@@ -114,6 +114,27 @@ pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
     }
 }
 
+pub fn encode_schema_key(entity: &str) -> Vec<u8> {
+    format!("meta/schema/{entity}").into_bytes()
+}
+
+pub fn encode_constraint_key(constraint_type: &str, entity: &str, name: &str) -> Vec<u8> {
+    format!("meta/constraint/{constraint_type}/{entity}/{name}").into_bytes()
+}
+
+pub fn encode_fk_reverse_index_key(
+    target_entity: &str,
+    target_id: &str,
+    source_entity: &str,
+    source_id: &str,
+) -> Vec<u8> {
+    format!("fkref/{target_entity}/{target_id}/{source_entity}/{source_id}").into_bytes()
+}
+
+pub fn encode_fk_reverse_prefix(target_entity: &str, target_id: &str) -> Vec<u8> {
+    format!("fkref/{target_entity}/{target_id}/").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

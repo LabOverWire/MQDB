@@ -1,5 +1,6 @@
 pub mod checksum;
 pub mod config;
+pub mod constraint;
 pub mod cursor;
 pub mod database;
 pub mod dedup;
@@ -10,13 +11,16 @@ pub mod events;
 pub mod index;
 pub mod keys;
 pub mod relationship;
+pub mod schema;
 pub mod storage;
 pub mod subscription;
 
 pub use config::{DatabaseConfig, DurabilityMode};
+pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use cursor::{Cursor, Query};
 pub use database::{Database, Filter, FilterOp, Pagination, SortDirection, SortOrder};
 pub use dedup::DedupStore;
 pub use error::{Error, Result};
 pub use events::{ChangeEvent, Operation};
+pub use schema::{FieldDefinition, FieldType, Schema};
 pub use subscription::Subscription;

@@ -1,4 +1,5 @@
 use crate::config::DatabaseConfig;
+use crate::constraint::ConstraintManager;
 use crate::dispatcher::EventDispatcher;
 use crate::entity::Entity;
 use crate::error::{Error, Result};
@@ -6,6 +7,7 @@ use crate::events::ChangeEvent;
 use crate::index::IndexManager;
 use crate::keys;
 use crate::relationship::{Relationship, RelationshipRegistry};
+use crate::schema::{Schema, SchemaRegistry};
 use crate::storage::Storage;
 use crate::subscription::{Subscription, SubscriptionRegistry};
 use serde_json::Value;
@@ -22,6 +24,8 @@ pub struct Database {
     dispatcher: Arc<EventDispatcher>,
     index_manager: Arc<RwLock<IndexManager>>,
     relationship_registry: Arc<RwLock<RelationshipRegistry>>,
+    schema_registry: Arc<RwLock<SchemaRegistry>>,
+    constraint_manager: Arc<RwLock<ConstraintManager>>,
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
 }
@@ -41,6 +45,14 @@ impl Database {
         ));
         let index_manager = Arc::new(RwLock::new(IndexManager::new()));
         let relationship_registry = Arc::new(RwLock::new(RelationshipRegistry::new()));
+
+        let mut schema_registry = SchemaRegistry::new();
+        schema_registry.load_schemas(&storage)?;
+        let schema_registry = Arc::new(RwLock::new(schema_registry));
+
+        let mut constraint_manager = ConstraintManager::new();
+        constraint_manager.load_constraints(&storage)?;
+        let constraint_manager = Arc::new(RwLock::new(constraint_manager));
 
         registry.load().await?;
 
@@ -66,12 +78,18 @@ impl Database {
             dispatcher,
             index_manager,
             relationship_registry,
+            schema_registry,
+            constraint_manager,
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
         })
     }
 
     pub async fn create(&self, entity_name: String, mut data: Value) -> Result<Value> {
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.apply_defaults(&entity_name, &mut data)?;
+        drop(schema_registry);
+
         let id = self.generate_id(&entity_name).await?;
 
         if let Value::Object(ref mut obj) = data {
@@ -88,9 +106,18 @@ impl Database {
             }
         }
 
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.validate_entity(&entity_name, &data)?;
+        drop(schema_registry);
+
         let entity = Entity::new(entity_name.clone(), id, data.clone());
 
         let mut batch = self.storage.batch();
+
+        let constraint_manager = self.constraint_manager.read().await;
+        constraint_manager.validate_create(&entity, &mut batch, &self.storage)?;
+        drop(constraint_manager);
+
         batch.insert(entity.key(), entity.serialize()?);
 
         let index_manager = self.index_manager.read().await;
@@ -189,17 +216,27 @@ impl Database {
                 id: id.clone(),
             })?;
 
-        let mut existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
+        let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
+        let mut updated_data = existing_entity.data.clone();
 
-        if let (Value::Object(existing), Value::Object(updates)) = (&mut existing_entity.data, fields) {
+        if let (Value::Object(existing), Value::Object(updates)) = (&mut updated_data, fields) {
             for (key, value) in updates {
                 existing.insert(key, value);
             }
         }
 
-        let updated_entity = Entity::new(entity_name.clone(), id.clone(), existing_entity.data.clone());
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.validate_entity(&entity_name, &updated_data)?;
+        drop(schema_registry);
+
+        let updated_entity = Entity::new(entity_name.clone(), id.clone(), updated_data);
 
         let mut batch = self.storage.batch();
+
+        let constraint_manager = self.constraint_manager.read().await;
+        constraint_manager.validate_update(&updated_entity, &existing_entity, &mut batch, &self.storage)?;
+        drop(constraint_manager);
+
         batch.expect_value(key, existing_data);
         batch.insert(updated_entity.key(), updated_entity.serialize()?);
 
@@ -231,16 +268,44 @@ impl Database {
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
 
+        let constraint_manager = self.constraint_manager.read().await;
+        let cascade_ops = constraint_manager.validate_delete(&existing_entity, &self.storage)?;
+        drop(constraint_manager);
+
         let mut batch = self.storage.batch();
-        batch.remove(key);
+
+        batch.remove(key.clone());
 
         let index_manager = self.index_manager.read().await;
         index_manager.remove_indexes(&mut batch, &existing_entity);
+        drop(index_manager);
+
+        for cascade_op in &cascade_ops {
+            let cascade_key = keys::encode_data_key(&cascade_op.entity, &cascade_op.id);
+            if let Some(cascade_data) = self.storage.get(&cascade_key)? {
+                let cascade_entity = Entity::deserialize(
+                    cascade_op.entity.clone(),
+                    cascade_op.id.clone(),
+                    &cascade_data,
+                )?;
+
+                batch.remove(cascade_key);
+
+                let index_manager = self.index_manager.read().await;
+                index_manager.remove_indexes(&mut batch, &cascade_entity);
+                drop(index_manager);
+            }
+        }
 
         batch.commit()?;
 
         let event = ChangeEvent::delete(entity_name, id);
         self.dispatcher.dispatch(event).await?;
+
+        for cascade_op in cascade_ops {
+            let cascade_event = ChangeEvent::delete(cascade_op.entity, cascade_op.id);
+            self.dispatcher.dispatch(cascade_event).await?;
+        }
 
         Ok(())
     }
@@ -479,6 +544,97 @@ impl Database {
         let mut registry = self.relationship_registry.write().await;
         let relationship = Relationship::new(source_entity, field, target_entity);
         registry.add(relationship);
+    }
+
+    pub async fn add_schema(&self, schema: Schema) -> Result<()> {
+        let mut batch = self.storage.batch();
+
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.persist_schema(&mut batch, &schema)?;
+        drop(schema_registry);
+
+        batch.commit()?;
+
+        let mut schema_registry = self.schema_registry.write().await;
+        schema_registry.add_schema(schema);
+
+        Ok(())
+    }
+
+    pub async fn add_unique_constraint(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<()> {
+        use crate::constraint::{Constraint, UniqueConstraint};
+
+        self.add_index(entity.clone(), fields.clone()).await;
+
+        let constraint = Constraint::Unique(UniqueConstraint::new(entity, fields));
+
+        let mut batch = self.storage.batch();
+
+        let constraint_manager = self.constraint_manager.read().await;
+        constraint_manager.persist_constraint(&mut batch, &constraint)?;
+        drop(constraint_manager);
+
+        batch.commit()?;
+
+        let mut constraint_manager = self.constraint_manager.write().await;
+        constraint_manager.add_constraint(constraint);
+
+        Ok(())
+    }
+
+    pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
+        use crate::constraint::{Constraint, NotNullConstraint};
+
+        let constraint = Constraint::NotNull(NotNullConstraint::new(entity, field));
+
+        let mut batch = self.storage.batch();
+
+        let constraint_manager = self.constraint_manager.read().await;
+        constraint_manager.persist_constraint(&mut batch, &constraint)?;
+        drop(constraint_manager);
+
+        batch.commit()?;
+
+        let mut constraint_manager = self.constraint_manager.write().await;
+        constraint_manager.add_constraint(constraint);
+
+        Ok(())
+    }
+
+    pub async fn add_foreign_key(
+        &self,
+        source_entity: String,
+        source_field: String,
+        target_entity: String,
+        target_field: String,
+        on_delete: crate::constraint::OnDeleteAction,
+    ) -> Result<()> {
+        use crate::constraint::{Constraint, ForeignKeyConstraint};
+
+        let constraint = Constraint::ForeignKey(ForeignKeyConstraint::new(
+            source_entity,
+            source_field,
+            target_entity,
+            target_field,
+            on_delete,
+        ));
+
+        let mut batch = self.storage.batch();
+
+        let constraint_manager = self.constraint_manager.read().await;
+        constraint_manager.persist_constraint(&mut batch, &constraint)?;
+        drop(constraint_manager);
+
+        batch.commit()?;
+
+        let mut constraint_manager = self.constraint_manager.write().await;
+        constraint_manager.add_constraint(constraint);
+
+        Ok(())
     }
 
     pub async fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {

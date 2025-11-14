@@ -1,0 +1,448 @@
+use crate::entity::Entity;
+use crate::error::{Error, Result};
+use crate::keys;
+use crate::storage::{BatchWriter, Storage};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum OnDeleteAction {
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UniqueConstraint {
+    pub entity: String,
+    pub fields: Vec<String>,
+    pub name: String,
+}
+
+impl UniqueConstraint {
+    pub fn new(entity: impl Into<String>, fields: Vec<String>) -> Self {
+        let entity = entity.into();
+        let name = format!("{}_{}_unique", entity, fields.join("_"));
+        Self {
+            entity,
+            fields,
+            name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForeignKeyConstraint {
+    pub source_entity: String,
+    pub source_field: String,
+    pub target_entity: String,
+    pub target_field: String,
+    pub on_delete: OnDeleteAction,
+    pub name: String,
+}
+
+impl ForeignKeyConstraint {
+    pub fn new(
+        source_entity: impl Into<String>,
+        source_field: impl Into<String>,
+        target_entity: impl Into<String>,
+        target_field: impl Into<String>,
+        on_delete: OnDeleteAction,
+    ) -> Self {
+        let source_entity = source_entity.into();
+        let source_field = source_field.into();
+        let target_entity = target_entity.into();
+        let target_field = target_field.into();
+        let name = format!(
+            "{}_{}_{}_fk",
+            source_entity, source_field, target_entity
+        );
+        Self {
+            source_entity,
+            source_field,
+            target_entity,
+            target_field,
+            on_delete,
+            name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotNullConstraint {
+    pub entity: String,
+    pub field: String,
+    pub name: String,
+}
+
+impl NotNullConstraint {
+    pub fn new(entity: impl Into<String>, field: impl Into<String>) -> Self {
+        let entity = entity.into();
+        let field = field.into();
+        let name = format!("{}_{}_notnull", entity, field);
+        Self {
+            entity,
+            field,
+            name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Constraint {
+    Unique(UniqueConstraint),
+    ForeignKey(ForeignKeyConstraint),
+    NotNull(NotNullConstraint),
+}
+
+impl Constraint {
+    pub fn name(&self) -> &str {
+        match self {
+            Constraint::Unique(c) => &c.name,
+            Constraint::ForeignKey(c) => &c.name,
+            Constraint::NotNull(c) => &c.name,
+        }
+    }
+
+    pub fn entity(&self) -> &str {
+        match self {
+            Constraint::Unique(c) => &c.entity,
+            Constraint::ForeignKey(c) => &c.source_entity,
+            Constraint::NotNull(c) => &c.entity,
+        }
+    }
+
+    fn constraint_type(&self) -> &str {
+        match self {
+            Constraint::Unique(_) => "unique",
+            Constraint::ForeignKey(_) => "fk",
+            Constraint::NotNull(_) => "notnull",
+        }
+    }
+}
+
+pub struct CascadeOperation {
+    pub entity: String,
+    pub id: String,
+}
+
+pub struct ConstraintManager {
+    constraints: HashMap<String, Vec<Constraint>>,
+}
+
+impl ConstraintManager {
+    pub fn new() -> Self {
+        Self {
+            constraints: HashMap::new(),
+        }
+    }
+
+    pub fn add_constraint(&mut self, constraint: Constraint) {
+        let entity = constraint.entity().to_string();
+        self.constraints
+            .entry(entity)
+            .or_default()
+            .push(constraint);
+    }
+
+    pub fn get_constraints(&self, entity: &str) -> &[Constraint] {
+        self.constraints
+            .get(entity)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn validate_create(
+        &self,
+        entity: &Entity,
+        _batch: &mut BatchWriter,
+        storage: &Storage,
+    ) -> Result<()> {
+        let constraints = self.get_constraints(&entity.name);
+
+        for constraint in constraints {
+            match constraint {
+                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
+                Constraint::Unique(c) => self.validate_unique(entity, c, storage)?,
+                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_update(
+        &self,
+        entity: &Entity,
+        old_entity: &Entity,
+        _batch: &mut BatchWriter,
+        storage: &Storage,
+    ) -> Result<()> {
+        let constraints = self.get_constraints(&entity.name);
+
+        for constraint in constraints {
+            match constraint {
+                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
+                Constraint::Unique(c) => {
+                    self.validate_unique_update(entity, old_entity, c, storage)?
+                }
+                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_delete(
+        &self,
+        entity: &Entity,
+        storage: &Storage,
+    ) -> Result<Vec<CascadeOperation>> {
+        let mut cascade_ops = Vec::new();
+
+        let all_constraints: Vec<&Constraint> = self.constraints.values().flatten().collect();
+
+        for constraint in all_constraints {
+            if let Constraint::ForeignKey(fk) = constraint {
+                if fk.target_entity == entity.name {
+                    match fk.on_delete {
+                        OnDeleteAction::Restrict => {
+                            let referencing = self.find_referencing_entities(
+                                storage,
+                                &fk.source_entity,
+                                &fk.source_field,
+                                &entity.id,
+                            )?;
+                            if !referencing.is_empty() {
+                                return Err(Error::ForeignKeyRestrict {
+                                    entity: entity.name.clone(),
+                                    id: entity.id.clone(),
+                                    referencing_entity: fk.source_entity.clone(),
+                                });
+                            }
+                        }
+                        OnDeleteAction::Cascade => {
+                            let referencing = self.find_referencing_entities(
+                                storage,
+                                &fk.source_entity,
+                                &fk.source_field,
+                                &entity.id,
+                            )?;
+                            for id in referencing {
+                                cascade_ops.push(CascadeOperation {
+                                    entity: fk.source_entity.clone(),
+                                    id,
+                                });
+                            }
+                        }
+                        OnDeleteAction::SetNull => {}
+                    }
+                }
+            }
+        }
+
+        Ok(cascade_ops)
+    }
+
+    fn validate_not_null(&self, entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
+        match entity.get_field(&constraint.field) {
+            Some(value) if !value.is_null() => Ok(()),
+            _ => Err(Error::NotNullViolation {
+                entity: entity.name.clone(),
+                field: constraint.field.clone(),
+            }),
+        }
+    }
+
+    fn validate_unique(
+        &self,
+        entity: &Entity,
+        constraint: &UniqueConstraint,
+        storage: &Storage,
+    ) -> Result<()> {
+        for field in &constraint.fields {
+            if let Some(value) = entity.get_field(field) {
+                let value_bytes = keys::encode_value_for_index(value)?;
+                let prefix = keys::encode_index_prefix(&entity.name, field, Some(&value_bytes));
+                let existing = storage.prefix_scan(&prefix)?;
+
+                for (key, _) in existing {
+                    if let Some(existing_id) = Self::extract_id_from_index_key(&key) {
+                        if existing_id != entity.id {
+                            return Err(Error::UniqueViolation {
+                                entity: entity.name.clone(),
+                                field: field.clone(),
+                                value: String::from_utf8_lossy(&value_bytes).to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_unique_update(
+        &self,
+        entity: &Entity,
+        _old_entity: &Entity,
+        constraint: &UniqueConstraint,
+        storage: &Storage,
+    ) -> Result<()> {
+        self.validate_unique(entity, constraint, storage)
+    }
+
+    fn validate_foreign_key(
+        &self,
+        entity: &Entity,
+        constraint: &ForeignKeyConstraint,
+        storage: &Storage,
+    ) -> Result<()> {
+        if let Some(fk_value) = entity.get_field(&constraint.source_field) {
+            if !fk_value.is_null() {
+                let target_id = fk_value
+                    .as_str()
+                    .ok_or(Error::InvalidForeignKey)?;
+
+                let target_key = keys::encode_data_key(&constraint.target_entity, target_id);
+
+                if storage.get(&target_key)?.is_none() {
+                    return Err(Error::ForeignKeyViolation {
+                        entity: entity.name.clone(),
+                        field: constraint.source_field.clone(),
+                        target_entity: constraint.target_entity.clone(),
+                        target_id: target_id.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn find_referencing_entities(
+        &self,
+        storage: &Storage,
+        source_entity: &str,
+        source_field: &str,
+        target_id: &str,
+    ) -> Result<Vec<String>> {
+        let prefix = keys::encode_index_prefix(source_entity, source_field, None);
+        let items = storage.prefix_scan(&prefix)?;
+
+        let mut referencing_ids = Vec::new();
+
+        for (key, _) in items {
+            if let Some(value_and_id) = key.strip_prefix(prefix.as_slice()) {
+                let parts: Vec<&[u8]> = value_and_id.splitn(2, |&b| b == b'/').collect();
+                if parts.len() == 2 {
+                    if let Ok(value) = std::str::from_utf8(parts[0]) {
+                        if value == target_id {
+                            if let Ok(id) = String::from_utf8(parts[1].to_vec()) {
+                                referencing_ids.push(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(referencing_ids)
+    }
+
+    fn extract_id_from_index_key(key: &[u8]) -> Option<String> {
+        if let Some(last_slash) = key.iter().rposition(|&b| b == b'/') {
+            String::from_utf8(key[last_slash + 1..].to_vec()).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn persist_constraint(
+        &self,
+        batch: &mut BatchWriter,
+        constraint: &Constraint,
+    ) -> Result<()> {
+        let key = keys::encode_constraint_key(
+            constraint.constraint_type(),
+            constraint.entity(),
+            constraint.name(),
+        );
+        let value = serde_json::to_vec(constraint)?;
+        batch.insert(key, value);
+        Ok(())
+    }
+
+    pub fn load_constraints(&mut self, storage: &Storage) -> Result<()> {
+        let prefix = b"meta/constraint/";
+        let items = storage.prefix_scan(prefix)?;
+
+        for (_key, value) in items {
+            let constraint: Constraint = serde_json::from_slice(&value)?;
+            self.add_constraint(constraint);
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_constraint(&mut self, batch: &mut BatchWriter, entity: &str, name: &str) {
+        if let Some(constraints) = self.constraints.get_mut(entity) {
+            if let Some(pos) = constraints.iter().position(|c| c.name() == name) {
+                let constraint = constraints.remove(pos);
+                let key = keys::encode_constraint_key(
+                    constraint.constraint_type(),
+                    constraint.entity(),
+                    constraint.name(),
+                );
+                batch.remove(key);
+            }
+        }
+    }
+}
+
+impl Default for ConstraintManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_constraint_creation() {
+        let unique = UniqueConstraint::new("users", vec!["email".to_string()]);
+        assert_eq!(unique.entity, "users");
+        assert_eq!(unique.fields, vec!["email"]);
+        assert_eq!(unique.name, "users_email_unique");
+
+        let fk = ForeignKeyConstraint::new(
+            "posts",
+            "author_id",
+            "users",
+            "id",
+            OnDeleteAction::Cascade,
+        );
+        assert_eq!(fk.source_entity, "posts");
+        assert_eq!(fk.source_field, "author_id");
+        assert_eq!(fk.target_entity, "users");
+        assert_eq!(fk.on_delete, OnDeleteAction::Cascade);
+
+        let not_null = NotNullConstraint::new("users", "email");
+        assert_eq!(not_null.entity, "users");
+        assert_eq!(not_null.field, "email");
+    }
+
+    #[test]
+    fn test_constraint_manager() {
+        let mut manager = ConstraintManager::new();
+
+        let constraint = Constraint::Unique(UniqueConstraint::new("users", vec!["email".to_string()]));
+        manager.add_constraint(constraint);
+
+        let constraints = manager.get_constraints("users");
+        assert_eq!(constraints.len(), 1);
+    }
+}
