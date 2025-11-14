@@ -256,6 +256,8 @@ impl Database {
     }
 
     pub async fn delete(&self, entity_name: String, id: String) -> Result<()> {
+        use crate::constraint::DeleteOperation;
+
         let key = keys::encode_data_key(&entity_name, &id);
 
         let existing_data = self
@@ -269,7 +271,7 @@ impl Database {
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
 
         let constraint_manager = self.constraint_manager.read().await;
-        let cascade_ops = constraint_manager.validate_delete(&existing_entity, &self.storage)?;
+        let delete_ops = constraint_manager.validate_delete(&existing_entity, &self.storage)?;
         drop(constraint_manager);
 
         let mut batch = self.storage.batch();
@@ -280,20 +282,50 @@ impl Database {
         index_manager.remove_indexes(&mut batch, &existing_entity);
         drop(index_manager);
 
-        for cascade_op in &cascade_ops {
-            let cascade_key = keys::encode_data_key(&cascade_op.entity, &cascade_op.id);
-            if let Some(cascade_data) = self.storage.get(&cascade_key)? {
-                let cascade_entity = Entity::deserialize(
-                    cascade_op.entity.clone(),
-                    cascade_op.id.clone(),
-                    &cascade_data,
-                )?;
+        let mut deleted_entities = Vec::new();
 
-                batch.remove(cascade_key);
+        for operation in &delete_ops {
+            match operation {
+                DeleteOperation::Cascade(cascade_op) => {
+                    let cascade_key = keys::encode_data_key(&cascade_op.entity, &cascade_op.id);
+                    if let Some(cascade_data) = self.storage.get(&cascade_key)? {
+                        let cascade_entity = Entity::deserialize(
+                            cascade_op.entity.clone(),
+                            cascade_op.id.clone(),
+                            &cascade_data,
+                        )?;
 
-                let index_manager = self.index_manager.read().await;
-                index_manager.remove_indexes(&mut batch, &cascade_entity);
-                drop(index_manager);
+                        batch.remove(cascade_key);
+
+                        let index_manager = self.index_manager.read().await;
+                        index_manager.remove_indexes(&mut batch, &cascade_entity);
+                        drop(index_manager);
+
+                        deleted_entities.push((cascade_op.entity.clone(), cascade_op.id.clone()));
+                    }
+                }
+                DeleteOperation::SetNull(set_null_op) => {
+                    let entity_key = keys::encode_data_key(&set_null_op.entity, &set_null_op.id);
+                    if let Some(entity_data) = self.storage.get(&entity_key)? {
+                        let mut entity = Entity::deserialize(
+                            set_null_op.entity.clone(),
+                            set_null_op.id.clone(),
+                            &entity_data,
+                        )?;
+
+                        let old_entity = entity.clone();
+
+                        if let Some(obj) = entity.data.as_object_mut() {
+                            obj.insert(set_null_op.field.clone(), serde_json::Value::Null);
+                        }
+
+                        batch.insert(entity_key, entity.serialize()?);
+
+                        let index_manager = self.index_manager.read().await;
+                        index_manager.update_indexes(&mut batch, &entity, Some(&old_entity));
+                        drop(index_manager);
+                    }
+                }
             }
         }
 
@@ -302,8 +334,8 @@ impl Database {
         let event = ChangeEvent::delete(entity_name, id);
         self.dispatcher.dispatch(event).await?;
 
-        for cascade_op in cascade_ops {
-            let cascade_event = ChangeEvent::delete(cascade_op.entity, cascade_op.id);
+        for (entity, id) in deleted_entities {
+            let cascade_event = ChangeEvent::delete(entity, id);
             self.dispatcher.dispatch(cascade_event).await?;
         }
 

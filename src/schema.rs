@@ -44,15 +44,15 @@ impl FieldDefinition {
     }
 
     fn validate_value(&self, value: &Value) -> bool {
-        match (&self.field_type, value) {
-            (FieldType::String, Value::String(_)) => true,
-            (FieldType::Number, Value::Number(_)) => true,
-            (FieldType::Boolean, Value::Bool(_)) => true,
-            (FieldType::Array, Value::Array(_)) => true,
-            (FieldType::Object, Value::Object(_)) => true,
-            (FieldType::Null, Value::Null) => true,
-            _ => false,
-        }
+        matches!(
+            (&self.field_type, value),
+            (FieldType::String, Value::String(_))
+                | (FieldType::Number, Value::Number(_))
+                | (FieldType::Boolean, Value::Bool(_))
+                | (FieldType::Array, Value::Array(_))
+                | (FieldType::Object, Value::Object(_))
+                | (FieldType::Null, Value::Null)
+        )
     }
 }
 

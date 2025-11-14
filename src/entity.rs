@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::keys;
 use serde_json::Value;
 
+#[derive(Clone)]
 pub struct Entity {
     pub name: String,
     pub id: String,

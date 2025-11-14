@@ -54,8 +54,7 @@ impl ForeignKeyConstraint {
         let target_entity = target_entity.into();
         let target_field = target_field.into();
         let name = format!(
-            "{}_{}_{}_fk",
-            source_entity, source_field, target_entity
+            "{source_entity}_{source_field}_{target_entity}_fk"
         );
         Self {
             source_entity,
@@ -79,7 +78,7 @@ impl NotNullConstraint {
     pub fn new(entity: impl Into<String>, field: impl Into<String>) -> Self {
         let entity = entity.into();
         let field = field.into();
-        let name = format!("{}_{}_notnull", entity, field);
+        let name = format!("{entity}_{field}_notnull");
         Self {
             entity,
             field,
@@ -124,6 +123,17 @@ impl Constraint {
 pub struct CascadeOperation {
     pub entity: String,
     pub id: String,
+}
+
+pub struct SetNullOperation {
+    pub entity: String,
+    pub id: String,
+    pub field: String,
+}
+
+pub enum DeleteOperation {
+    Cascade(CascadeOperation),
+    SetNull(SetNullOperation),
 }
 
 pub struct ConstraintManager {
@@ -197,8 +207,26 @@ impl ConstraintManager {
         &self,
         entity: &Entity,
         storage: &Storage,
-    ) -> Result<Vec<CascadeOperation>> {
-        let mut cascade_ops = Vec::new();
+    ) -> Result<Vec<DeleteOperation>> {
+        use std::collections::HashSet;
+        let mut all_operations = Vec::new();
+        let mut visited = HashSet::new();
+        self.collect_delete_operations(entity, storage, &mut all_operations, &mut visited)?;
+        Ok(all_operations)
+    }
+
+    fn collect_delete_operations(
+        &self,
+        entity: &Entity,
+        storage: &Storage,
+        all_operations: &mut Vec<DeleteOperation>,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
+        let entity_key = format!("{}/{}", entity.name, entity.id);
+        if visited.contains(&entity_key) {
+            return Ok(());
+        }
+        visited.insert(entity_key);
 
         let all_constraints: Vec<&Constraint> = self.constraints.values().flatten().collect();
 
@@ -229,19 +257,47 @@ impl ConstraintManager {
                                 &entity.id,
                             )?;
                             for id in referencing {
-                                cascade_ops.push(CascadeOperation {
+                                let cascade_key = keys::encode_data_key(&fk.source_entity, &id);
+                                if let Some(cascade_data) = storage.get(&cascade_key)? {
+                                    let cascade_entity = Entity::deserialize(
+                                        fk.source_entity.clone(),
+                                        id.clone(),
+                                        &cascade_data,
+                                    )?;
+                                    self.collect_delete_operations(
+                                        &cascade_entity,
+                                        storage,
+                                        all_operations,
+                                        visited,
+                                    )?;
+                                }
+                                all_operations.push(DeleteOperation::Cascade(CascadeOperation {
                                     entity: fk.source_entity.clone(),
                                     id,
-                                });
+                                }));
                             }
                         }
-                        OnDeleteAction::SetNull => {}
+                        OnDeleteAction::SetNull => {
+                            let referencing = self.find_referencing_entities(
+                                storage,
+                                &fk.source_entity,
+                                &fk.source_field,
+                                &entity.id,
+                            )?;
+                            for id in referencing {
+                                all_operations.push(DeleteOperation::SetNull(SetNullOperation {
+                                    entity: fk.source_entity.clone(),
+                                    id,
+                                    field: fk.source_field.clone(),
+                                }));
+                            }
+                        }
                     }
                 }
             }
         }
 
-        Ok(cascade_ops)
+        Ok(())
     }
 
     fn validate_not_null(&self, entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
@@ -328,18 +384,19 @@ impl ConstraintManager {
         source_field: &str,
         target_id: &str,
     ) -> Result<Vec<String>> {
-        let prefix = keys::encode_index_prefix(source_entity, source_field, None);
+        use crate::entity::Entity;
+
+        let prefix = keys::encode_data_key(source_entity, "");
         let items = storage.prefix_scan(&prefix)?;
 
         let mut referencing_ids = Vec::new();
 
-        for (key, _) in items {
-            if let Some(value_and_id) = key.strip_prefix(prefix.as_slice()) {
-                let parts: Vec<&[u8]> = value_and_id.splitn(2, |&b| b == b'/').collect();
-                if parts.len() == 2 {
-                    if let Ok(value) = std::str::from_utf8(parts[0]) {
-                        if value == target_id {
-                            if let Ok(id) = String::from_utf8(parts[1].to_vec()) {
+        for (key, value) in items {
+            if let Ok((_entity, id)) = keys::decode_data_key(&key) {
+                if let Ok(entity) = Entity::deserialize(source_entity.to_string(), id.clone(), &value) {
+                    if let Some(fk_value) = entity.get_field(source_field) {
+                        if let Some(fk_str) = fk_value.as_str() {
+                            if fk_str == target_id {
                                 referencing_ids.push(id);
                             }
                         }
