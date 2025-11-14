@@ -73,7 +73,9 @@ async fn test_concurrent_delete_and_read() {
         let handle = tokio::spawn(async move {
             for _ in 0..10 {
                 let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-                let _ = db_clone.list("users".into(), vec![filter], vec![], None, vec![]).await;
+                let _ = db_clone
+                    .list("users".into(), vec![filter], vec![], None, vec![])
+                    .await;
                 tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
             }
         });
@@ -84,11 +86,17 @@ async fn test_concurrent_delete_and_read() {
         handle.await.unwrap();
     }
 
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![]).await.unwrap();
+    let all_users = db
+        .list("users".into(), vec![], vec![], None, vec![])
+        .await
+        .unwrap();
     assert_eq!(all_users.len(), 25, "Should have 25 entities remaining");
 
     let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let indexed_results = db.list("users".into(), vec![filter], vec![], None, vec![]).await.unwrap();
+    let indexed_results = db
+        .list("users".into(), vec![filter], vec![], None, vec![])
+        .await
+        .unwrap();
     assert_eq!(
         indexed_results.len(),
         25,
@@ -155,7 +163,10 @@ async fn test_max_list_results_limit_enforcement() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![]).await.unwrap();
+    let all_users = db
+        .list("users".into(), vec![], vec![], None, vec![])
+        .await
+        .unwrap();
     assert_eq!(
         all_users.len(),
         10,

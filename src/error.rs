@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error("backup/restore failed: {0}")]
     BackupFailed(String),
+
+    #[error("concurrent modification conflict: {0}")]
+    Conflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

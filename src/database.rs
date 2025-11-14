@@ -197,9 +197,10 @@ impl Database {
             }
         }
 
-        let updated_entity = Entity::new(entity_name.clone(), id, existing_entity.data.clone());
+        let updated_entity = Entity::new(entity_name.clone(), id.clone(), existing_entity.data.clone());
 
         let mut batch = self.storage.batch();
+        batch.expect_value(key, existing_data);
         batch.insert(updated_entity.key(), updated_entity.serialize()?);
 
         let index_manager = self.index_manager.read().await;
