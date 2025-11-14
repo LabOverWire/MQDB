@@ -258,9 +258,10 @@ impl Database {
             let prefix = format!("data/{entity_name}/");
             let items = self.storage.prefix_scan(prefix.as_bytes())?;
 
-            for (_key, value) in items {
-                let value: Value = serde_json::from_slice(&value)?;
-                results.push(value);
+            for (key, value) in items {
+                let (_, id) = keys::decode_data_key(&key)?;
+                let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
+                results.push(entity.to_json());
             }
         } else {
             let index_manager = self.index_manager.read().await;
@@ -298,8 +299,10 @@ impl Database {
                 let prefix = format!("data/{entity_name}/");
                 let items = self.storage.prefix_scan(prefix.as_bytes())?;
 
-                for (_key, value) in items {
-                    let entity_data: Value = serde_json::from_slice(&value)?;
+                for (key, value) in items {
+                    let (_, id) = keys::decode_data_key(&key)?;
+                    let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
+                    let entity_data = entity.to_json();
                     if self.matches_filters(&entity_data, &filters) {
                         results.push(entity_data);
                     }

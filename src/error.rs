@@ -25,6 +25,9 @@ pub enum Error {
 
     #[error("system time error: {0}")]
     SystemTime(String),
+
+    #[error("data corruption detected: {entity}/{id} - checksum mismatch")]
+    Corruption { entity: String, id: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

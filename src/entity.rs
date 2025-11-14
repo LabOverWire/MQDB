@@ -45,11 +45,19 @@ impl Entity {
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        Ok(serde_json::to_vec(&self.data)?)
+        let json_data = serde_json::to_vec(&self.data)?;
+        Ok(crate::checksum::encode_with_checksum(&json_data))
     }
 
     pub fn deserialize(name: String, id: String, data: &[u8]) -> Result<Self> {
-        let value: Value = serde_json::from_slice(data)?;
+        let json_data = crate::checksum::decode_and_verify(data).map_err(|err| {
+            tracing::warn!("checksum verification failed for {}/{}: {}", name, id, err);
+            Error::Corruption {
+                entity: name.clone(),
+                id: id.clone(),
+            }
+        })?;
+        let value: Value = serde_json::from_slice(json_data)?;
         Ok(Self { name, id, data: value })
     }
 
