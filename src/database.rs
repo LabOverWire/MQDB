@@ -349,6 +349,22 @@ impl Database {
         Ok(paginated_results)
     }
 
+    pub async fn cursor(
+        &self,
+        entity_name: String,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+    ) -> Result<crate::cursor::Cursor> {
+        crate::cursor::Cursor::new(
+            entity_name,
+            &self.storage,
+            filters,
+            sort,
+            self.config.max_cursor_buffer,
+            self.config.max_sort_buffer,
+        )
+    }
+
     fn sort_results(&self, results: &mut [Value], sort: &[SortOrder]) {
         results.sort_by(|a, b| {
             for order in sort {
@@ -462,6 +478,155 @@ impl Database {
         let mut registry = self.relationship_registry.write().await;
         let relationship = Relationship::new(source_entity, field, target_entity);
         registry.add(relationship);
+    }
+
+    pub async fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+        use std::fs;
+        use std::io;
+
+        let dest = destination.as_ref();
+
+        self.storage.flush()?;
+
+        if dest.exists() {
+            return Err(crate::error::Error::BackupFailed(format!(
+                "destination already exists: {}",
+                dest.display()
+            )));
+        }
+
+        let src = &self.config.path;
+
+        fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
+            fs::create_dir_all(dst)?;
+
+            for entry in fs::read_dir(src)? {
+                let entry = entry?;
+                let path = entry.path();
+                let dest_path = dst.join(entry.file_name());
+
+                if path.is_dir() {
+                    copy_dir_recursive(&path, &dest_path)?;
+                } else {
+                    fs::copy(&path, &dest_path)?;
+                }
+            }
+            Ok(())
+        }
+
+        copy_dir_recursive(src, dest).map_err(|e| {
+            crate::error::Error::BackupFailed(format!("failed to copy database: {e}"))
+        })?;
+
+        tracing::info!("physical backup completed: {} -> {}", src.display(), dest.display());
+        Ok(())
+    }
+
+    pub async fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+        use std::fs::File;
+        use std::io::BufWriter;
+
+        let dest = destination.as_ref();
+
+        if dest.exists() {
+            return Err(crate::error::Error::BackupFailed(format!(
+                "destination already exists: {}",
+                dest.display()
+            )));
+        }
+
+        let file = File::create(dest).map_err(|e| {
+            crate::error::Error::BackupFailed(format!("failed to create backup file: {e}"))
+        })?;
+
+        let mut writer = BufWriter::new(file);
+
+        let prefix = b"data/";
+        let items = self.storage.prefix_scan(prefix)?;
+
+        let mut count = 0;
+        for (key, value) in items {
+            let (entity_name, id) = crate::keys::decode_data_key(&key)?;
+            let entity = crate::entity::Entity::deserialize(entity_name.clone(), id, &value)?;
+
+            let backup_record = serde_json::json!({
+                "_entity": entity_name,
+                "_data": entity.to_json()
+            });
+
+            serde_json::to_writer(&mut writer, &backup_record).map_err(|e| {
+                crate::error::Error::BackupFailed(format!("failed to write entity: {e}"))
+            })?;
+
+            std::io::Write::write_all(&mut writer, b"\n").map_err(|e| {
+                crate::error::Error::BackupFailed(format!("failed to write newline: {e}"))
+            })?;
+
+            count += 1;
+        }
+
+        std::io::Write::flush(&mut writer).map_err(|e| {
+            crate::error::Error::BackupFailed(format!("failed to flush backup: {e}"))
+        })?;
+
+        tracing::info!("logical backup completed: {count} entities written to {}", dest.display());
+        Ok(())
+    }
+
+    pub async fn restore_logical<P: AsRef<Path>>(&self, source: P) -> Result<usize> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let src = source.as_ref();
+
+        if !src.exists() {
+            return Err(crate::error::Error::BackupFailed(format!(
+                "backup file not found: {}",
+                src.display()
+            )));
+        }
+
+        let file = File::open(src).map_err(|e| {
+            crate::error::Error::BackupFailed(format!("failed to open backup file: {e}"))
+        })?;
+
+        let reader = BufReader::new(file);
+        let mut count = 0;
+
+        for line in reader.lines() {
+            let line = line.map_err(|e| {
+                crate::error::Error::BackupFailed(format!("failed to read line: {e}"))
+            })?;
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let backup_record: Value = serde_json::from_str(&line).map_err(|e| {
+                crate::error::Error::BackupFailed(format!("failed to parse entity: {e}"))
+            })?;
+
+            let entity_name = backup_record
+                .get("_entity")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    crate::error::Error::BackupFailed("entity missing _entity field".to_string())
+                })?
+                .to_string();
+
+            let entity_data = backup_record
+                .get("_data")
+                .ok_or_else(|| {
+                    crate::error::Error::BackupFailed("entity missing _data field".to_string())
+                })?
+                .clone();
+
+            self.create(entity_name, entity_data).await?;
+            count += 1;
+        }
+
+        tracing::info!("logical restore completed: {count} entities restored from {}", src.display());
+        Ok(count)
     }
 }
 

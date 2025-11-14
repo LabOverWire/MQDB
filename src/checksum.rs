@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn test_bitflip_detection() {
         let data = b"important data that must not be corrupted";
-        let mut encoded = encode_with_checksum(data);
+        let encoded = encode_with_checksum(data);
 
         for i in 4..encoded.len() {
             let mut corrupted = encoded.clone();

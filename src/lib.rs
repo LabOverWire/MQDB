@@ -1,5 +1,6 @@
 pub mod checksum;
 pub mod config;
+pub mod cursor;
 pub mod database;
 pub mod dedup;
 pub mod dispatcher;
@@ -13,6 +14,7 @@ pub mod storage;
 pub mod subscription;
 
 pub use config::{DatabaseConfig, DurabilityMode};
+pub use cursor::{Cursor, Query};
 pub use database::{Database, Filter, FilterOp, Pagination, SortDirection, SortOrder};
 pub use dedup::DedupStore;
 pub use error::{Error, Result};

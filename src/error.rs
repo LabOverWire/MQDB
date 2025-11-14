@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("data corruption detected: {entity}/{id} - checksum mismatch")]
     Corruption { entity: String, id: String },
+
+    #[error("backup/restore failed: {0}")]
+    BackupFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

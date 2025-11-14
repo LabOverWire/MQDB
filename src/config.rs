@@ -15,6 +15,8 @@ pub struct DatabaseConfig {
     pub max_list_results: Option<usize>,
     pub max_subscriptions: Option<usize>,
     pub ttl_cleanup_interval_secs: Option<u64>,
+    pub max_cursor_buffer: usize,
+    pub max_sort_buffer: usize,
 }
 
 impl DatabaseConfig {
@@ -26,6 +28,8 @@ impl DatabaseConfig {
             max_list_results: Some(10_000),
             max_subscriptions: Some(1_000),
             ttl_cleanup_interval_secs: Some(60),
+            max_cursor_buffer: 100,
+            max_sort_buffer: 10_000,
         }
     }
 

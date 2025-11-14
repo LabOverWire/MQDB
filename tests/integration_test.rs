@@ -1,4 +1,4 @@
-use mqdb::{Database, Filter, FilterOp};
+use mqdb::{Database, Filter, FilterOp, SortDirection, SortOrder};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -423,4 +423,211 @@ async fn test_ttl_with_indexes() {
 
     let results_after = db.list("sessions".into(), vec![filter], vec![], None, vec![]).await.unwrap();
     assert_eq!(results_after.len(), 0);
+}
+
+#[tokio::test]
+async fn test_cursor_api() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    for i in 0..50 {
+        let user = json!({
+            "name": format!("User {}", i),
+            "age": 20 + (i % 30),
+            "status": if i % 2 == 0 { "active" } else { "inactive" }
+        });
+        db.create("users".into(), user).await.unwrap();
+    }
+
+    let mut cursor = db.cursor("users".into(), vec![], vec![]).await.unwrap();
+
+    let mut count = 0;
+    while let Some(_user) = cursor.next().await.unwrap() {
+        count += 1;
+    }
+    assert_eq!(count, 50);
+
+    let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
+    let mut filtered_cursor = db.cursor("users".into(), vec![filter], vec![]).await.unwrap();
+
+    let mut active_count = 0;
+    while let Some(user) = filtered_cursor.next().await.unwrap() {
+        assert_eq!(user["status"], "active");
+        active_count += 1;
+    }
+    assert_eq!(active_count, 25);
+
+    let age_filter = Filter::new("age".into(), FilterOp::Gt, json!(30));
+    let mut age_cursor = db.cursor("users".into(), vec![age_filter], vec![]).await.unwrap();
+
+    let batch = age_cursor.next_batch(10).await.unwrap();
+    assert!(batch.len() > 0);
+    for user in batch {
+        let age = user["age"].as_u64().unwrap();
+        assert!(age > 30);
+    }
+}
+
+#[tokio::test]
+async fn test_cursor_with_sorting() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    for i in 0..20 {
+        let user = json!({
+            "name": format!("User {}", i),
+            "age": 50 - i,
+            "score": (i * 3) % 10,
+        });
+        db.create("users".into(), user).await.unwrap();
+    }
+
+    let sort_by_age_asc = vec![SortOrder::new("age".into(), SortDirection::Asc)];
+    let mut cursor = db.cursor("users".into(), vec![], sort_by_age_asc).await.unwrap();
+
+    let mut prev_age = 0;
+    let mut count = 0;
+    while let Some(user) = cursor.next().await.unwrap() {
+        let age = user["age"].as_u64().unwrap();
+        assert!(age >= prev_age, "ages should be in ascending order");
+        prev_age = age;
+        count += 1;
+    }
+    assert_eq!(count, 20);
+
+    let sort_by_age_desc = vec![SortOrder::new("age".into(), SortDirection::Desc)];
+    let mut desc_cursor = db.cursor("users".into(), vec![], sort_by_age_desc).await.unwrap();
+
+    let mut prev_age = u64::MAX;
+    while let Some(user) = desc_cursor.next().await.unwrap() {
+        let age = user["age"].as_u64().unwrap();
+        assert!(age <= prev_age, "ages should be in descending order");
+        prev_age = age;
+    }
+
+    let multi_sort = vec![
+        SortOrder::new("score".into(), SortDirection::Asc),
+        SortOrder::new("age".into(), SortDirection::Desc),
+    ];
+    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).await.unwrap();
+
+    let mut results = vec![];
+    while let Some(user) = multi_cursor.next().await.unwrap() {
+        results.push((
+            user["score"].as_u64().unwrap(),
+            user["age"].as_u64().unwrap(),
+        ));
+    }
+
+    for i in 1..results.len() {
+        let (prev_score, prev_age) = results[i - 1];
+        let (curr_score, curr_age) = results[i];
+        if prev_score == curr_score {
+            assert!(
+                curr_age <= prev_age,
+                "when scores are equal, ages should be descending"
+            );
+        } else {
+            assert!(curr_score >= prev_score, "scores should be ascending");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_physical_backup_and_restore() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    let backup_path = tmp.path().join("backup");
+
+    let db = Database::open(&db_path).await.unwrap();
+
+    for i in 0..10 {
+        let user = json!({
+            "name": format!("User {}", i),
+            "email": format!("user{}@example.com", i),
+        });
+        db.create("users".into(), user).await.unwrap();
+    }
+
+    db.backup_physical(&backup_path).await.unwrap();
+
+    drop(db);
+
+    let restored_db = Database::open(&backup_path).await.unwrap();
+    let users = restored_db
+        .list("users".into(), vec![], vec![], None, vec![])
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 10);
+}
+
+#[tokio::test]
+async fn test_logical_backup_and_restore() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    let backup_file = tmp.path().join("backup.jsonl");
+
+    let db = Database::open(&db_path).await.unwrap();
+
+    for i in 0..20 {
+        let product = json!({
+            "name": format!("Product {}", i),
+            "price": 10.0 + i as f64,
+            "stock": 100 - i,
+        });
+        db.create("products".into(), product).await.unwrap();
+    }
+
+    db.backup_logical(&backup_file).await.unwrap();
+
+    let new_db_path = tmp.path().join("restored_db");
+    let new_db = Database::open(&new_db_path).await.unwrap();
+
+    let count = new_db.restore_logical(&backup_file).await.unwrap();
+    assert_eq!(count, 20);
+
+    let products = new_db
+        .list("products".into(), vec![], vec![], None, vec![])
+        .await
+        .unwrap();
+
+    assert_eq!(products.len(), 20);
+
+    for product in &products {
+        assert!(product["name"].as_str().unwrap().starts_with("Product"));
+        assert!(product["price"].as_f64().unwrap() >= 10.0);
+    }
+}
+
+#[tokio::test]
+async fn test_backup_fails_if_destination_exists() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    let backup_path = tmp.path().join("backup");
+
+    let db = Database::open(&db_path).await.unwrap();
+
+    db.create("users".into(), json!({"name": "Test"}))
+        .await
+        .unwrap();
+
+    std::fs::create_dir(&backup_path).unwrap();
+
+    let result = db.backup_physical(&backup_path).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("already exists"));
+}
+
+#[tokio::test]
+async fn test_restore_fails_if_source_not_found() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    let missing_backup = tmp.path().join("missing.jsonl");
+
+    let db = Database::open(&db_path).await.unwrap();
+
+    let result = db.restore_logical(&missing_backup).await;
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
 }
