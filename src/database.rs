@@ -80,7 +80,7 @@ impl Database {
             if let Some(ttl_secs) = obj.get("ttl_secs").and_then(|v| v.as_u64()) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
                     .as_secs();
                 let expires_at = now + ttl_secs;
                 obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
@@ -267,30 +267,31 @@ impl Database {
             let use_index = filters.first().map(|f| f.op == FilterOp::Eq).unwrap_or(false);
 
             if use_index {
-                let filter = filters.first().unwrap();
-                let value_bytes = keys::encode_value_for_index(&filter.value)?;
-                let ids = index_manager.lookup_by_field(
-                    &self.storage,
-                    &entity_name,
-                    &filter.field,
-                    &value_bytes,
-                )?;
+                if let Some(filter) = filters.first() {
+                    let value_bytes = keys::encode_value_for_index(&filter.value)?;
+                    let ids = index_manager.lookup_by_field(
+                        &self.storage,
+                        &entity_name,
+                        &filter.field,
+                        &value_bytes,
+                    )?;
 
-                for id in ids {
-                    match self.read(entity_name.clone(), id.clone(), vec![]).await {
-                        Ok(entity_data) => {
-                            if self.matches_filters(&entity_data, &filters) {
-                                results.push(entity_data);
+                    for id in ids {
+                        match self.read(entity_name.clone(), id.clone(), vec![]).await {
+                            Ok(entity_data) => {
+                                if self.matches_filters(&entity_data, &filters) {
+                                    results.push(entity_data);
+                                }
                             }
+                            Err(Error::NotFound { .. }) => {
+                                tracing::warn!(
+                                    "index pointed to non-existent entity: {}/{}",
+                                    entity_name,
+                                    id
+                                );
+                            }
+                            Err(e) => return Err(e),
                         }
-                        Err(Error::NotFound { .. }) => {
-                            tracing::warn!(
-                                "index pointed to non-existent entity: {}/{}",
-                                entity_name,
-                                id
-                            );
-                        }
-                        Err(e) => return Err(e),
                     }
                 }
             } else {
@@ -625,10 +626,13 @@ async fn ttl_cleanup_task(
     loop {
         interval.tick().await;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(e) => {
+                tracing::warn!("TTL cleanup: failed to get system time: {e}");
+                continue;
+            }
+        };
 
         let prefix = b"data/";
         let items = match storage.prefix_scan(prefix) {

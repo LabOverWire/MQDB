@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("system time error: {0}")]
+    SystemTime(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
