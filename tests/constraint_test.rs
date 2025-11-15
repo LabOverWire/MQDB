@@ -174,10 +174,12 @@ async fn test_unique_constraint_concurrent_create() {
     let result1 = handle1.await.unwrap();
     let result2 = handle2.await.unwrap();
 
-    let has_violation =
-        matches!(result1, Err(Error::UniqueViolation { .. }))
-            || matches!(result2, Err(Error::UniqueViolation { .. }));
-    assert!(has_violation, "one create should fail with unique violation");
+    let has_violation = matches!(result1, Err(Error::UniqueViolation { .. }))
+        || matches!(result2, Err(Error::UniqueViolation { .. }));
+    assert!(
+        has_violation,
+        "one create should fail with unique violation"
+    );
 }
 
 #[tokio::test]
@@ -475,9 +477,7 @@ async fn test_schema_default_values() {
 
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String))
-        .add_field(
-            FieldDefinition::new("status", FieldType::String).default(json!("active")),
-        );
+        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
 
@@ -592,9 +592,7 @@ async fn test_combined_schema_and_constraints() {
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("email", FieldType::String).required())
-        .add_field(
-            FieldDefinition::new("status", FieldType::String).default(json!("active")),
-        );
+        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
     db.add_unique_constraint("users".into(), vec!["email".into()])

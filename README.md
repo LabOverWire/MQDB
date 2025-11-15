@@ -6,6 +6,7 @@ A high-performance, reactive embedded database built in Rust with MQTT-ready eve
 
 - **Reactive Subscriptions**: Built-in change observation with MQTT-style wildcard patterns (`+`, `#`)
 - **High Performance**: 168k+ writes/sec, 558k+ reads/sec with sub-millisecond latency
+- **ACID Constraints**: Schemas, unique constraints, foreign keys with CASCADE/RESTRICT/SET NULL
 - **Secondary Indexes**: Efficient equality and range indexes for fast queries
 - **Extended Filter Operators**: In, Like (glob patterns), IsNull, IsNotNull
 - **Sorting & Pagination**: Multi-field sorting with offset/limit pagination
@@ -167,6 +168,65 @@ println!("Author: {}", post_with_author["author"]["name"]);
 let posts = db.list("posts".into(), vec![], vec![], None, vec!["author".into()]).await?;
 ```
 
+## Constraints & Data Integrity
+
+MQDB provides a comprehensive constraint system for maintaining data integrity with ACID guarantees.
+
+### Schemas with Type Validation
+
+```rust
+use mqdb::{Schema, FieldDefinition, FieldType};
+
+let schema = Schema::new("users")
+    .add_field(FieldDefinition::new("name", FieldType::String).required())
+    .add_field(FieldDefinition::new("age", FieldType::Number))
+    .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+
+db.add_schema(schema).await?;
+```
+
+### Unique Constraints
+
+```rust
+db.add_unique_constraint("users".into(), vec!["email".into()]).await?;
+
+db.add_unique_constraint("posts".into(), vec!["user_id".into(), "slug".into()]).await?;
+```
+
+### Not-Null Constraints
+
+```rust
+db.add_not_null("users".into(), "email".into()).await?;
+```
+
+### Foreign Keys
+
+```rust
+use mqdb::OnDeleteAction;
+
+db.add_foreign_key(
+    "posts".into(),
+    "author_id".into(),
+    "users".into(),
+    "id".into(),
+    OnDeleteAction::Cascade,
+).await?;
+```
+
+**Delete Policies:**
+- `OnDeleteAction::Cascade` - Automatically delete referencing entities
+- `OnDeleteAction::Restrict` - Prevent deletion if references exist
+- `OnDeleteAction::SetNull` - Set foreign key field to null
+
+See constraint examples for detailed usage:
+- `constraints_01_schemas.rs` - Type validation and default values
+- `constraints_02_unique.rs` - Single and composite unique constraints
+- `constraints_03_not_null.rs` - Required field enforcement
+- `constraints_04_fk_cascade.rs` - Cascade deletion (multilevel)
+- `constraints_05_fk_restrict.rs` - Prevent deletion with references
+- `constraints_06_fk_set_null.rs` - Optional relationships
+- `constraints_07_combined.rs` - All constraints working together
+
 ## TTL (Time-To-Live)
 
 ```rust
@@ -210,13 +270,25 @@ cargo test --test integration_test
 
 ## Examples
 
+### Basic Usage
 - `basic_usage.rs` - Complete CRUD operations and subscriptions
 - `benchmark.rs` - Performance testing
+
+### Constraint Examples
+- `constraints_01_schemas.rs` - Type validation and default values
+- `constraints_02_unique.rs` - Single and composite unique constraints
+- `constraints_03_not_null.rs` - Required field enforcement
+- `constraints_04_fk_cascade.rs` - Cascade deletion (multilevel)
+- `constraints_05_fk_restrict.rs` - Prevent deletion with references
+- `constraints_06_fk_set_null.rs` - Optional relationships
+- `constraints_07_combined.rs` - All constraints working together
 
 Run examples:
 ```bash
 cargo run --example basic_usage
 cargo run --example benchmark --release
+cargo run --example constraints_01_schemas
+cargo run --example constraints_07_combined
 ```
 
 ## Design Inspiration
@@ -242,10 +314,20 @@ cargo run --example benchmark --release
 - [x] Relationships and nested entity loading
 - [x] TTL-based cleanup with reactive notifications
 
+### Phase 5: ACID Constraint System ✓
+- [x] Schema validation with type checking
+- [x] Field-level constraints (required, default values)
+- [x] Unique constraints (single and composite)
+- [x] Not-null constraints
+- [x] Foreign key constraints with CASCADE/RESTRICT/SET NULL
+- [x] Recursive cascade deletion
+- [x] Atomic constraint validation
+- [x] Constraint persistence across restarts
+
 ### Test Coverage
-- 29 tests passing (12 unit + 11 integration + 4 concurrency + 2 durability)
+- 93 tests passing (26 unit + 67 integration including 25 constraint tests)
 - Clippy clean, no warnings
-- All features tested including TTL index cleanup
+- Full constraint coverage including multilevel cascade
 
 ## Future Enhancements
 
