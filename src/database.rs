@@ -857,13 +857,14 @@ impl Database {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SortDirection {
     Asc,
     Desc,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SortOrder {
     pub field: String,
     pub direction: SortDirection,
@@ -883,7 +884,7 @@ impl SortOrder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Pagination {
     pub limit: usize,
     pub offset: usize,
@@ -895,7 +896,8 @@ impl Pagination {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FilterOp {
     Eq,
     Neq,
@@ -909,7 +911,7 @@ pub enum FilterOp {
     IsNotNull,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Filter {
     pub field: String,
     pub op: FilterOp,

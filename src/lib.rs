@@ -12,8 +12,10 @@ pub mod index;
 pub mod keys;
 pub mod relationship;
 pub mod schema;
+pub mod session;
 pub mod storage;
 pub mod subscription;
+pub mod transport;
 
 pub use config::{DatabaseConfig, DurabilityMode};
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
@@ -23,4 +25,6 @@ pub use dedup::DedupStore;
 pub use error::{Error, Result};
 pub use events::{ChangeEvent, Operation};
 pub use schema::{FieldDefinition, FieldType, Schema};
+pub use session::{ClientSession, EventRouter, SessionManager};
 pub use subscription::Subscription;
+pub use transport::{ErrorCode, Request, Response};
