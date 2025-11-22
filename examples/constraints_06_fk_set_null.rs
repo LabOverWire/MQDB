@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create("posts".into(), post3).await?;
     println!("✓ Created 3 posts\n");
 
-    let posts_before = db.list("posts".into(), vec![], vec![], None, vec![]).await?;
+    let posts_before = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
     println!("Before deletion:");
     for post in &posts_before {
         println!("  {} - category: {:?}", post["title"], post["category_id"]);
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete("categories".into(), tech_id.to_string()).await?;
     println!("✓ Category deleted\n");
 
-    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![]).await?;
+    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
     println!("After deletion:");
     println!("  Total posts: {} (all still exist)", posts_after.len());
     for post in &posts_after {

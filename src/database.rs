@@ -136,6 +136,7 @@ impl Database {
         entity_name: String,
         id: String,
         includes: Vec<String>,
+        projection: Option<Vec<String>>,
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
@@ -154,6 +155,12 @@ impl Database {
             self.load_includes(&mut result, &entity_name, &includes, 0)
                 .await?;
         }
+
+        let result = if let Some(ref fields) = projection {
+            self.project_fields(result, fields)
+        } else {
+            result
+        };
 
         Ok(result)
     }
@@ -179,7 +186,7 @@ impl Database {
                     if let Some(id_value) = entity.get(&rel.field_suffix) {
                         if let Some(id_str) = id_value.as_str() {
                             match self
-                                .read(rel.target_entity.clone(), id_str.to_string(), vec![])
+                                .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
                                 .await
                             {
                                 Ok(related_entity) => {
@@ -203,6 +210,27 @@ impl Database {
 
             Ok(())
         })
+    }
+
+    fn project_fields(&self, entity: Value, fields: &[String]) -> Value {
+        if let Value::Object(obj) = entity {
+            let mut projected = serde_json::Map::new();
+
+            if let Some(id) = obj.get("id") {
+                projected.insert("id".to_string(), id.clone());
+            }
+
+            for field in fields {
+                if field != "id" {
+                    if let Some(value) = obj.get(field) {
+                        projected.insert(field.clone(), value.clone());
+                    }
+                }
+            }
+            Value::Object(projected)
+        } else {
+            entity
+        }
     }
 
     pub async fn update(&self, entity_name: String, id: String, fields: Value) -> Result<Value> {
@@ -349,6 +377,7 @@ impl Database {
         sort: Vec<SortOrder>,
         pagination: Option<Pagination>,
         includes: Vec<String>,
+        projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
 
@@ -376,7 +405,7 @@ impl Database {
                     )?;
 
                     for id in ids {
-                        match self.read(entity_name.clone(), id.clone(), vec![]).await {
+                        match self.read(entity_name.clone(), id.clone(), vec![], None).await {
                             Ok(entity_data) => {
                                 if self.matches_filters(&entity_data, &filters) {
                                     results.push(entity_data);
@@ -443,6 +472,15 @@ impl Database {
                     .await?;
             }
         }
+
+        let paginated_results = if let Some(ref fields) = projection {
+            paginated_results
+                .into_iter()
+                .map(|e| self.project_fields(e, fields))
+                .collect()
+        } else {
+            paginated_results
+        };
 
         Ok(paginated_results)
     }

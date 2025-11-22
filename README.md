@@ -283,12 +283,23 @@ cargo test --test integration_test
 - `constraints_06_fk_set_null.rs` - Optional relationships
 - `constraints_07_combined.rs` - All constraints working together
 
+### Real-World Application
+- `parking_lot.rs` - Complete parking lot management system demonstrating:
+  - Complex schema with 5+ entities and comprehensive constraints
+  - Foreign keys with CASCADE/RESTRICT/SET_NULL policies
+  - Reactive event system with MQTT bridge pattern
+  - Bidirectional DB ↔ MQTT integration
+  - Complete entry/exit flows with IoT device simulation
+  - Real-time status updates via subscriptions
+  - TTL-based reservation expiration
+
 Run examples:
 ```bash
 cargo run --example basic_usage
 cargo run --example benchmark --release
 cargo run --example constraints_01_schemas
 cargo run --example constraints_07_combined
+cargo run --example parking_lot
 ```
 
 ## Design Inspiration

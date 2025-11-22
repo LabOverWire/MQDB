@@ -22,7 +22,7 @@ async fn test_recovery_after_immediate_close_during_writes() {
 
     let db = Database::open(&db_path).await.unwrap();
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -53,7 +53,7 @@ async fn test_recovery_with_periodic_durability() {
 
     let db = Database::open(&db_path).await.unwrap();
     let products = db
-        .list("products".into(), vec![], vec![], None, vec![])
+        .list("products".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -78,7 +78,7 @@ async fn test_recovery_after_many_operations() {
         }
 
         let all_users = db
-            .list("users".into(), vec![], vec![], None, vec![])
+            .list("users".into(), vec![], vec![], None, vec![], None)
             .await
             .unwrap();
 
@@ -102,7 +102,7 @@ async fn test_recovery_after_many_operations() {
 
     let db = Database::open(&db_path).await.unwrap();
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -142,7 +142,7 @@ async fn test_recovery_with_indexes() {
         json!("user15@example.com"),
     );
     let results = db
-        .list("users".into(), vec![filter], vec![], None, vec![])
+        .list("users".into(), vec![filter], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -184,7 +184,7 @@ async fn test_recovery_after_concurrent_writes() {
 
     let db = Database::open(&db_path).await.unwrap();
     let items = db
-        .list("items".into(), vec![], vec![], None, vec![])
+        .list("items".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -211,7 +211,7 @@ async fn test_recovery_maintains_data_integrity() {
 
     let db = Database::open(&db_path).await.unwrap();
     let records = db
-        .list("records".into(), vec![], vec![], None, vec![])
+        .list("records".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -246,7 +246,7 @@ async fn test_recovery_with_ttl_entries() {
 
     let db = Database::open(&db_path).await.unwrap();
     let items = db
-        .list("items".into(), vec![], vec![], None, vec![])
+        .list("items".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -264,7 +264,7 @@ async fn test_recovery_empty_database() {
 
     let db = Database::open(&db_path).await.unwrap();
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -290,7 +290,7 @@ async fn test_recovery_after_delete_operations() {
         }
 
         let users = db
-            .list("users".into(), vec![], vec![], None, vec![])
+            .list("users".into(), vec![], vec![], None, vec![], None)
             .await
             .unwrap();
 
@@ -313,7 +313,7 @@ async fn test_recovery_after_delete_operations() {
 
     let db = Database::open(&db_path).await.unwrap();
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -352,15 +352,15 @@ async fn test_recovery_with_mixed_entity_types() {
     let db = Database::open(&db_path).await.unwrap();
 
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     let products = db
-        .list("products".into(), vec![], vec![], None, vec![])
+        .list("products".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     let orders = db
-        .list("orders".into(), vec![], vec![], None, vec![])
+        .list("orders".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -386,7 +386,7 @@ async fn test_recovery_after_update_operations() {
         }
 
         let users = db
-            .list("users".into(), vec![], vec![], None, vec![])
+            .list("users".into(), vec![], vec![], None, vec![], None)
             .await
             .unwrap();
 
@@ -405,7 +405,7 @@ async fn test_recovery_after_update_operations() {
 
     let db = Database::open(&db_path).await.unwrap();
     let users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -436,7 +436,7 @@ async fn test_multiple_reopen_cycles() {
 
     let db = Database::open(&db_path).await.unwrap();
     let items = db
-        .list("items".into(), vec![], vec![], None, vec![])
+        .list("items".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 
@@ -461,7 +461,7 @@ async fn test_recovery_preserves_checksums() {
 
     let db = Database::open(&db_path).await.unwrap();
     let records = db
-        .list("records".into(), vec![], vec![], None, vec![])
+        .list("records".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
 

@@ -334,7 +334,7 @@ async fn test_foreign_key_cascade_delete_simple() {
     assert!(result.is_ok());
 
     let posts = db
-        .list("posts".into(), vec![], vec![], None, vec![])
+        .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(posts.len(), 0, "all posts should be cascaded deleted");
@@ -382,13 +382,13 @@ async fn test_foreign_key_cascade_delete_multilevel() {
     assert!(result.is_ok());
 
     let posts = db
-        .list("posts".into(), vec![], vec![], None, vec![])
+        .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(posts.len(), 0, "posts should be cascaded");
 
     let comments = db
-        .list("comments".into(), vec![], vec![], None, vec![])
+        .list("comments".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(comments.len(), 0, "comments should be cascaded from posts");
@@ -422,7 +422,7 @@ async fn test_foreign_key_set_null() {
     assert!(result.is_ok());
 
     let all_posts = db
-        .list("posts".into(), vec![], vec![], None, vec![])
+        .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(all_posts.len(), 2, "both posts should still exist");

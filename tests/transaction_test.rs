@@ -29,7 +29,7 @@ async fn test_update_race_condition_within_transaction() {
         handle.await.unwrap().ok();
     }
 
-    let final_user = db.read("users".into(), id, vec![]).await.unwrap();
+    let final_user = db.read("users".into(), id, vec![], None).await.unwrap();
     let value = final_user["value"].as_str().unwrap();
     assert!(value.starts_with("update-"), "final value should be from one of the updates: {}", value);
 }
@@ -55,7 +55,7 @@ async fn test_dirty_read_prevented() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
 
-    let user = db.read("users".into(), id.clone(), vec![]).await.unwrap();
+    let user = db.read("users".into(), id.clone(), vec![], None).await.unwrap();
     let status = user["status"].as_str().unwrap();
 
     handle.await.unwrap().unwrap();
@@ -78,7 +78,7 @@ async fn test_atomicity_all_or_nothing() {
     db.create("users".into(), user2).await.unwrap();
     db.create("users".into(), user3).await.unwrap();
 
-    let users = db.list("users".into(), vec![], vec![], None, vec![]).await.unwrap();
+    let users = db.list("users".into(), vec![], vec![], None, vec![], None).await.unwrap();
     assert_eq!(users.len(), 3);
 
     let indexed_users = db.list(
@@ -87,6 +87,7 @@ async fn test_atomicity_all_or_nothing() {
         vec![],
         None,
         vec![],
+        None,
     ).await.unwrap();
     assert_eq!(indexed_users.len(), 3, "all users should be indexed");
 }
@@ -126,8 +127,8 @@ async fn test_concurrent_updates_to_different_entities() {
         handle.await.unwrap().ok();
     }
 
-    let u1 = db.read("users".into(), id1, vec![]).await.unwrap();
-    let u2 = db.read("users".into(), id2, vec![]).await.unwrap();
+    let u1 = db.read("users".into(), id1, vec![], None).await.unwrap();
+    let u2 = db.read("users".into(), id2, vec![], None).await.unwrap();
 
     assert!(u1["count"].as_i64().unwrap() >= 0 && u1["count"].as_i64().unwrap() < 10);
     assert!(u2["count"].as_i64().unwrap() >= 100 && u2["count"].as_i64().unwrap() < 110);
@@ -156,7 +157,7 @@ async fn test_create_operations_are_atomic() {
         handle.await.unwrap().unwrap();
     }
 
-    let users = db.list("users".into(), vec![], vec![], None, vec![]).await.unwrap();
+    let users = db.list("users".into(), vec![], vec![], None, vec![], None).await.unwrap();
     assert_eq!(users.len(), 50);
 
     for i in 0..50 {
@@ -165,7 +166,7 @@ async fn test_create_operations_are_atomic() {
             mqdb::FilterOp::Eq,
             json!(format!("user{}@example.com", i)),
         );
-        let result = db.list("users".into(), vec![filter], vec![], None, vec![]).await.unwrap();
+        let result = db.list("users".into(), vec![filter], vec![], None, vec![], None).await.unwrap();
         assert_eq!(result.len(), 1, "each email should be indexed exactly once");
     }
 }
@@ -200,10 +201,10 @@ async fn test_delete_operations_are_atomic() {
         handle.await.unwrap().unwrap();
     }
 
-    let users = db.list("users".into(), vec![], vec![], None, vec![]).await.unwrap();
+    let users = db.list("users".into(), vec![], vec![], None, vec![], None).await.unwrap();
     assert_eq!(users.len(), 10);
 
     let filter = mqdb::Filter::new("status".into(), mqdb::FilterOp::Eq, json!("active"));
-    let active_users = db.list("users".into(), vec![filter], vec![], None, vec![]).await.unwrap();
+    let active_users = db.list("users".into(), vec![filter], vec![], None, vec![], None).await.unwrap();
     assert_eq!(active_users.len(), 10, "index should match actual data");
 }

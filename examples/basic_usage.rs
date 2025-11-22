@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nReading user...");
     let alice_id = created_alice["id"].as_str().unwrap();
-    let alice_data = db.read("users".into(), alice_id.to_string(), vec![]).await?;
+    let alice_data = db.read("users".into(), alice_id.to_string(), vec![], None).await?;
     println!("Read: {}", alice_data);
 
     println!("\nUpdating user...");
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Updated: {}", updated_alice);
 
     println!("\nListing all users...");
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![]).await?;
+    let all_users = db.list("users".into(), vec![], vec![], None, vec![], None).await?;
     println!("Total users: {}", all_users.len());
     for user in &all_users {
         println!("  - {}: {}", user["name"], user["email"]);
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nFiltering active users...");
     let active_filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let active_users = db.list("users".into(), vec![active_filter], vec![], None, vec![]).await?;
+    let active_users = db.list("users".into(), vec![active_filter], vec![], None, vec![], None).await?;
     println!("Active users: {}", active_users.len());
     for user in &active_users {
         println!("  - {}: {}", user["name"], user["status"]);

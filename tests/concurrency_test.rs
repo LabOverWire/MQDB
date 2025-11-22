@@ -38,7 +38,7 @@ async fn test_concurrent_id_generation_no_duplicates() {
     );
 
     for id in &ids {
-        let entity = db.read("users".into(), id.clone(), vec![]).await.unwrap();
+        let entity = db.read("users".into(), id.clone(), vec![], None).await.unwrap();
         assert!(entity.get("name").is_some(), "Entity should exist in DB");
     }
 }
@@ -74,7 +74,7 @@ async fn test_concurrent_delete_and_read() {
             for _ in 0..10 {
                 let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
                 let _ = db_clone
-                    .list("users".into(), vec![filter], vec![], None, vec![])
+                    .list("users".into(), vec![filter], vec![], None, vec![], None)
                     .await;
                 tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
             }
@@ -87,14 +87,14 @@ async fn test_concurrent_delete_and_read() {
     }
 
     let all_users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(all_users.len(), 25, "Should have 25 entities remaining");
 
     let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
     let indexed_results = db
-        .list("users".into(), vec![filter], vec![], None, vec![])
+        .list("users".into(), vec![filter], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(
@@ -104,12 +104,12 @@ async fn test_concurrent_delete_and_read() {
     );
 
     for i in 1..=25 {
-        let result = db.read("users".into(), i.to_string(), vec![]).await;
+        let result = db.read("users".into(), i.to_string(), vec![], None).await;
         assert!(result.is_err(), "Deleted entity {i} should not exist");
     }
 
     for i in 26..=50 {
-        let result = db.read("users".into(), i.to_string(), vec![]).await;
+        let result = db.read("users".into(), i.to_string(), vec![], None).await;
         assert!(result.is_ok(), "Non-deleted entity {i} should exist");
     }
 }
@@ -164,7 +164,7 @@ async fn test_max_list_results_limit_enforcement() {
     }
 
     let all_users = db
-        .list("users".into(), vec![], vec![], None, vec![])
+        .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
     assert_eq!(

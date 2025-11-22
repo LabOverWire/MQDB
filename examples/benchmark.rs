@@ -77,7 +77,7 @@ async fn benchmark_reads(db: &Database, count: usize) -> Result<(), Box<dyn std:
     for i in 1..=count {
         let record_start = Instant::now();
 
-        let _ = db.read("users".into(), i.to_string(), vec![]).await;
+        let _ = db.read("users".into(), i.to_string(), vec![], None).await;
 
         let record_elapsed = record_start.elapsed();
         latencies.push(record_elapsed);
@@ -160,7 +160,7 @@ async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn 
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let _ = db.list("users".into(), vec![], vec![], None, vec![]).await;
+        let _ = db.list("users".into(), vec![], vec![], None, vec![], None).await;
     }
 
     let total_elapsed = start.elapsed();

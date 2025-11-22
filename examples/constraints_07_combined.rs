@@ -94,9 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stats_before = (
-        db.list("users".into(), vec![], vec![], None, vec![]).await?.len(),
-        db.list("posts".into(), vec![], vec![], None, vec![]).await?.len(),
-        db.list("comments".into(), vec![], vec![], None, vec![]).await?.len(),
+        db.list("users".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("posts".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("comments".into(), vec![], vec![], None, vec![], None).await?.len(),
     );
     println!("Before cascade deletion:");
     println!("  Users: {}, Posts: {}, Comments: {}\n", stats_before.0, stats_before.1, stats_before.2);
@@ -106,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✓ Deleted\n");
 
     let stats_after = (
-        db.list("users".into(), vec![], vec![], None, vec![]).await?.len(),
-        db.list("posts".into(), vec![], vec![], None, vec![]).await?.len(),
-        db.list("comments".into(), vec![], vec![], None, vec![]).await?.len(),
+        db.list("users".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("posts".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("comments".into(), vec![], vec![], None, vec![], None).await?.len(),
     );
     println!("After cascade deletion:");
     println!("  Users: {} (Alice deleted)", stats_after.0);

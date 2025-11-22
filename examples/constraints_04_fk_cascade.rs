@@ -50,8 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     println!("✓ Created 3 comments\n");
 
-    let posts_before = db.list("posts".into(), vec![], vec![], None, vec![]).await?;
-    let comments_before = db.list("comments".into(), vec![], vec![], None, vec![]).await?;
+    let posts_before = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
+    let comments_before = db.list("comments".into(), vec![], vec![], None, vec![], None).await?;
     println!("Before deletion:");
     println!("  Posts: {}", posts_before.len());
     println!("  Comments: {}\n", comments_before.len());
@@ -60,8 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete("users".into(), user_id.to_string()).await?;
     println!("✓ User deleted\n");
 
-    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![]).await?;
-    let comments_after = db.list("comments".into(), vec![], vec![], None, vec![]).await?;
+    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
+    let comments_after = db.list("comments".into(), vec![], vec![], None, vec![], None).await?;
     println!("After deletion:");
     println!("  Posts: {} (cascaded)", posts_after.len());
     println!("  Comments: {} (cascaded from posts)\n", comments_after.len());
