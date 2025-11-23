@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
-use mqdb::{Database, MqdbAgent};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -384,7 +384,7 @@ async fn cmd_create(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
-    let topic = format!("$DB/{}/create", entity);
+    let topic = format!("$DB/{entity}/create");
     let response = execute_request(&conn, &topic, payload).await?;
     output_response(response, format);
     Ok(())
@@ -397,7 +397,7 @@ async fn cmd_read(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/{}/{}", entity, id);
+    let topic = format!("$DB/{entity}/{id}");
     let payload = if let Some(proj) = projection {
         let fields: Vec<&str> = proj.split(',').collect();
         json!({ "projection": fields })
@@ -417,7 +417,7 @@ async fn cmd_update(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
-    let topic = format!("$DB/{}/{}/update", entity, id);
+    let topic = format!("$DB/{entity}/{id}/update");
     let response = execute_request(&conn, &topic, payload).await?;
     output_response(response, format);
     Ok(())
@@ -429,7 +429,7 @@ async fn cmd_delete(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/{}/{}/delete", entity, id);
+    let topic = format!("$DB/{entity}/{id}/delete");
     let response = execute_request(&conn, &topic, json!({})).await?;
     output_response(response, format);
     Ok(())
@@ -444,15 +444,12 @@ async fn cmd_list(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/{}/list", entity);
+    let topic = format!("$DB/{entity}/list");
 
     let mut payload = json!({});
 
     if !filters.is_empty() {
-        let parsed_filters: Vec<Value> = filters
-            .iter()
-            .flat_map(|f| parse_filters(f))
-            .collect();
+        let parsed_filters: Vec<Value> = filters.iter().flat_map(|f| parse_filters(f)).collect();
         payload["filters"] = json!(parsed_filters);
     }
 
@@ -492,7 +489,7 @@ async fn cmd_watch(
     }
 
     let client = connect_client(&conn).await?;
-    let topic = format!("$DB/{}/events/#", entity);
+    let topic = format!("$DB/{entity}/events/#");
 
     let (tx, mut rx) = mpsc::channel::<Value>(100);
 
@@ -504,7 +501,7 @@ async fn cmd_watch(
         })
         .await?;
 
-    eprintln!("Watching {} events (Ctrl+C to stop)...", entity);
+    eprintln!("Watching {entity} events (Ctrl+C to stop)...");
 
     while let Some(event) = rx.recv().await {
         output_response(event, format.clone());
@@ -520,7 +517,7 @@ async fn cmd_schema_set(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(&file)?;
     let schema: Value = serde_json::from_str(&content)?;
-    let topic = format!("$DB/_admin/schema/{}/set", entity);
+    let topic = format!("$DB/_admin/schema/{entity}/set");
     let response = execute_request(&conn, &topic, schema).await?;
     output_response(response, OutputFormat::Json);
     Ok(())
@@ -531,7 +528,7 @@ async fn cmd_schema_get(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/_admin/schema/{}/get", entity);
+    let topic = format!("$DB/_admin/schema/{entity}/get");
     let response = execute_request(&conn, &topic, json!({})).await?;
     output_response(response, format);
     Ok(())
@@ -544,7 +541,7 @@ async fn cmd_constraint_add(
     not_null: Option<String>,
     conn: ConnectionArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/_admin/constraint/{}/add", entity);
+    let topic = format!("$DB/_admin/constraint/{entity}/add");
 
     let payload = if let Some(field) = unique {
         json!({ "type": "unique", "fields": [field] })
@@ -576,7 +573,7 @@ async fn cmd_constraint_list(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/_admin/constraint/{}/list", entity);
+    let topic = format!("$DB/_admin/constraint/{entity}/list");
     let response = execute_request(&conn, &topic, json!({})).await?;
     output_response(response, format);
     Ok(())
@@ -598,9 +595,7 @@ async fn cmd_restore(
     Ok(())
 }
 
-async fn connect_client(
-    conn: &ConnectionArgs,
-) -> Result<MqttClient, Box<dyn std::error::Error>> {
+async fn connect_client(conn: &ConnectionArgs) -> Result<MqttClient, Box<dyn std::error::Error>> {
     let client = MqttClient::new("mqdb-cli");
 
     if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
@@ -743,7 +738,7 @@ fn output_response(response: Value, format: OutputFormat) {
 }
 
 fn output_table(data: &[Value]) {
-    use comfy_table::{Table, ContentArrangement};
+    use comfy_table::{ContentArrangement, Table};
 
     if data.is_empty() {
         println!("(no results)");

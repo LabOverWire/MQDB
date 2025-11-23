@@ -20,6 +20,46 @@ pub struct DbOperation {
     pub id: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum AdminOperation {
+    SchemaSet { entity: String },
+    SchemaGet { entity: String },
+    ConstraintAdd { entity: String },
+    ConstraintList { entity: String },
+    Backup,
+    Restore,
+}
+
+type ListOptions = (
+    Vec<crate::Filter>,
+    Vec<crate::SortOrder>,
+    Option<crate::Pagination>,
+    Vec<String>,
+    Option<Vec<String>>,
+);
+
+pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
+    let parts: Vec<&str> = topic.strip_prefix("$DB/_admin/")?.split('/').collect();
+
+    match parts.as_slice() {
+        ["schema", entity, "set"] => Some(AdminOperation::SchemaSet {
+            entity: (*entity).to_string(),
+        }),
+        ["schema", entity, "get"] => Some(AdminOperation::SchemaGet {
+            entity: (*entity).to_string(),
+        }),
+        ["constraint", entity, "add"] => Some(AdminOperation::ConstraintAdd {
+            entity: (*entity).to_string(),
+        }),
+        ["constraint", entity, "list"] => Some(AdminOperation::ConstraintList {
+            entity: (*entity).to_string(),
+        }),
+        ["backup"] => Some(AdminOperation::Backup),
+        ["restore"] => Some(AdminOperation::Restore),
+        _ => None,
+    }
+}
+
 pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     let parts: Vec<&str> = topic.strip_prefix("$DB/")?.split('/').collect();
 
@@ -118,15 +158,7 @@ fn extract_read_options(data: &Value) -> (Vec<String>, Option<Vec<String>>) {
     (includes, projection)
 }
 
-fn extract_list_options(
-    data: &Value,
-) -> (
-    Vec<crate::Filter>,
-    Vec<crate::SortOrder>,
-    Option<crate::Pagination>,
-    Vec<String>,
-    Option<Vec<String>>,
-) {
+fn extract_list_options(data: &Value) -> ListOptions {
     let filters: Vec<crate::Filter> = data
         .get("filters")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -398,6 +430,11 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message) {
         return;
     }
 
+    if let Some(admin_op) = parse_admin_topic(topic) {
+        handle_admin_operation(db, client, &message, admin_op).await;
+        return;
+    }
+
     let op = match parse_db_topic(topic) {
         Some(op) => op,
         None => {
@@ -433,12 +470,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message) {
         use opentelemetry::Context;
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-        let user_props: Vec<(String, String)> = message
-            .properties
-            .user_properties
-            .iter()
-            .cloned()
-            .collect();
+        let user_props: Vec<(String, String)> = message.properties.user_properties.to_vec();
 
         if let Some(parent_cx) = propagation::extract_trace_context(&user_props) {
             let parent = SpanContext::new(
@@ -464,6 +496,155 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message) {
             }
             Err(e) => {
                 error!("Failed to serialize response: {}", e);
+            }
+        }
+    }
+}
+
+async fn handle_admin_operation(
+    db: &Database,
+    client: &MqttClient,
+    message: &Message,
+    op: AdminOperation,
+) {
+    use crate::constraint::OnDeleteAction;
+    use serde_json::json;
+
+    let payload: Value = if message.payload.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&message.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(response_topic) = &message.properties.response_topic {
+                    let response = Response::error(crate::ErrorCode::BadRequest, e.to_string());
+                    if let Ok(payload) = serde_json::to_vec(&response) {
+                        let _ = client.publish_qos1(response_topic, payload).await;
+                    }
+                }
+                return;
+            }
+        }
+    };
+
+    let response = match op {
+        AdminOperation::SchemaSet { entity } => {
+            match serde_json::from_value::<crate::schema::Schema>(payload) {
+                Ok(mut schema) => {
+                    schema.entity = entity;
+                    match db.add_schema(schema).await {
+                        Ok(()) => Response::ok(json!({"message": "schema set"})),
+                        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+                    }
+                }
+                Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+            }
+        }
+        AdminOperation::SchemaGet { entity } => match db.get_schema(&entity).await {
+            Some(schema) => Response::ok(serde_json::to_value(schema).unwrap_or(Value::Null)),
+            None => Response::error(
+                crate::ErrorCode::NotFound,
+                format!("no schema for entity: {entity}"),
+            ),
+        },
+        AdminOperation::ConstraintAdd { entity } => {
+            let constraint_type = payload.get("type").and_then(|v| v.as_str());
+
+            let result = match constraint_type {
+                Some("unique") => {
+                    let fields: Vec<String> = payload
+                        .get("fields")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if fields.is_empty() {
+                        Err("unique constraint requires fields array".to_string())
+                    } else {
+                        db.add_unique_constraint(entity, fields)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                }
+                Some("not_null") => {
+                    let field = payload
+                        .get("field")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    match field {
+                        Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
+                        None => Err("not_null constraint requires field".to_string()),
+                    }
+                }
+                Some("foreign_key") => {
+                    let source_field = payload.get("field").and_then(|v| v.as_str());
+                    let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
+                    let target_field = payload.get("target_field").and_then(|v| v.as_str());
+                    let on_delete = payload
+                        .get("on_delete")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("restrict");
+
+                    let action = match on_delete {
+                        "cascade" => OnDeleteAction::Cascade,
+                        "set_null" => OnDeleteAction::SetNull,
+                        _ => OnDeleteAction::Restrict,
+                    };
+
+                    match (source_field, target_entity, target_field) {
+                        (Some(sf), Some(te), Some(tf)) => db
+                            .add_foreign_key(
+                                entity,
+                                sf.to_string(),
+                                te.to_string(),
+                                tf.to_string(),
+                                action,
+                            )
+                            .await
+                            .map_err(|e| e.to_string()),
+                        _ => Err(
+                            "foreign_key requires field, target_entity, target_field".to_string(),
+                        ),
+                    }
+                }
+                _ => Err(format!("unknown constraint type: {constraint_type:?}")),
+            };
+
+            match result {
+                Ok(()) => Response::ok(json!({"message": "constraint added"})),
+                Err(e) => Response::error(crate::ErrorCode::BadRequest, e),
+            }
+        }
+        AdminOperation::ConstraintList { entity } => {
+            let constraints = db.list_constraints(&entity).await;
+            let data: Vec<Value> = constraints
+                .into_iter()
+                .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+                .collect();
+            Response::ok(json!(data))
+        }
+        AdminOperation::Backup => {
+            Response::error(crate::ErrorCode::Internal, "backup not yet implemented via MQTT")
+        }
+        AdminOperation::Restore => {
+            Response::error(crate::ErrorCode::Internal, "restore not yet implemented via MQTT")
+        }
+    };
+
+    if let Some(response_topic) = &message.properties.response_topic {
+        match serde_json::to_vec(&response) {
+            Ok(payload) => {
+                if let Err(e) = client.publish_qos1(response_topic, payload).await {
+                    error!("Failed to publish admin response to {}: {}", response_topic, e);
+                }
+            }
+            Err(e) => {
+                error!("Failed to serialize admin response: {}", e);
             }
         }
     }

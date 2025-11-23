@@ -468,7 +468,7 @@ async fn test_cursor_api() {
     let mut age_cursor = db.cursor("users".into(), vec![age_filter], vec![]).await.unwrap();
 
     let batch = age_cursor.next_batch(10).await.unwrap();
-    assert!(batch.len() > 0);
+    assert!(!batch.is_empty());
     for user in batch {
         let age = user["age"].as_u64().unwrap();
         assert!(age > 30);

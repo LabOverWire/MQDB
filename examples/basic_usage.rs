@@ -1,6 +1,5 @@
 use mqdb::{Database, Filter, FilterOp};
 use serde_json::json;
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

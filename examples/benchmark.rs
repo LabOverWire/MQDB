@@ -1,7 +1,6 @@
 use mqdb::Database;
 use serde_json::json;
 use std::time::{Duration, Instant};
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

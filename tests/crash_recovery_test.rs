@@ -57,7 +57,7 @@ async fn test_recovery_with_periodic_durability() {
         .await
         .unwrap();
 
-    assert!(products.len() > 0, "should have persisted some products");
+    assert!(!products.is_empty(), "should have persisted some products");
 }
 
 #[tokio::test]

@@ -616,6 +616,16 @@ impl Database {
         registry.add(relationship);
     }
 
+    pub async fn get_schema(&self, entity: &str) -> Option<Schema> {
+        let registry = self.schema_registry.read().await;
+        registry.get_schema(entity).cloned()
+    }
+
+    pub async fn list_constraints(&self, entity: &str) -> Vec<crate::constraint::Constraint> {
+        let manager = self.constraint_manager.read().await;
+        manager.get_constraints(entity).to_vec()
+    }
+
     pub async fn add_schema(&self, schema: Schema) -> Result<()> {
         let mut batch = self.storage.batch();
 
