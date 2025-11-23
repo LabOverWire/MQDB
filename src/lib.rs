@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod checksum;
 pub mod config;
 pub mod constraint;
@@ -25,6 +26,7 @@ pub use dedup::DedupStore;
 pub use error::{Error, Result};
 pub use events::{ChangeEvent, Operation};
 pub use schema::{FieldDefinition, FieldType, Schema};
+pub use agent::MqdbAgent;
 pub use session::{ClientSession, EventRouter, SessionManager};
 pub use subscription::Subscription;
 pub use transport::{ErrorCode, Request, Response};

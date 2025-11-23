@@ -1,0 +1,13 @@
+# MQDB Agent Password File
+# Format: username:argon2_hash
+#
+# Generate hashes using the mqttv5 CLI:
+#   mqttv5 passwd --add admin --password admin123 >> passwd.txt
+#   mqttv5 passwd --add alice --password alice123 >> passwd.txt
+#   mqttv5 passwd --add bob --password bob123 >> passwd.txt
+#
+# Or programmatically using mqtt5::broker::auth::PasswordAuthProvider::hash_password()
+#
+admin:$argon2id$v=19$m=19456,t=2,p=1$Fak6730WA1mPXP4V0LAvpA$odtEZKfPID5jSwaCDsLeO6N170XVq2f9QH1dbhFVjJo
+alice:$argon2id$v=19$m=19456,t=2,p=1$zrufpgc9/METJop7H7Q5IQ$UH+2Z0MXRxmkRaN1R/yd1WgfH0O0Kik+A0h0XYETBew
+bob:$argon2id$v=19$m=19456,t=2,p=1$Reg/w5LtcKXPIcqeTkJVFw$GbAObmre+9RC5TU/bOmdjO9Q9m/hEJdzMmyCcOgWiD8

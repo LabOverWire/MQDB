@@ -45,7 +45,7 @@ impl SessionManager {
         let mut sessions = self.sessions.write().await;
         let mut sub_to_client = self.subscription_to_client.write().await;
 
-        let removed_subs = if let Some(session) = sessions.remove(client_id) {
+        if let Some(session) = sessions.remove(client_id) {
             let subs: Vec<String> = session.subscriptions.into_iter().collect();
             for sub_id in &subs {
                 sub_to_client.remove(sub_id);
@@ -53,9 +53,7 @@ impl SessionManager {
             subs
         } else {
             vec![]
-        };
-
-        removed_subs
+        }
     }
 
     pub async fn add_subscription(&self, client_id: &str, subscription_id: String) {

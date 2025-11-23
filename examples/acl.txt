@@ -1,0 +1,19 @@
+# MQDB Agent ACL Configuration
+# Format: user <username> topic <pattern> permission <read|write|readwrite|deny>
+
+# Admin has full access to all entities
+user admin topic $DB/# permission readwrite
+
+# Alice can only access the users entity
+user alice topic $DB/users/# permission readwrite
+user alice topic $DB/# permission deny
+
+# Bob can only list entities (not create/update/delete)
+user bob topic $DB/+/list permission write
+user bob topic $DB/# permission deny
+
+# Events are readable by all authenticated users
+user * topic $DB/+/events/# permission read
+
+# Allow response topics for request-response pattern
+user * topic +/responses permission readwrite
