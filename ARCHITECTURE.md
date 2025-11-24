@@ -807,31 +807,39 @@ let posts = db.list("posts", filters, sort, page, vec!["author"]).await?;
 
 ### 7.4 Backup & Restore
 
-**Physical Backup:**
+**Physical Backup (via Database API):**
 ```rust
-db.backup_physical("path/to/backup").await?;
+db.backup("path/to/backup")?;
 ```
 - Flushes memtables to disk
 - Copies entire database directory
 - Fast, preserves SST files
-- Not portable across platforms
 
-**Logical Backup:**
-```rust
-db.backup_logical("backup.jsonl").await?;
+**Backup via MQTT Agent:**
+
+The MqdbAgent provides server-side managed backups:
 ```
-- Exports entities as JSON-lines
-- Format: `{"_entity": "users", "_data": {...}}\n`
-- Portable, human-readable
-- Slower, but cross-platform
+Topic: $DB/_admin/backup
+Payload: {"name": "daily_backup"}
+```
+- Backups stored in `{db_path}/backups/{name}/`
+- Names must be alphanumeric, underscore, or hyphen only
+- Validates names to prevent path traversal
+
+**Listing Backups:**
+```
+Topic: $DB/_admin/backup/list
+Response: ["backup1", "backup2", ...]
+```
 
 **Restore:**
-```rust
-db.restore_logical("backup.jsonl").await?;
+Restore requires agent restart due to open file handles. The CLI provides guidance:
+```bash
+mqdb restore --name daily_backup
+# Error: restore requires agent restart
 ```
-- Recreates entities from backup
-- Triggers constraint validation (may fail on invalid data)
-- Idempotent (can run multiple times)
+
+For restore, stop the agent and copy backup directory over the database directory.
 
 ---
 
@@ -864,35 +872,72 @@ while let Some(batch) = cursor.next_batch(100).await? {
 
 ## 8. Extension Points
 
-### 8.1 Future MQTT Integration
+### 8.1 MQTT Agent (MqdbAgent)
 
-**Design Hooks Already in Place:**
-- `EventDispatcher` can route to MQTT publisher
-- Subscription patterns already MQTT-compatible
-- `reply_to` pattern supports request/response
+**Current Implementation:**
 
-**Proposed Integration Architecture:**
-```
-MQTT Broker (Mosquitto, etc.)
-    ↓
-Subscribe: db/users/create
-    ↓
-Parse JSON payload
-    ↓
-db.create("users", data).await?
-    ↓
-EventDispatcher → ChangeEvent
-    ↓
-Publish to MQTT topic: db/users/created/{id}
+The `MqdbAgent` component provides an embedded MQTT broker that exposes database operations:
+
+```rust
+let db = Database::open("./data/mydb").await?;
+let agent = MqdbAgent::new(db)
+    .with_bind_address("0.0.0.0:1884".parse()?)
+    .with_password_file("passwd.txt".into())
+    .with_acl_file("acl.txt".into())
+    .with_backup_dir("./backups".into());
+
+agent.run().await?;
 ```
 
-**Topics:**
-- `db/{entity}/create` - Create requests
-- `db/{entity}/update/{id}` - Update requests
-- `db/{entity}/delete/{id}` - Delete requests
-- `db/{entity}/created/{id}` - Creation events
-- `db/{entity}/updated/{id}` - Update events
-- `db/{entity}/deleted/{id}` - Deletion events
+**Architecture:**
+```
+MQTT Client
+    ↓
+MqttBroker (embedded)
+    ↓
+Internal Handler (subscribed to $DB/#)
+    ↓
+parse_db_topic() / parse_admin_topic()
+    ↓
+Database API / Admin Handlers
+    ↓
+Response via response_topic (MQTT 5.0)
+```
+
+**CRUD Topics:**
+- `$DB/{entity}/create` - Create entity
+- `$DB/{entity}/{id}` - Read entity
+- `$DB/{entity}/{id}/update` - Update entity
+- `$DB/{entity}/{id}/delete` - Delete entity
+- `$DB/{entity}/list` - List with filters
+- `$DB/{entity}/events/#` - Change notifications
+
+**Admin Topics:**
+- `$DB/_admin/schema/{entity}/set` - Set schema
+- `$DB/_admin/schema/{entity}/get` - Get schema
+- `$DB/_admin/constraint/{entity}/add` - Add constraint
+- `$DB/_admin/constraint/{entity}/list` - List constraints
+- `$DB/_admin/backup` - Create backup
+- `$DB/_admin/backup/list` - List backups
+- `$DB/_admin/restore` - Restore (requires restart)
+
+**Request/Response Pattern:**
+
+Clients use MQTT 5.0 `response_topic` property:
+```
+Publish to: $DB/users/create
+Properties: response_topic = "client/responses/uuid"
+Payload: {"name": "Alice"}
+
+Response on: client/responses/uuid
+Payload: {"ok": true, "data": {"id": "1", "name": "Alice"}}
+```
+
+**Authentication & Authorization:**
+
+- Password file format: `username:bcrypt_hash`
+- ACL file format: `user <name> topic <pattern> permission <read|write|readwrite|deny>`
+- Admin operations restricted via `$DB/_admin/#` pattern
 
 ---
 

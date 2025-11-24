@@ -261,6 +261,125 @@ Run benchmarks:
 cargo run --example benchmark --release
 ```
 
+## MQTT Agent
+
+MQDB includes an embedded MQTT broker that exposes database operations via MQTT topics.
+
+### Starting the Agent
+
+```rust
+use mqdb::{Database, MqdbAgent};
+
+let db = Database::open("./data/mydb").await?;
+let agent = MqdbAgent::new(db)
+    .with_bind_address("0.0.0.0:1884".parse()?)
+    .with_password_file("passwd.txt".into())
+    .with_acl_file("acl.txt".into());
+
+agent.run().await?;
+```
+
+### MQTT Topic Structure
+
+**CRUD Operations:**
+- `$DB/{entity}/create` - Create entity
+- `$DB/{entity}/{id}` - Read entity
+- `$DB/{entity}/{id}/update` - Update entity
+- `$DB/{entity}/{id}/delete` - Delete entity
+- `$DB/{entity}/list` - List entities with filters
+- `$DB/{entity}/events/#` - Subscribe to change events
+
+**Admin Operations:**
+- `$DB/_admin/schema/{entity}/set` - Set schema
+- `$DB/_admin/schema/{entity}/get` - Get schema
+- `$DB/_admin/constraint/{entity}/add` - Add constraint
+- `$DB/_admin/constraint/{entity}/list` - List constraints
+- `$DB/_admin/backup` - Create backup
+- `$DB/_admin/backup/list` - List backups
+- `$DB/_admin/restore` - Restore (requires restart)
+
+### ACL Configuration
+
+```
+# Admin has full access
+user admin topic $DB/# permission readwrite
+
+# Alice can only access users
+user alice topic $DB/users/# permission readwrite
+user alice topic $DB/# permission deny
+
+# Restrict admin operations
+user * topic $DB/_admin/# permission deny
+user admin topic $DB/_admin/# permission readwrite
+```
+
+## CLI Tool
+
+The `mqdb` CLI provides command-line access to a running MQDB agent.
+
+### Installation
+
+```bash
+cargo build --release --bin mqdb
+```
+
+### Environment Variables
+
+- `MQDB_BROKER` - Broker address (default: `127.0.0.1:1884`)
+- `MQDB_USER` - Username for authentication
+- `MQDB_PASS` - Password for authentication
+
+### Commands
+
+```bash
+# Start agent
+mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb
+
+# CRUD operations
+mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
+mqdb read users 1
+mqdb update users 1 '{"name": "Alice Smith"}'
+mqdb delete users 1
+mqdb list users --filter "status=active" --sort "-created_at" --limit 10
+
+# Watch for changes
+mqdb watch users
+
+# Schema management
+mqdb schema set users schema.json
+mqdb schema get users
+
+# Constraints
+mqdb constraint add users --type unique --fields email
+mqdb constraint add posts --type foreign_key --field author_id --target users --on-delete cascade
+mqdb constraint list users
+
+# Backup
+mqdb backup create --name daily_backup
+mqdb backup list
+mqdb restore --name daily_backup
+```
+
+### Filter Syntax
+
+- `field=value` - Equals
+- `field!=value` - Not equals
+- `field>value` - Greater than
+- `field<value` - Less than
+- `field>=value` - Greater than or equal
+- `field<=value` - Less than or equal
+- `field~pattern` - Like (glob pattern)
+- `field?` - Is null
+- `field!?` - Is not null
+
+### Output Formats
+
+```bash
+mqdb list users --format json    # JSON output (default)
+mqdb list users --format table   # Table format
+mqdb list users --format csv     # CSV format
+```
+
 ## Testing
 
 ```bash
@@ -335,6 +454,16 @@ cargo run --example parking_lot
 - [x] Atomic constraint validation
 - [x] Constraint persistence across restarts
 
+### Phase 6: MQTT Integration ✓
+- [x] Embedded MQTT broker (MqdbAgent)
+- [x] Authentication with password file
+- [x] ACL-based authorization
+- [x] CRUD operations via MQTT topics
+- [x] Admin topics for schema/constraint/backup
+- [x] CLI tool with all operations
+- [x] Request/response pattern with response_topic
+- [x] Server-side backup management
+
 ### Test Coverage
 - 93 tests passing (26 unit + 67 integration including 25 constraint tests)
 - Clippy clean, no warnings
@@ -342,11 +471,11 @@ cargo run --example parking_lot
 
 ## Future Enhancements
 
-- MQTT broker integration layer
 - Replication and WAL streaming
 - Reactive query language (subscribe to expressions)
 - Persistence metrics and tracing
 - Optimized TTL cleanup with expiration index
+- Distributed consensus for multi-node deployments
 
 ## License
 
