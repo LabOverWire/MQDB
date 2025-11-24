@@ -582,6 +582,29 @@ impl Database {
         self.dispatcher.subscribe()
     }
 
+    pub fn path(&self) -> &Path {
+        &self.config.path
+    }
+
+    pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
+        self.storage.flush()?;
+
+        let src = &self.config.path;
+        let dst = backup_path.as_ref();
+
+        if dst.exists() {
+            std::fs::remove_dir_all(dst).map_err(|e| {
+                Error::BackupFailed(format!("failed to remove existing backup: {e}"))
+            })?;
+        }
+
+        copy_dir_recursive(src, dst).map_err(|e| {
+            Error::BackupFailed(format!("failed to create backup: {e}"))
+        })?;
+
+        Ok(())
+    }
+
     async fn generate_id(&self, entity_name: &str) -> Result<String> {
         let _lock = self.id_gen_lock.lock().await;
 
@@ -1090,6 +1113,22 @@ async fn ttl_cleanup_task(
             }
         }
     }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

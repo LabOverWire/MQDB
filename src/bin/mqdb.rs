@@ -103,14 +103,26 @@ enum Commands {
         action: ConstraintAction,
     },
     Backup {
-        #[arg(short, long)]
-        file: PathBuf,
-        #[command(flatten)]
-        conn: ConnectionArgs,
+        #[command(subcommand)]
+        action: BackupAction,
     },
     Restore {
         #[arg(short, long)]
-        file: PathBuf,
+        name: String,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    Create {
+        #[arg(short, long, default_value = "backup")]
+        name: String,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
+    List {
         #[command(flatten)]
         conn: ConnectionArgs,
     },
@@ -305,11 +317,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cmd_constraint_list(entity, conn, format).await?;
             }
         },
-        Commands::Backup { file, conn } => {
-            cmd_backup(file, conn).await?;
-        }
-        Commands::Restore { file, conn } => {
-            cmd_restore(file, conn).await?;
+        Commands::Backup { action } => match action {
+            BackupAction::Create { name, conn } => {
+                cmd_backup_create(&name, &conn).await?;
+            }
+            BackupAction::List { conn } => {
+                cmd_backup_list(&conn).await?;
+            }
+        },
+        Commands::Restore { name, conn } => {
+            cmd_restore(&name, &conn).await?;
         }
     }
 
@@ -579,19 +596,66 @@ async fn cmd_constraint_list(
     Ok(())
 }
 
-async fn cmd_backup(
-    _file: PathBuf,
-    _conn: ConnectionArgs,
+async fn cmd_backup_create(
+    name: &str,
+    conn: &ConnectionArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Backup not yet implemented");
+    let topic = "$DB/_admin/backup";
+    let payload = json!({"name": name});
+    let response = execute_request(conn, topic, payload).await?;
+
+    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if let Some(data) = response.get("data") {
+            if let Some(msg) = data.get("message").and_then(|v| v.as_str()) {
+                println!("{msg}");
+            }
+        }
+    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+        eprintln!("Error: {error}");
+    }
+
+    Ok(())
+}
+
+async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = "$DB/_admin/backup/list";
+    let payload = json!({});
+    let response = execute_request(conn, topic, payload).await?;
+
+    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if let Some(backups) = response.get("data").and_then(|v| v.as_array()) {
+            if backups.is_empty() {
+                println!("No backups found");
+            } else {
+                println!("Available backups:");
+                for backup in backups {
+                    if let Some(name) = backup.as_str() {
+                        println!("  {name}");
+                    }
+                }
+            }
+        }
+    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+        eprintln!("Error: {error}");
+    }
+
     Ok(())
 }
 
 async fn cmd_restore(
-    _file: PathBuf,
-    _conn: ConnectionArgs,
+    name: &str,
+    conn: &ConnectionArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Restore not yet implemented");
+    let topic = "$DB/_admin/restore";
+    let payload = json!({"name": name});
+    let response = execute_request(conn, topic, payload).await?;
+
+    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        println!("Restore initiated");
+    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+        eprintln!("Error: {error}");
+    }
+
     Ok(())
 }
 

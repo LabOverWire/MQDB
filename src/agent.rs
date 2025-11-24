@@ -5,7 +5,7 @@ use mqtt5::time::Duration;
 use mqtt5::types::Message;
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, info_span, warn, Instrument};
@@ -28,6 +28,7 @@ pub enum AdminOperation {
     ConstraintList { entity: String },
     Backup,
     Restore,
+    BackupList,
 }
 
 type ListOptions = (
@@ -55,6 +56,7 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
             entity: (*entity).to_string(),
         }),
         ["backup"] => Some(AdminOperation::Backup),
+        ["backup", "list"] => Some(AdminOperation::BackupList),
         ["restore"] => Some(AdminOperation::Restore),
         _ => None,
     }
@@ -204,11 +206,13 @@ pub struct MqdbAgent {
     allow_anonymous: bool,
     service_username: Option<String>,
     service_password: Option<String>,
+    backup_dir: PathBuf,
 }
 
 impl MqdbAgent {
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
+        let backup_dir = db.path().join("backups");
         Self {
             db: Arc::new(db),
             bind_address: "127.0.0.1:1884".parse().unwrap(),
@@ -218,6 +222,7 @@ impl MqdbAgent {
             allow_anonymous: true,
             service_username: None,
             service_password: None,
+            backup_dir,
         }
     }
 
@@ -244,6 +249,11 @@ impl MqdbAgent {
     pub fn with_service_credentials(mut self, username: String, password: String) -> Self {
         self.service_username = Some(username);
         self.service_password = Some(password);
+        self
+    }
+
+    pub fn with_backup_dir(mut self, path: PathBuf) -> Self {
+        self.backup_dir = path;
         self
     }
 
@@ -279,6 +289,7 @@ impl MqdbAgent {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let service_username = self.service_username.clone();
         let service_password = self.service_password.clone();
+        let backup_dir = self.backup_dir.clone();
 
         let handler_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -334,7 +345,7 @@ impl MqdbAgent {
                     msg = msg_rx.recv() => {
                         match msg {
                             Some(message) => {
-                                handle_message(&db, &response_client, message).await;
+                                handle_message(&db, &response_client, message, &backup_dir).await;
                             }
                             None => {
                                 debug!("Message channel closed");
@@ -423,7 +434,7 @@ impl MqdbAgent {
     }
 }
 
-async fn handle_message(db: &Database, client: &MqttClient, message: Message) {
+async fn handle_message(db: &Database, client: &MqttClient, message: Message, backup_dir: &Path) {
     let topic = &message.topic;
 
     if topic.contains("/events") {
@@ -431,7 +442,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message) {
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        handle_admin_operation(db, client, &message, admin_op).await;
+        handle_admin_operation(db, client, &message, admin_op, backup_dir).await;
         return;
     }
 
@@ -506,6 +517,7 @@ async fn handle_admin_operation(
     client: &MqttClient,
     message: &Message,
     op: AdminOperation,
+    backup_dir: &Path,
 ) {
     use crate::constraint::OnDeleteAction;
     use serde_json::json;
@@ -629,10 +641,54 @@ async fn handle_admin_operation(
             Response::ok(json!(data))
         }
         AdminOperation::Backup => {
-            Response::error(crate::ErrorCode::Internal, "backup not yet implemented via MQTT")
+            let name = payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("backup");
+
+            if !is_valid_backup_name(name) {
+                Response::error(
+                    crate::ErrorCode::BadRequest,
+                    "invalid backup name: must be alphanumeric, underscore, or hyphen only",
+                )
+            } else if let Err(e) = std::fs::create_dir_all(backup_dir) {
+                Response::error(
+                    crate::ErrorCode::Internal,
+                    format!("failed to create backup directory: {e}"),
+                )
+            } else {
+                let backup_path = backup_dir.join(name);
+                match db.backup(&backup_path) {
+                    Ok(()) => Response::ok(json!({"message": format!("backup created: {name}")})),
+                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+                }
+            }
         }
         AdminOperation::Restore => {
-            Response::error(crate::ErrorCode::Internal, "restore not yet implemented via MQTT")
+            Response::error(
+                crate::ErrorCode::Internal,
+                "restore requires agent restart - use CLI with --restore flag",
+            )
+        }
+        AdminOperation::BackupList => {
+            if !backup_dir.exists() {
+                Response::ok(json!(Vec::<String>::new()))
+            } else {
+                match std::fs::read_dir(backup_dir) {
+                    Ok(entries) => {
+                        let backups: Vec<_> = entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().is_dir())
+                            .filter_map(|e| e.file_name().into_string().ok())
+                            .collect();
+                        Response::ok(json!(backups))
+                    }
+                    Err(e) => Response::error(
+                        crate::ErrorCode::Internal,
+                        format!("failed to read backup directory: {e}"),
+                    ),
+                }
+            }
         }
     };
 
@@ -648,6 +704,16 @@ async fn handle_admin_operation(
             }
         }
     }
+}
+
+fn is_valid_backup_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 #[cfg(test)]
