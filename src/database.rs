@@ -6,9 +6,10 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::index::IndexManager;
 use crate::keys;
+use crate::outbox::Outbox;
 use crate::relationship::{Relationship, RelationshipRegistry};
 use crate::schema::{Schema, SchemaRegistry};
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageBackend};
 use crate::subscription::{Subscription, SubscriptionRegistry};
 use serde_json::Value;
 use std::future::Future;
@@ -22,6 +23,7 @@ pub struct Database {
     storage: Arc<Storage>,
     registry: Arc<SubscriptionRegistry>,
     dispatcher: Arc<EventDispatcher>,
+    outbox: Arc<Outbox>,
     index_manager: Arc<RwLock<IndexManager>>,
     relationship_registry: Arc<RwLock<RelationshipRegistry>>,
     schema_registry: Arc<RwLock<SchemaRegistry>>,
@@ -38,11 +40,24 @@ impl Database {
 
     pub async fn open_with_config(config: DatabaseConfig) -> Result<Self> {
         let storage = Arc::new(Storage::open(&config.path, config.durability.clone())?);
+        Self::init_with_storage(storage, config).await
+    }
+
+    pub async fn open_with_backend(
+        backend: Arc<dyn StorageBackend>,
+        config: DatabaseConfig,
+    ) -> Result<Self> {
+        let storage = Arc::new(Storage::with_backend(backend));
+        Self::init_with_storage(storage, config).await
+    }
+
+    async fn init_with_storage(storage: Arc<Storage>, config: DatabaseConfig) -> Result<Self> {
         let registry = Arc::new(SubscriptionRegistry::new(Arc::clone(&storage)));
         let dispatcher = Arc::new(EventDispatcher::new(
             Arc::clone(&registry),
             config.event_channel_capacity,
         ));
+        let outbox = Arc::new(Outbox::new(Arc::clone(&storage)));
         let index_manager = Arc::new(RwLock::new(IndexManager::new()));
         let relationship_registry = Arc::new(RwLock::new(RelationshipRegistry::new()));
 
@@ -76,6 +91,7 @@ impl Database {
             storage,
             registry,
             dispatcher,
+            outbox,
             index_manager,
             relationship_registry,
             schema_registry,
@@ -123,10 +139,14 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &entity, None);
 
+        let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone());
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        self.outbox.enqueue_event(&mut batch, &operation_id, &event);
+
         batch.commit()?;
 
-        let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone());
         self.dispatcher.dispatch(event).await?;
+        self.outbox.mark_delivered(&operation_id)?;
 
         Ok(entity.to_json())
     }
@@ -271,14 +291,18 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &updated_entity, Some(&existing_entity));
 
-        batch.commit()?;
-
         let event = ChangeEvent::update(
             entity_name,
             updated_entity.id.clone(),
             updated_entity.data.clone(),
         );
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        self.outbox.enqueue_event(&mut batch, &operation_id, &event);
+
+        batch.commit()?;
+
         self.dispatcher.dispatch(event).await?;
+        self.outbox.mark_delivered(&operation_id)?;
 
         Ok(updated_entity.to_json())
     }
@@ -357,15 +381,20 @@ impl Database {
             }
         }
 
+        let mut events = vec![ChangeEvent::delete(entity_name, id)];
+        for (entity, id) in &deleted_entities {
+            events.push(ChangeEvent::delete(entity.clone(), id.clone()));
+        }
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        self.outbox.enqueue_events(&mut batch, &operation_id, &events);
+
         batch.commit()?;
 
-        let event = ChangeEvent::delete(entity_name, id);
-        self.dispatcher.dispatch(event).await?;
-
-        for (entity, id) in deleted_entities {
-            let cascade_event = ChangeEvent::delete(entity, id);
-            self.dispatcher.dispatch(cascade_event).await?;
+        for event in events {
+            self.dispatcher.dispatch(event).await?;
         }
+        self.outbox.mark_delivered(&operation_id)?;
 
         Ok(())
     }

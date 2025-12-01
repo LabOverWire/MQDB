@@ -11,6 +11,7 @@ pub mod error;
 pub mod events;
 pub mod index;
 pub mod keys;
+pub mod outbox;
 pub mod relationship;
 pub mod schema;
 pub mod session;
