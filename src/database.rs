@@ -6,7 +6,7 @@ use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::index::IndexManager;
 use crate::keys;
-use crate::outbox::Outbox;
+use crate::outbox::{Outbox, OutboxProcessor};
 use crate::relationship::{Relationship, RelationshipRegistry};
 use crate::schema::{Schema, SchemaRegistry};
 use crate::storage::{Storage, StorageBackend};
@@ -16,7 +16,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 
 #[derive(Clone)]
 pub struct Database {
@@ -30,6 +30,7 @@ pub struct Database {
     constraint_manager: Arc<RwLock<ConstraintManager>>,
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl Database {
@@ -71,15 +72,39 @@ impl Database {
 
         registry.load().await?;
 
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        if config.outbox.enabled {
+            let pending_count = outbox.pending_count().unwrap_or(0);
+            if pending_count > 0 {
+                tracing::info!(
+                    pending = pending_count,
+                    "found pending outbox entries, starting processor"
+                );
+            }
+
+            let mut processor = OutboxProcessor::new(
+                Arc::clone(&outbox),
+                Arc::clone(&dispatcher),
+                config.outbox.clone(),
+                shutdown_rx.clone(),
+            );
+            tokio::spawn(async move {
+                processor.run().await;
+            });
+        }
+
         if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
             let storage_clone = Arc::clone(&storage);
             let dispatcher_clone = Arc::clone(&dispatcher);
+            let outbox_clone = Arc::clone(&outbox);
             let index_manager_clone = Arc::clone(&index_manager);
 
             tokio::spawn(async move {
                 ttl_cleanup_task(
                     storage_clone,
                     dispatcher_clone,
+                    outbox_clone,
                     index_manager_clone,
                     interval_secs,
                 )
@@ -98,6 +123,7 @@ impl Database {
             constraint_manager,
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
+            shutdown_tx,
         })
     }
 
@@ -615,6 +641,11 @@ impl Database {
         &self.config.path
     }
 
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+        tracing::info!("database shutdown signal sent");
+    }
+
     pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
         self.storage.flush()?;
 
@@ -1077,6 +1108,7 @@ impl Filter {
 async fn ttl_cleanup_task(
     storage: Arc<Storage>,
     dispatcher: Arc<EventDispatcher>,
+    outbox: Arc<Outbox>,
     index_manager: Arc<RwLock<IndexManager>>,
     interval_secs: u64,
 ) {
@@ -1098,6 +1130,8 @@ async fn ttl_cleanup_task(
             Ok(items) => items,
             Err(_) => continue,
         };
+
+        let mut expired_entities = Vec::new();
 
         for (key, value) in items {
             let key_str = match std::str::from_utf8(&key) {
@@ -1125,22 +1159,48 @@ async fn ttl_cleanup_task(
                 .and_then(|v| v.as_u64())
             {
                 if expires_at <= now {
-                    let mut batch = storage.batch();
-                    batch.remove(key.clone());
-
-                    let index_mgr = index_manager.read().await;
-                    index_mgr.remove_indexes(&mut batch, &entity);
-
-                    if batch.commit().is_ok() {
-                        let event = ChangeEvent::delete(
-                            entity_name.to_string(),
-                            id.to_string(),
-                        );
-                        let _ = dispatcher.dispatch(event).await;
-                    }
+                    expired_entities.push((key, entity));
                 }
             }
         }
+
+        if expired_entities.is_empty() {
+            continue;
+        }
+
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let mut batch = storage.batch();
+        let mut events = Vec::new();
+
+        for (key, entity) in &expired_entities {
+            batch.remove(key.clone());
+
+            let index_mgr = index_manager.read().await;
+            index_mgr.remove_indexes(&mut batch, entity);
+
+            events.push(ChangeEvent::delete(entity.name.clone(), entity.id.clone()));
+        }
+
+        outbox.enqueue_events(&mut batch, &operation_id, &events);
+
+        if let Err(e) = batch.commit() {
+            tracing::error!(err = %e, "TTL cleanup batch commit failed");
+            continue;
+        }
+
+        for event in events {
+            let _ = dispatcher.dispatch(event).await;
+        }
+
+        if let Err(e) = outbox.mark_delivered(&operation_id) {
+            tracing::warn!(op_id = %operation_id, err = %e, "TTL cleanup mark_delivered failed");
+        }
+
+        tracing::debug!(
+            count = expired_entities.len(),
+            op_id = %operation_id,
+            "TTL cleanup processed expired entities"
+        );
     }
 }
 

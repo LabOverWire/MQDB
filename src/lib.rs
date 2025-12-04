@@ -19,7 +19,8 @@ pub mod storage;
 pub mod subscription;
 pub mod transport;
 
-pub use config::{DatabaseConfig, DurabilityMode};
+pub use config::{DatabaseConfig, DurabilityMode, OutboxConfig};
+pub use outbox::{Outbox, OutboxEntry, OutboxProcessor};
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use cursor::{Cursor, Query};
 pub use database::{Database, Filter, FilterOp, Pagination, SortDirection, SortOrder};

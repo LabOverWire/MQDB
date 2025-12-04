@@ -8,6 +8,25 @@ pub enum DurabilityMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct OutboxConfig {
+    pub enabled: bool,
+    pub retry_interval_ms: u64,
+    pub max_retries: u32,
+    pub batch_size: usize,
+}
+
+impl Default for OutboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retry_interval_ms: 5000,
+            max_retries: 10,
+            batch_size: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub path: PathBuf,
     pub durability: DurabilityMode,
@@ -17,6 +36,7 @@ pub struct DatabaseConfig {
     pub ttl_cleanup_interval_secs: Option<u64>,
     pub max_cursor_buffer: usize,
     pub max_sort_buffer: usize,
+    pub outbox: OutboxConfig,
 }
 
 impl DatabaseConfig {
@@ -30,6 +50,7 @@ impl DatabaseConfig {
             ttl_cleanup_interval_secs: Some(60),
             max_cursor_buffer: 100,
             max_sort_buffer: 10_000,
+            outbox: OutboxConfig::default(),
         }
     }
 
@@ -55,6 +76,11 @@ impl DatabaseConfig {
 
     pub fn with_ttl_cleanup_interval(mut self, interval_secs: Option<u64>) -> Self {
         self.ttl_cleanup_interval_secs = interval_secs;
+        self
+    }
+
+    pub fn with_outbox(mut self, outbox: OutboxConfig) -> Self {
+        self.outbox = outbox;
         self
     }
 }

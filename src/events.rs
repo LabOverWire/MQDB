@@ -17,6 +17,8 @@ pub struct ChangeEvent {
     pub id: String,
     pub operation: Operation,
     pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 impl ChangeEvent {
@@ -27,7 +29,13 @@ impl ChangeEvent {
             id,
             operation,
             data,
+            operation_id: None,
         }
+    }
+
+    pub fn with_operation_id(mut self, operation_id: String) -> Self {
+        self.operation_id = Some(operation_id);
+        self
     }
 
     pub fn create(entity: String, id: String, data: serde_json::Value) -> Self {
