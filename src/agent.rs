@@ -29,6 +29,11 @@ pub enum AdminOperation {
     Backup,
     Restore,
     BackupList,
+    Subscribe,
+    Heartbeat { sub_id: String },
+    Unsubscribe { sub_id: String },
+    ConsumerGroupList,
+    ConsumerGroupShow { name: String },
 }
 
 type ListOptions = (
@@ -40,6 +45,20 @@ type ListOptions = (
 );
 
 pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
+    if let Some(rest) = topic.strip_prefix("$DB/_sub/") {
+        let parts: Vec<&str> = rest.split('/').collect();
+        return match parts.as_slice() {
+            ["subscribe"] => Some(AdminOperation::Subscribe),
+            [id, "heartbeat"] => Some(AdminOperation::Heartbeat {
+                sub_id: (*id).to_string(),
+            }),
+            [id, "unsubscribe"] => Some(AdminOperation::Unsubscribe {
+                sub_id: (*id).to_string(),
+            }),
+            _ => None,
+        };
+    }
+
     let parts: Vec<&str> = topic.strip_prefix("$DB/_admin/")?.split('/').collect();
 
     match parts.as_slice() {
@@ -58,6 +77,10 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
         ["backup"] => Some(AdminOperation::Backup),
         ["backup", "list"] => Some(AdminOperation::BackupList),
         ["restore"] => Some(AdminOperation::Restore),
+        ["consumer-groups"] => Some(AdminOperation::ConsumerGroupList),
+        ["consumer-groups", name] => Some(AdminOperation::ConsumerGroupShow {
+            name: (*name).to_string(),
+        }),
         _ => None,
     }
 }
@@ -366,6 +389,7 @@ impl MqdbAgent {
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
         let event_service_username = self.service_username.clone();
         let event_service_password = self.service_password.clone();
+        let num_partitions = self.db.num_partitions();
 
         let event_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -393,7 +417,12 @@ impl MqdbAgent {
                     event = event_rx.recv() => {
                         match event {
                             Ok(change_event) => {
-                                let topic = format!("$DB/{}/events/{}", change_event.entity, change_event.id);
+                                let topic = if num_partitions > 0 {
+                                    let partition = change_event.partition(num_partitions);
+                                    format!("$DB/{}/events/p{}/{}", change_event.entity, partition, change_event.id)
+                                } else {
+                                    format!("$DB/{}/events/{}", change_event.entity, change_event.id)
+                                };
                                 let payload = match serde_json::to_vec(&change_event) {
                                     Ok(p) => p,
                                     Err(e) => {
@@ -690,6 +719,67 @@ async fn handle_admin_operation(
                 }
             }
         }
+        AdminOperation::Subscribe => {
+            use crate::subscription::SubscriptionMode;
+
+            let pattern = payload
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let entity = payload
+                .get("entity")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let group = payload
+                .get("group")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let mode_str = payload
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("broadcast");
+
+            let mode = match mode_str {
+                "load-balanced" | "load_balanced" => SubscriptionMode::LoadBalanced,
+                "ordered" => SubscriptionMode::Ordered,
+                _ => SubscriptionMode::Broadcast,
+            };
+
+            if let Some(group) = group {
+                match db.subscribe_shared(pattern, entity, group, mode).await {
+                    Ok(result) => Response::ok(json!({
+                        "id": result.id,
+                        "partitions": result.assigned_partitions
+                    })),
+                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+                }
+            } else {
+                match db.subscribe(pattern, entity).await {
+                    Ok(id) => Response::ok(json!({"id": id})),
+                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+                }
+            }
+        }
+        AdminOperation::Heartbeat { sub_id } => match db.heartbeat(&sub_id).await {
+            Ok(()) => Response::ok(json!({"ok": true})),
+            Err(e) => Response::error(crate::ErrorCode::NotFound, e.to_string()),
+        },
+        AdminOperation::Unsubscribe { sub_id } => match db.unsubscribe(&sub_id).await {
+            Ok(()) => Response::ok(json!({"ok": true})),
+            Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+        },
+        AdminOperation::ConsumerGroupList => {
+            let groups = db.list_consumer_groups().await;
+            Response::ok(serde_json::to_value(groups).unwrap_or(Value::Null))
+        }
+        AdminOperation::ConsumerGroupShow { name } => match db.get_consumer_group(&name).await {
+            Some(details) => Response::ok(serde_json::to_value(details).unwrap_or(Value::Null)),
+            None => Response::error(
+                crate::ErrorCode::NotFound,
+                format!("consumer group not found: {name}"),
+            ),
+        },
     };
 
     if let Some(response_topic) = &message.properties.response_topic {

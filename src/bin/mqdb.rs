@@ -5,6 +5,7 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -112,6 +113,25 @@ enum Commands {
         #[command(flatten)]
         conn: ConnectionArgs,
     },
+    Subscribe {
+        pattern: String,
+        #[arg(long)]
+        entity: Option<String>,
+        #[arg(long)]
+        group: Option<String>,
+        #[arg(long, default_value = "broadcast")]
+        mode: SubscriptionModeArg,
+        #[arg(long, default_value = "10")]
+        heartbeat_interval: u64,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    ConsumerGroup {
+        #[command(subcommand)]
+        action: ConsumerGroupAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,6 +145,23 @@ enum BackupAction {
     List {
         #[command(flatten)]
         conn: ConnectionArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConsumerGroupAction {
+    List {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    Show {
+        name: String,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
     },
 }
 
@@ -188,7 +225,7 @@ enum ConstraintAction {
     },
 }
 
-#[derive(clap::Args)]
+#[derive(Clone, clap::Args)]
 struct ConnectionArgs {
     #[arg(long, env = "MQDB_BROKER", default_value = "127.0.0.1:1883")]
     broker: String,
@@ -205,6 +242,13 @@ enum OutputFormat {
     Json,
     Table,
     Csv,
+}
+
+#[derive(Clone, ValueEnum)]
+enum SubscriptionModeArg {
+    Broadcast,
+    LoadBalanced,
+    Ordered,
 }
 
 #[tokio::main]
@@ -328,6 +372,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Restore { name, conn } => {
             cmd_restore(&name, &conn).await?;
         }
+        Commands::Subscribe {
+            pattern,
+            entity,
+            group,
+            mode,
+            heartbeat_interval,
+            conn,
+            format,
+        } => {
+            cmd_subscribe(pattern, entity, group, mode, heartbeat_interval, conn, format).await?;
+        }
+        Commands::ConsumerGroup { action } => match action {
+            ConsumerGroupAction::List { conn, format } => {
+                cmd_consumer_group_list(conn, format).await?;
+            }
+            ConsumerGroupAction::Show { name, conn, format } => {
+                cmd_consumer_group_show(name, conn, format).await?;
+            }
+        },
     }
 
     Ok(())
@@ -873,4 +936,129 @@ fn output_csv(data: &[Value]) {
             }
         }
     }
+}
+
+async fn cmd_subscribe(
+    pattern: String,
+    entity: Option<String>,
+    group: Option<String>,
+    mode: SubscriptionModeArg,
+    heartbeat_interval: u64,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = "$DB/_sub/subscribe";
+    let mode_str = match mode {
+        SubscriptionModeArg::Broadcast => "broadcast",
+        SubscriptionModeArg::LoadBalanced => "load-balanced",
+        SubscriptionModeArg::Ordered => "ordered",
+    };
+
+    let payload = json!({
+        "pattern": pattern,
+        "entity": entity,
+        "group": group,
+        "mode": mode_str
+    });
+
+    let response = execute_request(&conn, topic, payload).await?;
+
+    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let data = response.get("data").unwrap_or(&Value::Null);
+        let sub_id = data.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+
+        eprintln!("Subscription ID: {sub_id}");
+        if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array()) {
+            if !partitions.is_empty() {
+                eprintln!("Assigned partitions: {partitions:?}");
+            }
+        }
+
+        let event_pattern = if let Some(ref ent) = entity {
+            format!("$DB/{ent}/events/#")
+        } else {
+            "$DB/+/events/#".to_string()
+        };
+
+        let client = connect_client(&conn).await?;
+        let (tx, mut rx) = mpsc::channel::<Value>(100);
+
+        client
+            .subscribe(&event_pattern, move |msg| {
+                if let Ok(value) = serde_json::from_slice::<Value>(&msg.payload) {
+                    let _ = tx.try_send(value);
+                }
+            })
+            .await?;
+
+        eprintln!("Watching events (Ctrl+C to stop)...");
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            shutdown_clone.store(true, Ordering::SeqCst);
+        });
+
+        let heartbeat_conn = conn.clone();
+        let heartbeat_sub_id = sub_id.to_string();
+        let heartbeat_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(heartbeat_interval));
+            while !heartbeat_shutdown.load(Ordering::SeqCst) {
+                interval.tick().await;
+                if heartbeat_shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
+                let topic = format!("$DB/_sub/{heartbeat_sub_id}/heartbeat");
+                let _ = execute_request(&heartbeat_conn, &topic, json!({})).await;
+            }
+        });
+
+        while !shutdown.load(Ordering::SeqCst) {
+            tokio::select! {
+                event = rx.recv() => {
+                    if let Some(event) = event {
+                        output_response(event, format.clone());
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        eprintln!("\nUnsubscribing...");
+        let unsub_topic = format!("$DB/_sub/{sub_id}/unsubscribe");
+        let _ = execute_request(&conn, &unsub_topic, json!({})).await;
+        client.disconnect().await?;
+    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+        eprintln!("Error: {error}");
+    }
+
+    Ok(())
+}
+
+async fn cmd_consumer_group_list(
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = "$DB/_admin/consumer-groups";
+    let response = execute_request(&conn, topic, json!({})).await?;
+    output_response(response, format);
+    Ok(())
+}
+
+async fn cmd_consumer_group_show(
+    name: String,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/_admin/consumer-groups/{name}");
+    let response = execute_request(&conn, &topic, json!({})).await?;
+    output_response(response, format);
+    Ok(())
 }

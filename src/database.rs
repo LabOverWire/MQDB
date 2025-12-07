@@ -10,13 +10,22 @@ use crate::outbox::{Outbox, OutboxProcessor};
 use crate::relationship::{Relationship, RelationshipRegistry};
 use crate::schema::{Schema, SchemaRegistry};
 use crate::storage::{Storage, StorageBackend};
-use crate::subscription::{Subscription, SubscriptionRegistry};
+use crate::consumer_group::{ConsumerGroup, ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
+use crate::subscription::{Subscription, SubscriptionMode, SubscriptionRegistry};
+use crate::types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
+
+#[derive(Debug, Clone)]
+pub struct SubscriptionResult {
+    pub id: String,
+    pub assigned_partitions: Option<Vec<u8>>,
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -28,6 +37,7 @@ pub struct Database {
     relationship_registry: Arc<RwLock<RelationshipRegistry>>,
     schema_registry: Arc<RwLock<SchemaRegistry>>,
     constraint_manager: Arc<RwLock<ConstraintManager>>,
+    consumer_groups: Arc<RwLock<HashMap<String, ConsumerGroup>>>,
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
@@ -54,9 +64,12 @@ impl Database {
 
     async fn init_with_storage(storage: Arc<Storage>, config: DatabaseConfig) -> Result<Self> {
         let registry = Arc::new(SubscriptionRegistry::new(Arc::clone(&storage)));
+        let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
         let dispatcher = Arc::new(EventDispatcher::new(
             Arc::clone(&registry),
             config.event_channel_capacity,
+            Arc::clone(&consumer_groups),
+            config.shared_subscription.num_partitions,
         ));
         let outbox = Arc::new(Outbox::new(Arc::clone(&storage)));
         let index_manager = Arc::new(RwLock::new(IndexManager::new()));
@@ -112,6 +125,39 @@ impl Database {
             });
         }
 
+        if config.shared_subscription.consumer_timeout_ms > 0 {
+            let consumer_groups_clone = Arc::clone(&consumer_groups);
+            let timeout_ms = config.shared_subscription.consumer_timeout_ms;
+            let mut shutdown_rx_clone = shutdown_rx.clone();
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(
+                    std::time::Duration::from_millis(timeout_ms / 2),
+                );
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let mut groups = consumer_groups_clone.write().await;
+                            for (name, group) in groups.iter_mut() {
+                                let stale = group.remove_stale_members(timeout_ms);
+                                if !stale.is_empty() {
+                                    tracing::info!(
+                                        group = %name,
+                                        removed = ?stale,
+                                        "removed stale consumers"
+                                    );
+                                }
+                            }
+                        }
+                        _ = shutdown_rx_clone.changed() => {
+                            tracing::debug!("heartbeat cleanup task shutting down");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             storage,
             registry,
@@ -121,6 +167,7 @@ impl Database {
             relationship_registry,
             schema_registry,
             constraint_manager,
+            consumer_groups,
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
             shutdown_tx,
@@ -627,9 +674,100 @@ impl Database {
         Ok(sub_id)
     }
 
+    pub async fn subscribe_shared(
+        &self,
+        pattern: String,
+        entity: Option<String>,
+        group: String,
+        mode: SubscriptionMode,
+    ) -> Result<SubscriptionResult> {
+        if let Some(max_subs) = self.config.max_subscriptions {
+            let current_count = self.registry.count().await;
+            if current_count >= max_subs {
+                return Err(Error::Internal(format!(
+                    "maximum subscription limit reached: {current_count}/{max_subs}"
+                )));
+            }
+        }
+
+        {
+            let groups = self.consumer_groups.read().await;
+            if let Some(existing_group) = groups.get(&group) {
+                for member in existing_group.members() {
+                    if let Some(existing_sub) = self.registry.get(&member.consumer_id).await {
+                        if existing_sub.mode != mode {
+                            return Err(Error::Validation(format!(
+                                "share group '{}' already uses {:?} mode, cannot mix with {:?}",
+                                group, existing_sub.mode, mode
+                            )));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let sub_id = uuid::Uuid::new_v4().to_string();
+        let consumer_id = sub_id.clone();
+
+        let assigned_partitions = {
+            let mut groups = self.consumer_groups.write().await;
+            let num_partitions = self.config.shared_subscription.num_partitions;
+
+            let consumer_group = groups
+                .entry(group.clone())
+                .or_insert_with(|| ConsumerGroup::new(group.clone(), num_partitions));
+
+            let partitions = consumer_group.add_member(consumer_id);
+
+            if mode == SubscriptionMode::Ordered {
+                Some(partitions)
+            } else {
+                None
+            }
+        };
+
+        let subscription = Subscription::new(sub_id.clone(), pattern, entity)
+            .with_share_group(group, mode);
+
+        self.registry.register(subscription).await?;
+
+        Ok(SubscriptionResult {
+            id: sub_id,
+            assigned_partitions,
+        })
+    }
+
     pub async fn unsubscribe(&self, sub_id: &str) -> Result<()> {
+        if let Some(sub) = self.registry.get(sub_id).await {
+            if let Some(group) = &sub.share_group {
+                let mut groups = self.consumer_groups.write().await;
+                if let Some(cg) = groups.get_mut(group) {
+                    cg.remove_member(sub_id);
+                    if cg.member_count() == 0 {
+                        groups.remove(group);
+                    }
+                }
+            }
+        }
+
         self.registry.unregister(sub_id).await?;
         self.dispatcher.remove_listener(sub_id).await;
+        Ok(())
+    }
+
+    pub async fn heartbeat(&self, sub_id: &str) -> Result<()> {
+        let sub = self.registry.get(sub_id).await.ok_or_else(|| Error::NotFound {
+            entity: "subscription".into(),
+            id: sub_id.into(),
+        })?;
+
+        if let Some(group) = &sub.share_group {
+            let mut groups = self.consumer_groups.write().await;
+            if let Some(cg) = groups.get_mut(group) {
+                cg.update_heartbeat(sub_id);
+            }
+        }
         Ok(())
     }
 
@@ -639,6 +777,31 @@ impl Database {
 
     pub fn path(&self) -> &Path {
         &self.config.path
+    }
+
+    pub fn num_partitions(&self) -> u8 {
+        self.config.shared_subscription.num_partitions
+    }
+
+    pub async fn list_consumer_groups(&self) -> Vec<ConsumerGroupInfo> {
+        let groups = self.consumer_groups.read().await;
+        groups
+            .iter()
+            .map(|(name, cg)| ConsumerGroupInfo {
+                name: name.clone(),
+                member_count: cg.member_count(),
+                total_partitions: self.config.shared_subscription.num_partitions,
+            })
+            .collect()
+    }
+
+    pub async fn get_consumer_group(&self, name: &str) -> Option<ConsumerGroupDetails> {
+        let groups = self.consumer_groups.read().await;
+        groups.get(name).map(|cg| ConsumerGroupDetails {
+            name: name.to_string(),
+            members: cg.members().map(ConsumerMemberInfo::from).collect(),
+            total_partitions: self.config.shared_subscription.num_partitions,
+        })
     }
 
     pub fn shutdown(&self) {
@@ -950,160 +1113,6 @@ impl Database {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SortDirection {
-    Asc,
-    Desc,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SortOrder {
-    pub field: String,
-    pub direction: SortDirection,
-}
-
-impl SortOrder {
-    pub fn new(field: String, direction: SortDirection) -> Self {
-        Self { field, direction }
-    }
-
-    pub fn asc(field: String) -> Self {
-        Self::new(field, SortDirection::Asc)
-    }
-
-    pub fn desc(field: String) -> Self {
-        Self::new(field, SortDirection::Desc)
-    }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Pagination {
-    pub limit: usize,
-    pub offset: usize,
-}
-
-impl Pagination {
-    pub fn new(limit: usize, offset: usize) -> Self {
-        Self { limit, offset }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FilterOp {
-    Eq,
-    Neq,
-    Lt,
-    Lte,
-    Gt,
-    Gte,
-    In,
-    Like,
-    IsNull,
-    IsNotNull,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Filter {
-    pub field: String,
-    pub op: FilterOp,
-    pub value: Value,
-}
-
-impl Filter {
-    pub fn new(field: String, op: FilterOp, value: Value) -> Self {
-        Self { field, op, value }
-    }
-
-    pub fn matches(&self, field_value: &Value) -> bool {
-        match self.op {
-            FilterOp::Eq => field_value == &self.value,
-            FilterOp::Neq => field_value != &self.value,
-            FilterOp::Lt => self.compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Less),
-            FilterOp::Lte => matches!(
-                self.compare_values(field_value, &self.value),
-                Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-            ),
-            FilterOp::Gt => self.compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Greater),
-            FilterOp::Gte => matches!(
-                self.compare_values(field_value, &self.value),
-                Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-            ),
-            FilterOp::In => {
-                if let Value::Array(values) = &self.value {
-                    values.contains(field_value)
-                } else {
-                    false
-                }
-            }
-            FilterOp::Like => {
-                if let (Value::String(field_str), Value::String(pattern)) = (field_value, &self.value) {
-                    self.glob_match(field_str, pattern)
-                } else {
-                    false
-                }
-            }
-            FilterOp::IsNull => field_value.is_null(),
-            FilterOp::IsNotNull => !field_value.is_null(),
-        }
-    }
-
-    fn compare_values(&self, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-        match (a, b) {
-            (Value::Number(a), Value::Number(b)) => {
-                let a_f64 = a.as_f64()?;
-                let b_f64 = b.as_f64()?;
-                a_f64.partial_cmp(&b_f64)
-            }
-            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-            _ => None,
-        }
-    }
-
-    fn glob_match(&self, text: &str, pattern: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
-
-        let parts: Vec<&str> = pattern.split('*').collect();
-
-        if parts.len() == 1 {
-            return text == pattern;
-        }
-
-        let non_empty_parts: Vec<&str> = parts.iter().filter(|p| !p.is_empty()).copied().collect();
-
-        if non_empty_parts.is_empty() {
-            return true;
-        }
-
-        let starts_with_wildcard = pattern.starts_with('*');
-        let ends_with_wildcard = pattern.ends_with('*');
-
-        let mut text_pos = 0;
-
-        for (idx, part) in non_empty_parts.iter().enumerate() {
-            let is_first = idx == 0;
-            let is_last = idx == non_empty_parts.len() - 1;
-
-            if is_first && !starts_with_wildcard {
-                if !text.starts_with(part) {
-                    return false;
-                }
-                text_pos = part.len();
-            } else if is_last && !ends_with_wildcard {
-                return text[text_pos..].ends_with(part);
-            } else if let Some(pos) = text[text_pos..].find(part) {
-                text_pos += pos + part.len();
-            } else {
-                return false;
-            }
-        }
-
-        true
-    }
-}
 
 async fn ttl_cleanup_task(
     storage: Arc<Storage>,

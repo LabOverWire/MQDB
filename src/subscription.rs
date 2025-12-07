@@ -1,22 +1,41 @@
-use crate::error::Result;
 use crate::events::ChangeEvent;
-use crate::keys;
-use crate::storage::Storage;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionMode {
+    #[default]
+    Broadcast,
+    LoadBalanced,
+    Ordered,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub id: String,
     pub pattern: String,
     pub entity: Option<String>,
+    #[serde(default)]
+    pub share_group: Option<String>,
+    #[serde(default)]
+    pub mode: SubscriptionMode,
 }
 
 impl Subscription {
     pub fn new(id: String, pattern: String, entity: Option<String>) -> Self {
-        Self { id, pattern, entity }
+        Self {
+            id,
+            pattern,
+            entity,
+            share_group: None,
+            mode: SubscriptionMode::default(),
+        }
+    }
+
+    pub fn with_share_group(mut self, group: String, mode: SubscriptionMode) -> Self {
+        self.share_group = Some(group);
+        self.mode = mode;
+        self
     }
 
     pub fn matches(&self, event: &ChangeEvent) -> bool {
@@ -30,12 +49,12 @@ impl Subscription {
     }
 }
 
-fn match_pattern(pattern: &str, entity: &str, id: &str) -> bool {
+pub fn match_pattern(pattern: &str, entity: &str, id: &str) -> bool {
     let path = format!("{entity}/{id}");
     match_wildcard(pattern, &path)
 }
 
-fn match_wildcard(pattern: &str, path: &str) -> bool {
+pub fn match_wildcard(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
     let path_parts: Vec<&str> = path.split('/').collect();
 
@@ -72,68 +91,85 @@ fn match_parts(pattern: &[&str], path: &[&str], p_idx: usize, path_idx: usize) -
     false
 }
 
-pub struct SubscriptionRegistry {
-    subscriptions: Arc<RwLock<HashMap<String, Subscription>>>,
-    storage: Arc<Storage>,
-}
+#[cfg(not(target_arch = "wasm32"))]
+mod registry {
+    use super::Subscription;
+    use crate::error::Result;
+    use crate::events::ChangeEvent;
+    use crate::keys;
+    use crate::storage::Storage;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
-impl SubscriptionRegistry {
-    pub fn new(storage: Arc<Storage>) -> Self {
-        Self {
-            subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            storage,
+    pub struct SubscriptionRegistry {
+        subscriptions: Arc<RwLock<HashMap<String, Subscription>>>,
+        storage: Arc<Storage>,
+    }
+
+    impl SubscriptionRegistry {
+        pub fn new(storage: Arc<Storage>) -> Self {
+            Self {
+                subscriptions: Arc::new(RwLock::new(HashMap::new())),
+                storage,
+            }
+        }
+
+        pub async fn load(&self) -> Result<()> {
+            let prefix = b"sub/";
+            let items = self.storage.prefix_scan(prefix)?;
+
+            let mut subs = self.subscriptions.write().await;
+
+            for (_key, value) in items {
+                let sub: Subscription = serde_json::from_slice(&value)?;
+                subs.insert(sub.id.clone(), sub);
+            }
+
+            Ok(())
+        }
+
+        pub async fn register(&self, subscription: Subscription) -> Result<()> {
+            let key = keys::encode_subscription_key(&subscription.id);
+            let value = serde_json::to_vec(&subscription)?;
+
+            self.storage.insert(&key, &value)?;
+
+            let mut subs = self.subscriptions.write().await;
+            subs.insert(subscription.id.clone(), subscription);
+
+            Ok(())
+        }
+
+        pub async fn unregister(&self, sub_id: &str) -> Result<()> {
+            let key = keys::encode_subscription_key(sub_id);
+            self.storage.remove(&key)?;
+
+            let mut subs = self.subscriptions.write().await;
+            subs.remove(sub_id);
+
+            Ok(())
+        }
+
+        pub async fn find_matching(&self, event: &ChangeEvent) -> Vec<Subscription> {
+            let subs = self.subscriptions.read().await;
+            subs.values().filter(|sub| sub.matches(event)).cloned().collect()
+        }
+
+        pub async fn count(&self) -> usize {
+            let subs = self.subscriptions.read().await;
+            subs.len()
+        }
+
+        pub async fn get(&self, sub_id: &str) -> Option<Subscription> {
+            let subs = self.subscriptions.read().await;
+            subs.get(sub_id).cloned()
         }
     }
-
-    pub async fn load(&self) -> Result<()> {
-        let prefix = b"sub/";
-        let items = self.storage.prefix_scan(prefix)?;
-
-        let mut subs = self.subscriptions.write().await;
-
-        for (_key, value) in items {
-            let sub: Subscription = serde_json::from_slice(&value)?;
-            subs.insert(sub.id.clone(), sub);
-        }
-
-        Ok(())
-    }
-
-    pub async fn register(&self, subscription: Subscription) -> Result<()> {
-        let key = keys::encode_subscription_key(&subscription.id);
-        let value = serde_json::to_vec(&subscription)?;
-
-        self.storage.insert(&key, &value)?;
-
-        let mut subs = self.subscriptions.write().await;
-        subs.insert(subscription.id.clone(), subscription);
-
-        Ok(())
-    }
-
-    pub async fn unregister(&self, sub_id: &str) -> Result<()> {
-        let key = keys::encode_subscription_key(sub_id);
-        self.storage.remove(&key)?;
-
-        let mut subs = self.subscriptions.write().await;
-        subs.remove(sub_id);
-
-        Ok(())
-    }
-
-    pub async fn find_matching(&self, event: &ChangeEvent) -> Vec<Subscription> {
-        let subs = self.subscriptions.read().await;
-        subs.values()
-            .filter(|sub| sub.matches(event))
-            .cloned()
-            .collect()
-    }
-
-    pub async fn count(&self) -> usize {
-        let subs = self.subscriptions.read().await;
-        subs.len()
-    }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use registry::SubscriptionRegistry;
 
 #[cfg(test)]
 mod tests {
@@ -151,17 +187,10 @@ mod tests {
 
     #[test]
     fn test_subscription_matches() {
-        let sub = Subscription::new(
-            "sub1".into(),
-            "users/+".into(),
-            Some("users".into()),
-        );
+        let sub = Subscription::new("sub1".into(), "users/+".into(), Some("users".into()));
 
-        let event = ChangeEvent::create(
-            "users".into(),
-            "123".into(),
-            serde_json::json!({"name": "test"}),
-        );
+        let event =
+            ChangeEvent::create("users".into(), "123".into(), serde_json::json!({"name": "test"}));
 
         assert!(sub.matches(&event));
     }
