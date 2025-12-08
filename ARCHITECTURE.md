@@ -4,18 +4,21 @@
 
 ### What is MQDB?
 
-MQDB is a reactive embedded database built in Rust that combines:
+MQDB is a message-oriented reactive database built in Rust that combines:
+- **Native MQTT integration** with embedded broker and topic-based API
+- **Point-to-point delivery** with consumer groups and partition-based routing
 - **Reactive subscriptions** with MQTT-style pub/sub patterns
 - **Schema-less JSON** entities with optional schema validation
-- **ACID transactions** with optimistic locking
-- **LSM-based storage** built on Fjall engine
+- **ACID transactions** with optimistic locking and outbox pattern
+- **Pluggable storage** with Fjall (native) and Memory (WASM) backends
 
 ### Core Principles
 
-1. **Reactive-first**: All mutations trigger subscription events, enabling real-time UIs and event-driven architectures
-2. **Embedded efficiency**: Low-latency local access with minimal dependencies
-3. **Data integrity**: ACID guarantees with comprehensive constraint system (schemas, unique, foreign keys)
-4. **Extensibility**: Designed for future MQTT broker integration
+1. **Message-oriented**: Database operations exposed via MQTT topics, enabling seamless IoT integration
+2. **Reactive-first**: All mutations trigger subscription events with configurable delivery modes
+3. **Embedded efficiency**: Low-latency local access, runs in browsers via WASM
+4. **Data integrity**: ACID guarantees with comprehensive constraint system
+5. **Reliability**: Outbox pattern ensures atomic event persistence with retry and dead letter queue
 
 ### Design Philosophy
 
@@ -31,13 +34,16 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 
 ```
 ┌─────────────────────────────────────────────────┐
-│        Application / MQTT Integration           │
+│           MQTT Clients / Web Browsers           │
+├─────────────────────────────────────────────────┤
+│         MQTT Agent (MqdbAgent)                  │
+│  Embedded Broker │ Auth │ ACL │ Topic Handlers  │
 ├─────────────────────────────────────────────────┤
 │         Database API (database.rs)              │
 │  CRUD │ Queries │ Subscriptions │ Constraints   │
 ├─────────────────────────────────────────────────┤
 │          Reactive Event System                  │
-│  EventDispatcher │ SubscriptionRegistry         │
+│  EventDispatcher │ ConsumerGroups │ Outbox      │
 ├─────────────────────────────────────────────────┤
 │         Domain Logic Layer                      │
 │  Schema │ Constraints │ Indexes │ Relations     │
@@ -45,52 +51,76 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 │         Entity & Key Management                 │
 │  Entity (JSON ↔ Bytes) │ Keys (Encoding)        │
 ├─────────────────────────────────────────────────┤
-│         Storage Abstraction                     │
+│         Storage Abstraction (StorageBackend)    │
 │  BatchWriter │ Transactions │ Durability        │
 ├─────────────────────────────────────────────────┤
-│              Fjall LSM Engine                   │
-│  Partitions │ Transactions │ Persistence        │
+│    Fjall (Native) │ Memory (WASM/Testing)       │
+│  LSM Persistence  │  In-Memory HashMap          │
 └─────────────────────────────────────────────────┘
 ```
 
 ### Component Interaction
 
+- **MQTT Agent** exposes database via MQTT topics with authentication and ACL
 - **Database API** coordinates all operations, managing transactions and event dispatch
-- **Reactive System** broadcasts changes to interested subscribers
+- **Reactive System** routes events based on subscription mode (Broadcast/LoadBalanced/Ordered)
+- **Consumer Groups** manage partition assignment and rebalancing for point-to-point delivery
+- **Outbox** ensures atomic event persistence with retry and dead letter queue
 - **Domain Logic** enforces business rules (constraints, schemas, indexes)
 - **Entity Layer** handles JSON serialization and key encoding
-- **Storage Layer** provides transactional guarantees and persistence
-- **Fjall Engine** manages physical storage (LSM tree, compaction, WAL)
+- **Storage Backend** provides pluggable persistence (Fjall for native, Memory for WASM)
 
 ---
 
 ## 3. Core Components
 
-### 3.1 Storage Layer (`storage.rs`)
+### 3.1 Storage Layer (`storage/`)
 
-**Responsibility:** Persistence and transaction management
+**Responsibility:** Persistence and transaction management with pluggable backends
+
+**Architecture:**
+```rust
+pub trait StorageBackend: Send + Sync {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
+    fn remove(&self, key: &[u8]) -> Result<()>;
+    fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn batch(&self) -> Box<dyn BatchWriter>;
+    fn flush(&self) -> Result<()>;
+}
+```
+
+**Available Backends:**
+
+| Backend | Use Case | Persistence | Platform |
+|---------|----------|-------------|----------|
+| `FjallBackend` | Production | LSM-based disk | Native |
+| `MemoryBackend` | Testing/WASM | In-memory HashMap | All |
 
 **Key Features:**
-- Wraps Fjall `TransactionalKeyspace` for ACID transactions
 - `BatchWriter` for atomic multi-key operations
 - Optimistic locking via preconditions
 - Configurable durability modes (`Immediate`, `Periodic`, `None`)
 
 **Transaction Model:**
 ```rust
-// Optimistic locking pattern
 let mut batch = storage.batch();
 batch.expect_value(key, old_value);  // Precondition check
 batch.insert(key, new_value);
 batch.commit()?;  // Fails if precondition not met
 ```
 
-**Why Fjall?**
+**Why Fjall (Native)?**
 - Rust-native LSM implementation (no C bindings)
 - Built-in transactional support
 - Memory-safe with zero-cost abstractions
 - Efficient for write-heavy workloads
-- Active maintenance and good performance
+
+**Why Memory Backend (WASM)?**
+- No file system dependencies
+- Runs in browsers via WebAssembly
+- Fast for testing (no I/O overhead)
+- Same API as persistent backend
 
 ---
 
@@ -105,6 +135,8 @@ dedup/{correlation_id}                      → Idempotency cache
 meta/{key}                                  → Sequences, metadata
 meta/schema/{entity}                        → Schema definitions
 meta/constraint/{type}/{entity}/{name}      → Constraint definitions
+_outbox/{operation_id}                      → Pending events for delivery
+_dead_letter/{operation_id}                 → Failed events after max retries
 fkref/{target_entity}/{target_id}/...       → FK reverse lookups (reserved)
 ```
 
@@ -290,9 +322,17 @@ Dispatch delete events for all affected entities
 
 ---
 
-### 3.6 Reactive System (`subscription.rs`, `dispatcher.rs`, `events.rs`)
+### 3.6 Reactive System (`subscription.rs`, `dispatcher.rs`, `events.rs`, `consumer_group.rs`)
 
-**Purpose:** Real-time change notifications for event-driven architectures
+**Purpose:** Real-time change notifications with configurable delivery modes
+
+#### Subscription Modes
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **Broadcast** | All subscribers receive all events | Notifications, caches |
+| **LoadBalanced** | Round-robin across group members | Worker pools |
+| **Ordered** | Partition-based (same entity:id → same consumer) | Event sourcing |
 
 #### Event Flow
 
@@ -301,15 +341,19 @@ Mutation (create/update/delete)
     ↓
 BatchWriter.commit() succeeds
     ↓
-ChangeEvent created
+ChangeEvent created (includes entity:id hash for partitioning)
     ↓
 EventDispatcher.dispatch()
     ↓
-SubscriptionRegistry.find_matching()
+┌─────────────────────────────────────────────┐
+│  Route by subscription mode:                │
+│                                             │
+│  Broadcast → All matching subscribers       │
+│  LoadBalanced → Round-robin in group        │
+│  Ordered → Partition owner in group         │
+└─────────────────────────────────────────────┘
     ↓
-Filter by pattern match
-    ↓
-Broadcast to matching subscribers
+Deliver to selected subscribers
 ```
 
 #### Subscription Matching
@@ -366,8 +410,71 @@ users/123        users/123                   users/124
 
 **Guarantees:**
 - Events dispatched in order of commit
-- No guarantee of delivery (best-effort)
+- No guarantee of delivery (best-effort for Broadcast)
 - Subscribers responsible for handling missed events
+
+#### Consumer Groups (`consumer_group.rs`)
+
+**Purpose:** Partition-based message routing for point-to-point delivery
+
+**Partition Assignment:**
+```
+8 partitions, 3 consumers:
+  Consumer A: [0, 1, 2]
+  Consumer B: [3, 4, 5]
+  Consumer C: [6, 7]
+
+Event routing (Ordered mode):
+  hash("orders:123") % 8 = 3 → Consumer B
+  hash("orders:456") % 8 = 7 → Consumer C
+```
+
+**Rebalancing:**
+- Triggered on member join/leave
+- Deterministic assignment (sorted member IDs)
+- All members in group get same view
+
+**Heartbeat Mechanism:**
+```rust
+db.heartbeat(&subscription_id).await?;
+```
+- Consumers send periodic heartbeats
+- Stale consumers removed after timeout (default: 30s)
+- Removal triggers partition rebalance
+
+**Mode Validation:**
+- Groups cannot mix LoadBalanced and Ordered modes
+- First subscriber sets the mode
+- Subsequent subscribers must match or get rejected
+
+#### Outbox Pattern (`outbox.rs`)
+
+**Purpose:** Atomic event persistence with guaranteed delivery
+
+**Flow:**
+```
+1. Write entity + event to outbox (atomic)
+2. OutboxProcessor polls pending events
+3. Dispatch to subscribers
+4. Mark delivered (remove from outbox)
+5. On failure: increment retry count
+6. After max retries: move to dead letter queue
+```
+
+**Configuration:**
+```rust
+OutboxConfig {
+    max_retries: 3,
+    retry_interval_ms: 1000,
+    dead_letter_enabled: true,
+}
+```
+
+**Benefits:**
+- Events never lost (persisted before commit returns)
+- Automatic retry with backoff
+- Dead letter queue for investigation
+- Survives crashes and restarts
 
 ---
 
@@ -920,6 +1027,23 @@ Response via response_topic (MQTT 5.0)
 - `$DB/_admin/backup` - Create backup
 - `$DB/_admin/backup/list` - List backups
 - `$DB/_admin/restore` - Restore (requires restart)
+- `$DB/_admin/consumer-groups` - List consumer groups
+- `$DB/_admin/consumer-groups/{name}` - Show consumer group details
+
+**Subscription Management Topics:**
+- `$DB/_sub/subscribe` - Create subscription (supports shared subscriptions)
+- `$DB/_sub/{id}/heartbeat` - Send heartbeat for shared subscription
+- `$DB/_sub/{id}/unsubscribe` - Remove subscription
+
+**Subscribe Payload:**
+```json
+{
+  "pattern": "orders/#",
+  "entity": "orders",
+  "group": "order-processors",
+  "mode": "ordered"
+}
+```
 
 **Request/Response Pattern:**
 
@@ -941,22 +1065,42 @@ Payload: {"ok": true, "data": {"id": "1", "name": "Alice"}}
 
 ---
 
-### 8.2 Custom Storage Backends
+### 8.2 Storage Backends
 
-**Current Abstraction:**
-- `Storage` struct wraps Fjall
-- Could be trait for pluggable backends
+**Current Implementation:**
 
-**Potential Backends:**
+The `StorageBackend` trait enables pluggable persistence:
+
+```rust
+pub trait StorageBackend: Send + Sync {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
+    fn remove(&self, key: &[u8]) -> Result<()>;
+    fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn batch(&self) -> Box<dyn BatchWriter>;
+    fn flush(&self) -> Result<()>;
+}
+```
+
+**Available Backends:**
+
+| Backend | File | Use Case |
+|---------|------|----------|
+| `FjallBackend` | `storage/fjall_backend.rs` | Native production (LSM persistence) |
+| `MemoryBackend` | `storage/memory_backend.rs` | WASM/testing (in-memory) |
+
+**Adding Custom Backends:**
+
+Implement `StorageBackend` trait. Potential additions:
 - RocksDB: More mature LSM implementation
 - LMDB: B-tree based, different performance profile
-- FoundationDB: Distributed, ACID across nodes
-- SQLite: SQL compatibility, widespread adoption
+- IndexedDB: Browser-native persistence for WASM
+- SQLite: SQL compatibility layer
 
 **Requirements:**
-- Transactional batch writes
+- Transactional batch writes with optimistic locking
 - Prefix iteration (for scans)
-- MVCC or equivalent isolation
+- Thread-safe (Send + Sync)
 
 ---
 
@@ -1139,14 +1283,15 @@ DatabaseConfig::new("db")
 
 ## 12. Testing Strategy
 
-### Test Coverage: 93 Tests
+### Test Coverage: 142 Tests
 
 **Breakdown:**
-- 26 unit tests (component isolation)
-- 67 integration tests (full workflows)
+- 68 unit tests (component isolation)
+- 74 integration tests (full workflows)
   - 25 constraint tests
   - 17 CRUD + features
   - 13 crash recovery
+  - 7 point-to-point delivery
   - 6 transaction conflicts
   - 4 concurrency
   - 2 durability
@@ -1168,6 +1313,7 @@ DatabaseConfig::new("db")
 - `transaction_test.rs`: ACID guarantees, conflicts
 - `concurrency_test.rs`: Parallel writes, race conditions
 - `durability_test.rs`: Fsync behavior, crash simulation
+- `point_to_point_test.rs`: Shared subscriptions, consumer groups, heartbeat
 
 **3. Constraint Tests (25 tests):**
 - NOT NULL: 4 tests (create/update violations, success)
@@ -1309,17 +1455,19 @@ db.backup_logical(format!("backups/logical_{}.jsonl", timestamp)).await?;
 ### MQDB is Optimized For:
 
 - **Real-time applications** needing change observation (reactive UIs, dashboards)
-- **Embedded systems** with local persistence needs
-- **Event-driven architectures** where database changes trigger workflows
-- **Future MQTT integration** for IoT and pub/sub systems
+- **IoT systems** with native MQTT integration and topic-based API
+- **Event-driven architectures** with point-to-point delivery and consumer groups
+- **Cross-platform deployment** (native servers, WASM browsers)
+- **Message processing pipelines** with ordered delivery guarantees
 
 ### Key Strengths:
 
-1. **ACID Transactions:** Full transactional guarantees with comprehensive constraint system
-2. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications
-3. **Schema Flexibility:** JSON entities with optional type validation
-4. **Simple Deployment:** Single binary, embedded (no separate server process)
-5. **Rust Safety:** Memory-safe, no data races, strong type system
+1. **Native MQTT Integration:** Embedded broker with topic-based database API
+2. **Point-to-Point Delivery:** Consumer groups with LoadBalanced and Ordered modes
+3. **ACID Transactions:** Full transactional guarantees with outbox pattern
+4. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications
+5. **Platform Flexibility:** Runs native (Fjall) or in browsers (WASM/Memory)
+6. **Rust Safety:** Memory-safe, no data races, strong type system
 
 ### Design Philosophy:
 
@@ -1334,16 +1482,17 @@ MQDB prioritizes:
 ### When to Use MQDB:
 
 ✅ **Good fit:**
-- Local-first applications
-- Real-time dashboards
-- Event sourcing patterns
-- Embedded devices
+- IoT applications with MQTT devices
+- Real-time dashboards and UIs
+- Event sourcing with ordered delivery
+- Message processing pipelines
+- Browser-based applications (WASM)
 - Rapid prototyping (schema-less)
 
 ❌ **Not ideal for:**
 - Massive scale (billions of entities)
 - Complex analytical queries (no query planner)
-- Distributed systems (no replication)
+- Distributed systems (no replication yet)
 - SQL compatibility required
 
 ### Contributing:
