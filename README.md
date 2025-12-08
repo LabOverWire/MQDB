@@ -1,10 +1,12 @@
-# MQDB - Reactive Embedded Database
+# MQDB - Message-Oriented Reactive Database
 
-A high-performance, reactive embedded database built in Rust with MQTT-ready event streaming.
+A high-performance reactive database with native MQTT integration, point-to-point delivery, and consumer groups. Built in Rust with support for both native and WASM targets.
 
 ## Features
 
 - **Reactive Subscriptions**: Built-in change observation with MQTT-style wildcard patterns (`+`, `#`)
+- **Point-to-Point Delivery**: Shared subscriptions with LoadBalanced and Ordered modes
+- **Consumer Groups**: Partition-based message routing with automatic rebalancing
 - **High Performance**: 168k+ writes/sec, 558k+ reads/sec with sub-millisecond latency
 - **ACID Constraints**: Schemas, unique constraints, foreign keys with CASCADE/RESTRICT/SET NULL
 - **Secondary Indexes**: Efficient equality and range indexes for fast queries
@@ -13,21 +15,25 @@ A high-performance, reactive embedded database built in Rust with MQTT-ready eve
 - **Relationships**: Foreign key-style relationships with nested entity loading
 - **TTL Expiration**: Automatic entity cleanup with reactive delete events
 - **Atomic Transactions**: Multi-key atomic batches with ACID guarantees
+- **Outbox Pattern**: Atomic event persistence with retry and dead letter queue
 - **Persistent Subscriptions**: Subscriptions survive restarts
 - **Event Streaming**: Real-time change notifications via async channels
-- **LSM-based Storage**: Built on Fjall for efficient disk I/O
+- **Storage Abstraction**: Pluggable backends (Fjall for native, Memory for WASM)
+- **WASM Support**: Run in browsers with in-memory storage
 - **Idempotent Operations**: Correlation ID-based deduplication
 
 ## Architecture
 
 ### Core Components
 
-1. **Storage Layer (Fjall)**: LSM-based key-value persistence with atomic batch operations
+1. **Storage Layer**: Pluggable backend (Fjall for native, Memory for WASM) with atomic batch operations
 2. **Reactive Core**: Subscription registry with prefix/wildcard matching and event dispatching
 3. **Entity Layer**: JSON ↔ KV translation with schema-less storage
 4. **Index Manager**: Secondary indexes for efficient queries
-5. **Event Dispatcher**: Async notification system with bounded channels
-6. **Dedup Store**: Correlation ID-based idempotency
+5. **Event Dispatcher**: Mode-aware routing (Broadcast/LoadBalanced/Ordered)
+6. **Consumer Groups**: Partition assignment with automatic rebalancing
+7. **Outbox**: Atomic event persistence with retry and dead letter queue
+8. **Dedup Store**: Correlation ID-based idempotency
 
 ### Key Encoding Scheme
 
@@ -37,6 +43,8 @@ idx/{entity}/{field}/{value}/{id} → secondary index entries
 sub/{subscription_id}           → subscription metadata
 dedup/{correlation_id}          → cached responses for idempotency
 meta/{key}                      → system metadata (sequences, etc.)
+_outbox/{operation_id}          → pending events for delivery
+_dead_letter/{operation_id}     → failed events after max retries
 ```
 
 ## Quick Start
@@ -98,6 +106,52 @@ db.create("users".into(), user).await?;
 - `users/+` - matches single level (e.g., `users/123`)
 - `users/#` - matches multiple levels (e.g., `users/123`, `users/123/profile`)
 - `+/123` - matches any entity with id `123`
+
+## Point-to-Point Delivery
+
+MQDB supports shared subscriptions for distributing events across multiple consumers.
+
+### Subscription Modes
+
+- **Broadcast** (default): All subscribers receive all events
+- **LoadBalanced**: Round-robin distribution across consumers in a group
+- **Ordered**: Partition-based routing ensuring same entity:id always goes to same consumer
+
+```rust
+use mqdb::SubscriptionMode;
+
+let result = db.subscribe_shared(
+    "orders/#".into(),
+    Some("orders".into()),
+    "order-processors".into(),
+    SubscriptionMode::Ordered,
+).await?;
+
+println!("Subscription ID: {}", result.id);
+println!("Assigned partitions: {:?}", result.assigned_partitions);
+
+db.heartbeat(&result.id).await?;
+
+db.unsubscribe(&result.id).await?;
+```
+
+### Consumer Groups
+
+Consumer groups automatically rebalance partitions when members join or leave:
+
+```rust
+let groups = db.list_consumer_groups().await;
+for group in groups {
+    println!("{}: {} members, {} partitions",
+        group.name, group.member_count, group.total_partitions);
+}
+
+if let Some(details) = db.get_consumer_group("order-processors").await {
+    for member in details.members {
+        println!("  {}: partitions {:?}", member.id, member.partitions);
+    }
+}
+```
 
 ## Secondary Indexes
 
@@ -297,6 +351,13 @@ agent.run().await?;
 - `$DB/_admin/backup` - Create backup
 - `$DB/_admin/backup/list` - List backups
 - `$DB/_admin/restore` - Restore (requires restart)
+- `$DB/_admin/consumer-groups` - List consumer groups
+- `$DB/_admin/consumer-groups/{name}` - Show consumer group details
+
+**Subscription Management:**
+- `$DB/_sub/subscribe` - Create subscription (supports shared subscriptions)
+- `$DB/_sub/{id}/heartbeat` - Send heartbeat for shared subscription
+- `$DB/_sub/{id}/unsubscribe` - Remove subscription
 
 ### ACL Configuration
 
@@ -344,6 +405,15 @@ mqdb list users --filter "status=active" --sort "-created_at" --limit 10
 
 # Watch for changes
 mqdb watch users
+
+# Point-to-point subscriptions
+mqdb subscribe "orders/#" --group workers --mode load-balanced
+mqdb subscribe "orders/#" --group processors --mode ordered
+mqdb subscribe "users/#"  # broadcast mode (default)
+
+# Consumer group management
+mqdb consumer-group list
+mqdb consumer-group show workers
 
 # Schema management
 mqdb schema set users schema.json
@@ -464,10 +534,30 @@ cargo run --example parking_lot
 - [x] Request/response pattern with response_topic
 - [x] Server-side backup management
 
+### Phase 7: Point-to-Point & Reliability ✓
+- [x] Shared subscriptions with consumer groups
+- [x] LoadBalanced mode (round-robin distribution)
+- [x] Ordered mode (partition-based routing)
+- [x] Consumer group rebalancing on join/leave
+- [x] Heartbeat mechanism for stale consumer detection
+- [x] Mode validation (prevent mixing modes in same group)
+- [x] Outbox pattern for atomic event persistence
+- [x] Retry with exponential backoff
+- [x] Dead letter queue for failed events
+- [x] CLI commands for subscribe and consumer-group
+
+### Phase 8: Platform Support ✓
+- [x] Storage abstraction with pluggable backends
+- [x] Fjall backend for native (LSM-based persistence)
+- [x] Memory backend for WASM (in-memory storage)
+- [x] Feature flags for conditional compilation
+- [x] WASM crate with JavaScript bindings
+
 ### Test Coverage
-- 93 tests passing (26 unit + 67 integration including 25 constraint tests)
+- 142 tests passing (68 unit + 74 integration)
 - Clippy clean, no warnings
 - Full constraint coverage including multilevel cascade
+- Point-to-point delivery tests with partition verification
 
 ## Future Enhancements
 
