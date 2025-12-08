@@ -156,7 +156,7 @@ fkref/{target_entity}/{target_id}/...       → FK reverse lookups (reserved)
 data/users/123                              → User entity with ID 123
 idx/users/email/alice@example.com/123       → Email index entry
 meta/schema/users                           → Users schema definition
-meta/constraint/fk/posts/posts_author_id_users_fk
+meta/constraint/fk/posts/posts_author_id_fk → Foreign key constraint
 ```
 
 ---
