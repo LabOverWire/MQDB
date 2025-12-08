@@ -1,0 +1,6 @@
+{
+  "rust-analyzer.check.allTargets": true,
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.check.targets": ["wasm32-unknown-unknown"], // Uncomment the two wasm32 lines to develop for wasm
+  "rust-analyzer.cargo.target": "wasm32-unknown-unknown"
+}
