@@ -1,14 +1,14 @@
 mod backend;
+#[cfg(feature = "native")]
 mod fjall_backend;
 mod memory_backend;
 
 pub use backend::{BatchOperations, StorageBackend};
+#[cfg(feature = "native")]
 pub use fjall_backend::FjallBackend;
 pub use memory_backend::MemoryBackend;
 
-use crate::config::DurabilityMode;
 use crate::error::Result;
-use std::path::Path;
 use std::sync::Arc;
 
 pub struct Storage {
@@ -16,11 +16,21 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn open<P: AsRef<Path>>(path: P, durability: DurabilityMode) -> Result<Self> {
+    #[cfg(feature = "native")]
+    pub fn open<P: AsRef<std::path::Path>>(
+        path: P,
+        durability: crate::config::DurabilityMode,
+    ) -> Result<Self> {
         let backend = FjallBackend::open(path, durability)?;
         Ok(Self {
             backend: Arc::new(backend),
         })
+    }
+
+    pub fn memory() -> Self {
+        Self {
+            backend: Arc::new(MemoryBackend::new()),
+        }
     }
 
     pub fn with_backend(backend: Arc<dyn StorageBackend>) -> Self {

@@ -2,3 +2,5 @@
 .claude
 data/
 mqtt_storage/
+pkg/
+**/mqdb-wasm/target/

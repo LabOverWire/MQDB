@@ -1,6 +1,6 @@
+use super::backend::{BatchOperations, StorageBackend};
 use crate::config::DurabilityMode;
 use crate::error::Result;
-use super::backend::{BatchOperations, StorageBackend};
 use fjall::{Config, TransactionalKeyspace, TransactionalPartitionHandle};
 use std::path::Path;
 use std::sync::Arc;
@@ -115,7 +115,10 @@ impl BatchOperations for FjallBatch {
     }
 
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
-        self.preconditions.push(Precondition { key, expected_value });
+        self.preconditions.push(Precondition {
+            key,
+            expected_value,
+        });
     }
 
     fn commit(self: Box<Self>) -> Result<()> {

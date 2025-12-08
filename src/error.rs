@@ -2,8 +2,12 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[cfg(feature = "native")]
     #[error("storage error: {0}")]
     Storage(#[from] fjall::Error),
+
+    #[error("storage error: {0}")]
+    StorageGeneric(String),
 
     #[error("entity not found: {entity} id={id}")]
     NotFound { entity: String, id: String },

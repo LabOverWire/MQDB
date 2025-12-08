@@ -1,4 +1,5 @@
-use crate::{Database, Error, Filter, Pagination, SortOrder};
+use crate::subscription::SubscriptionMode;
+use crate::{Error, Filter, Pagination, SortOrder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -43,6 +44,10 @@ pub enum Request {
         pattern: String,
         #[serde(default)]
         entity: Option<String>,
+        #[serde(default)]
+        share_group: Option<String>,
+        #[serde(default)]
+        mode: Option<SubscriptionMode>,
     },
     Unsubscribe {
         id: String,
@@ -124,66 +129,93 @@ impl From<Error> for Response {
     }
 }
 
-fn value_from_unit(_: ()) -> Value {
-    Value::Null
-}
+#[cfg(not(target_arch = "wasm32"))]
+mod execute {
+    use super::{Request, Response};
+    use crate::Database;
+    use serde_json::Value;
 
-fn value_from_vec(v: Vec<Value>) -> Value {
-    Value::Array(v)
-}
+    fn value_from_unit(_: ()) -> Value {
+        Value::Null
+    }
 
-fn value_from_string(s: String) -> Value {
-    Value::String(s)
-}
+    fn value_from_vec(v: Vec<Value>) -> Value {
+        Value::Array(v)
+    }
 
-impl Database {
-    pub async fn execute(&self, request: Request) -> Response {
-        match request {
-            Request::Create { entity, data } => match self.create(entity, data).await {
-                Ok(v) => Response::ok(v),
-                Err(e) => e.into(),
-            },
-            Request::Read {
-                entity,
-                id,
-                includes,
-                projection,
-            } => match self.read(entity, id, includes, projection).await {
-                Ok(v) => Response::ok(v),
-                Err(e) => e.into(),
-            },
-            Request::Update { entity, id, fields } => match self.update(entity, id, fields).await {
-                Ok(v) => Response::ok(v),
-                Err(e) => e.into(),
-            },
-            Request::Delete { entity, id } => match self.delete(entity, id).await {
-                Ok(()) => Response::ok(value_from_unit(())),
-                Err(e) => e.into(),
-            },
-            Request::List {
-                entity,
-                filters,
-                sort,
-                pagination,
-                includes,
-                projection,
-            } => {
-                match self
-                    .list(entity, filters, sort, pagination, includes, projection)
-                    .await
-                {
-                    Ok(v) => Response::ok(value_from_vec(v)),
+    fn value_from_string(s: String) -> Value {
+        Value::String(s)
+    }
+
+    impl Database {
+        pub async fn execute(&self, request: Request) -> Response {
+            match request {
+                Request::Create { entity, data } => match self.create(entity, data).await {
+                    Ok(v) => Response::ok(v),
                     Err(e) => e.into(),
+                },
+                Request::Read {
+                    entity,
+                    id,
+                    includes,
+                    projection,
+                } => match self.read(entity, id, includes, projection).await {
+                    Ok(v) => Response::ok(v),
+                    Err(e) => e.into(),
+                },
+                Request::Update { entity, id, fields } => {
+                    match self.update(entity, id, fields).await {
+                        Ok(v) => Response::ok(v),
+                        Err(e) => e.into(),
+                    }
                 }
+                Request::Delete { entity, id } => match self.delete(entity, id).await {
+                    Ok(()) => Response::ok(value_from_unit(())),
+                    Err(e) => e.into(),
+                },
+                Request::List {
+                    entity,
+                    filters,
+                    sort,
+                    pagination,
+                    includes,
+                    projection,
+                } => {
+                    match self
+                        .list(entity, filters, sort, pagination, includes, projection)
+                        .await
+                    {
+                        Ok(v) => Response::ok(value_from_vec(v)),
+                        Err(e) => e.into(),
+                    }
+                }
+                Request::Subscribe {
+                    pattern,
+                    entity,
+                    share_group,
+                    mode,
+                } => {
+                    match (share_group, mode) {
+                        (Some(group), Some(m)) => {
+                            match self.subscribe_shared(pattern, entity, group, m).await {
+                                Ok(result) => Response::ok(serde_json::json!({
+                                    "id": result.id,
+                                    "assigned_partitions": result.assigned_partitions
+                                })),
+                                Err(e) => e.into(),
+                            }
+                        }
+                        _ => match self.subscribe(pattern, entity).await {
+                            Ok(id) => Response::ok(value_from_string(id)),
+                            Err(e) => e.into(),
+                        },
+                    }
+                }
+                Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
+                    Ok(()) => Response::ok(value_from_unit(())),
+                    Err(e) => e.into(),
+                },
             }
-            Request::Subscribe { pattern, entity } => match self.subscribe(pattern, entity).await {
-                Ok(id) => Response::ok(value_from_string(id)),
-                Err(e) => e.into(),
-            },
-            Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
-                Ok(()) => Response::ok(value_from_unit(())),
-                Err(e) => e.into(),
-            },
         }
     }
 }

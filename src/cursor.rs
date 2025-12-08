@@ -1,4 +1,4 @@
-use crate::database::{Filter, SortDirection, SortOrder};
+use crate::types::{Filter, SortDirection, SortOrder};
 use crate::entity::Entity;
 use crate::error::Result;
 use crate::storage::Storage;
@@ -157,7 +157,7 @@ impl Cursor {
     }
 
     fn matches_filters(&self, entity: &Value) -> bool {
-        use crate::database::FilterOp;
+        use crate::types::FilterOp;
 
         for filter in &self.filters {
             let field_value = entity.get(&filter.field);

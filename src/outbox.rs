@@ -1,12 +1,9 @@
-use crate::config::OutboxConfig;
-use crate::dispatcher::EventDispatcher;
 use crate::error::Result;
 use crate::events::ChangeEvent;
 use crate::storage::{BatchWriter, Storage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::watch;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const OUTBOX_PREFIX: &[u8] = b"_outbox/";
 const DEAD_LETTER_PREFIX: &[u8] = b"_dead_letter/";
@@ -141,98 +138,6 @@ impl Outbox {
     }
 }
 
-pub struct OutboxProcessor {
-    outbox: Arc<Outbox>,
-    dispatcher: Arc<EventDispatcher>,
-    config: OutboxConfig,
-    shutdown_rx: watch::Receiver<bool>,
-}
-
-impl OutboxProcessor {
-    pub fn new(
-        outbox: Arc<Outbox>,
-        dispatcher: Arc<EventDispatcher>,
-        config: OutboxConfig,
-        shutdown_rx: watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            outbox,
-            dispatcher,
-            config,
-            shutdown_rx,
-        }
-    }
-
-    pub async fn run(&mut self) {
-        tracing::info!("outbox processor started");
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(self.config.retry_interval_ms)) => {
-                    self.process_pending().await;
-                }
-                _ = self.shutdown_rx.changed() => {
-                    tracing::info!("outbox processor shutting down");
-                    break;
-                }
-            }
-        }
-    }
-
-    async fn process_pending(&self) {
-        let entries = match self.outbox.pending_events() {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!(err = %e, "failed to fetch pending outbox entries");
-                return;
-            }
-        };
-
-        for entry in entries.into_iter().take(self.config.batch_size) {
-            if entry.retry_count >= self.config.max_retries {
-                tracing::error!(
-                    op_id = %entry.operation_id,
-                    retries = entry.retry_count,
-                    "max retries exceeded, moving to dead letter"
-                );
-                if let Err(e) = self.outbox.move_to_dead_letter(&entry.operation_id) {
-                    tracing::error!(err = %e, "failed to move to dead letter");
-                }
-                continue;
-            }
-
-            let mut success = true;
-            for event in &entry.events {
-                let event_with_op_id = event.clone().with_operation_id(entry.operation_id.clone());
-                if let Err(e) = self.dispatcher.dispatch(event_with_op_id).await {
-                    tracing::warn!(
-                        op_id = %entry.operation_id,
-                        err = %e,
-                        "dispatch failed"
-                    );
-                    success = false;
-                    break;
-                }
-            }
-
-            if success {
-                if let Err(e) = self.outbox.mark_delivered(&entry.operation_id) {
-                    tracing::error!(
-                        op_id = %entry.operation_id,
-                        err = %e,
-                        "failed to mark as delivered"
-                    );
-                }
-            } else if let Err(e) = self.outbox.increment_retry(&entry.operation_id) {
-                tracing::error!(
-                    op_id = %entry.operation_id,
-                    err = %e,
-                    "failed to increment retry count"
-                );
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct OutboxEntry {
     pub operation_id: String,
@@ -240,6 +145,111 @@ pub struct OutboxEntry {
     pub retry_count: u32,
     pub created_at: u64,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+mod processor {
+    use super::Outbox;
+    use crate::config::OutboxConfig;
+    use crate::dispatcher::EventDispatcher;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    pub struct OutboxProcessor {
+        outbox: Arc<Outbox>,
+        dispatcher: Arc<EventDispatcher>,
+        config: OutboxConfig,
+        shutdown_rx: watch::Receiver<bool>,
+    }
+
+    impl OutboxProcessor {
+        pub fn new(
+            outbox: Arc<Outbox>,
+            dispatcher: Arc<EventDispatcher>,
+            config: OutboxConfig,
+            shutdown_rx: watch::Receiver<bool>,
+        ) -> Self {
+            Self {
+                outbox,
+                dispatcher,
+                config,
+                shutdown_rx,
+            }
+        }
+
+        pub async fn run(&mut self) {
+            tracing::info!("outbox processor started");
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(self.config.retry_interval_ms)) => {
+                        self.process_pending().await;
+                    }
+                    _ = self.shutdown_rx.changed() => {
+                        tracing::info!("outbox processor shutting down");
+                        break;
+                    }
+                }
+            }
+        }
+
+        async fn process_pending(&self) {
+            let entries = match self.outbox.pending_events() {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(err = %e, "failed to fetch pending outbox entries");
+                    return;
+                }
+            };
+
+            for entry in entries.into_iter().take(self.config.batch_size) {
+                if entry.retry_count >= self.config.max_retries {
+                    tracing::error!(
+                        op_id = %entry.operation_id,
+                        retries = entry.retry_count,
+                        "max retries exceeded, moving to dead letter"
+                    );
+                    if let Err(e) = self.outbox.move_to_dead_letter(&entry.operation_id) {
+                        tracing::error!(err = %e, "failed to move to dead letter");
+                    }
+                    continue;
+                }
+
+                let mut success = true;
+                for event in &entry.events {
+                    let event_with_op_id = event.clone().with_operation_id(entry.operation_id.clone());
+                    if let Err(e) = self.dispatcher.dispatch(event_with_op_id).await {
+                        tracing::warn!(
+                            op_id = %entry.operation_id,
+                            err = %e,
+                            "dispatch failed"
+                        );
+                        success = false;
+                        break;
+                    }
+                }
+
+                if success {
+                    if let Err(e) = self.outbox.mark_delivered(&entry.operation_id) {
+                        tracing::error!(
+                            op_id = %entry.operation_id,
+                            err = %e,
+                            "failed to mark as delivered"
+                        );
+                    }
+                } else if let Err(e) = self.outbox.increment_retry(&entry.operation_id) {
+                    tracing::error!(
+                        op_id = %entry.operation_id,
+                        err = %e,
+                        "failed to increment retry count"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use processor::OutboxProcessor;
 
 #[cfg(test)]
 mod tests {
