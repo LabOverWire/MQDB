@@ -688,7 +688,6 @@ batch.commit()?;                            // Commit or conflict
 - Better concurrency than pessimistic locks
 - No deadlock risk
 - Simpler implementation
-- But: requires retry logic for conflicts
 
 ---
 
