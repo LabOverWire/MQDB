@@ -10,6 +10,7 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 tracing = "0.1.44"
 uuid = { version = "1.19.0", features = ["v4"] }
+bebytes = { version = "2.12.0", features = ["bytes"] }
 
 clap = { version = "4.5.53", features = ["derive", "env"], optional = true }
 comfy-table = { version = "7.2.1", optional = true }

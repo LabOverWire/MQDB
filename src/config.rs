@@ -74,36 +74,43 @@ mod native {
             }
         }
 
+        #[must_use]
         pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
             self.durability = mode;
             self
         }
 
+        #[must_use]
         pub fn with_event_capacity(mut self, capacity: usize) -> Self {
             self.event_channel_capacity = capacity;
             self
         }
 
+        #[must_use]
         pub fn with_max_list_results(mut self, max: Option<usize>) -> Self {
             self.max_list_results = max;
             self
         }
 
+        #[must_use]
         pub fn with_max_subscriptions(mut self, max: Option<usize>) -> Self {
             self.max_subscriptions = max;
             self
         }
 
+        #[must_use]
         pub fn with_ttl_cleanup_interval(mut self, interval_secs: Option<u64>) -> Self {
             self.ttl_cleanup_interval_secs = interval_secs;
             self
         }
 
+        #[must_use]
         pub fn with_outbox(mut self, outbox: OutboxConfig) -> Self {
             self.outbox = outbox;
             self
         }
 
+        #[must_use]
         pub fn with_shared_subscription(mut self, config: SharedSubscriptionConfig) -> Self {
             self.shared_subscription = config;
             self

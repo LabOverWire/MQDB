@@ -20,12 +20,13 @@ pub struct Outbox {
 }
 
 impl Outbox {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(storage: Arc<Storage>) -> Self {
         Self { storage }
     }
 
     pub fn enqueue_event(&self, batch: &mut BatchWriter, operation_id: &str, event: &ChangeEvent) {
-        self.enqueue_events(batch, operation_id, &[event.clone()]);
+        self.enqueue_events(batch, operation_id, std::slice::from_ref(event));
     }
 
     pub fn enqueue_events(
@@ -47,6 +48,8 @@ impl Outbox {
         batch.insert(key.into_bytes(), value);
     }
 
+    /// # Errors
+    /// Returns an error if reading from storage fails.
     pub fn pending_events(&self) -> Result<Vec<OutboxEntry>> {
         self.scan_entries(OUTBOX_PREFIX, "_outbox/")
     }
@@ -89,28 +92,35 @@ impl Outbox {
         Ok(entries)
     }
 
+    /// # Errors
+    /// Returns an error if removing from storage fails.
     pub fn mark_delivered(&self, operation_id: &str) -> Result<()> {
         let key = format!("_outbox/{operation_id}");
         self.storage.remove(key.as_bytes())
     }
 
+    /// # Errors
+    /// Returns an error if reading from storage fails.
     pub fn pending_count(&self) -> Result<usize> {
         let items = self.storage.prefix_scan(OUTBOX_PREFIX)?;
         Ok(items.len())
     }
 
+    /// # Errors
+    /// Returns an error if reading or writing to storage fails.
     pub fn increment_retry(&self, operation_id: &str) -> Result<()> {
         let key = format!("_outbox/{operation_id}");
-        if let Some(value) = self.storage.get(key.as_bytes())? {
-            if let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value) {
+        if let Some(value) = self.storage.get(key.as_bytes())?
+            && let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value) {
                 stored.retry_count += 1;
                 let new_value = serde_json::to_vec(&stored).unwrap_or_default();
                 self.storage.insert(key.as_bytes(), &new_value)?;
             }
-        }
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if reading or writing to storage fails.
     pub fn move_to_dead_letter(&self, operation_id: &str) -> Result<()> {
         let outbox_key = format!("_outbox/{operation_id}");
         if let Some(value) = self.storage.get(outbox_key.as_bytes())? {
@@ -123,15 +133,21 @@ impl Outbox {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if reading from storage fails.
     pub fn dead_letter_entries(&self) -> Result<Vec<OutboxEntry>> {
         self.scan_entries(DEAD_LETTER_PREFIX, "_dead_letter/")
     }
 
+    /// # Errors
+    /// Returns an error if reading from storage fails.
     pub fn dead_letter_count(&self) -> Result<usize> {
         let items = self.storage.prefix_scan(DEAD_LETTER_PREFIX)?;
         Ok(items.len())
     }
 
+    /// # Errors
+    /// Returns an error if removing from storage fails.
     pub fn remove_dead_letter(&self, operation_id: &str) -> Result<()> {
         let key = format!("_dead_letter/{operation_id}");
         self.storage.remove(key.as_bytes())
@@ -163,6 +179,7 @@ mod processor {
     }
 
     impl OutboxProcessor {
+        #[allow(clippy::must_use_candidate)]
         pub fn new(
             outbox: Arc<Outbox>,
             dispatcher: Arc<EventDispatcher>,

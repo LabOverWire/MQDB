@@ -8,6 +8,7 @@ pub struct MemoryBackend {
 }
 
 impl MemoryBackend {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(BTreeMap::new())),

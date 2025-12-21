@@ -27,6 +27,7 @@ impl Storage {
         })
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn memory() -> Self {
         Self {
             backend: Arc::new(MemoryBackend::new()),
@@ -57,6 +58,7 @@ impl Storage {
         self.backend.range_scan(start, end)
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn batch(&self) -> BatchWriter {
         BatchWriter {
             inner: self.backend.batch(),

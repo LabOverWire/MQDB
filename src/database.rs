@@ -44,16 +44,22 @@ pub struct Database {
 }
 
 impl Database {
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = DatabaseConfig::new(path.as_ref().to_path_buf());
         Self::open_with_config(config).await
     }
 
+    /// # Errors
+    /// Returns an error if the database cannot be opened or initialized.
     pub async fn open_with_config(config: DatabaseConfig) -> Result<Self> {
         let storage = Arc::new(Storage::open(&config.path, config.durability.clone())?);
         Self::init_with_storage(storage, config).await
     }
 
+    /// # Errors
+    /// Returns an error if initialization fails.
     pub async fn open_with_backend(
         backend: Arc<dyn StorageBackend>,
         config: DatabaseConfig,
@@ -174,6 +180,8 @@ impl Database {
         })
     }
 
+    /// # Errors
+    /// Returns an error if validation or persistence fails.
     pub async fn create(&self, entity_name: String, mut data: Value) -> Result<Value> {
         let schema_registry = self.schema_registry.read().await;
         schema_registry.apply_defaults(&entity_name, &mut data)?;
@@ -224,6 +232,8 @@ impl Database {
         Ok(entity.to_json())
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or reading fails.
     pub async fn read(
         &self,
         entity_name: String,
@@ -275,9 +285,9 @@ impl Database {
             let registry = self.relationship_registry.read().await;
 
             for include_field in includes {
-                if let Some(rel) = registry.get(entity_name, include_field) {
-                    if let Some(id_value) = entity.get(&rel.field_suffix) {
-                        if let Some(id_str) = id_value.as_str() {
+                if let Some(rel) = registry.get(entity_name, include_field)
+                    && let Some(id_value) = entity.get(&rel.field_suffix)
+                        && let Some(id_str) = id_value.as_str() {
                             match self
                                 .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
                                 .await
@@ -297,8 +307,6 @@ impl Database {
                                 Err(e) => return Err(e),
                             }
                         }
-                    }
-                }
             }
 
             Ok(())
@@ -314,11 +322,10 @@ impl Database {
             }
 
             for field in fields {
-                if field != "id" {
-                    if let Some(value) = obj.get(field) {
+                if field != "id"
+                    && let Some(value) = obj.get(field) {
                         projected.insert(field.clone(), value.clone());
                     }
-                }
             }
             Value::Object(projected)
         } else {
@@ -326,6 +333,8 @@ impl Database {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or update fails.
     pub async fn update(&self, entity_name: String, id: String, fields: Value) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
@@ -380,6 +389,8 @@ impl Database {
         Ok(updated_entity.to_json())
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or deletion fails.
     pub async fn delete(&self, entity_name: String, id: String) -> Result<()> {
         use crate::constraint::DeleteOperation;
 
@@ -472,6 +483,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if listing entities fails.
     pub async fn list(
         &self,
         entity_name: String,
@@ -587,6 +600,8 @@ impl Database {
         Ok(paginated_results)
     }
 
+    /// # Errors
+    /// Returns an error if creating the cursor fails.
     pub async fn cursor(
         &self,
         entity_name: String,
@@ -656,6 +671,8 @@ impl Database {
         true
     }
 
+    /// # Errors
+    /// Returns an error if registration fails or limit is reached.
     pub async fn subscribe(&self, pattern: String, entity: Option<String>) -> Result<String> {
         if let Some(max_subs) = self.config.max_subscriptions {
             let current_count = self.registry.count().await;
@@ -674,6 +691,8 @@ impl Database {
         Ok(sub_id)
     }
 
+    /// # Errors
+    /// Returns an error if registration fails or limit is reached.
     pub async fn subscribe_shared(
         &self,
         pattern: String,
@@ -738,9 +757,11 @@ impl Database {
         })
     }
 
+    /// # Errors
+    /// Returns an error if unregistering fails.
     pub async fn unsubscribe(&self, sub_id: &str) -> Result<()> {
-        if let Some(sub) = self.registry.get(sub_id).await {
-            if let Some(group) = &sub.share_group {
+        if let Some(sub) = self.registry.get(sub_id).await
+            && let Some(group) = &sub.share_group {
                 let mut groups = self.consumer_groups.write().await;
                 if let Some(cg) = groups.get_mut(group) {
                     cg.remove_member(sub_id);
@@ -749,13 +770,14 @@ impl Database {
                     }
                 }
             }
-        }
 
         self.registry.unregister(sub_id).await?;
         self.dispatcher.remove_listener(sub_id).await;
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the subscription is not found.
     pub async fn heartbeat(&self, sub_id: &str) -> Result<()> {
         let sub = self.registry.get(sub_id).await.ok_or_else(|| Error::NotFound {
             entity: "subscription".into(),
@@ -771,14 +793,17 @@ impl Database {
         Ok(())
     }
 
+    #[must_use]
     pub fn event_receiver(&self) -> tokio::sync::broadcast::Receiver<ChangeEvent> {
         self.dispatcher.subscribe()
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.config.path
     }
 
+    #[must_use]
     pub fn num_partitions(&self) -> u8 {
         self.config.shared_subscription.num_partitions
     }
@@ -809,6 +834,8 @@ impl Database {
         tracing::info!("database shutdown signal sent");
     }
 
+    /// # Errors
+    /// Returns an error if the backup fails.
     pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
         self.storage.flush()?;
 
@@ -872,6 +899,8 @@ impl Database {
         manager.get_constraints(entity).to_vec()
     }
 
+    /// # Errors
+    /// Returns an error if persisting the schema fails.
     pub async fn add_schema(&self, schema: Schema) -> Result<()> {
         let mut batch = self.storage.batch();
 
@@ -887,6 +916,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
     pub async fn add_unique_constraint(
         &self,
         entity: String,
@@ -912,6 +943,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
         use crate::constraint::{Constraint, NotNullConstraint};
 
@@ -931,6 +964,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
     pub async fn add_foreign_key(
         &self,
         source_entity: String,
@@ -963,6 +998,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the backup fails.
     pub async fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs;
         use std::io;
@@ -1005,6 +1042,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the backup fails.
     pub async fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
@@ -1056,6 +1095,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the restore fails.
     pub async fn restore_logical<P: AsRef<Path>>(&self, source: P) -> Result<usize> {
         use std::fs::File;
         use std::io::{BufRead, BufReader};
@@ -1166,11 +1207,9 @@ async fn ttl_cleanup_task(
                 .data
                 .get("_expires_at")
                 .and_then(|v| v.as_u64())
-            {
-                if expires_at <= now {
+                && expires_at <= now {
                     expired_entities.push((key, entity));
                 }
-            }
         }
 
         if expired_entities.is_empty() {
@@ -1232,23 +1271,19 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    
 
     #[test]
     fn test_glob_match() {
-        let filter = Filter::new("test".into(), FilterOp::Like, json!("*li*"));
+        assert!(Filter::glob_match("Alice", "*li*"));
+        assert!(Filter::glob_match("Charlie", "*li*"));
+        assert!(!Filter::glob_match("Bob", "*li*"));
+        assert!(!Filter::glob_match("David", "*li*"));
 
-        assert!(filter.glob_match("Alice", "*li*"));
-        assert!(filter.glob_match("Charlie", "*li*"));
-        assert!(!filter.glob_match("Bob", "*li*"));
-        assert!(!filter.glob_match("David", "*li*"));
+        assert!(Filter::glob_match("test@example.com", "*@example.com"));
+        assert!(Filter::glob_match("a@example.com", "*@example.com"));
 
-        let filter2 = Filter::new("test".into(), FilterOp::Like, json!("*@example.com"));
-        assert!(filter2.glob_match("test@example.com", "*@example.com"));
-        assert!(filter2.glob_match("a@example.com", "*@example.com"));
-
-        let filter3 = Filter::new("test".into(), FilterOp::Like, json!("*lie"));
-        assert!(filter3.glob_match("Charlie", "*lie"));
-        assert!(!filter3.glob_match("Alice", "*lie"));
+        assert!(Filter::glob_match("Charlie", "*lie"));
+        assert!(!Filter::glob_match("Alice", "*lie"));
     }
 }

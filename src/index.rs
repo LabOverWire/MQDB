@@ -10,6 +10,7 @@ pub struct IndexDefinition {
 }
 
 impl IndexDefinition {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(entity: String, fields: Vec<String>) -> Self {
         Self { entity, fields }
     }
@@ -20,6 +21,7 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             indexes: HashMap::new(),
@@ -30,6 +32,7 @@ impl IndexManager {
         self.indexes.insert(definition.entity.clone(), definition);
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get_indexed_fields(&self, entity: &str) -> Option<&Vec<String>> {
         self.indexes.get(entity).map(|idx| &idx.fields)
     }
@@ -79,11 +82,10 @@ impl IndexManager {
 
         let mut ids = Vec::new();
         for (key, _) in items {
-            if let Some(id_start) = key.iter().rposition(|&b| b == b'/') {
-                if let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec()) {
+            if let Some(id_start) = key.iter().rposition(|&b| b == b'/')
+                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec()) {
                     ids.push(id);
                 }
-            }
         }
 
         Ok(ids)

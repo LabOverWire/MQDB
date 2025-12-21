@@ -22,6 +22,7 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(id: String, pattern: String, entity: Option<String>) -> Self {
         Self {
             id,
@@ -32,28 +33,31 @@ impl Subscription {
         }
     }
 
+    #[must_use]
     pub fn with_share_group(mut self, group: String, mode: SubscriptionMode) -> Self {
         self.share_group = Some(group);
         self.mode = mode;
         self
     }
 
+    #[must_use]
     pub fn matches(&self, event: &ChangeEvent) -> bool {
-        if let Some(ref entity) = self.entity {
-            if entity != &event.entity {
+        if let Some(ref entity) = self.entity
+            && entity != &event.entity {
                 return false;
             }
-        }
 
         match_pattern(&self.pattern, &event.entity, &event.id)
     }
 }
 
+#[must_use]
 pub fn match_pattern(pattern: &str, entity: &str, id: &str) -> bool {
     let path = format!("{entity}/{id}");
     match_wildcard(pattern, &path)
 }
 
+#[must_use]
 pub fn match_wildcard(pattern: &str, path: &str) -> bool {
     let pattern_parts: Vec<&str> = pattern.split('/').collect();
     let path_parts: Vec<&str> = path.split('/').collect();
@@ -108,6 +112,7 @@ mod registry {
     }
 
     impl SubscriptionRegistry {
+        #[allow(clippy::must_use_candidate)]
         pub fn new(storage: Arc<Storage>) -> Self {
             Self {
                 subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -115,6 +120,8 @@ mod registry {
             }
         }
 
+        /// # Errors
+        /// Returns an error if reading or deserializing subscriptions fails.
         pub async fn load(&self) -> Result<()> {
             let prefix = b"sub/";
             let items = self.storage.prefix_scan(prefix)?;
@@ -129,6 +136,8 @@ mod registry {
             Ok(())
         }
 
+        /// # Errors
+        /// Returns an error if storing the subscription fails.
         pub async fn register(&self, subscription: Subscription) -> Result<()> {
             let key = keys::encode_subscription_key(&subscription.id);
             let value = serde_json::to_vec(&subscription)?;
@@ -141,6 +150,8 @@ mod registry {
             Ok(())
         }
 
+        /// # Errors
+        /// Returns an error if removing the subscription fails.
         pub async fn unregister(&self, sub_id: &str) -> Result<()> {
             let key = keys::encode_subscription_key(sub_id);
             self.storage.remove(&key)?;

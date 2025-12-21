@@ -668,11 +668,10 @@ async fn cmd_backup_create(
     let response = execute_request(conn, topic, payload).await?;
 
     if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-        if let Some(data) = response.get("data") {
-            if let Some(msg) = data.get("message").and_then(|v| v.as_str()) {
+        if let Some(data) = response.get("data")
+            && let Some(msg) = data.get("message").and_then(|v| v.as_str()) {
                 println!("{msg}");
             }
-        }
     } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
         eprintln!("Error: {error}");
     }
@@ -840,7 +839,7 @@ fn output_response(response: Value, format: OutputFormat) {
                 if let Some(arr) = data.as_array() {
                     output_table(arr);
                 } else if data.is_object() {
-                    output_table(&[data.clone()]);
+                    output_table(std::slice::from_ref(data));
                 } else {
                     println!("{}", serde_json::to_string_pretty(&response).unwrap());
                 }
@@ -853,7 +852,7 @@ fn output_response(response: Value, format: OutputFormat) {
                 if let Some(arr) = data.as_array() {
                     output_csv(arr);
                 } else if data.is_object() {
-                    output_csv(&[data.clone()]);
+                    output_csv(std::slice::from_ref(data));
                 } else {
                     println!("{}", serde_json::to_string_pretty(&response).unwrap());
                 }
@@ -968,11 +967,10 @@ async fn cmd_subscribe(
         let sub_id = data.get("id").and_then(|v| v.as_str()).unwrap_or_default();
 
         eprintln!("Subscription ID: {sub_id}");
-        if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array()) {
-            if !partitions.is_empty() {
+        if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array())
+            && !partitions.is_empty() {
                 eprintln!("Assigned partitions: {partitions:?}");
             }
-        }
 
         let event_pattern = if let Some(ref ent) = entity {
             format!("$DB/{ent}/events/#")

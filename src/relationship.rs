@@ -9,6 +9,7 @@ pub struct Relationship {
 }
 
 impl Relationship {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(source_entity: String, field: String, target_entity: String) -> Self {
         let field_suffix = if field.ends_with("_id") {
             field.clone()
@@ -31,6 +32,7 @@ pub struct RelationshipRegistry {
 }
 
 impl RelationshipRegistry {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             relationships: HashMap::new(),
@@ -45,6 +47,7 @@ impl RelationshipRegistry {
             .push(relationship);
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get(&self, entity: &str, field: &str) -> Option<&Relationship> {
         self.relationships
             .get(entity)?
@@ -52,6 +55,7 @@ impl RelationshipRegistry {
             .find(|r| r.field == field)
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get_all(&self, entity: &str) -> Option<&Vec<Relationship>> {
         self.relationships.get(entity)
     }

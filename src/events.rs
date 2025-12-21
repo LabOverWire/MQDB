@@ -33,23 +33,28 @@ impl ChangeEvent {
         }
     }
 
+    #[must_use]
     pub fn with_operation_id(mut self, operation_id: String) -> Self {
         self.operation_id = Some(operation_id);
         self
     }
 
+    #[must_use]
     pub fn create(entity: String, id: String, data: serde_json::Value) -> Self {
         Self::new(entity, id, Operation::Create, Some(data))
     }
 
+    #[must_use]
     pub fn update(entity: String, id: String, data: serde_json::Value) -> Self {
         Self::new(entity, id, Operation::Update, Some(data))
     }
 
+    #[must_use]
     pub fn delete(entity: String, id: String) -> Self {
         Self::new(entity, id, Operation::Delete, None)
     }
 
+    #[must_use]
     pub fn partition(&self, num_partitions: u8) -> u8 {
         if num_partitions == 0 {
             return 0;

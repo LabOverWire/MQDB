@@ -44,6 +44,7 @@ type ListOptions = (
     Option<Vec<String>>,
 );
 
+#[allow(clippy::must_use_candidate)]
 pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
     if let Some(rest) = topic.strip_prefix("$DB/_sub/") {
         let parts: Vec<&str> = rest.split('/').collect();
@@ -85,6 +86,7 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
     }
 }
 
+#[allow(clippy::must_use_candidate)]
 pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     let parts: Vec<&str> = topic.strip_prefix("$DB/")?.split('/').collect();
 
@@ -233,6 +235,7 @@ pub struct MqdbAgent {
 }
 
 impl MqdbAgent {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         let backup_dir = db.path().join("backups");
@@ -249,32 +252,38 @@ impl MqdbAgent {
         }
     }
 
+    #[must_use]
     pub fn with_bind_address(mut self, addr: SocketAddr) -> Self {
         self.bind_address = addr;
         self
     }
 
+    #[must_use]
     pub fn with_password_file(mut self, path: PathBuf) -> Self {
         self.password_file = Some(path);
         self
     }
 
+    #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
         self.acl_file = Some(path);
         self
     }
 
+    #[must_use]
     pub fn with_anonymous(mut self, allow: bool) -> Self {
         self.allow_anonymous = allow;
         self
     }
 
+    #[must_use]
     pub fn with_service_credentials(mut self, username: String, password: String) -> Self {
         self.service_username = Some(username);
         self.service_password = Some(password);
         self
     }
 
+    #[must_use]
     pub fn with_backup_dir(mut self, path: PathBuf) -> Self {
         self.backup_dir = path;
         self

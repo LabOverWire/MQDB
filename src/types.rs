@@ -15,14 +15,17 @@ pub struct SortOrder {
 }
 
 impl SortOrder {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(field: String, direction: SortDirection) -> Self {
         Self { field, direction }
     }
 
+    #[must_use]
     pub fn asc(field: String) -> Self {
         Self::new(field, SortDirection::Asc)
     }
 
+    #[must_use]
     pub fn desc(field: String) -> Self {
         Self::new(field, SortDirection::Desc)
     }
@@ -35,6 +38,7 @@ pub struct Pagination {
 }
 
 impl Pagination {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(limit: usize, offset: usize) -> Self {
         Self { limit, offset }
     }
@@ -63,26 +67,28 @@ pub struct Filter {
 }
 
 impl Filter {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(field: String, op: FilterOp, value: Value) -> Self {
         Self { field, op, value }
     }
 
+    #[must_use]
     pub fn matches(&self, field_value: &Value) -> bool {
         match self.op {
             FilterOp::Eq => field_value == &self.value,
             FilterOp::Neq => field_value != &self.value,
             FilterOp::Lt => {
-                self.compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Less)
+                Self::compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Less)
             }
             FilterOp::Lte => matches!(
-                self.compare_values(field_value, &self.value),
+                Self::compare_values(field_value, &self.value),
                 Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
             ),
             FilterOp::Gt => {
-                self.compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Greater)
+                Self::compare_values(field_value, &self.value) == Some(std::cmp::Ordering::Greater)
             }
             FilterOp::Gte => matches!(
-                self.compare_values(field_value, &self.value),
+                Self::compare_values(field_value, &self.value),
                 Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
             ),
             FilterOp::In => {
@@ -96,7 +102,7 @@ impl Filter {
                 if let (Value::String(field_str), Value::String(pattern)) =
                     (field_value, &self.value)
                 {
-                    self.glob_match(field_str, pattern)
+                    Self::glob_match(field_str, pattern)
                 } else {
                     false
                 }
@@ -106,7 +112,7 @@ impl Filter {
         }
     }
 
-    fn compare_values(&self, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         match (a, b) {
             (Value::Number(a), Value::Number(b)) => {
                 let a_f64 = a.as_f64()?;
@@ -118,7 +124,8 @@ impl Filter {
         }
     }
 
-    pub fn glob_match(&self, text: &str, pattern: &str) -> bool {
+    #[must_use]
+    pub fn glob_match(text: &str, pattern: &str) -> bool {
         if pattern == "*" {
             return true;
         }

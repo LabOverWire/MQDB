@@ -31,7 +31,7 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("spot_number", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_type", FieldType::String).required())
         .add_field(FieldDefinition::new("location", FieldType::String).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("available")))
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("available")))
         .add_field(FieldDefinition::new("gate_device_id", FieldType::String).required());
 
     let vehicles_schema = Schema::new("vehicles")
@@ -44,21 +44,21 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("vehicle_id", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_id", FieldType::String).required())
         .add_field(FieldDefinition::new("reserved_at", FieldType::Number).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("pending")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("pending")));
 
     let sessions_schema = Schema::new("parking_sessions")
         .add_field(FieldDefinition::new("vehicle_id", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_id", FieldType::String).required())
         .add_field(FieldDefinition::new("entry_time", FieldType::Number).required())
         .add_field(
-            FieldDefinition::new("session_status", FieldType::String).default(json!("in_progress")),
+            FieldDefinition::new("session_status", FieldType::String).with_default(json!("in_progress")),
         );
 
     let payments_schema = Schema::new("payments")
         .add_field(FieldDefinition::new("session_id", FieldType::String).required())
         .add_field(FieldDefinition::new("amount", FieldType::Number).required())
         .add_field(
-            FieldDefinition::new("payment_status", FieldType::String).default(json!("pending")),
+            FieldDefinition::new("payment_status", FieldType::String).with_default(json!("pending")),
         )
         .add_field(FieldDefinition::new("receipt_code", FieldType::String).required());
 

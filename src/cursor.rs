@@ -15,6 +15,7 @@ pub struct Query {
 }
 
 impl Query {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             filters: Vec::new(),
@@ -24,21 +25,25 @@ impl Query {
         }
     }
 
+    #[must_use]
     pub fn with_filters(mut self, filters: Vec<Filter>) -> Self {
         self.filters = filters;
         self
     }
 
+    #[must_use]
     pub fn with_sort(mut self, sort: Vec<SortOrder>) -> Self {
         self.sort = sort;
         self
     }
 
+    #[must_use]
     pub fn with_includes(mut self, includes: Vec<String>) -> Self {
         self.includes = includes;
         self
     }
 
+    #[must_use]
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
         self
@@ -92,6 +97,8 @@ impl Cursor {
         })
     }
 
+    /// # Errors
+    /// Returns an error if reading or deserializing entities fails.
     pub async fn next(&mut self) -> Result<Option<Value>> {
         if !self.sort_orders.is_empty() {
             if self.sorted_buffer.is_none() {
@@ -103,9 +110,8 @@ impl Cursor {
                     let result = sorted[self.sorted_position].clone();
                     self.sorted_position += 1;
                     return Ok(Some(result));
-                } else {
-                    return Ok(None);
                 }
+                return Ok(None);
             }
         }
 
@@ -122,6 +128,8 @@ impl Cursor {
         Ok(self.buffer.pop_front())
     }
 
+    /// # Errors
+    /// Returns an error if reading or deserializing entities fails.
     pub async fn next_batch(&mut self, size: usize) -> Result<Vec<Value>> {
         let mut batch = Vec::with_capacity(size);
 

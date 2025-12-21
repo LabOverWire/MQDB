@@ -49,6 +49,7 @@ pub struct ConsumerGroup {
 }
 
 impl ConsumerGroup {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(name: String, num_partitions: u8) -> Self {
         Self {
             name,
@@ -96,6 +97,7 @@ impl ConsumerGroup {
         }
     }
 
+    #[must_use]
     pub fn get_member(&self, consumer_id: &str) -> Option<&ConsumerMember> {
         self.members.get(consumer_id)
     }
@@ -104,24 +106,26 @@ impl ConsumerGroup {
         self.members.values()
     }
 
+    #[must_use]
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
 
+    #[must_use]
     pub fn get_partition_owner(&self, partition: u8) -> Option<&str> {
-        self.assignments.get(&partition).map(|s| s.as_str())
+        self.assignments.get(&partition).map(String::as_str)
     }
 
     pub fn rebalance(&mut self) {
         self.assignments.clear();
 
-        let member_ids: Vec<String> = {
+        let sorted_ids: Vec<String> = {
             let mut ids: Vec<_> = self.members.keys().cloned().collect();
             ids.sort();
             ids
         };
 
-        if member_ids.is_empty() {
+        if sorted_ids.is_empty() {
             for member in self.members.values_mut() {
                 member.assigned_partitions.clear();
             }
@@ -133,8 +137,8 @@ impl ConsumerGroup {
         }
 
         for partition in 0..self.num_partitions {
-            let member_idx = partition as usize % member_ids.len();
-            let member_id = &member_ids[member_idx];
+            let idx = partition as usize % sorted_ids.len();
+            let member_id = &sorted_ids[idx];
 
             self.assignments.insert(partition, member_id.clone());
 

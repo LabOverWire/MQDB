@@ -1201,6 +1201,7 @@ dependencies = [
 name = "mqdb"
 version = "0.1.0"
 dependencies = [
+ "bebytes",
  "clap",
  "comfy-table",
  "crc32fast",

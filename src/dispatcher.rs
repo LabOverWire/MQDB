@@ -36,6 +36,8 @@ impl EventDispatcher {
         }
     }
 
+    /// # Errors
+    /// Returns an error if dispatching fails.
     pub async fn dispatch(&self, event: ChangeEvent) -> Result<()> {
         let matching = self.registry.find_matching(&event).await;
 
@@ -57,27 +59,25 @@ impl EventDispatcher {
             }
         }
 
-        if !broadcast_subs.is_empty() {
-            if let Err(e) = self.sender.send(event.clone()) {
+        if !broadcast_subs.is_empty()
+            && let Err(e) = self.sender.send(event.clone()) {
                 tracing::warn!(
                     "failed to dispatch event to broadcast channel: {} (channel full or no receivers)",
                     e
                 );
             }
-        }
 
         let listeners = self.listeners.read().await;
 
         for sub in &broadcast_subs {
-            if let Some(listener) = listeners.iter().find(|l| l.subscription.id == sub.id) {
-                if let Err(e) = listener.sender.send(event.clone()) {
+            if let Some(listener) = listeners.iter().find(|l| l.subscription.id == sub.id)
+                && let Err(e) = listener.sender.send(event.clone()) {
                     tracing::warn!(
                         "failed to dispatch event to listener {}: {} (channel full or no receivers)",
                         listener.subscription.id,
                         e
                     );
                 }
-            }
         }
 
         for (group_name, subs) in share_groups {
@@ -92,17 +92,15 @@ impl EventDispatcher {
                 SubscriptionMode::Broadcast => continue,
             };
 
-            if let Some(target_id) = target_sub_id {
-                if let Some(listener) = listeners.iter().find(|l| l.subscription.id == target_id) {
-                    if let Err(e) = listener.sender.send(event.clone()) {
+            if let Some(target_id) = target_sub_id
+                && let Some(listener) = listeners.iter().find(|l| l.subscription.id == target_id)
+                    && let Err(e) = listener.sender.send(event.clone()) {
                         tracing::warn!(
                             "failed to dispatch event to shared listener {}: {}",
                             target_id,
                             e
                         );
                     }
-                }
-            }
         }
 
         Ok(())
@@ -132,6 +130,7 @@ impl EventDispatcher {
             .map(|s| s.to_string())
     }
 
+    #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<ChangeEvent> {
         self.sender.subscribe()
     }
@@ -162,6 +161,7 @@ pub struct EventListener {
 }
 
 impl EventListener {
+    #[must_use]
     pub fn receiver(&self) -> broadcast::Receiver<ChangeEvent> {
         self.sender.subscribe()
     }

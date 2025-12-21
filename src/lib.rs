@@ -1,4 +1,5 @@
 pub mod checksum;
+pub mod cluster;
 pub mod config;
 pub mod constraint;
 pub mod entity;
@@ -60,3 +61,5 @@ pub use subscription::SubscriptionRegistry;
 #[cfg(feature = "native")]
 pub use database::SubscriptionResult;
 pub use transport::{ErrorCode, ErrorResponse, Request, Response};
+
+pub use cluster::{Epoch, NodeId, PartitionId, PartitionAssignment, PartitionMap, PartitionRole, NUM_PARTITIONS};

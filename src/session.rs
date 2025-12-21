@@ -125,6 +125,7 @@ impl EventRouter {
         }
     }
 
+    #[must_use]
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
         self
@@ -156,11 +157,10 @@ impl EventRouter {
         let sessions = self.sessions.sessions.read().await;
 
         for (client_id, session) in sessions.iter() {
-            if self.event_matches_subscriptions(&event, &session.subscriptions) {
-                if let Some(sender) = senders.get(client_id) {
+            if self.event_matches_subscriptions(&event, &session.subscriptions)
+                && let Some(sender) = senders.get(client_id) {
                     let _ = sender.try_send(event.clone());
                 }
-            }
         }
     }
 
@@ -183,25 +183,25 @@ impl EventRouter {
         let path_parts: Vec<&str> = path.split('/').collect();
         let pattern_parts: Vec<&str> = pattern.split('/').collect();
 
-        let mut pi = 0;
-        let mut pati = 0;
+        let mut path_idx = 0;
+        let mut pat_idx = 0;
 
-        while pi < path_parts.len() && pati < pattern_parts.len() {
-            match pattern_parts[pati] {
+        while path_idx < path_parts.len() && pat_idx < pattern_parts.len() {
+            match pattern_parts[pat_idx] {
                 "#" => return true,
                 "+" => {
-                    pi += 1;
-                    pati += 1;
+                    path_idx += 1;
+                    pat_idx += 1;
                 }
-                part if part == path_parts[pi] => {
-                    pi += 1;
-                    pati += 1;
+                part if part == path_parts[path_idx] => {
+                    path_idx += 1;
+                    pat_idx += 1;
                 }
                 _ => return false,
             }
         }
 
-        pi == path_parts.len() && pati == pattern_parts.len()
+        path_idx == path_parts.len() && pat_idx == pattern_parts.len()
     }
 
     pub fn database(&self) -> &Database {

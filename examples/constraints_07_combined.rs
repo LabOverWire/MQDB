@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("email", FieldType::String).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(user_schema).await?;
     db.add_unique_constraint("users".into(), vec!["email".into()])

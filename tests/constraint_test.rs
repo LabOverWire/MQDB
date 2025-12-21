@@ -477,7 +477,7 @@ async fn test_schema_default_values() {
 
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String))
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
 
@@ -592,7 +592,7 @@ async fn test_combined_schema_and_constraints() {
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("email", FieldType::String).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
     db.add_unique_constraint("users".into(), vec!["email".into()])

@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("age", FieldType::Number))
         .add_field(FieldDefinition::new("active", FieldType::Boolean))
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await?;
 
