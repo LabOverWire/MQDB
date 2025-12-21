@@ -1,5 +1,7 @@
 mod epoch;
 mod heartbeat;
+#[cfg(feature = "native")]
+mod mqtt_transport;
 mod node;
 mod node_controller;
 mod partition;
@@ -21,3 +23,5 @@ pub use protocol::{
 pub use quorum::{PendingWrites, QuorumResult, QuorumTracker};
 pub use replication::{ReplicaRole, ReplicaState, ReplicationError};
 pub use transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError};
+#[cfg(feature = "native")]
+pub use mqtt_transport::MqttTransport;
