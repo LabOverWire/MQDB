@@ -3,10 +3,10 @@ use crate::error::Result;
 use crate::events::ChangeEvent;
 use crate::subscription::{Subscription, SubscriptionMode, SubscriptionRegistry};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
+use tokio::sync::broadcast;
 
 pub struct EventDispatcher {
     sender: broadcast::Sender<ChangeEvent>,
@@ -60,47 +60,46 @@ impl EventDispatcher {
         }
 
         if !broadcast_subs.is_empty()
-            && let Err(e) = self.sender.send(event.clone()) {
-                tracing::warn!(
-                    "failed to dispatch event to broadcast channel: {} (channel full or no receivers)",
-                    e
-                );
-            }
+            && let Err(e) = self.sender.send(event.clone())
+        {
+            tracing::warn!(
+                "failed to dispatch event to broadcast channel: {} (channel full or no receivers)",
+                e
+            );
+        }
 
         let listeners = self.listeners.read().await;
 
         for sub in &broadcast_subs {
             if let Some(listener) = listeners.iter().find(|l| l.subscription.id == sub.id)
-                && let Err(e) = listener.sender.send(event.clone()) {
-                    tracing::warn!(
-                        "failed to dispatch event to listener {}: {} (channel full or no receivers)",
-                        listener.subscription.id,
-                        e
-                    );
-                }
+                && let Err(e) = listener.sender.send(event.clone())
+            {
+                tracing::warn!(
+                    "failed to dispatch event to listener {}: {} (channel full or no receivers)",
+                    listener.subscription.id,
+                    e
+                );
+            }
         }
 
         for (group_name, subs) in share_groups {
             let mode = subs.first().map(|s| s.mode).unwrap_or_default();
             let target_sub_id = match mode {
-                SubscriptionMode::LoadBalanced => {
-                    self.select_round_robin(&group_name, &subs).await
-                }
-                SubscriptionMode::Ordered => {
-                    self.select_by_partition(&group_name, &event).await
-                }
+                SubscriptionMode::LoadBalanced => self.select_round_robin(&group_name, &subs).await,
+                SubscriptionMode::Ordered => self.select_by_partition(&group_name, &event).await,
                 SubscriptionMode::Broadcast => continue,
             };
 
             if let Some(target_id) = target_sub_id
                 && let Some(listener) = listeners.iter().find(|l| l.subscription.id == target_id)
-                    && let Err(e) = listener.sender.send(event.clone()) {
-                        tracing::warn!(
-                            "failed to dispatch event to shared listener {}: {}",
-                            target_id,
-                            e
-                        );
-                    }
+                && let Err(e) = listener.sender.send(event.clone())
+            {
+                tracing::warn!(
+                    "failed to dispatch event to shared listener {}: {}",
+                    target_id,
+                    e
+                );
+            }
         }
 
         Ok(())

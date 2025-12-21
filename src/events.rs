@@ -22,7 +22,12 @@ pub struct ChangeEvent {
 }
 
 impl ChangeEvent {
-    pub fn new(entity: String, id: String, operation: Operation, data: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        entity: String,
+        id: String,
+        operation: Operation,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             sequence: SEQUENCE.fetch_add(1, Ordering::SeqCst),
             entity,

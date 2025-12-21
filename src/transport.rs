@@ -194,23 +194,21 @@ mod execute {
                     entity,
                     share_group,
                     mode,
-                } => {
-                    match (share_group, mode) {
-                        (Some(group), Some(m)) => {
-                            match self.subscribe_shared(pattern, entity, group, m).await {
-                                Ok(result) => Response::ok(serde_json::json!({
-                                    "id": result.id,
-                                    "assigned_partitions": result.assigned_partitions
-                                })),
-                                Err(e) => e.into(),
-                            }
-                        }
-                        _ => match self.subscribe(pattern, entity).await {
-                            Ok(id) => Response::ok(value_from_string(id)),
+                } => match (share_group, mode) {
+                    (Some(group), Some(m)) => {
+                        match self.subscribe_shared(pattern, entity, group, m).await {
+                            Ok(result) => Response::ok(serde_json::json!({
+                                "id": result.id,
+                                "assigned_partitions": result.assigned_partitions
+                            })),
                             Err(e) => e.into(),
-                        },
+                        }
                     }
-                }
+                    _ => match self.subscribe(pattern, entity).await {
+                        Ok(id) => Response::ok(value_from_string(id)),
+                        Err(e) => e.into(),
+                    },
+                },
                 Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
                     Ok(()) => Response::ok(value_from_unit(())),
                     Err(e) => e.into(),

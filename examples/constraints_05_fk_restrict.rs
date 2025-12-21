@@ -33,14 +33,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => println!("✓ Deletion prevented: {}\n", e),
     }
 
-    let users_after = db.list("users".into(), vec![], vec![], None, vec![], None).await?;
-    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
+    let users_after = db
+        .list("users".into(), vec![], vec![], None, vec![], None)
+        .await?;
+    let posts_after = db
+        .list("posts".into(), vec![], vec![], None, vec![], None)
+        .await?;
     println!("After failed deletion:");
     println!("  Users: {} (still exists)", users_after.len());
     println!("  Posts: {} (still exists)\n", posts_after.len());
 
     println!("Deleting the post first...");
-    let posts = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
+    let posts = db
+        .list("posts".into(), vec![], vec![], None, vec![], None)
+        .await?;
     let post_id = posts[0]["id"].as_str().unwrap();
     db.delete("posts".into(), post_id.to_string()).await?;
     println!("✓ Post deleted\n");

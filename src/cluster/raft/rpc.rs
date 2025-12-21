@@ -74,8 +74,21 @@ impl AppendEntriesRequest {
         }
     }
 
-    pub fn heartbeat(term: u64, leader_id: u16, prev_log_index: u64, prev_log_term: u64, leader_commit: u64) -> Self {
-        Self::create(term, leader_id, prev_log_index, prev_log_term, Vec::new(), leader_commit)
+    pub fn heartbeat(
+        term: u64,
+        leader_id: u16,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        leader_commit: u64,
+    ) -> Self {
+        Self::create(
+            term,
+            leader_id,
+            prev_log_index,
+            prev_log_term,
+            Vec::new(),
+            leader_commit,
+        )
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -109,14 +122,18 @@ impl AppendEntriesRequest {
                 return None;
             }
             let entry_len = u32::from_be_bytes([
-                bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
             ]) as usize;
             offset += 4;
 
             if offset + entry_len > bytes.len() {
                 return None;
             }
-            let (entry, _) = LogEntry::try_from_be_bytes(&bytes[offset..offset + entry_len]).ok()?;
+            let (entry, _) =
+                LogEntry::try_from_be_bytes(&bytes[offset..offset + entry_len]).ok()?;
             entries.push(entry);
             offset += entry_len;
         }

@@ -111,11 +111,12 @@ impl Outbox {
     pub fn increment_retry(&self, operation_id: &str) -> Result<()> {
         let key = format!("_outbox/{operation_id}");
         if let Some(value) = self.storage.get(key.as_bytes())?
-            && let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value) {
-                stored.retry_count += 1;
-                let new_value = serde_json::to_vec(&stored).unwrap_or_default();
-                self.storage.insert(key.as_bytes(), &new_value)?;
-            }
+            && let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value)
+        {
+            stored.retry_count += 1;
+            let new_value = serde_json::to_vec(&stored).unwrap_or_default();
+            self.storage.insert(key.as_bytes(), &new_value)?;
+        }
         Ok(())
     }
 
@@ -233,7 +234,8 @@ mod processor {
 
                 let mut success = true;
                 for event in &entry.events {
-                    let event_with_op_id = event.clone().with_operation_id(entry.operation_id.clone());
+                    let event_with_op_id =
+                        event.clone().with_operation_id(entry.operation_id.clone());
                     if let Err(e) = self.dispatcher.dispatch(event_with_op_id).await {
                         tracing::warn!(
                             op_id = %entry.operation_id,

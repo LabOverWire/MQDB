@@ -100,8 +100,7 @@ impl HeartbeatManager {
         self.update_partition_map_from_heartbeat(from, heartbeat);
     }
 
-    fn update_partition_map_from_heartbeat(&mut self, _from: NodeId, _heartbeat: &Heartbeat) {
-    }
+    fn update_partition_map_from_heartbeat(&mut self, _from: NodeId, _heartbeat: &Heartbeat) {}
 
     pub fn check_timeouts(&mut self, now: u64) -> Vec<NodeId> {
         let mut dead_nodes = Vec::new();

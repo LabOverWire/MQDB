@@ -1,4 +1,4 @@
-use super::{Epoch, NodeId, PartitionId, NUM_PARTITIONS};
+use super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionRole {
@@ -163,11 +163,7 @@ mod tests {
     fn partition_assignment() {
         let mut map = PartitionMap::new();
 
-        let assignment = PartitionAssignment::new(
-            node(1),
-            vec![node(2), node(3)],
-            Epoch::new(1),
-        );
+        let assignment = PartitionAssignment::new(node(1), vec![node(2), node(3)], Epoch::new(1));
 
         map.set(partition(0), assignment);
 
@@ -181,11 +177,7 @@ mod tests {
     fn role_for_node() {
         let mut map = PartitionMap::new();
 
-        let assignment = PartitionAssignment::new(
-            node(1),
-            vec![node(2), node(3)],
-            Epoch::new(1),
-        );
+        let assignment = PartitionAssignment::new(node(1), vec![node(2), node(3)], Epoch::new(1));
         map.set(partition(0), assignment);
 
         assert_eq!(map.role_for(partition(0), node(1)), PartitionRole::Primary);
@@ -198,9 +190,18 @@ mod tests {
     fn partitions_for_node() {
         let mut map = PartitionMap::new();
 
-        map.set(partition(0), PartitionAssignment::new(node(1), vec![node(2)], Epoch::new(1)));
-        map.set(partition(1), PartitionAssignment::new(node(2), vec![node(1)], Epoch::new(1)));
-        map.set(partition(2), PartitionAssignment::new(node(1), vec![node(3)], Epoch::new(1)));
+        map.set(
+            partition(0),
+            PartitionAssignment::new(node(1), vec![node(2)], Epoch::new(1)),
+        );
+        map.set(
+            partition(1),
+            PartitionAssignment::new(node(2), vec![node(1)], Epoch::new(1)),
+        );
+        map.set(
+            partition(2),
+            PartitionAssignment::new(node(1), vec![node(3)], Epoch::new(1)),
+        );
 
         let node1_partitions = map.partitions_for_node(node(1));
         assert_eq!(node1_partitions.len(), 3);

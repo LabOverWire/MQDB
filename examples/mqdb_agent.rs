@@ -1,6 +1,6 @@
+use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{PublishOptions, PublishProperties};
-use mqdb::{Database, MqdbAgent};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -71,7 +71,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({"name": "Alice", "email": "alice@example.com", "age": 30});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
     if let Some(response) = response_rx.recv().await {
@@ -80,7 +84,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({"name": "Bob", "email": "bob@example.com", "age": 25});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
     if let Some(response) = response_rx.recv().await {
@@ -89,7 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({"name": "Charlie", "email": "charlie@example.com", "age": 35});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
     let charlie_id = if let Some(response) = response_rx.recv().await {
@@ -104,7 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({});
     client
-        .publish_with_options("$DB/users/list", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/list",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
     if let Some(response) = response_rx.recv().await {
@@ -154,7 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "filters": [{"field": "age", "op": "gt", "value": 28}]
     });
     client
-        .publish_with_options("$DB/users/list", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/list",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
     if let Some(response) = response_rx.recv().await {

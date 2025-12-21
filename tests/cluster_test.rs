@@ -117,8 +117,8 @@ fn simulation_network_partition() {
 #[test]
 fn simulation_scheduled_tasks() {
     use simulation::framework::SimulatedRuntime;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     let rt = SimulatedRuntime::new();
     let counter = Arc::new(AtomicU32::new(0));
@@ -141,8 +141,8 @@ fn simulation_scheduled_tasks() {
 
 #[test]
 fn two_node_replication() {
-    use simulation::framework::VirtualNetwork;
     use simulation::framework::VirtualClock;
+    use simulation::framework::VirtualNetwork;
     use simulation::transport::SimulatedTransport;
 
     let clock = VirtualClock::new();
@@ -191,10 +191,10 @@ fn two_node_replication() {
 
 #[test]
 fn heartbeat_detection() {
-    use simulation::framework::VirtualNetwork;
-    use simulation::framework::VirtualClock;
-    use simulation::transport::SimulatedTransport;
     use mqdb::cluster::NodeStatus;
+    use simulation::framework::VirtualClock;
+    use simulation::framework::VirtualNetwork;
+    use simulation::transport::SimulatedTransport;
 
     let clock = VirtualClock::new();
     let network = VirtualNetwork::new(clock.clone());
@@ -274,7 +274,9 @@ fn raft_leader_election_three_nodes() {
 
     let outputs = n1.handle_request_vote_response(node2, resp1);
 
-    let became_leader = outputs.iter().any(|o| matches!(o, RaftOutput::BecameLeader));
+    let became_leader = outputs
+        .iter()
+        .any(|o| matches!(o, RaftOutput::BecameLeader));
     assert!(became_leader);
     assert_eq!(n1.role(), RaftRole::Leader);
     assert_eq!(n1.leader_id(), Some(node1));
@@ -285,7 +287,7 @@ fn raft_leader_election_three_nodes() {
 
 #[test]
 fn raft_step_down_on_higher_term() {
-    use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole, AppendEntriesRequest};
+    use mqdb::cluster::raft::{AppendEntriesRequest, RaftConfig, RaftNode, RaftOutput, RaftRole};
 
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
@@ -309,7 +311,11 @@ fn raft_step_down_on_higher_term() {
     let (response, outputs) = n1.handle_append_entries(node2, request, 1000);
 
     assert!(response.is_success());
-    assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameFollower { .. })));
+    assert!(
+        outputs
+            .iter()
+            .any(|o| matches!(o, RaftOutput::BecameFollower { .. }))
+    );
     assert_eq!(n1.role(), RaftRole::Follower);
     assert_eq!(n1.current_term(), 5);
 }

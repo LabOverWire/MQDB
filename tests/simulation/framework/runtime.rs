@@ -1,7 +1,7 @@
 use super::clock::VirtualClock;
 use super::network::VirtualNetwork;
-use std::collections::BinaryHeap;
 use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
 
 pub type TaskId = u64;
@@ -28,7 +28,8 @@ impl PartialOrd for ScheduledTask {
 
 impl Ord for ScheduledTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        Reverse(self.wake_at).cmp(&Reverse(other.wake_at))
+        Reverse(self.wake_at)
+            .cmp(&Reverse(other.wake_at))
             .then_with(|| Reverse(self.id).cmp(&Reverse(other.id)))
     }
 }

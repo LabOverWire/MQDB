@@ -1,7 +1,7 @@
-use crate::types::{Filter, SortDirection, SortOrder};
 use crate::entity::Entity;
 use crate::error::Result;
 use crate::storage::Storage;
+use crate::types::{Filter, SortDirection, SortOrder};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -175,28 +175,36 @@ impl Cursor {
                 FilterOp::Neq => field_value != Some(&filter.value),
                 FilterOp::Lt => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_lt()).unwrap_or(false)
+                        Self::compare_values(a, b)
+                            .map(|ord| ord.is_lt())
+                            .unwrap_or(false)
                     } else {
                         false
                     }
                 }
                 FilterOp::Lte => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_le()).unwrap_or(false)
+                        Self::compare_values(a, b)
+                            .map(|ord| ord.is_le())
+                            .unwrap_or(false)
                     } else {
                         false
                     }
                 }
                 FilterOp::Gt => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_gt()).unwrap_or(false)
+                        Self::compare_values(a, b)
+                            .map(|ord| ord.is_gt())
+                            .unwrap_or(false)
                     } else {
                         false
                     }
                 }
                 FilterOp::Gte => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_ge()).unwrap_or(false)
+                        Self::compare_values(a, b)
+                            .map(|ord| ord.is_ge())
+                            .unwrap_or(false)
                     } else {
                         false
                     }
@@ -218,9 +226,7 @@ impl Cursor {
                     }
                 }
                 FilterOp::IsNull => field_value.is_none() || field_value == Some(&Value::Null),
-                FilterOp::IsNotNull => {
-                    field_value.is_some() && field_value != Some(&Value::Null)
-                }
+                FilterOp::IsNotNull => field_value.is_some() && field_value != Some(&Value::Null),
             };
 
             if !matches {
@@ -328,7 +334,9 @@ impl Cursor {
                 let b_val = b.get(&order.field);
 
                 let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => Self::compare_values(av, bv).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(av), Some(bv)) => {
+                        Self::compare_values(av, bv).unwrap_or(std::cmp::Ordering::Equal)
+                    }
                     (Some(_), None) => std::cmp::Ordering::Greater,
                     (None, Some(_)) => std::cmp::Ordering::Less,
                     (None, None) => std::cmp::Ordering::Equal,

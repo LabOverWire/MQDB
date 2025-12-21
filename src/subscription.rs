@@ -43,9 +43,10 @@ impl Subscription {
     #[must_use]
     pub fn matches(&self, event: &ChangeEvent) -> bool {
         if let Some(ref entity) = self.entity
-            && entity != &event.entity {
-                return false;
-            }
+            && entity != &event.entity
+        {
+            return false;
+        }
 
         match_pattern(&self.pattern, &event.entity, &event.id)
     }
@@ -164,7 +165,10 @@ mod registry {
 
         pub async fn find_matching(&self, event: &ChangeEvent) -> Vec<Subscription> {
             let subs = self.subscriptions.read().await;
-            subs.values().filter(|sub| sub.matches(event)).cloned().collect()
+            subs.values()
+                .filter(|sub| sub.matches(event))
+                .cloned()
+                .collect()
         }
 
         pub async fn count(&self) -> usize {
@@ -200,8 +204,11 @@ mod tests {
     fn test_subscription_matches() {
         let sub = Subscription::new("sub1".into(), "users/+".into(), Some("users".into()));
 
-        let event =
-            ChangeEvent::create("users".into(), "123".into(), serde_json::json!({"name": "test"}));
+        let event = ChangeEvent::create(
+            "users".into(),
+            "123".into(),
+            serde_json::json!({"name": "test"}),
+        );
 
         assert!(sub.matches(&event));
     }

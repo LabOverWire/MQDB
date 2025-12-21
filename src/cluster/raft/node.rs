@@ -1,4 +1,6 @@
-use super::rpc::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+use super::rpc::{
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+};
 use super::state::{RaftCommand, RaftRole, RaftState};
 use crate::cluster::NodeId;
 
@@ -87,7 +89,10 @@ impl RaftNode {
     }
 
     fn next_random(&mut self) -> u64 {
-        self.random_seed = self.random_seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        self.random_seed = self
+            .random_seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         self.random_seed
     }
 
@@ -184,7 +189,10 @@ impl RaftNode {
         let mut outputs = Vec::new();
 
         if from.get() != request.candidate_id {
-            return (RequestVoteResponse::rejected(self.state.current_term()), outputs);
+            return (
+                RequestVoteResponse::rejected(self.state.current_term()),
+                outputs,
+            );
         }
 
         if request.term > self.state.current_term() {
@@ -289,7 +297,10 @@ impl RaftNode {
             outputs.extend(self.apply_committed());
 
             (
-                AppendEntriesResponse::success(self.state.current_term(), self.state.last_log_index()),
+                AppendEntriesResponse::success(
+                    self.state.current_term(),
+                    self.state.last_log_index(),
+                ),
                 outputs,
             )
         } else {
@@ -356,7 +367,11 @@ mod tests {
         node.add_peer(NodeId::validated(3).unwrap());
 
         let outputs = node.tick(1000);
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::SendRequestVote { .. })));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+        );
         assert_eq!(node.role(), RaftRole::Candidate);
         assert_eq!(node.current_term(), 1);
     }
@@ -375,7 +390,11 @@ mod tests {
         let response = RequestVoteResponse::granted(1);
         let outputs = node.handle_request_vote_response(peer2, response);
 
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameLeader)));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::BecameLeader))
+        );
         assert_eq!(node.role(), RaftRole::Leader);
     }
 
@@ -389,7 +408,11 @@ mod tests {
         let request = AppendEntriesRequest::heartbeat(5, 2, 0, 0, 0);
         let (_, outputs) = node.handle_append_entries(NodeId::validated(2).unwrap(), request, 2000);
 
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameFollower { .. })));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::BecameFollower { .. }))
+        );
         assert_eq!(node.role(), RaftRole::Follower);
         assert_eq!(node.current_term(), 5);
     }
@@ -406,7 +429,11 @@ mod tests {
         assert_eq!(node.role(), RaftRole::Leader);
 
         let outputs = node.tick(1100);
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::SendAppendEntries { .. })));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendAppendEntries { .. }))
+        );
     }
 
     #[test]
@@ -426,22 +453,33 @@ mod tests {
         leader.propose(RaftCommand::Noop);
 
         let outputs = leader.tick(1100);
-        let append_req = outputs.iter().find_map(|o| match o {
-            RaftOutput::SendAppendEntries { request, .. } => Some(request.clone()),
-            _ => None,
-        }).unwrap();
+        let append_req = outputs
+            .iter()
+            .find_map(|o| match o {
+                RaftOutput::SendAppendEntries { request, .. } => Some(request.clone()),
+                _ => None,
+            })
+            .unwrap();
 
         let (resp, _) = follower.handle_append_entries(peer1, append_req.clone(), 1100);
         assert!(resp.is_success());
 
         leader.handle_append_entries_response(peer2, resp);
 
-        let append_with_commit = leader.tick(1200).into_iter().find_map(|o| match o {
-            RaftOutput::SendAppendEntries { request, .. } => Some(request),
-            _ => None,
-        }).unwrap();
+        let append_with_commit = leader
+            .tick(1200)
+            .into_iter()
+            .find_map(|o| match o {
+                RaftOutput::SendAppendEntries { request, .. } => Some(request),
+                _ => None,
+            })
+            .unwrap();
 
         let (_, outputs) = follower.handle_append_entries(peer1, append_with_commit, 1200);
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::ApplyCommand(_))));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::ApplyCommand(_)))
+        );
     }
 }

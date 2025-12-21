@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(feature = "opentelemetry")]
 use mqtt5::telemetry::propagation;
@@ -330,13 +330,17 @@ impl MqdbAgent {
             let addr = format!("{}:{}", bind_addr.ip(), bind_addr.port());
 
             let response_creds = (service_username.clone(), service_password.clone());
-            let connect_result = if let (Some(user), Some(pass)) = (service_username, service_password) {
-                let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
-                    .with_credentials(user, pass);
-                client.connect_with_options(&addr, options).await.map(|_| ())
-            } else {
-                client.connect(&addr).await
-            };
+            let connect_result =
+                if let (Some(user), Some(pass)) = (service_username, service_password) {
+                    let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
+                        .with_credentials(user, pass);
+                    client
+                        .connect_with_options(&addr, options)
+                        .await
+                        .map(|_| ())
+                } else {
+                    client.connect(&addr).await
+                };
 
             if let Err(e) = connect_result {
                 error!("Failed to connect internal handler: {}", e);
@@ -362,7 +366,10 @@ impl MqdbAgent {
             let response_connect = if let (Some(user), Some(pass)) = response_creds {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-response-publisher")
                     .with_credentials(user, pass);
-                response_client.connect_with_options(&addr, options).await.map(|_| ())
+                response_client
+                    .connect_with_options(&addr, options)
+                    .await
+                    .map(|_| ())
             } else {
                 response_client.connect(&addr).await
             };
@@ -406,10 +413,15 @@ impl MqdbAgent {
             let client = MqttClient::new("mqdb-event-publisher");
             let addr = format!("{}:{}", event_addr.ip(), event_addr.port());
 
-            let connect_result = if let (Some(user), Some(pass)) = (event_service_username, event_service_password) {
+            let connect_result = if let (Some(user), Some(pass)) =
+                (event_service_username, event_service_password)
+            {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-event-publisher")
                     .with_credentials(user, pass);
-                client.connect_with_options(&addr, options).await.map(|_| ())
+                client
+                    .connect_with_options(&addr, options)
+                    .await
+                    .map(|_| ())
             } else {
                 client.connect(&addr).await
             };
@@ -515,8 +527,8 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
 
     #[cfg(feature = "opentelemetry")]
     let span = {
-        use opentelemetry::trace::{SpanContext, TraceContextExt};
         use opentelemetry::Context;
+        use opentelemetry::trace::{SpanContext, TraceContextExt};
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
         let user_props: Vec<(String, String)> = message.properties.user_properties.to_vec();
@@ -600,70 +612,70 @@ async fn handle_admin_operation(
         AdminOperation::ConstraintAdd { entity } => {
             let constraint_type = payload.get("type").and_then(|v| v.as_str());
 
-            let result = match constraint_type {
-                Some("unique") => {
-                    let fields: Vec<String> = payload
-                        .get("fields")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+            let result =
+                match constraint_type {
+                    Some("unique") => {
+                        let fields: Vec<String> = payload
+                            .get("fields")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
-                    if fields.is_empty() {
-                        Err("unique constraint requires fields array".to_string())
-                    } else {
-                        db.add_unique_constraint(entity, fields)
-                            .await
-                            .map_err(|e| e.to_string())
+                        if fields.is_empty() {
+                            Err("unique constraint requires fields array".to_string())
+                        } else {
+                            db.add_unique_constraint(entity, fields)
+                                .await
+                                .map_err(|e| e.to_string())
+                        }
                     }
-                }
-                Some("not_null") => {
-                    let field = payload
-                        .get("field")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+                    Some("not_null") => {
+                        let field = payload
+                            .get("field")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
 
-                    match field {
-                        Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
-                        None => Err("not_null constraint requires field".to_string()),
+                        match field {
+                            Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
+                            None => Err("not_null constraint requires field".to_string()),
+                        }
                     }
-                }
-                Some("foreign_key") => {
-                    let source_field = payload.get("field").and_then(|v| v.as_str());
-                    let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
-                    let target_field = payload.get("target_field").and_then(|v| v.as_str());
-                    let on_delete = payload
-                        .get("on_delete")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("restrict");
+                    Some("foreign_key") => {
+                        let source_field = payload.get("field").and_then(|v| v.as_str());
+                        let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
+                        let target_field = payload.get("target_field").and_then(|v| v.as_str());
+                        let on_delete = payload
+                            .get("on_delete")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("restrict");
 
-                    let action = match on_delete {
-                        "cascade" => OnDeleteAction::Cascade,
-                        "set_null" => OnDeleteAction::SetNull,
-                        _ => OnDeleteAction::Restrict,
-                    };
+                        let action = match on_delete {
+                            "cascade" => OnDeleteAction::Cascade,
+                            "set_null" => OnDeleteAction::SetNull,
+                            _ => OnDeleteAction::Restrict,
+                        };
 
-                    match (source_field, target_entity, target_field) {
-                        (Some(sf), Some(te), Some(tf)) => db
-                            .add_foreign_key(
-                                entity,
-                                sf.to_string(),
-                                te.to_string(),
-                                tf.to_string(),
-                                action,
-                            )
-                            .await
-                            .map_err(|e| e.to_string()),
-                        _ => Err(
-                            "foreign_key requires field, target_entity, target_field".to_string(),
-                        ),
+                        match (source_field, target_entity, target_field) {
+                            (Some(sf), Some(te), Some(tf)) => db
+                                .add_foreign_key(
+                                    entity,
+                                    sf.to_string(),
+                                    te.to_string(),
+                                    tf.to_string(),
+                                    action,
+                                )
+                                .await
+                                .map_err(|e| e.to_string()),
+                            _ => Err("foreign_key requires field, target_entity, target_field"
+                                .to_string()),
+                        }
                     }
-                }
-                _ => Err(format!("unknown constraint type: {constraint_type:?}")),
-            };
+                    _ => Err(format!("unknown constraint type: {constraint_type:?}")),
+                };
 
             match result {
                 Ok(()) => Response::ok(json!({"message": "constraint added"})),
@@ -702,12 +714,10 @@ async fn handle_admin_operation(
                 }
             }
         }
-        AdminOperation::Restore => {
-            Response::error(
-                crate::ErrorCode::Internal,
-                "restore requires agent restart - use CLI with --restore flag",
-            )
-        }
+        AdminOperation::Restore => Response::error(
+            crate::ErrorCode::Internal,
+            "restore requires agent restart - use CLI with --restore flag",
+        ),
         AdminOperation::BackupList => {
             if !backup_dir.exists() {
                 Response::ok(json!(Vec::<String>::new()))
@@ -795,7 +805,10 @@ async fn handle_admin_operation(
         match serde_json::to_vec(&response) {
             Ok(payload) => {
                 if let Err(e) = client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish admin response to {}: {}", response_topic, e);
+                    error!(
+                        "Failed to publish admin response to {}: {}",
+                        response_topic, e
+                    );
                 }
             }
             Err(e) => {

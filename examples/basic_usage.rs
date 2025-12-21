@@ -6,7 +6,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open("./data/example_db").await?;
 
     println!("Creating index on email field...");
-    db.add_index("users".into(), vec!["email".into(), "status".into()]).await;
+    db.add_index("users".into(), vec!["email".into(), "status".into()])
+        .await;
 
     println!("\nCreating users...");
     let alice = json!({
@@ -41,16 +42,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nReading user...");
     let alice_id = created_alice["id"].as_str().unwrap();
-    let alice_data = db.read("users".into(), alice_id.to_string(), vec![], None).await?;
+    let alice_data = db
+        .read("users".into(), alice_id.to_string(), vec![], None)
+        .await?;
     println!("Read: {}", alice_data);
 
     println!("\nUpdating user...");
     let updates = json!({"age": 31});
-    let updated_alice = db.update("users".into(), alice_id.to_string(), updates).await?;
+    let updated_alice = db
+        .update("users".into(), alice_id.to_string(), updates)
+        .await?;
     println!("Updated: {}", updated_alice);
 
     println!("\nListing all users...");
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![], None).await?;
+    let all_users = db
+        .list("users".into(), vec![], vec![], None, vec![], None)
+        .await?;
     println!("Total users: {}", all_users.len());
     for user in &all_users {
         println!("  - {}: {}", user["name"], user["email"]);
@@ -58,7 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nFiltering active users...");
     let active_filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let active_users = db.list("users".into(), vec![active_filter], vec![], None, vec![], None).await?;
+    let active_users = db
+        .list(
+            "users".into(),
+            vec![active_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await?;
     println!("Active users: {}", active_users.len());
     for user in &active_users {
         println!("  - {}: {}", user["name"], user["status"]);
@@ -72,7 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         while let Ok(event) = receiver.recv().await {
-            println!("Event received: {:?} on {}/{}", event.operation, event.entity, event.id);
+            println!(
+                "Event received: {:?} on {}/{}",
+                event.operation, event.entity, event.id
+            );
         }
     });
 
@@ -87,7 +106,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     println!("\nDeleting user...");
-    db.delete("users".into(), created_charlie["id"].as_str().unwrap().to_string()).await?;
+    db.delete(
+        "users".into(),
+        created_charlie["id"].as_str().unwrap().to_string(),
+    )
+    .await?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

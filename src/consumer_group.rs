@@ -198,7 +198,11 @@ mod tests {
         assert_eq!(partitions_1.len(), 4);
         assert_eq!(partitions_2.len(), 4);
 
-        let mut all: Vec<u8> = partitions_1.iter().chain(partitions_2.iter()).copied().collect();
+        let mut all: Vec<u8> = partitions_1
+            .iter()
+            .chain(partitions_2.iter())
+            .copied()
+            .collect();
         all.sort();
         assert_eq!(all, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }

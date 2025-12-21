@@ -4,7 +4,7 @@ use mqdb::{
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 const DATA_PATH: &str = "./data/parking_lot";
 
@@ -31,7 +31,9 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("spot_number", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_type", FieldType::String).required())
         .add_field(FieldDefinition::new("location", FieldType::String).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("available")))
+        .add_field(
+            FieldDefinition::new("status", FieldType::String).with_default(json!("available")),
+        )
         .add_field(FieldDefinition::new("gate_device_id", FieldType::String).required());
 
     let vehicles_schema = Schema::new("vehicles")
@@ -44,21 +46,25 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("vehicle_id", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_id", FieldType::String).required())
         .add_field(FieldDefinition::new("reserved_at", FieldType::Number).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("pending")));
+        .add_field(
+            FieldDefinition::new("status", FieldType::String).with_default(json!("pending")),
+        );
 
     let sessions_schema = Schema::new("parking_sessions")
         .add_field(FieldDefinition::new("vehicle_id", FieldType::String).required())
         .add_field(FieldDefinition::new("spot_id", FieldType::String).required())
         .add_field(FieldDefinition::new("entry_time", FieldType::Number).required())
         .add_field(
-            FieldDefinition::new("session_status", FieldType::String).with_default(json!("in_progress")),
+            FieldDefinition::new("session_status", FieldType::String)
+                .with_default(json!("in_progress")),
         );
 
     let payments_schema = Schema::new("payments")
         .add_field(FieldDefinition::new("session_id", FieldType::String).required())
         .add_field(FieldDefinition::new("amount", FieldType::Number).required())
         .add_field(
-            FieldDefinition::new("payment_status", FieldType::String).with_default(json!("pending")),
+            FieldDefinition::new("payment_status", FieldType::String)
+                .with_default(json!("pending")),
         )
         .add_field(FieldDefinition::new("receipt_code", FieldType::String).required());
 
@@ -319,13 +325,14 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     sleep(Duration::from_millis(300)).await;
 
-    db.update("spots".into(), spot_id.clone(), json!({"status": "reserved"}))
-        .await?;
+    db.update(
+        "spots".into(),
+        spot_id.clone(),
+        json!({"status": "reserved"}),
+    )
+    .await?;
 
-    mqtt_response(
-        "req-3",
-        json!({"status": "ok"}),
-    );
+    mqtt_response("req-3", json!({"status": "ok"}));
 
     println!(
         "🖥️  Display: 'Proceed to {} at {}'\n",
@@ -449,10 +456,7 @@ async fn gate_camera_client(
 
     let session_id = session["id"].as_str().unwrap().to_string();
 
-    mqtt_response(
-        "gate-2",
-        json!({"status": "ok", "result": session}),
-    );
+    mqtt_response("gate-2", json!({"status": "ok", "result": session}));
 
     mqtt_publish(
         "db/spots/update",
@@ -510,12 +514,13 @@ async fn payment_booth_client(
     let duration = (now_timestamp() - entry_time) / 3600;
     let amount = (duration.max(1) * 5) as f64;
 
-    mqtt_response(
-        "pay-1",
-        json!({"status": "ok", "result": session}),
-    );
+    mqtt_response("pay-1", json!({"status": "ok", "result": session}));
 
-    println!("💰 Fee calculated: ${} ({} hours)\n", amount, duration.max(1));
+    println!(
+        "💰 Fee calculated: ${} ({} hours)\n",
+        amount,
+        duration.max(1)
+    );
 
     let receipt_code = format!("RCP-{}", now_timestamp());
 
@@ -549,10 +554,7 @@ async fn payment_booth_client(
         )
         .await?;
 
-    mqtt_response(
-        "pay-2",
-        json!({"status": "ok", "result": payment}),
-    );
+    mqtt_response("pay-2", json!({"status": "ok", "result": payment}));
 
     println!("🧾 Receipt printed: {receipt_code}\n");
 
@@ -582,10 +584,7 @@ async fn exit_gate_client(
 
     println!("--- IoT Device: Exit Gate Controller (exit_b1) ---\n");
 
-    mqtt_event(
-        "scanner/b1/scan",
-        json!({"receipt_code": &receipt_code}),
-    );
+    mqtt_event("scanner/b1/scan", json!({"receipt_code": &receipt_code}));
 
     println!("Gate controller validates receipt against DB...\n");
 
@@ -630,7 +629,12 @@ async fn exit_gate_client(
     );
 
     let session = db
-        .read("parking_sessions".into(), session_id.to_string(), vec![], None)
+        .read(
+            "parking_sessions".into(),
+            session_id.to_string(),
+            vec![],
+            None,
+        )
         .await?;
 
     let spot_id = session["spot_id"].as_str().unwrap();
@@ -680,8 +684,12 @@ async fn exit_gate_client(
         }),
     );
 
-    db.update("spots".into(), spot_id.to_string(), json!({"status": "available"}))
-        .await?;
+    db.update(
+        "spots".into(),
+        spot_id.to_string(),
+        json!({"status": "available"}),
+    )
+    .await?;
 
     mqtt_publish(
         "gate/b1/status",

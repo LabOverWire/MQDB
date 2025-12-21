@@ -87,8 +87,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_node_death(&mut self, _node: NodeId) {
-    }
+    fn handle_node_death(&mut self, _node: NodeId) {}
 
     pub fn process_messages(&mut self) {
         while let Some(msg) = self.transport.recv() {
@@ -99,7 +98,8 @@ impl<T: ClusterTransport> NodeController<T> {
     fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
-                self.heartbeat.receive_heartbeat(msg.from, &hb, msg.received_at);
+                self.heartbeat
+                    .receive_heartbeat(msg.from, &hb, msg.received_at);
             }
             ClusterMessage::Write(write) => {
                 self.handle_write(msg.from, write);
@@ -138,8 +138,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn on_write_complete(&mut self, _partition: PartitionId, _seq: u64, _result: QuorumResult) {
-    }
+    fn on_write_complete(&mut self, _partition: PartitionId, _seq: u64, _result: QuorumResult) {}
 
     pub fn replicate_write(
         &mut self,
@@ -197,7 +196,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     #[must_use]
     pub fn sequence(&self, partition: PartitionId) -> Option<u64> {
-        self.replicas.get(&partition.get()).map(ReplicaState::sequence)
+        self.replicas
+            .get(&partition.get())
+            .map(ReplicaState::sequence)
     }
 
     #[must_use]

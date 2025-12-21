@@ -3,15 +3,11 @@ use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::Value;
 use std::error::Error;
 use tokio::sync::mpsc;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
-pub async fn publish_request(
-    client: &MqttClient,
-    topic: &str,
-    payload: Value,
-) -> Result<Value> {
+pub async fn publish_request(client: &MqttClient, topic: &str, payload: Value) -> Result<Value> {
     let response_topic = format!("client/responses/{}", uuid::Uuid::new_v4());
     let (tx, mut rx) = mpsc::channel::<Value>(1);
 
@@ -40,7 +36,10 @@ pub async fn publish_request(
         .map_err(|_| "Request timed out")?
         .ok_or("No response received")?;
 
-    let status = response.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if status != "ok" {
         let error = response
             .get("message")

@@ -179,10 +179,7 @@ impl RaftState {
         if index == 0 {
             return Some(0);
         }
-        self.log
-            .iter()
-            .find(|e| e.index == index)
-            .map(|e| e.term)
+        self.log.iter().find(|e| e.index == index).map(|e| e.term)
     }
 
     pub fn add_peer(&mut self, peer: NodeId) {
@@ -237,7 +234,13 @@ impl RaftState {
         self.votes_received.len() >= self.quorum_size()
     }
 
-    pub fn can_grant_vote(&self, candidate_term: u64, candidate_id: NodeId, last_log_index: u64, last_log_term: u64) -> bool {
+    pub fn can_grant_vote(
+        &self,
+        candidate_term: u64,
+        candidate_id: NodeId,
+        last_log_index: u64,
+        last_log_term: u64,
+    ) -> bool {
         if candidate_term < self.current_term {
             return false;
         }
@@ -276,7 +279,12 @@ impl RaftState {
         }
     }
 
-    pub fn append_entries(&mut self, prev_log_index: u64, prev_log_term: u64, entries: Vec<LogEntry>) -> bool {
+    pub fn append_entries(
+        &mut self,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        entries: Vec<LogEntry>,
+    ) -> bool {
         if prev_log_index > 0 {
             match self.log_term_at(prev_log_index) {
                 Some(term) if term == prev_log_term => {}
@@ -347,12 +355,7 @@ impl RaftState {
                 continue;
             }
 
-            let match_count = self
-                .match_index
-                .iter()
-                .filter(|(_, idx)| *idx >= n)
-                .count()
-                + 1;
+            let match_count = self.match_index.iter().filter(|(_, idx)| *idx >= n).count() + 1;
 
             if match_count >= self.quorum_size() {
                 self.commit_index = n;

@@ -1,13 +1,13 @@
 use mqdb::cluster::{
-    ClusterMessage, ClusterTransport, Epoch, Heartbeat, MqttTransport, NodeId, PartitionId,
-    ReplicationWrite, Operation, TransportConfig, NodeController,
+    ClusterMessage, ClusterTransport, Epoch, Heartbeat, MqttTransport, NodeController, NodeId,
+    Operation, PartitionId, ReplicationWrite, TransportConfig,
 };
-use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::MqttBroker;
-use mqtt5::{MqttClient, ConnectOptions, WillMessage, QoS};
+use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::{ConnectOptions, MqttClient, QoS, WillMessage};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 async fn start_broker_and_wait(port: u16) {
@@ -49,7 +49,9 @@ async fn mqtt_transport_heartbeat_roundtrip() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let hb = Heartbeat::create(node1, 1000);
-    t1.broadcast_async(ClusterMessage::Heartbeat(hb)).await.unwrap();
+    t1.broadcast_async(ClusterMessage::Heartbeat(hb))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -95,7 +97,9 @@ async fn mqtt_transport_replication_write() {
         b"test data".to_vec(),
     );
 
-    t1.send_async(node2, ClusterMessage::Write(write)).await.unwrap();
+    t1.send_async(node2, ClusterMessage::Write(write))
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -207,7 +211,10 @@ async fn mqtt_lwt_death_detection() {
         .with_keep_alive(Duration::from_secs(1));
 
     let dying_node = MqttClient::with_options(options.clone());
-    dying_node.connect_with_options(&addr, options).await.unwrap();
+    dying_node
+        .connect_with_options(&addr, options)
+        .await
+        .unwrap();
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

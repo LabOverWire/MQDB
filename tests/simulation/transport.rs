@@ -1,8 +1,10 @@
+use mqdb::cluster::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+};
 use mqdb::cluster::{
     ClusterMessage, ClusterTransport, Epoch, Heartbeat, InboundMessage, NodeId, PartitionId,
     ReplicationAck, ReplicationWrite, TransportError,
 };
-use mqdb::cluster::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 
 use super::framework::{VirtualClock, VirtualNetwork};
 use bebytes::BeBytes;

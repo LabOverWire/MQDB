@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -35,7 +35,8 @@ impl VirtualClock {
     }
 
     pub fn advance(&self, duration: Duration) {
-        self.nanos.fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
+        self.nanos
+            .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
     }
 
     pub fn advance_ms(&self, ms: u64) {

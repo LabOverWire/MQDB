@@ -1,5 +1,8 @@
 use crate::config::DatabaseConfig;
 use crate::constraint::ConstraintManager;
+use crate::consumer_group::{
+    ConsumerGroup, ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo,
+};
 use crate::dispatcher::EventDispatcher;
 use crate::entity::Entity;
 use crate::error::{Error, Result};
@@ -10,7 +13,6 @@ use crate::outbox::{Outbox, OutboxProcessor};
 use crate::relationship::{Relationship, RelationshipRegistry};
 use crate::schema::{Schema, SchemaRegistry};
 use crate::storage::{Storage, StorageBackend};
-use crate::consumer_group::{ConsumerGroup, ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
 use crate::subscription::{Subscription, SubscriptionMode, SubscriptionRegistry};
 use crate::types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
 use serde_json::Value;
@@ -19,7 +21,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
@@ -137,9 +139,8 @@ impl Database {
             let mut shutdown_rx_clone = shutdown_rx.clone();
 
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_millis(timeout_ms / 2),
-                );
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
                 loop {
                     tokio::select! {
                         _ = interval.tick() => {
@@ -243,13 +244,10 @@ impl Database {
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let entity = Entity::deserialize(entity_name.clone(), id, &data)?;
         let mut result = entity.to_json();
@@ -287,26 +285,27 @@ impl Database {
             for include_field in includes {
                 if let Some(rel) = registry.get(entity_name, include_field)
                     && let Some(id_value) = entity.get(&rel.field_suffix)
-                        && let Some(id_str) = id_value.as_str() {
-                            match self
-                                .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
-                                .await
-                            {
-                                Ok(related_entity) => {
-                                    if let Value::Object(obj) = entity {
-                                        obj.insert(rel.field.clone(), related_entity);
-                                    }
-                                }
-                                Err(Error::NotFound { .. }) => {
-                                    tracing::warn!(
-                                        "related entity not found: {}/{}",
-                                        rel.target_entity,
-                                        id_str
-                                    );
-                                }
-                                Err(e) => return Err(e),
+                    && let Some(id_str) = id_value.as_str()
+                {
+                    match self
+                        .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
+                        .await
+                    {
+                        Ok(related_entity) => {
+                            if let Value::Object(obj) = entity {
+                                obj.insert(rel.field.clone(), related_entity);
                             }
                         }
+                        Err(Error::NotFound { .. }) => {
+                            tracing::warn!(
+                                "related entity not found: {}/{}",
+                                rel.target_entity,
+                                id_str
+                            );
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
             }
 
             Ok(())
@@ -323,9 +322,10 @@ impl Database {
 
             for field in fields {
                 if field != "id"
-                    && let Some(value) = obj.get(field) {
-                        projected.insert(field.clone(), value.clone());
-                    }
+                    && let Some(value) = obj.get(field)
+                {
+                    projected.insert(field.clone(), value.clone());
+                }
             }
             Value::Object(projected)
         } else {
@@ -338,13 +338,10 @@ impl Database {
     pub async fn update(&self, entity_name: String, id: String, fields: Value) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let existing_data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
         let mut updated_data = existing_entity.data.clone();
@@ -364,7 +361,12 @@ impl Database {
         let mut batch = self.storage.batch();
 
         let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.validate_update(&updated_entity, &existing_entity, &mut batch, &self.storage)?;
+        constraint_manager.validate_update(
+            &updated_entity,
+            &existing_entity,
+            &mut batch,
+            &self.storage,
+        )?;
         drop(constraint_manager);
 
         batch.expect_value(key, existing_data);
@@ -396,13 +398,10 @@ impl Database {
 
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let existing_data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
 
@@ -471,7 +470,8 @@ impl Database {
         }
 
         let operation_id = uuid::Uuid::new_v4().to_string();
-        self.outbox.enqueue_events(&mut batch, &operation_id, &events);
+        self.outbox
+            .enqueue_events(&mut batch, &operation_id, &events);
 
         batch.commit()?;
 
@@ -507,7 +507,10 @@ impl Database {
             }
         } else {
             let index_manager = self.index_manager.read().await;
-            let use_index = filters.first().map(|f| f.op == FilterOp::Eq).unwrap_or(false);
+            let use_index = filters
+                .first()
+                .map(|f| f.op == FilterOp::Eq)
+                .unwrap_or(false);
 
             if use_index {
                 if let Some(filter) = filters.first() {
@@ -520,7 +523,10 @@ impl Database {
                     )?;
 
                     for id in ids {
-                        match self.read(entity_name.clone(), id.clone(), vec![], None).await {
+                        match self
+                            .read(entity_name.clone(), id.clone(), vec![], None)
+                            .await
+                        {
                             Ok(entity_data) => {
                                 if self.matches_filters(&entity_data, &filters) {
                                     results.push(entity_data);
@@ -649,7 +655,9 @@ impl Database {
             (Value::Number(a_num), Value::Number(b_num)) => {
                 let a_f64 = a_num.as_f64().unwrap_or(0.0);
                 let b_f64 = b_num.as_f64().unwrap_or(0.0);
-                a_f64.partial_cmp(&b_f64).unwrap_or(std::cmp::Ordering::Equal)
+                a_f64
+                    .partial_cmp(&b_f64)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
             (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
             (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
@@ -746,8 +754,8 @@ impl Database {
             }
         };
 
-        let subscription = Subscription::new(sub_id.clone(), pattern, entity)
-            .with_share_group(group, mode);
+        let subscription =
+            Subscription::new(sub_id.clone(), pattern, entity).with_share_group(group, mode);
 
         self.registry.register(subscription).await?;
 
@@ -761,15 +769,16 @@ impl Database {
     /// Returns an error if unregistering fails.
     pub async fn unsubscribe(&self, sub_id: &str) -> Result<()> {
         if let Some(sub) = self.registry.get(sub_id).await
-            && let Some(group) = &sub.share_group {
-                let mut groups = self.consumer_groups.write().await;
-                if let Some(cg) = groups.get_mut(group) {
-                    cg.remove_member(sub_id);
-                    if cg.member_count() == 0 {
-                        groups.remove(group);
-                    }
+            && let Some(group) = &sub.share_group
+        {
+            let mut groups = self.consumer_groups.write().await;
+            if let Some(cg) = groups.get_mut(group) {
+                cg.remove_member(sub_id);
+                if cg.member_count() == 0 {
+                    groups.remove(group);
                 }
             }
+        }
 
         self.registry.unregister(sub_id).await?;
         self.dispatcher.remove_listener(sub_id).await;
@@ -779,10 +788,14 @@ impl Database {
     /// # Errors
     /// Returns an error if the subscription is not found.
     pub async fn heartbeat(&self, sub_id: &str) -> Result<()> {
-        let sub = self.registry.get(sub_id).await.ok_or_else(|| Error::NotFound {
-            entity: "subscription".into(),
-            id: sub_id.into(),
-        })?;
+        let sub = self
+            .registry
+            .get(sub_id)
+            .await
+            .ok_or_else(|| Error::NotFound {
+                entity: "subscription".into(),
+                id: sub_id.into(),
+            })?;
 
         if let Some(group) = &sub.share_group {
             let mut groups = self.consumer_groups.write().await;
@@ -848,9 +861,8 @@ impl Database {
             })?;
         }
 
-        copy_dir_recursive(src, dst).map_err(|e| {
-            Error::BackupFailed(format!("failed to create backup: {e}"))
-        })?;
+        copy_dir_recursive(src, dst)
+            .map_err(|e| Error::BackupFailed(format!("failed to create backup: {e}")))?;
 
         Ok(())
     }
@@ -868,7 +880,8 @@ impl Database {
             .unwrap_or(0);
 
         let next = current + 1;
-        self.storage.insert(&counter_key, next.to_string().as_bytes())?;
+        self.storage
+            .insert(&counter_key, next.to_string().as_bytes())?;
 
         Ok(next.to_string())
     }
@@ -918,11 +931,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if persisting the constraint fails.
-    pub async fn add_unique_constraint(
-        &self,
-        entity: String,
-        fields: Vec<String>,
-    ) -> Result<()> {
+    pub async fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<()> {
         use crate::constraint::{Constraint, UniqueConstraint};
 
         self.add_index(entity.clone(), fields.clone()).await;
@@ -1038,7 +1047,11 @@ impl Database {
             crate::error::Error::BackupFailed(format!("failed to copy database: {e}"))
         })?;
 
-        tracing::info!("physical backup completed: {} -> {}", src.display(), dest.display());
+        tracing::info!(
+            "physical backup completed: {} -> {}",
+            src.display(),
+            dest.display()
+        );
         Ok(())
     }
 
@@ -1091,7 +1104,10 @@ impl Database {
             crate::error::Error::BackupFailed(format!("failed to flush backup: {e}"))
         })?;
 
-        tracing::info!("logical backup completed: {count} entities written to {}", dest.display());
+        tracing::info!(
+            "logical backup completed: {count} entities written to {}",
+            dest.display()
+        );
         Ok(())
     }
 
@@ -1149,11 +1165,13 @@ impl Database {
             count += 1;
         }
 
-        tracing::info!("logical restore completed: {count} entities restored from {}", src.display());
+        tracing::info!(
+            "logical restore completed: {count} entities restored from {}",
+            src.display()
+        );
         Ok(count)
     }
 }
-
 
 async fn ttl_cleanup_task(
     storage: Arc<Storage>,
@@ -1203,13 +1221,11 @@ async fn ttl_cleanup_task(
                 Err(_) => continue,
             };
 
-            if let Some(expires_at) = entity
-                .data
-                .get("_expires_at")
-                .and_then(|v| v.as_u64())
-                && expires_at <= now {
-                    expired_entities.push((key, entity));
-                }
+            if let Some(expires_at) = entity.data.get("_expires_at").and_then(|v| v.as_u64())
+                && expires_at <= now
+            {
+                expired_entities.push((key, entity));
+            }
         }
 
         if expired_entities.is_empty() {
@@ -1271,7 +1287,6 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_glob_match() {

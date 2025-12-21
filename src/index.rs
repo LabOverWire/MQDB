@@ -37,7 +37,12 @@ impl IndexManager {
         self.indexes.get(entity).map(|idx| &idx.fields)
     }
 
-    pub fn update_indexes(&self, batch: &mut BatchWriter, entity: &Entity, old_entity: Option<&Entity>) {
+    pub fn update_indexes(
+        &self,
+        batch: &mut BatchWriter,
+        entity: &Entity,
+        old_entity: Option<&Entity>,
+    ) {
         if let Some(fields) = self.get_indexed_fields(&entity.name) {
             if let Some(old) = old_entity {
                 self.remove_index_entries(batch, old, fields);
@@ -83,9 +88,10 @@ impl IndexManager {
         let mut ids = Vec::new();
         for (key, _) in items {
             if let Some(id_start) = key.iter().rposition(|&b| b == b'/')
-                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec()) {
-                    ids.push(id);
-                }
+                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec())
+            {
+                ids.push(id);
+            }
         }
 
         Ok(ids)

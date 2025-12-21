@@ -150,7 +150,10 @@ async fn benchmark_updates(db: &Database, count: usize) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn benchmark_list(
+    db: &Database,
+    iterations: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("List/Scan Performance Test");
     println!("--------------------------");
 
@@ -159,7 +162,9 @@ async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn 
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let _ = db.list("users".into(), vec![], vec![], None, vec![], None).await;
+        let _ = db
+            .list("users".into(), vec![], vec![], None, vec![], None)
+            .await;
     }
 
     let total_elapsed = start.elapsed();
@@ -168,7 +173,10 @@ async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn 
     println!("Total scans: {}", iterations);
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
     println!("Throughput: {:.0} scans/sec", throughput);
-    println!("Avg latency: {:.2}ms", (total_elapsed.as_secs_f64() * 1000.0) / iterations as f64);
+    println!(
+        "Avg latency: {:.2}ms",
+        (total_elapsed.as_secs_f64() * 1000.0) / iterations as f64
+    );
 
     println!();
 

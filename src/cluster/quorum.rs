@@ -23,7 +23,12 @@ pub struct QuorumTracker {
 
 impl QuorumTracker {
     #[must_use]
-    pub fn new(sequence: u64, epoch: Epoch, replica_nodes: &[NodeId], required_acks: usize) -> Self {
+    pub fn new(
+        sequence: u64,
+        epoch: Epoch,
+        replica_nodes: &[NodeId],
+        required_acks: usize,
+    ) -> Self {
         let expected_nodes: HashSet<u16> = replica_nodes.iter().map(|n| n.get()).collect();
         Self {
             sequence,
@@ -90,7 +95,8 @@ impl QuorumTracker {
             return QuorumResult::Failed;
         }
 
-        let remaining = self.expected_nodes.len() - self.acked_nodes.len() - self.failed_nodes.len();
+        let remaining =
+            self.expected_nodes.len() - self.acked_nodes.len() - self.failed_nodes.len();
         let possible = self.acked_nodes.len() + remaining;
 
         if possible < self.required {
@@ -102,7 +108,10 @@ impl QuorumTracker {
 
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        matches!(self.current_result(), QuorumResult::Success | QuorumResult::Failed)
+        matches!(
+            self.current_result(),
+            QuorumResult::Success | QuorumResult::Failed
+        )
     }
 
     #[must_use]
@@ -199,7 +208,9 @@ mod tests {
     use crate::cluster::PartitionId;
 
     fn nodes(ids: &[u16]) -> Vec<NodeId> {
-        ids.iter().map(|&id| NodeId::validated(id).unwrap()).collect()
+        ids.iter()
+            .map(|&id| NodeId::validated(id).unwrap())
+            .collect()
     }
 
     fn ok_ack(partition: u16, epoch: u64, seq: u64, node: u16) -> ReplicationAck {

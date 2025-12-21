@@ -152,7 +152,8 @@ impl ReplicationWrite {
         let entity_bytes = self.entity.as_bytes();
         let id_bytes = self.id.as_bytes();
 
-        let mut buf = Vec::with_capacity(20 + entity_bytes.len() + id_bytes.len() + self.data.len());
+        let mut buf =
+            Vec::with_capacity(20 + entity_bytes.len() + id_bytes.len() + self.data.len());
 
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.partition.get().to_be_bytes());
@@ -179,8 +180,7 @@ impl ReplicationWrite {
         let operation = Operation::from_u8(bytes[3])?;
         let epoch = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         let sequence = u64::from_be_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11],
-            bytes[12], bytes[13], bytes[14], bytes[15],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
         ]);
         let entity_len = bytes[16] as usize;
         let id_len = bytes[17] as usize;
@@ -261,7 +261,12 @@ impl ReplicationAck {
     }
 
     #[must_use]
-    pub fn sequence_gap(partition: PartitionId, epoch: Epoch, expected_seq: u64, node_id: NodeId) -> Self {
+    pub fn sequence_gap(
+        partition: PartitionId,
+        epoch: Epoch,
+        expected_seq: u64,
+        node_id: NodeId,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             partition: partition.get(),

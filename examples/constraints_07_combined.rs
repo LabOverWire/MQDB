@@ -44,20 +44,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating users...");
     let alice = db
-        .create("users".into(), json!({"name": "Alice", "email": "alice@example.com"}))
+        .create(
+            "users".into(),
+            json!({"name": "Alice", "email": "alice@example.com"}),
+        )
         .await?;
     let alice_id = alice["id"].as_str().unwrap();
     println!("✓ Created Alice (status defaulted to 'active')");
 
     let bob = db
-        .create("users".into(), json!({"name": "Bob", "email": "bob@example.com"}))
+        .create(
+            "users".into(),
+            json!({"name": "Bob", "email": "bob@example.com"}),
+        )
         .await?;
     let bob_id = bob["id"].as_str().unwrap();
     println!("✓ Created Bob\n");
 
     println!("Testing unique constraint...");
     match db
-        .create("users".into(), json!({"name": "Charlie", "email": "alice@example.com"}))
+        .create(
+            "users".into(),
+            json!({"name": "Charlie", "email": "alice@example.com"}),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -66,27 +75,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating posts...");
     let post1 = db
-        .create("posts".into(), json!({"title": "Hello World", "author_id": alice_id}))
+        .create(
+            "posts".into(),
+            json!({"title": "Hello World", "author_id": alice_id}),
+        )
         .await?;
     let post1_id = post1["id"].as_str().unwrap();
 
-    db.create("posts".into(), json!({"title": "Rust Tips", "author_id": alice_id}))
-        .await?;
+    db.create(
+        "posts".into(),
+        json!({"title": "Rust Tips", "author_id": alice_id}),
+    )
+    .await?;
 
-    db.create("posts".into(), json!({"title": "Bob's Post", "author_id": bob_id}))
-        .await?;
+    db.create(
+        "posts".into(),
+        json!({"title": "Bob's Post", "author_id": bob_id}),
+    )
+    .await?;
     println!("✓ Created 3 posts\n");
 
     println!("Creating comments...");
-    db.create("comments".into(), json!({"text": "Great post!", "post_id": post1_id}))
-        .await?;
-    db.create("comments".into(), json!({"text": "Thanks!", "post_id": post1_id}))
-        .await?;
+    db.create(
+        "comments".into(),
+        json!({"text": "Great post!", "post_id": post1_id}),
+    )
+    .await?;
+    db.create(
+        "comments".into(),
+        json!({"text": "Thanks!", "post_id": post1_id}),
+    )
+    .await?;
     println!("✓ Created 2 comments\n");
 
     println!("Testing foreign key validation...");
     match db
-        .create("posts".into(), json!({"title": "Orphan", "author_id": "nonexistent"}))
+        .create(
+            "posts".into(),
+            json!({"title": "Orphan", "author_id": "nonexistent"}),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -94,26 +121,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let stats_before = (
-        db.list("users".into(), vec![], vec![], None, vec![], None).await?.len(),
-        db.list("posts".into(), vec![], vec![], None, vec![], None).await?.len(),
-        db.list("comments".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("users".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
+        db.list("posts".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
+        db.list("comments".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
     );
     println!("Before cascade deletion:");
-    println!("  Users: {}, Posts: {}, Comments: {}\n", stats_before.0, stats_before.1, stats_before.2);
+    println!(
+        "  Users: {}, Posts: {}, Comments: {}\n",
+        stats_before.0, stats_before.1, stats_before.2
+    );
 
     println!("Deleting Alice (cascade to posts and comments)...");
     db.delete("users".into(), alice_id.to_string()).await?;
     println!("✓ Deleted\n");
 
     let stats_after = (
-        db.list("users".into(), vec![], vec![], None, vec![], None).await?.len(),
-        db.list("posts".into(), vec![], vec![], None, vec![], None).await?.len(),
-        db.list("comments".into(), vec![], vec![], None, vec![], None).await?.len(),
+        db.list("users".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
+        db.list("posts".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
+        db.list("comments".into(), vec![], vec![], None, vec![], None)
+            .await?
+            .len(),
     );
     println!("After cascade deletion:");
     println!("  Users: {} (Alice deleted)", stats_after.0);
     println!("  Posts: {} (Alice's 2 posts deleted)", stats_after.1);
-    println!("  Comments: {} (comments on Alice's posts deleted)\n", stats_after.2);
+    println!(
+        "  Comments: {} (comments on Alice's posts deleted)\n",
+        stats_after.2
+    );
 
     println!("Summary:");
     println!("✓ Schema validation enforced types and defaults");

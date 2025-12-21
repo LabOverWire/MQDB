@@ -1,9 +1,9 @@
-use crate::events::ChangeEvent;
 use crate::Database;
+use crate::events::ChangeEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Debug, Clone)]
 pub struct ClientSession {
@@ -37,7 +37,10 @@ impl SessionManager {
 
     pub async fn create_session(&self, client_id: String) -> String {
         let session = ClientSession::new(client_id.clone());
-        self.sessions.write().await.insert(client_id.clone(), session);
+        self.sessions
+            .write()
+            .await
+            .insert(client_id.clone(), session);
         client_id
     }
 
@@ -158,9 +161,10 @@ impl EventRouter {
 
         for (client_id, session) in sessions.iter() {
             if self.event_matches_subscriptions(&event, &session.subscriptions)
-                && let Some(sender) = senders.get(client_id) {
-                    let _ = sender.try_send(event.clone());
-                }
+                && let Some(sender) = senders.get(client_id)
+            {
+                let _ = sender.try_send(event.clone());
+            }
         }
     }
 
@@ -267,14 +271,8 @@ mod tests {
         let removed = manager.destroy_session("client1").await;
         assert_eq!(removed.len(), 2);
 
-        assert!(manager
-            .get_client_for_subscription("sub1")
-            .await
-            .is_none());
-        assert!(manager
-            .get_client_for_subscription("sub2")
-            .await
-            .is_none());
+        assert!(manager.get_client_for_subscription("sub1").await.is_none());
+        assert!(manager.get_client_for_subscription("sub2").await.is_none());
     }
 
     #[tokio::test]

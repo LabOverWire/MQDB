@@ -132,9 +132,9 @@ checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
 name = "bebytes"
-version = "2.12.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fc3b51fd21eb7c3466e28efce3ebd1cca0dd0f8b82689cad9923d3fe85f5c01"
+checksum = "4b7ed36f4aa56da3ca71dc6bfa527b47d35a844d330b07a0ea814a36cd89d457"
 dependencies = [
  "bebytes_derive",
  "bytes",
@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "bebytes_derive"
-version = "2.12.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98cfd3368e74381ba995efe039ac0f19f5e110856f6cd1b200df09db6e4c8bc1"
+checksum = "c7dc45e9c143ee51401818c13b1ab001d015d80a4c464757e2e76b1f22d789f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1038,9 +1038,9 @@ dependencies = [
 
 [[package]]
 name = "itoa"
-version = "1.0.15"
+version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
+checksum = "7ee5b5339afb4c41626dde77b7a611bd4f2c202b897852b4bcf5d03eddc61010"
 
 [[package]]
 name = "jni"
@@ -1221,9 +1221,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.15.1"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "847a90fc2f6950e1cc32dfd81ddb628ebc5089c5cd74126e3fd350e4543275e1"
+checksum = "acc663e7c832593f5bbbbd660215592ca2355d6b04384a946e20c7dbcc118aa4"
 dependencies = [
  "argon2",
  "base64",
@@ -1269,9 +1269,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de05851c5ae6690efd75120a91b86b402e8def4b1e8debb658ff23e0d9033d7a"
+checksum = "a39359fa5415696264caf95345a174efced71f29debe635728464e73dab25242"
 dependencies = [
  "bebytes",
  "bytes",

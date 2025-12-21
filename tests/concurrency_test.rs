@@ -38,7 +38,10 @@ async fn test_concurrent_id_generation_no_duplicates() {
     );
 
     for id in &ids {
-        let entity = db.read("users".into(), id.clone(), vec![], None).await.unwrap();
+        let entity = db
+            .read("users".into(), id.clone(), vec![], None)
+            .await
+            .unwrap();
         assert!(entity.get("name").is_some(), "Entity should exist in DB");
     }
 }

@@ -5,8 +5,8 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -381,7 +381,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_subscribe(pattern, entity, group, mode, heartbeat_interval, conn, format).await?;
+            cmd_subscribe(
+                pattern,
+                entity,
+                group,
+                mode,
+                heartbeat_interval,
+                conn,
+                format,
+            )
+            .await?;
         }
         Commands::ConsumerGroup { action } => match action {
             ConsumerGroupAction::List { conn, format } => {
@@ -667,11 +676,16 @@ async fn cmd_backup_create(
     let payload = json!({"name": name});
     let response = execute_request(conn, topic, payload).await?;
 
-    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         if let Some(data) = response.get("data")
-            && let Some(msg) = data.get("message").and_then(|v| v.as_str()) {
-                println!("{msg}");
-            }
+            && let Some(msg) = data.get("message").and_then(|v| v.as_str())
+        {
+            println!("{msg}");
+        }
     } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
         eprintln!("Error: {error}");
     }
@@ -684,7 +698,11 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
     let payload = json!({});
     let response = execute_request(conn, topic, payload).await?;
 
-    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         if let Some(backups) = response.get("data").and_then(|v| v.as_array()) {
             if backups.is_empty() {
                 println!("No backups found");
@@ -704,15 +722,16 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-async fn cmd_restore(
-    name: &str,
-    conn: &ConnectionArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_restore(name: &str, conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/restore";
     let payload = json!({"name": name});
     let response = execute_request(conn, topic, payload).await?;
 
-    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         println!("Restore initiated");
     } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
         eprintln!("Error: {error}");
@@ -962,15 +981,20 @@ async fn cmd_subscribe(
 
     let response = execute_request(&conn, topic, payload).await?;
 
-    if response.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if response
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         let data = response.get("data").unwrap_or(&Value::Null);
         let sub_id = data.get("id").and_then(|v| v.as_str()).unwrap_or_default();
 
         eprintln!("Subscription ID: {sub_id}");
         if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array())
-            && !partitions.is_empty() {
-                eprintln!("Assigned partitions: {partitions:?}");
-            }
+            && !partitions.is_empty()
+        {
+            eprintln!("Assigned partitions: {partitions:?}");
+        }
 
         let event_pattern = if let Some(ref ent) = entity {
             format!("$DB/{ent}/events/#")

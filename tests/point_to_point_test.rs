@@ -3,11 +3,12 @@ use tempfile::tempdir;
 
 async fn setup_db() -> Database {
     let dir = tempdir().unwrap();
-    let config = DatabaseConfig::new(dir.path().to_path_buf())
-        .with_shared_subscription(SharedSubscriptionConfig {
+    let config = DatabaseConfig::new(dir.path().to_path_buf()).with_shared_subscription(
+        SharedSubscriptionConfig {
             num_partitions: 8,
             consumer_timeout_ms: 30_000,
-        });
+        },
+    );
     Database::open_with_config(config).await.unwrap()
 }
 

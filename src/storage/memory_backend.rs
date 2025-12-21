@@ -1,5 +1,5 @@
-use crate::error::{Error, Result};
 use super::backend::{BatchOperations, StorageBackend};
+use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -24,24 +24,36 @@ impl Default for MemoryBackend {
 
 impl StorageBackend for MemoryBackend {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let data = self.data.read().map_err(|e| Error::Internal(e.to_string()))?;
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(data.get(key).cloned())
     }
 
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut data = self.data.write().map_err(|e| Error::Internal(e.to_string()))?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| Error::Internal(e.to_string()))?;
         data.insert(key.to_vec(), value.to_vec());
         Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<()> {
-        let mut data = self.data.write().map_err(|e| Error::Internal(e.to_string()))?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| Error::Internal(e.to_string()))?;
         data.remove(key);
         Ok(())
     }
 
     fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let data = self.data.read().map_err(|e| Error::Internal(e.to_string()))?;
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
         let results: Vec<_> = data
             .range(prefix.to_vec()..)
             .take_while(|(k, _)| k.starts_with(prefix))
@@ -51,7 +63,10 @@ impl StorageBackend for MemoryBackend {
     }
 
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let data = self.data.read().map_err(|e| Error::Internal(e.to_string()))?;
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
         let results: Vec<_> = data
             .range(start.to_vec()..end.to_vec())
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -98,11 +113,17 @@ impl BatchOperations for MemoryBatch {
     }
 
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
-        self.preconditions.push(Precondition { key, expected_value });
+        self.preconditions.push(Precondition {
+            key,
+            expected_value,
+        });
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        let mut data = self.data.write().map_err(|e| Error::Internal(e.to_string()))?;
+        let mut data = self
+            .data
+            .write()
+            .map_err(|e| Error::Internal(e.to_string()))?;
 
         for precondition in &self.preconditions {
             let actual = data.get(&precondition.key);

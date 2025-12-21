@@ -106,7 +106,12 @@ impl ReplicaState {
 
         let gap = write.sequence - expected;
         if gap > self.max_pending_gap {
-            return ReplicationAck::sequence_gap(self.partition, self.epoch, expected, self.node_id);
+            return ReplicationAck::sequence_gap(
+                self.partition,
+                self.epoch,
+                expected,
+                self.node_id,
+            );
         }
 
         self.pending_writes.insert(write.sequence, write.clone());
@@ -188,8 +193,8 @@ impl ReplicationError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::protocol::Operation;
+    use super::*;
 
     fn partition() -> PartitionId {
         PartitionId::new(0).unwrap()

@@ -73,12 +73,19 @@ impl VirtualNetwork {
     pub fn send(&self, from: u16, to: u16, payload: Vec<u8>) -> bool {
         let mut state = self.state.lock().unwrap();
 
-        let link_state = state.links.get(&(from, to)).copied().unwrap_or(LinkState::Up);
+        let link_state = state
+            .links
+            .get(&(from, to))
+            .copied()
+            .unwrap_or(LinkState::Up);
 
         match link_state {
             LinkState::Down => return false,
             LinkState::Lossy { loss_rate_percent } => {
-                state.rng_seed = state.rng_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                state.rng_seed = state
+                    .rng_seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1);
                 let rand = (state.rng_seed >> 33) as u8;
                 if rand % 100 < loss_rate_percent {
                     return false;

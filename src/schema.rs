@@ -135,9 +135,10 @@ impl Schema {
 
         for (field_name, field_def) in &self.fields {
             if !obj.contains_key(field_name)
-                && let Some(default) = &field_def.default {
-                    obj.insert(field_name.clone(), default.clone());
-                }
+                && let Some(default) = &field_def.default
+            {
+                obj.insert(field_name.clone(), default.clone());
+            }
         }
 
         Ok(())
@@ -266,8 +267,7 @@ mod tests {
 
     #[test]
     fn test_schema_validation_wrong_type() {
-        let schema = Schema::new("users")
-            .add_field(FieldDefinition::new("age", FieldType::Number));
+        let schema = Schema::new("users").add_field(FieldDefinition::new("age", FieldType::Number));
 
         let data = json!({
             "age": "thirty"

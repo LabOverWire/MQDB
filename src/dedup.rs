@@ -89,10 +89,11 @@ impl DedupStore {
 
         for (key, value) in items {
             if let Ok(cached) = serde_json::from_slice::<CachedResponse>(&value)
-                && cached.is_expired(self.ttl_secs) {
-                    self.storage.remove(&key)?;
-                    removed += 1;
-                }
+                && cached.is_expired(self.ttl_secs)
+            {
+                self.storage.remove(&key)?;
+                removed += 1;
+            }
         }
 
         Ok(removed)

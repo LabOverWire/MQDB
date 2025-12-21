@@ -53,9 +53,7 @@ impl ForeignKeyConstraint {
         let source_field = source_field.into();
         let target_entity = target_entity.into();
         let target_field = target_field.into();
-        let name = format!(
-            "{source_entity}_{source_field}_{target_entity}_fk"
-        );
+        let name = format!("{source_entity}_{source_field}_{target_entity}_fk");
         Self {
             source_entity,
             source_field,
@@ -153,17 +151,12 @@ impl ConstraintManager {
 
     pub fn add_constraint(&mut self, constraint: Constraint) {
         let entity = constraint.entity().to_string();
-        self.constraints
-            .entry(entity)
-            .or_default()
-            .push(constraint);
+        self.constraints.entry(entity).or_default().push(constraint);
     }
 
     #[must_use]
     pub fn get_constraints(&self, entity: &str) -> &[Constraint] {
-        self.constraints
-            .get(entity)
-            .map_or(&[], Vec::as_slice)
+        self.constraints.get(entity).map_or(&[], Vec::as_slice)
     }
 
     /// # Errors
@@ -334,13 +327,14 @@ impl ConstraintManager {
 
                 for (key, _) in existing {
                     if let Some(existing_id) = Self::extract_id_from_index_key(&key)
-                        && existing_id != entity.id {
-                            return Err(Error::UniqueViolation {
-                                entity: entity.name.clone(),
-                                field: field.clone(),
-                                value: String::from_utf8_lossy(&value_bytes).to_string(),
-                            });
-                        }
+                        && existing_id != entity.id
+                    {
+                        return Err(Error::UniqueViolation {
+                            entity: entity.name.clone(),
+                            field: field.clone(),
+                            value: String::from_utf8_lossy(&value_bytes).to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -365,22 +359,21 @@ impl ConstraintManager {
         storage: &Storage,
     ) -> Result<()> {
         if let Some(fk_value) = entity.get_field(&constraint.source_field)
-            && !fk_value.is_null() {
-                let target_id = fk_value
-                    .as_str()
-                    .ok_or(Error::InvalidForeignKey)?;
+            && !fk_value.is_null()
+        {
+            let target_id = fk_value.as_str().ok_or(Error::InvalidForeignKey)?;
 
-                let target_key = keys::encode_data_key(&constraint.target_entity, target_id);
+            let target_key = keys::encode_data_key(&constraint.target_entity, target_id);
 
-                if storage.get(&target_key)?.is_none() {
-                    return Err(Error::ForeignKeyViolation {
-                        entity: entity.name.clone(),
-                        field: constraint.source_field.clone(),
-                        target_entity: constraint.target_entity.clone(),
-                        target_id: target_id.to_string(),
-                    });
-                }
+            if storage.get(&target_key)?.is_none() {
+                return Err(Error::ForeignKeyViolation {
+                    entity: entity.name.clone(),
+                    field: constraint.source_field.clone(),
+                    target_entity: constraint.target_entity.clone(),
+                    target_id: target_id.to_string(),
+                });
             }
+        }
 
         Ok(())
     }
@@ -401,12 +394,14 @@ impl ConstraintManager {
 
         for (key, value) in items {
             if let Ok((_entity, id)) = keys::decode_data_key(&key)
-                && let Ok(entity) = Entity::deserialize(source_entity.to_string(), id.clone(), &value)
-                    && let Some(fk_value) = entity.get_field(source_field)
-                        && let Some(fk_str) = fk_value.as_str()
-                            && fk_str == target_id {
-                                referencing_ids.push(id);
-                            }
+                && let Ok(entity) =
+                    Entity::deserialize(source_entity.to_string(), id.clone(), &value)
+                && let Some(fk_value) = entity.get_field(source_field)
+                && let Some(fk_str) = fk_value.as_str()
+                && fk_str == target_id
+            {
+                referencing_ids.push(id);
+            }
         }
 
         Ok(referencing_ids)
@@ -453,15 +448,16 @@ impl ConstraintManager {
 
     pub fn remove_constraint(&mut self, batch: &mut BatchWriter, entity: &str, name: &str) {
         if let Some(constraints) = self.constraints.get_mut(entity)
-            && let Some(pos) = constraints.iter().position(|c| c.name() == name) {
-                let constraint = constraints.remove(pos);
-                let key = keys::encode_constraint_key(
-                    constraint.constraint_type(),
-                    constraint.entity(),
-                    constraint.name(),
-                );
-                batch.remove(key);
-            }
+            && let Some(pos) = constraints.iter().position(|c| c.name() == name)
+        {
+            let constraint = constraints.remove(pos);
+            let key = keys::encode_constraint_key(
+                constraint.constraint_type(),
+                constraint.entity(),
+                constraint.name(),
+            );
+            batch.remove(key);
+        }
     }
 }
 
@@ -482,13 +478,8 @@ mod tests {
         assert_eq!(unique.fields, vec!["email"]);
         assert_eq!(unique.name, "users_email_unique");
 
-        let fk = ForeignKeyConstraint::new(
-            "posts",
-            "author_id",
-            "users",
-            "id",
-            OnDeleteAction::Cascade,
-        );
+        let fk =
+            ForeignKeyConstraint::new("posts", "author_id", "users", "id", OnDeleteAction::Cascade);
         assert_eq!(fk.source_entity, "posts");
         assert_eq!(fk.source_field, "author_id");
         assert_eq!(fk.target_entity, "users");
@@ -503,7 +494,8 @@ mod tests {
     fn test_constraint_manager() {
         let mut manager = ConstraintManager::new();
 
-        let constraint = Constraint::Unique(UniqueConstraint::new("users", vec!["email".to_string()]));
+        let constraint =
+            Constraint::Unique(UniqueConstraint::new("users", vec!["email".to_string()]));
         manager.add_constraint(constraint);
 
         let constraints = manager.get_constraints("users");

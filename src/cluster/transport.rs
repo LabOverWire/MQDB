@@ -1,5 +1,7 @@
 use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
-use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+use super::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+};
 use super::{NodeId, PartitionId};
 use std::fmt::Debug;
 
@@ -111,10 +113,7 @@ mod tests {
 
     #[test]
     fn message_type_values() {
-        let hb = ClusterMessage::Heartbeat(Heartbeat::create(
-            NodeId::validated(1).unwrap(),
-            1000,
-        ));
+        let hb = ClusterMessage::Heartbeat(Heartbeat::create(NodeId::validated(1).unwrap(), 1000));
         assert_eq!(hb.message_type(), 0);
 
         let death = ClusterMessage::DeathNotice {

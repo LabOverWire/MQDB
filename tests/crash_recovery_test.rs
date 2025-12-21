@@ -35,8 +35,7 @@ async fn test_recovery_with_periodic_durability() {
     let db_path = tmp.path().join("db");
 
     {
-        let config = DatabaseConfig::new(&db_path)
-            .with_durability(DurabilityMode::PeriodicMs(100));
+        let config = DatabaseConfig::new(&db_path).with_durability(DurabilityMode::PeriodicMs(100));
 
         let db = Database::open_with_config(config).await.unwrap();
 
@@ -87,13 +86,9 @@ async fn test_recovery_after_many_operations() {
             let id = user["id"].as_str().unwrap();
 
             if index < 25 {
-                db.update(
-                    "users".into(),
-                    id.to_string(),
-                    json!({"status": "updated"}),
-                )
-                .await
-                .unwrap();
+                db.update("users".into(), id.to_string(), json!({"status": "updated"}))
+                    .await
+                    .unwrap();
             } else if index < 35 {
                 db.delete("users".into(), id.to_string()).await.unwrap();
             }
@@ -136,11 +131,7 @@ async fn test_recovery_with_indexes() {
     let db = Database::open(&db_path).await.unwrap();
     db.add_index("users".into(), vec!["email".into()]).await;
 
-    let filter = Filter::new(
-        "email".into(),
-        FilterOp::Eq,
-        json!("user15@example.com"),
-    );
+    let filter = Filter::new("email".into(), FilterOp::Eq, json!("user15@example.com"));
     let results = db
         .list("users".into(), vec![filter], vec![], None, vec![], None)
         .await
@@ -168,10 +159,7 @@ async fn test_recovery_after_concurrent_writes() {
                         "index": i,
                         "value": format!("thread-{}-item-{}", thread_id, i),
                     });
-                    db_clone
-                        .create("items".into(), entity)
-                        .await
-                        .unwrap();
+                    db_clone.create("items".into(), entity).await.unwrap();
                 }
             });
             handles.push(handle);
@@ -220,10 +208,7 @@ async fn test_recovery_maintains_data_integrity() {
     for record in &records {
         let id_field = record["id_field"].as_u64().unwrap() as usize;
         assert_eq!(record["data"], format!("important-data-{}", id_field));
-        assert_eq!(
-            record["checksum"],
-            format!("{:x}", id_field * 12345)
-        );
+        assert_eq!(record["checksum"], format!("{:x}", id_field * 12345));
     }
 }
 
@@ -337,12 +322,9 @@ async fn test_recovery_with_mixed_entity_types() {
             db.create("users".into(), json!({"name": format!("User {}", i)}))
                 .await
                 .unwrap();
-            db.create(
-                "products".into(),
-                json!({"name": format!("Product {}", i)}),
-            )
-            .await
-            .unwrap();
+            db.create("products".into(), json!({"name": format!("Product {}", i)}))
+                .await
+                .unwrap();
             db.create("orders".into(), json!({"order_id": i}))
                 .await
                 .unwrap();

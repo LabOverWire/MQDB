@@ -9,9 +9,7 @@ pub const META_PREFIX: &[u8] = b"meta";
 
 #[must_use]
 pub fn encode_data_key(entity: &str, id: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(
-        DATA_PREFIX.len() + 1 + entity.len() + 1 + id.len(),
-    );
+    let mut key = Vec::with_capacity(DATA_PREFIX.len() + 1 + entity.len() + 1 + id.len());
     key.extend_from_slice(DATA_PREFIX);
     key.push(SEPARATOR);
     key.extend_from_slice(entity.as_bytes());
@@ -120,7 +118,9 @@ pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
             }
         }
         serde_json::Value::String(s) => Ok(s.as_bytes().to_vec()),
-        _ => Err(Error::Validation("cannot index arrays or objects directly".into())),
+        _ => Err(Error::Validation(
+            "cannot index arrays or objects directly".into(),
+        )),
     }
 }
 

@@ -11,11 +11,7 @@ impl NodeId {
 
     #[must_use]
     pub fn validated(id: u16) -> Option<Self> {
-        if id == 0 {
-            None
-        } else {
-            Some(Self::new(id))
-        }
+        if id == 0 { None } else { Some(Self::new(id)) }
     }
 
     #[must_use]

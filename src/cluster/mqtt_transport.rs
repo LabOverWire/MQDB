@@ -1,10 +1,12 @@
 use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
-use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+use super::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+};
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
-use mqtt5::client::MqttClient;
 use mqtt5::QoS;
+use mqtt5::client::MqttClient;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -221,7 +223,11 @@ impl MqttTransport {
         buf
     }
 
-    pub async fn send_async(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+    pub async fn send_async(
+        &self,
+        to: NodeId,
+        message: ClusterMessage,
+    ) -> Result<(), TransportError> {
         let topic = format!("{}/node/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
 
@@ -235,7 +241,9 @@ impl MqttTransport {
 
     pub async fn broadcast_async(&self, message: ClusterMessage) -> Result<(), TransportError> {
         let topic = match &message {
-            ClusterMessage::Heartbeat(_) => format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get()),
+            ClusterMessage::Heartbeat(_) => {
+                format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get())
+            }
             _ => format!("{}/broadcast", CLUSTER_TOPIC_PREFIX),
         };
 
@@ -292,7 +300,9 @@ impl ClusterTransport for MqttTransport {
         drop(state);
 
         let topic = match &message {
-            ClusterMessage::Heartbeat(_) => format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get()),
+            ClusterMessage::Heartbeat(_) => {
+                format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get())
+            }
             _ => format!("{}/broadcast", CLUSTER_TOPIC_PREFIX),
         };
 

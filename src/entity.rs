@@ -68,7 +68,11 @@ impl Entity {
             }
         })?;
         let value: Value = serde_json::from_slice(json_data)?;
-        Ok(Self { name, id, data: value })
+        Ok(Self {
+            name,
+            id,
+            data: value,
+        })
     }
 
     #[must_use]
@@ -82,9 +86,10 @@ impl Entity {
 
         for field in fields {
             if let Some(value) = self.get_field(field)
-                && let Ok(encoded) = keys::encode_value_for_index(value) {
-                    values.push((field.clone(), encoded));
-                }
+                && let Ok(encoded) = keys::encode_value_for_index(value)
+            {
+                values.push((field.clone(), encoded));
+            }
         }
 
         values
@@ -112,11 +117,7 @@ mod tests {
 
     #[test]
     fn test_entity_to_json() {
-        let entity = Entity::new(
-            "users".into(),
-            "123".into(),
-            json!({"name": "John"}),
-        );
+        let entity = Entity::new("users".into(), "123".into(), json!({"name": "John"}));
 
         let json = entity.to_json();
         assert_eq!(json["id"], "123");
