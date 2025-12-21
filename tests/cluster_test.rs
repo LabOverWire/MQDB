@@ -229,3 +229,87 @@ fn heartbeat_detection() {
     ctrl2.tick(600);
     assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Dead);
 }
+
+#[test]
+fn raft_leader_election_three_nodes() {
+    use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+
+    let config = RaftConfig::default();
+    let mut n1 = RaftNode::create(node1, config);
+    let config = RaftConfig::default();
+    let mut n2 = RaftNode::create(node2, config);
+    let config = RaftConfig::default();
+    let mut n3 = RaftNode::create(node3, config);
+
+    n1.add_peer(node2);
+    n1.add_peer(node3);
+    n2.add_peer(node1);
+    n2.add_peer(node3);
+    n3.add_peer(node1);
+    n3.add_peer(node2);
+
+    assert_eq!(n1.role(), RaftRole::Follower);
+    assert_eq!(n2.role(), RaftRole::Follower);
+    assert_eq!(n3.role(), RaftRole::Follower);
+
+    let outputs = n1.tick(1000);
+    assert_eq!(n1.role(), RaftRole::Candidate);
+    assert_eq!(n1.current_term(), 1);
+
+    let mut vote_requests = Vec::new();
+    for output in outputs {
+        if let RaftOutput::SendRequestVote { to, request } = output {
+            vote_requests.push((to, request));
+        }
+    }
+    assert_eq!(vote_requests.len(), 2);
+
+    let (_, req1) = &vote_requests[0];
+    let (resp1, _) = n2.handle_request_vote(node1, req1.clone(), 1000);
+    assert!(resp1.is_granted());
+
+    let outputs = n1.handle_request_vote_response(node2, resp1);
+
+    let became_leader = outputs.iter().any(|o| matches!(o, RaftOutput::BecameLeader));
+    assert!(became_leader);
+    assert_eq!(n1.role(), RaftRole::Leader);
+    assert_eq!(n1.leader_id(), Some(node1));
+
+    assert_eq!(n2.role(), RaftRole::Follower);
+    assert_eq!(n3.role(), RaftRole::Follower);
+}
+
+#[test]
+fn raft_step_down_on_higher_term() {
+    use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole, AppendEntriesRequest};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+
+    let config = RaftConfig::default();
+    let mut n1 = RaftNode::create(node1, config);
+    let config = RaftConfig::default();
+    let mut n2 = RaftNode::create(node2, config);
+
+    n1.add_peer(node2);
+    n1.add_peer(node3);
+    n2.add_peer(node1);
+    n2.add_peer(node3);
+
+    n1.tick(1000);
+    assert_eq!(n1.role(), RaftRole::Candidate);
+    assert_eq!(n1.current_term(), 1);
+
+    let request = AppendEntriesRequest::heartbeat(5, 2, 0, 0, 0);
+    let (response, outputs) = n1.handle_append_entries(node2, request, 1000);
+
+    assert!(response.is_success());
+    assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameFollower { .. })));
+    assert_eq!(n1.role(), RaftRole::Follower);
+    assert_eq!(n1.current_term(), 5);
+}

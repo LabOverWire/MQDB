@@ -1,4 +1,5 @@
 use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
+use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::{NodeId, PartitionId};
 use std::fmt::Debug;
 
@@ -8,6 +9,10 @@ pub enum ClusterMessage {
     Write(ReplicationWrite),
     Ack(ReplicationAck),
     DeathNotice { node_id: NodeId },
+    RequestVote(RequestVoteRequest),
+    RequestVoteResponse(RequestVoteResponse),
+    AppendEntries(AppendEntriesRequest),
+    AppendEntriesResponse(AppendEntriesResponse),
 }
 
 impl ClusterMessage {
@@ -18,6 +23,10 @@ impl ClusterMessage {
             Self::Write(_) => 10,
             Self::Ack(_) => 11,
             Self::DeathNotice { .. } => 2,
+            Self::RequestVote(_) => 20,
+            Self::RequestVoteResponse(_) => 21,
+            Self::AppendEntries(_) => 22,
+            Self::AppendEntriesResponse(_) => 23,
         }
     }
 }

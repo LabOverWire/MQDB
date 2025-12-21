@@ -111,6 +111,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.heartbeat.handle_death_notice(node_id);
                 self.handle_node_death(node_id);
             }
+            ClusterMessage::RequestVote(_)
+            | ClusterMessage::RequestVoteResponse(_)
+            | ClusterMessage::AppendEntries(_)
+            | ClusterMessage::AppendEntriesResponse(_) => {}
         }
     }
 

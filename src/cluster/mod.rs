@@ -8,6 +8,7 @@ mod partition;
 mod partition_map;
 mod protocol;
 mod quorum;
+pub mod raft;
 mod replication;
 mod transport;
 

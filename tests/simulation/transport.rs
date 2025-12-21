@@ -2,6 +2,7 @@ use mqdb::cluster::{
     ClusterMessage, ClusterTransport, Epoch, Heartbeat, InboundMessage, NodeId, PartitionId,
     ReplicationAck, ReplicationWrite, TransportError,
 };
+use mqdb::cluster::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 
 use super::framework::{VirtualClock, VirtualNetwork};
 use bebytes::BeBytes;
@@ -66,6 +67,18 @@ impl SimulatedTransport {
             ClusterMessage::DeathNotice { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
             }
+            ClusterMessage::RequestVote(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::RequestVoteResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::AppendEntries(req) => {
+                buf.extend_from_slice(&req.to_bytes());
+            }
+            ClusterMessage::AppendEntriesResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
         }
 
         buf
@@ -99,6 +112,22 @@ impl SimulatedTransport {
                 let node_id = u16::from_be_bytes([payload[0], payload[1]]);
                 let node = NodeId::validated(node_id)?;
                 Some(ClusterMessage::DeathNotice { node_id: node })
+            }
+            20 => {
+                let (req, _) = RequestVoteRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::RequestVote(req))
+            }
+            21 => {
+                let (resp, _) = RequestVoteResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::RequestVoteResponse(resp))
+            }
+            22 => {
+                let req = AppendEntriesRequest::from_bytes(payload)?;
+                Some(ClusterMessage::AppendEntries(req))
+            }
+            23 => {
+                let (resp, _) = AppendEntriesResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::AppendEntriesResponse(resp))
             }
             _ => None,
         }

@@ -1,4 +1,5 @@
 use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
+use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -156,6 +157,22 @@ impl MqttTransport {
                 let dead_node = NodeId::validated(dead_id)?;
                 ClusterMessage::DeathNotice { node_id: dead_node }
             }
+            20 => {
+                let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::RequestVote(req)
+            }
+            21 => {
+                let (resp, _) = RequestVoteResponse::try_from_be_bytes(data).ok()?;
+                ClusterMessage::RequestVoteResponse(resp)
+            }
+            22 => {
+                let req = AppendEntriesRequest::from_bytes(data)?;
+                ClusterMessage::AppendEntries(req)
+            }
+            23 => {
+                let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
+                ClusterMessage::AppendEntriesResponse(resp)
+            }
             _ => return None,
         };
 
@@ -186,6 +203,18 @@ impl MqttTransport {
             }
             ClusterMessage::DeathNotice { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
+            }
+            ClusterMessage::RequestVote(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::RequestVoteResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::AppendEntries(req) => {
+                buf.extend_from_slice(&req.to_bytes());
+            }
+            ClusterMessage::AppendEntriesResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
             }
         }
 
@@ -316,6 +345,18 @@ mod tests {
             }
             ClusterMessage::DeathNotice { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
+            }
+            ClusterMessage::RequestVote(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::RequestVoteResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::AppendEntries(req) => {
+                buf.extend_from_slice(&req.to_bytes());
+            }
+            ClusterMessage::AppendEntriesResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
             }
         }
 
