@@ -1,0 +1,56 @@
+[config]
+default_to_workspace = false
+
+[tasks.format]
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.format-check]
+command = "cargo"
+args = ["fmt", "--all", "--check"]
+
+[tasks.check]
+command = "cargo"
+args = ["check", "--all-targets", "--all-features"]
+
+[tasks.build]
+command = "cargo"
+args = ["build", "--all-targets"]
+
+[tasks.build-release]
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.clippy]
+command = "cargo"
+args = [
+    "clippy",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-W", "clippy::pedantic",
+]
+
+[tasks.test]
+command = "cargo"
+args = ["test", "--all-features"]
+
+[tasks.test-verbose]
+command = "cargo"
+args = ["test", "--all-features", "--", "--nocapture"]
+
+[tasks.clean]
+command = "cargo"
+args = ["clean"]
+
+[tasks.dev]
+description = "Format, clippy, and test"
+dependencies = ["format", "clippy", "test"]
+
+[tasks.ci]
+description = "CI pipeline: format-check, clippy, test"
+dependencies = ["format-check", "clippy", "test"]
+
+[tasks.watch]
+command = "cargo"
+args = ["watch", "-x", "check"]
