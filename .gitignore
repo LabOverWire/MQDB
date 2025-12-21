@@ -4,3 +4,5 @@ data/
 mqtt_storage/
 pkg/
 **/mqdb-wasm/target/
+docs/
+.idea/
