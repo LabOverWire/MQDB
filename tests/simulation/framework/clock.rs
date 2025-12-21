@@ -7,6 +7,14 @@ pub struct VirtualClock {
     nanos: Arc<AtomicU64>,
 }
 
+impl std::fmt::Debug for VirtualClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualClock")
+            .field("nanos", &self.nanos.load(Ordering::SeqCst))
+            .finish()
+    }
+}
+
 impl VirtualClock {
     #[must_use]
     pub fn new() -> Self {

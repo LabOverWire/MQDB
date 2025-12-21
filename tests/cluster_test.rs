@@ -1,6 +1,9 @@
 mod simulation;
 
-use mqdb::cluster::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole};
+use mqdb::cluster::{
+    Epoch, NodeController, NodeId, Operation, PartitionAssignment, PartitionId, PartitionMap,
+    PartitionRole, ReplicationWrite, TransportConfig,
+};
 
 #[test]
 fn partition_assignment_determinism() {
@@ -134,4 +137,95 @@ fn simulation_scheduled_tasks() {
 
     rt.run_for_ms(20);
     assert_eq!(counter.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn two_node_replication() {
+    use simulation::framework::VirtualNetwork;
+    use simulation::framework::VirtualClock;
+    use simulation::transport::SimulatedTransport;
+
+    let clock = VirtualClock::new();
+    let network = VirtualNetwork::new(clock.clone());
+
+    let node1_id = NodeId::validated(1).unwrap();
+    let node2_id = NodeId::validated(2).unwrap();
+
+    let t1 = SimulatedTransport::new(node1_id, network.clone(), clock.clone());
+    let t2 = SimulatedTransport::new(node2_id, network.clone(), clock.clone());
+
+    t1.register_peer(node2_id);
+    t2.register_peer(node1_id);
+
+    let config = TransportConfig::default();
+    let mut ctrl1 = NodeController::new(node1_id, t1, config);
+    let mut ctrl2 = NodeController::new(node2_id, t2, config);
+
+    let partition = PartitionId::new(0).unwrap();
+
+    ctrl1.become_primary(partition, Epoch::new(1));
+    ctrl2.become_replica(partition, Epoch::new(1), 0);
+
+    let write = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::new(1),
+        0,
+        "users".to_string(),
+        "123".to_string(),
+        b"test data".to_vec(),
+    );
+
+    let seq = ctrl1.replicate_write(write, &[node2_id], 1).unwrap();
+    assert_eq!(seq, 1);
+
+    clock.advance_ms(5);
+
+    ctrl2.process_messages();
+    assert_eq!(ctrl2.sequence(partition), Some(1));
+
+    clock.advance_ms(5);
+
+    ctrl1.process_messages();
+}
+
+#[test]
+fn heartbeat_detection() {
+    use simulation::framework::VirtualNetwork;
+    use simulation::framework::VirtualClock;
+    use simulation::transport::SimulatedTransport;
+    use mqdb::cluster::NodeStatus;
+
+    let clock = VirtualClock::new();
+    let network = VirtualNetwork::new(clock.clone());
+
+    let node1_id = NodeId::validated(1).unwrap();
+    let node2_id = NodeId::validated(2).unwrap();
+
+    let t1 = SimulatedTransport::new(node1_id, network.clone(), clock.clone());
+    let t2 = SimulatedTransport::new(node2_id, network.clone(), clock.clone());
+
+    t1.register_peer(node2_id);
+    t2.register_peer(node1_id);
+
+    let config = TransportConfig {
+        heartbeat_interval_ms: 100,
+        heartbeat_timeout_ms: 500,
+        ack_timeout_ms: 50,
+    };
+
+    let mut ctrl1 = NodeController::new(node1_id, t1, config);
+    let mut ctrl2 = NodeController::new(node2_id, t2, config);
+
+    ctrl1.register_peer(node2_id);
+    ctrl2.register_peer(node1_id);
+
+    ctrl1.tick(0);
+    clock.advance_ms(5);
+    ctrl2.process_messages();
+
+    assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Alive);
+
+    ctrl2.tick(600);
+    assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Dead);
 }

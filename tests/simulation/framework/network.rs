@@ -32,6 +32,14 @@ pub struct VirtualNetwork {
     state: Arc<Mutex<NetworkState>>,
 }
 
+impl std::fmt::Debug for VirtualNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VirtualNetwork")
+            .field("clock", &self.clock)
+            .finish_non_exhaustive()
+    }
+}
+
 impl VirtualNetwork {
     #[must_use]
     pub fn new(clock: VirtualClock) -> Self {
