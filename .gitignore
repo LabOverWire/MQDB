@@ -1,5 +1,6 @@
 /target
 .claude
+CLAUDE.md
 data/
 mqtt_storage/
 pkg/
