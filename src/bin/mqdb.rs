@@ -603,7 +603,7 @@ async fn cmd_schema_set(
     file: PathBuf,
     conn: ConnectionArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(&file)?;
+    let content = tokio::fs::read_to_string(&file).await?;
     let schema: Value = serde_json::from_str(&content)?;
     let topic = format!("$DB/_admin/schema/{entity}/set");
     let response = Box::pin(execute_request(&conn, &topic, schema)).await?;

@@ -700,7 +700,7 @@ async fn handle_admin_operation(
                     crate::ErrorCode::BadRequest,
                     "invalid backup name: must be alphanumeric, underscore, or hyphen only",
                 )
-            } else if let Err(e) = std::fs::create_dir_all(backup_dir) {
+            } else if let Err(e) = tokio::fs::create_dir_all(backup_dir).await {
                 Response::error(
                     crate::ErrorCode::Internal,
                     format!("failed to create backup directory: {e}"),
@@ -719,13 +719,16 @@ async fn handle_admin_operation(
         ),
         AdminOperation::BackupList => {
             if backup_dir.exists() {
-                match std::fs::read_dir(backup_dir) {
-                    Ok(entries) => {
-                        let backups: Vec<_> = entries
-                            .filter_map(std::result::Result::ok)
-                            .filter(|e| e.path().is_dir())
-                            .filter_map(|e| e.file_name().into_string().ok())
-                            .collect();
+                match tokio::fs::read_dir(backup_dir).await {
+                    Ok(mut entries) => {
+                        let mut backups = Vec::new();
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if entry.path().is_dir()
+                                && let Ok(name) = entry.file_name().into_string()
+                            {
+                                backups.push(name);
+                            }
+                        }
                         Response::ok(json!(backups))
                     }
                     Err(e) => Response::error(

@@ -1110,8 +1110,7 @@ impl Database {
     /// # Errors
     /// Returns an error if the restore fails.
     pub async fn restore_logical<P: AsRef<Path>>(&self, source: P) -> Result<usize> {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
+        use tokio::io::AsyncBufReadExt;
 
         let src = source.as_ref();
 
@@ -1122,17 +1121,17 @@ impl Database {
             )));
         }
 
-        let file = File::open(src).map_err(|e| {
+        let file = tokio::fs::File::open(src).await.map_err(|e| {
             crate::error::Error::BackupFailed(format!("failed to open backup file: {e}"))
         })?;
 
-        let reader = BufReader::new(file);
+        let reader = tokio::io::BufReader::new(file);
+        let mut lines = reader.lines();
         let mut count = 0;
 
-        for line in reader.lines() {
-            let line = line.map_err(|e| {
-                crate::error::Error::BackupFailed(format!("failed to read line: {e}"))
-            })?;
+        while let Some(line) = lines.next_line().await.map_err(|e| {
+            crate::error::Error::BackupFailed(format!("failed to read line: {e}"))
+        })? {
 
             if line.trim().is_empty() {
                 continue;
