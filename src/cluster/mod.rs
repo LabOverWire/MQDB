@@ -1,3 +1,4 @@
+pub mod entity;
 mod epoch;
 mod heartbeat;
 mod inflight_store;
@@ -18,11 +19,13 @@ mod rebalancer;
 mod replication;
 mod retained_store;
 mod session;
+mod store_manager;
 mod subscription_cache;
 mod topic_index;
 mod topic_trie;
 mod transport;
 mod wildcard_store;
+mod write_log;
 
 pub use epoch::Epoch;
 pub use heartbeat::{HeartbeatManager, NodeStatus};
@@ -38,7 +41,8 @@ pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key
 pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};
 pub use protocol::{
-    AckStatus, CatchupRequest, Heartbeat, MessageType, Operation, ReplicationAck, ReplicationWrite,
+    AckStatus, CatchupRequest, CatchupResponse, Heartbeat, MessageType, Operation, ReplicationAck,
+    ReplicationWrite,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};
 pub use qos2_store::{
@@ -54,6 +58,7 @@ pub use retained_store::{
     RetainedMessage, RetainedStore, RetainedStoreError, retained_message_key,
 };
 pub use session::{SessionData, SessionError, SessionStore, session_key, session_partition};
+pub use store_manager::{StoreApplyError, StoreManager};
 pub use subscription_cache::{
     MqttSubscriptionSnapshot, MqttTopicEntry, SubscriptionCache, SubscriptionCacheError,
     mqtt_subscription_key,
@@ -69,3 +74,4 @@ pub use transport::{
     ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError,
 };
 pub use wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError, wildcard_key};
+pub use write_log::PartitionWriteLog;

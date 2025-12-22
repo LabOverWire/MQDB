@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NodeId, PartitionId, session_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -285,6 +286,80 @@ impl InflightStore {
         self.messages.read().unwrap().len()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` if a message with the same client/packet ID exists.
+    pub fn add_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+        timestamp: u64,
+    ) -> Result<(InflightMessage, Vec<u8>), InflightStoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let mut messages = self.messages.write().unwrap();
+
+        if messages.contains_key(&key) {
+            return Err(InflightStoreError::AlreadyExists);
+        }
+
+        let msg = InflightMessage::create(client_id, packet_id, topic, payload, qos, timestamp);
+        let data = Self::serialize(&msg);
+        messages.insert(key, msg.clone());
+        Ok((msg, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if no message exists.
+    pub fn acknowledge_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+    ) -> Result<(InflightMessage, Vec<u8>), InflightStoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let msg = self
+            .messages
+            .write()
+            .unwrap()
+            .remove(&key)
+            .ok_or(InflightStoreError::NotFound)?;
+        let data = Self::serialize(&msg);
+        Ok((msg, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if no message exists, or `MaxRetriesExceeded` if attempts exhausted.
+    pub fn mark_retry_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        timestamp: u64,
+    ) -> Result<(u8, Vec<u8>), InflightStoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let mut messages = self.messages.write().unwrap();
+
+        let msg = messages.get_mut(&key).ok_or(InflightStoreError::NotFound)?;
+
+        if msg.attempts >= self.max_attempts {
+            return Err(InflightStoreError::MaxRetriesExceeded);
+        }
+
+        msg.increment_attempts(timestamp);
+        let attempts = msg.attempts;
+        let data = Self::serialize(msg);
+        Ok((attempts, data))
+    }
+
     #[must_use]
     pub fn serialize(msg: &InflightMessage) -> Vec<u8> {
         msg.to_be_bytes()
@@ -295,6 +370,43 @@ impl InflightStore {
         InflightMessage::try_from_be_bytes(bytes)
             .ok()
             .map(|(m, _)| m)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns an error if ID parsing or deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), InflightStoreError> {
+        let parts: Vec<&str> = id.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(InflightStoreError::SerializationError);
+        }
+        let client_id = parts[0];
+        let packet_id: u16 = parts[1]
+            .parse()
+            .map_err(|_| InflightStoreError::SerializationError)?;
+
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let msg = Self::deserialize(data).ok_or(InflightStoreError::SerializationError)?;
+                let key = (client_id.to_string(), packet_id);
+                let mut messages = self.messages.write().unwrap();
+                messages.insert(key, msg);
+                Ok(())
+            }
+            Operation::Delete => {
+                let key = (client_id.to_string(), packet_id);
+                let mut messages = self.messages.write().unwrap();
+                messages.remove(&key);
+                Ok(())
+            }
+        }
     }
 }
 

@@ -147,10 +147,7 @@ impl RaftNode {
             .peers()
             .to_vec()
             .into_iter()
-            .map(|peer| RaftOutput::SendRequestVote {
-                to: peer,
-                request,
-            })
+            .map(|peer| RaftOutput::SendRequestVote { to: peer, request })
             .collect()
     }
 

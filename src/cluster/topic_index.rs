@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -231,6 +232,48 @@ impl TopicIndex {
         self.entries.read().unwrap().len()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn subscribe_with_data(
+        &self,
+        topic: &str,
+        client_id: &str,
+        client_partition: PartitionId,
+        qos: u8,
+    ) -> (TopicIndexEntry, Vec<u8>) {
+        let mut entries = self.entries.write().unwrap();
+        let entry = entries
+            .entry(topic.to_string())
+            .or_insert_with(|| TopicIndexEntry::create(topic));
+        entry.add_subscriber(client_id, client_partition, qos);
+        let data = Self::serialize(entry);
+        (entry.clone(), data)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the topic does not exist.
+    pub fn unsubscribe_with_data(
+        &self,
+        topic: &str,
+        client_id: &str,
+    ) -> Result<(TopicIndexEntry, Vec<u8>), TopicIndexError> {
+        let mut entries = self.entries.write().unwrap();
+        if let Some(entry) = entries.get_mut(topic) {
+            let _ = entry.remove_subscriber(client_id);
+            let data = Self::serialize(entry);
+            let result = entry.clone();
+            if entry.subscribers.is_empty() {
+                entries.remove(topic);
+            }
+            Ok((result, data))
+        } else {
+            Err(TopicIndexError::NotFound)
+        }
+    }
+
     #[must_use]
     pub fn serialize(entry: &TopicIndexEntry) -> Vec<u8> {
         entry.to_be_bytes()
@@ -241,6 +284,32 @@ impl TopicIndex {
         TopicIndexEntry::try_from_be_bytes(bytes)
             .ok()
             .map(|(e, _)| e)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), TopicIndexError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let entry = Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
+                let mut entries = self.entries.write().unwrap();
+                entries.insert(id.to_string(), entry);
+                Ok(())
+            }
+            Operation::Delete => {
+                let mut entries = self.entries.write().unwrap();
+                entries.remove(id);
+                Ok(())
+            }
+        }
     }
 }
 

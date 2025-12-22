@@ -4,4 +4,3 @@ pub mod runtime;
 
 pub use clock::VirtualClock;
 pub use network::VirtualNetwork;
-pub use runtime::SimulatedRuntime;

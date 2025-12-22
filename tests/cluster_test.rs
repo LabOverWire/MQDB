@@ -68,7 +68,7 @@ fn partition_map_assignment() {
 
 #[test]
 fn simulation_framework_three_nodes() {
-    use simulation::framework::SimulatedRuntime;
+    use simulation::framework::runtime::SimulatedRuntime;
 
     let rt = SimulatedRuntime::new();
     let net = rt.network();
@@ -95,7 +95,7 @@ fn simulation_framework_three_nodes() {
 
 #[test]
 fn simulation_network_partition() {
-    use simulation::framework::SimulatedRuntime;
+    use simulation::framework::runtime::SimulatedRuntime;
 
     let rt = SimulatedRuntime::new();
     let net = rt.network();
@@ -116,7 +116,7 @@ fn simulation_network_partition() {
 
 #[test]
 fn simulation_scheduled_tasks() {
-    use simulation::framework::SimulatedRuntime;
+    use simulation::framework::runtime::SimulatedRuntime;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 

@@ -364,6 +364,105 @@ impl CatchupRequest {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CatchupResponse {
+    pub partition: PartitionId,
+    pub responder_id: NodeId,
+    pub writes: Vec<ReplicationWrite>,
+}
+
+impl CatchupResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(
+        partition: PartitionId,
+        responder: NodeId,
+        writes: Vec<ReplicationWrite>,
+    ) -> Self {
+        Self {
+            partition,
+            responder_id: responder,
+            writes,
+        }
+    }
+
+    #[must_use]
+    pub fn empty(partition: PartitionId, responder: NodeId) -> Self {
+        Self {
+            partition,
+            responder_id: responder,
+            writes: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let write_bytes: Vec<Vec<u8>> =
+            self.writes.iter().map(ReplicationWrite::to_bytes).collect();
+        let total_write_len: usize = write_bytes.iter().map(Vec::len).sum();
+
+        let mut buf = Vec::with_capacity(9 + total_write_len);
+        buf.push(Self::VERSION);
+        buf.extend_from_slice(&self.partition.get().to_be_bytes());
+        buf.extend_from_slice(&self.responder_id.get().to_be_bytes());
+        buf.extend_from_slice(&(self.writes.len() as u32).to_be_bytes());
+
+        for wb in write_bytes {
+            buf.extend_from_slice(&(wb.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&wb);
+        }
+
+        buf
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 9 {
+            return None;
+        }
+
+        let version = bytes[0];
+        if version != Self::VERSION {
+            return None;
+        }
+
+        let partition = u16::from_be_bytes([bytes[1], bytes[2]]);
+        let responder = u16::from_be_bytes([bytes[3], bytes[4]]);
+        let write_count = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
+
+        let mut offset = 9;
+        let mut writes = Vec::with_capacity(write_count);
+
+        for _ in 0..write_count {
+            if offset + 4 > bytes.len() {
+                return None;
+            }
+            let write_len = u32::from_be_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + write_len > bytes.len() {
+                return None;
+            }
+            let write = ReplicationWrite::from_bytes(&bytes[offset..offset + write_len])?;
+            writes.push(write);
+            offset += write_len;
+        }
+
+        Some(Self {
+            partition: PartitionId::new(partition)?,
+            responder_id: NodeId::validated(responder)?,
+            writes,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +579,57 @@ mod tests {
         assert_eq!(decoded.from_sequence(), 100);
         assert_eq!(decoded.to_sequence(), 200);
         assert_eq!(decoded.requester_id(), 5);
+    }
+
+    #[test]
+    fn catchup_response_roundtrip() {
+        let partition = PartitionId::new(7).unwrap();
+        let responder = NodeId::validated(3).unwrap();
+        let epoch = Epoch::new(5);
+
+        let writes = vec![
+            ReplicationWrite::new(
+                partition,
+                Operation::Insert,
+                epoch,
+                1,
+                "_sessions".to_string(),
+                "client1".to_string(),
+                b"data1".to_vec(),
+            ),
+            ReplicationWrite::new(
+                partition,
+                Operation::Update,
+                epoch,
+                2,
+                "_sessions".to_string(),
+                "client2".to_string(),
+                b"data2".to_vec(),
+            ),
+        ];
+
+        let resp = CatchupResponse::create(partition, responder, writes);
+        let bytes = resp.to_bytes();
+        let decoded = CatchupResponse::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.partition, partition);
+        assert_eq!(decoded.responder_id, responder);
+        assert_eq!(decoded.writes.len(), 2);
+        assert_eq!(decoded.writes[0].sequence, 1);
+        assert_eq!(decoded.writes[0].id, "client1");
+        assert_eq!(decoded.writes[1].sequence, 2);
+        assert_eq!(decoded.writes[1].id, "client2");
+    }
+
+    #[test]
+    fn catchup_response_empty() {
+        let partition = PartitionId::new(0).unwrap();
+        let responder = NodeId::validated(1).unwrap();
+
+        let resp = CatchupResponse::empty(partition, responder);
+        let bytes = resp.to_bytes();
+        let decoded = CatchupResponse::from_bytes(&bytes).unwrap();
+
+        assert!(decoded.writes.is_empty());
     }
 }

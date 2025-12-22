@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -319,6 +320,52 @@ impl SessionStore {
         self.sessions.read().unwrap().len()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` if a session with the same client ID exists.
+    pub fn create_session_with_data(
+        &self,
+        client_id: &str,
+    ) -> Result<(SessionData, Vec<u8>), SessionError> {
+        let session = self.create_session(client_id)?;
+        let data = Self::serialize(&session);
+        Ok((session, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the session does not exist.
+    pub fn update_with_data<F>(
+        &self,
+        client_id: &str,
+        f: F,
+    ) -> Result<(SessionData, Vec<u8>), SessionError>
+    where
+        F: FnOnce(&mut SessionData),
+    {
+        let session = self.update(client_id, f)?;
+        let data = Self::serialize(&session);
+        Ok((session, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the session does not exist.
+    pub fn remove_with_data(
+        &self,
+        client_id: &str,
+    ) -> Result<(SessionData, Vec<u8>), SessionError> {
+        let session = self.remove(client_id).ok_or(SessionError::NotFound)?;
+        let data = Self::serialize(&session);
+        Ok((session, data))
+    }
+
     #[must_use]
     pub fn serialize(session: &SessionData) -> Vec<u8> {
         session.to_be_bytes()
@@ -327,6 +374,56 @@ impl SessionStore {
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<SessionData> {
         SessionData::try_from_be_bytes(bytes).ok().map(|(s, _)| s)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated(&self, operation: Operation, data: &[u8]) -> Result<(), SessionError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
+                let client_id = session.client_id_str().to_string();
+                let mut sessions = self.sessions.write().unwrap();
+                sessions.insert(client_id, session);
+                Ok(())
+            }
+            Operation::Delete => {
+                let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
+                let client_id = session.client_id_str().to_string();
+                let mut sessions = self.sessions.write().unwrap();
+                sessions.remove(&client_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated_by_id(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), SessionError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
+                let mut sessions = self.sessions.write().unwrap();
+                sessions.insert(id.to_string(), session);
+                Ok(())
+            }
+            Operation::Delete => {
+                let mut sessions = self.sessions.write().unwrap();
+                sessions.remove(id);
+                Ok(())
+            }
+        }
     }
 }
 

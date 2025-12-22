@@ -1129,10 +1129,11 @@ impl Database {
         let mut lines = reader.lines();
         let mut count = 0;
 
-        while let Some(line) = lines.next_line().await.map_err(|e| {
-            crate::error::Error::BackupFailed(format!("failed to read line: {e}"))
-        })? {
-
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| crate::error::Error::BackupFailed(format!("failed to read line: {e}")))?
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -1208,8 +1209,7 @@ async fn ttl_cleanup_task(
             let entity_name = parts[1];
             let id = parts[2];
 
-            let Ok(entity) =
-                Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
+            let Ok(entity) = Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
             else {
                 continue;
             };

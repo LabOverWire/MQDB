@@ -1,0 +1,8 @@
+pub const SESSIONS: &str = "_sessions";
+pub const QOS2: &str = "_mqtt_qos2";
+pub const INFLIGHT: &str = "_mqtt_inflight";
+pub const SUBSCRIPTIONS: &str = "_mqtt_subs";
+pub const RETAINED: &str = "_mqtt_retained";
+pub const TOPIC_INDEX: &str = "_topic_index";
+pub const WILDCARDS: &str = "_wildcards";
+pub const OFFSETS: &str = "_offsets";

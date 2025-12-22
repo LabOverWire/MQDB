@@ -1,6 +1,8 @@
 use super::protocol::{AckStatus, ReplicationAck};
 use super::{Epoch, NodeId};
 use std::collections::HashSet;
+#[cfg(feature = "native")]
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuorumResult {
@@ -9,7 +11,6 @@ pub enum QuorumResult {
     Failed,
 }
 
-#[derive(Debug)]
 pub struct QuorumTracker {
     sequence: u64,
     epoch: Epoch,
@@ -19,6 +20,23 @@ pub struct QuorumTracker {
     failed_nodes: HashSet<u16>,
     stale_epoch_seen: bool,
     highest_epoch_seen: Epoch,
+    #[cfg(feature = "native")]
+    completion_tx: Option<oneshot::Sender<QuorumResult>>,
+}
+
+impl std::fmt::Debug for QuorumTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuorumTracker")
+            .field("sequence", &self.sequence)
+            .field("epoch", &self.epoch)
+            .field("required", &self.required)
+            .field("expected_nodes", &self.expected_nodes)
+            .field("acked_nodes", &self.acked_nodes)
+            .field("failed_nodes", &self.failed_nodes)
+            .field("stale_epoch_seen", &self.stale_epoch_seen)
+            .field("highest_epoch_seen", &self.highest_epoch_seen)
+            .finish_non_exhaustive()
+    }
 }
 
 impl QuorumTracker {
@@ -39,6 +57,39 @@ impl QuorumTracker {
             failed_nodes: HashSet::new(),
             stale_epoch_seen: false,
             highest_epoch_seen: epoch,
+            #[cfg(feature = "native")]
+            completion_tx: None,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    #[must_use]
+    pub fn with_completion(
+        sequence: u64,
+        epoch: Epoch,
+        replica_nodes: &[NodeId],
+        required_acks: usize,
+    ) -> (Self, oneshot::Receiver<QuorumResult>) {
+        let (tx, rx) = oneshot::channel();
+        let expected_nodes: HashSet<u16> = replica_nodes.iter().map(|n| n.get()).collect();
+        let tracker = Self {
+            sequence,
+            epoch,
+            required: required_acks,
+            expected_nodes,
+            acked_nodes: HashSet::new(),
+            failed_nodes: HashSet::new(),
+            stale_epoch_seen: false,
+            highest_epoch_seen: epoch,
+            completion_tx: Some(tx),
+        };
+        (tracker, rx)
+    }
+
+    #[cfg(feature = "native")]
+    pub fn signal_completion(&mut self) {
+        if let Some(tx) = self.completion_tx.take() {
+            let _ = tx.send(self.current_result());
         }
     }
 
@@ -182,8 +233,11 @@ impl PendingWrites {
         let mut i = 0;
         while i < self.trackers.len() {
             if self.trackers[i].is_complete() {
-                let tracker = self.trackers.swap_remove(i);
-                completed.push((tracker.sequence(), tracker.current_result()));
+                let mut tracker = self.trackers.swap_remove(i);
+                let result = tracker.current_result();
+                #[cfg(feature = "native")]
+                tracker.signal_completion();
+                completed.push((tracker.sequence(), result));
             } else {
                 i += 1;
             }

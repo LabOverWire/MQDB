@@ -985,7 +985,10 @@ async fn cmd_subscribe(
         .unwrap_or(false)
     {
         let data = response.get("data").unwrap_or(&Value::Null);
-        let sub_id = data.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let sub_id = data
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
 
         eprintln!("Subscription ID: {sub_id}");
         if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array())

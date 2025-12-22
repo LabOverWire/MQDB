@@ -1,4 +1,6 @@
-use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
+use super::protocol::{
+    CatchupRequest, CatchupResponse, Heartbeat, ReplicationAck, ReplicationWrite,
+};
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
@@ -15,6 +17,8 @@ pub enum ClusterMessage {
     RequestVoteResponse(RequestVoteResponse),
     AppendEntries(AppendEntriesRequest),
     AppendEntriesResponse(AppendEntriesResponse),
+    CatchupRequest(CatchupRequest),
+    CatchupResponse(CatchupResponse),
 }
 
 impl ClusterMessage {
@@ -29,6 +33,8 @@ impl ClusterMessage {
             Self::RequestVoteResponse(_) => 21,
             Self::AppendEntries(_) => 22,
             Self::AppendEntriesResponse(_) => 23,
+            Self::CatchupRequest(_) => 12,
+            Self::CatchupResponse(_) => 13,
         }
     }
 }

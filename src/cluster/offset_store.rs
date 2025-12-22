@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NodeId, PartitionId, session_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -163,6 +164,36 @@ impl OffsetStore {
         self.offsets.read().unwrap().len()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn commit_with_data(
+        &self,
+        consumer_id: &str,
+        partition: PartitionId,
+        sequence: u64,
+        timestamp: u64,
+    ) -> (ConsumerOffset, Vec<u8>) {
+        let key = (consumer_id.to_string(), partition.get());
+        let offset = ConsumerOffset::create(consumer_id, partition, sequence, timestamp);
+        let data = Self::serialize(&offset);
+        self.offsets.write().unwrap().insert(key, offset.clone());
+        (offset, data)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn delete_with_data(
+        &self,
+        consumer_id: &str,
+        partition: PartitionId,
+    ) -> Option<(ConsumerOffset, Vec<u8>)> {
+        let key = (consumer_id.to_string(), partition.get());
+        let offset = self.offsets.write().unwrap().remove(&key)?;
+        let data = Self::serialize(&offset);
+        Some((offset, data))
+    }
+
     #[must_use]
     pub fn serialize(offset: &ConsumerOffset) -> Vec<u8> {
         offset.to_be_bytes()
@@ -173,6 +204,43 @@ impl OffsetStore {
         ConsumerOffset::try_from_be_bytes(bytes)
             .ok()
             .map(|(o, _)| o)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns an error if ID parsing or deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), OffsetStoreError> {
+        let parts: Vec<&str> = id.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(OffsetStoreError::InvalidPartition);
+        }
+        let consumer_id = parts[0];
+        let partition_num: u16 = parts[1]
+            .parse()
+            .map_err(|_| OffsetStoreError::InvalidPartition)?;
+
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let offset = Self::deserialize(data).ok_or(OffsetStoreError::SerializationError)?;
+                let key = (consumer_id.to_string(), partition_num);
+                let mut offsets = self.offsets.write().unwrap();
+                offsets.insert(key, offset);
+                Ok(())
+            }
+            Operation::Delete => {
+                let key = (consumer_id.to_string(), partition_num);
+                let mut offsets = self.offsets.write().unwrap();
+                offsets.remove(&key);
+                Ok(())
+            }
+        }
     }
 }
 

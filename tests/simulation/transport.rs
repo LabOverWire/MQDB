@@ -2,8 +2,8 @@ use mqdb::cluster::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use mqdb::cluster::{
-    ClusterMessage, ClusterTransport, Epoch, Heartbeat, InboundMessage, NodeId, PartitionId,
-    ReplicationAck, ReplicationWrite, TransportError,
+    CatchupRequest, CatchupResponse, ClusterMessage, ClusterTransport, Epoch, Heartbeat,
+    InboundMessage, NodeId, PartitionId, ReplicationAck, ReplicationWrite, TransportError,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -81,6 +81,12 @@ impl SimulatedTransport {
             ClusterMessage::AppendEntriesResponse(resp) => {
                 buf.extend_from_slice(&resp.to_be_bytes());
             }
+            ClusterMessage::CatchupRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::CatchupResponse(resp) => {
+                buf.extend_from_slice(&resp.to_bytes());
+            }
         }
 
         buf
@@ -130,6 +136,14 @@ impl SimulatedTransport {
             23 => {
                 let (resp, _) = AppendEntriesResponse::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::AppendEntriesResponse(resp))
+            }
+            12 => {
+                let (req, _) = CatchupRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::CatchupRequest(req))
+            }
+            13 => {
+                let resp = CatchupResponse::from_bytes(payload)?;
+                Some(ClusterMessage::CatchupResponse(resp))
             }
             _ => None,
         }

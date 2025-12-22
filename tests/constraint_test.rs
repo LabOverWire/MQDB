@@ -391,7 +391,11 @@ async fn test_foreign_key_cascade_delete_multilevel() {
         .list("comments".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(all_comments.len(), 0, "comments should be cascaded from posts");
+    assert_eq!(
+        all_comments.len(),
+        0,
+        "comments should be cascaded from posts"
+    );
 }
 
 #[tokio::test]

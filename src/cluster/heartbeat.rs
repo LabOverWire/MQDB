@@ -108,10 +108,10 @@ impl HeartbeatManager {
 
             if sender_claims_primary || sender_claims_replica {
                 let our_role = self.partition_map.role_for(partition, from);
-                let expected_primary = sender_claims_primary
-                    && matches!(our_role, super::PartitionRole::Primary);
-                let expected_replica = sender_claims_replica
-                    && matches!(our_role, super::PartitionRole::Replica);
+                let expected_primary =
+                    sender_claims_primary && matches!(our_role, super::PartitionRole::Primary);
+                let expected_replica =
+                    sender_claims_replica && matches!(our_role, super::PartitionRole::Replica);
 
                 if (sender_claims_primary && !expected_primary)
                     || (sender_claims_replica && !expected_replica)

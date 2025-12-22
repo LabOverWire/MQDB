@@ -1,4 +1,6 @@
-use super::protocol::{Heartbeat, ReplicationAck, ReplicationWrite};
+use super::protocol::{
+    CatchupRequest, CatchupResponse, Heartbeat, ReplicationAck, ReplicationWrite,
+};
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
@@ -183,6 +185,14 @@ impl MqttTransport {
                 let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
                 ClusterMessage::AppendEntriesResponse(resp)
             }
+            12 => {
+                let (req, _) = CatchupRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::CatchupRequest(req)
+            }
+            13 => {
+                let resp = CatchupResponse::from_bytes(data)?;
+                ClusterMessage::CatchupResponse(resp)
+            }
             _ => return None,
         };
 
@@ -227,6 +237,12 @@ impl MqttTransport {
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
                 buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::CatchupRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::CatchupResponse(resp) => {
+                buf.extend_from_slice(&resp.to_bytes());
             }
         }
 
@@ -386,6 +402,12 @@ mod tests {
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
                 buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::CatchupRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::CatchupResponse(resp) => {
+                buf.extend_from_slice(&resp.to_bytes());
             }
         }
 

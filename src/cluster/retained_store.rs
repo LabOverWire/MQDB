@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NodeId, PartitionId, topic_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -138,6 +139,37 @@ impl RetainedStore {
         self.messages.read().unwrap().keys().cloned().collect()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn set_with_data(
+        &self,
+        topic: &str,
+        qos: u8,
+        payload: &[u8],
+        timestamp_ms: u64,
+    ) -> (Option<RetainedMessage>, Vec<u8>) {
+        let mut messages = self.messages.write().unwrap();
+        if payload.is_empty() {
+            let removed = messages.remove(topic);
+            let data = removed.as_ref().map(Self::serialize).unwrap_or_default();
+            (removed, data)
+        } else {
+            let msg = RetainedMessage::create(topic, qos, payload, timestamp_ms);
+            let data = Self::serialize(&msg);
+            messages.insert(topic.to_string(), msg.clone());
+            (Some(msg), data)
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn remove_with_data(&self, topic: &str) -> Option<(RetainedMessage, Vec<u8>)> {
+        let msg = self.messages.write().unwrap().remove(topic)?;
+        let data = Self::serialize(&msg);
+        Some((msg, data))
+    }
+
     #[must_use]
     pub fn serialize(msg: &RetainedMessage) -> Vec<u8> {
         msg.to_be_bytes()
@@ -148,6 +180,32 @@ impl RetainedStore {
         RetainedMessage::try_from_be_bytes(bytes)
             .ok()
             .map(|(m, _)| m)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), RetainedStoreError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let msg = Self::deserialize(data).ok_or(RetainedStoreError::SerializationError)?;
+                let mut messages = self.messages.write().unwrap();
+                messages.insert(id.to_string(), msg);
+                Ok(())
+            }
+            Operation::Delete => {
+                let mut messages = self.messages.write().unwrap();
+                messages.remove(id);
+                Ok(())
+            }
+        }
     }
 }
 

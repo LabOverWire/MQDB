@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NodeId, PartitionId, session_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -239,6 +240,59 @@ impl SubscriptionCache {
             .collect()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn add_subscription_with_data(
+        &self,
+        client_id: &str,
+        topic: &str,
+        qos: u8,
+    ) -> (MqttSubscriptionSnapshot, Vec<u8>) {
+        let mut snapshots = self.snapshots.write().unwrap();
+        let snapshot = snapshots
+            .entry(client_id.to_string())
+            .or_insert_with(|| MqttSubscriptionSnapshot::create(client_id));
+        snapshot.add_subscription(topic, qos);
+        let data = Self::serialize(snapshot);
+        (snapshot.clone(), data)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the client has no subscriptions.
+    pub fn remove_subscription_with_data(
+        &self,
+        client_id: &str,
+        topic: &str,
+    ) -> Result<(MqttSubscriptionSnapshot, Vec<u8>), SubscriptionCacheError> {
+        let mut snapshots = self.snapshots.write().unwrap();
+        if let Some(snapshot) = snapshots.get_mut(client_id) {
+            let _ = snapshot.remove_subscription(topic);
+            let data = Self::serialize(snapshot);
+            let result = snapshot.clone();
+            if snapshot.topics.is_empty() {
+                snapshots.remove(client_id);
+            }
+            Ok((result, data))
+        } else {
+            Err(SubscriptionCacheError::NotFound)
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn clear_client_with_data(
+        &self,
+        client_id: &str,
+    ) -> Option<(MqttSubscriptionSnapshot, Vec<u8>)> {
+        let snapshot = self.snapshots.write().unwrap().remove(client_id)?;
+        let data = Self::serialize(&snapshot);
+        Some((snapshot, data))
+    }
+
     #[must_use]
     pub fn serialize(snapshot: &MqttSubscriptionSnapshot) -> Vec<u8> {
         snapshot.to_be_bytes()
@@ -249,6 +303,33 @@ impl SubscriptionCache {
         MqttSubscriptionSnapshot::try_from_be_bytes(bytes)
             .ok()
             .map(|(s, _)| s)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), SubscriptionCacheError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let snapshot =
+                    Self::deserialize(data).ok_or(SubscriptionCacheError::SerializationError)?;
+                let mut snapshots = self.snapshots.write().unwrap();
+                snapshots.insert(id.to_string(), snapshot);
+                Ok(())
+            }
+            Operation::Delete => {
+                let mut snapshots = self.snapshots.write().unwrap();
+                snapshots.remove(id);
+                Ok(())
+            }
+        }
     }
 }
 

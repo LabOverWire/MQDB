@@ -170,10 +170,7 @@ impl EventRouter {
         }
     }
 
-    fn event_matches_subscriptions(
-        event: &ChangeEvent,
-        subscriptions: &HashSet<String>,
-    ) -> bool {
+    fn event_matches_subscriptions(event: &ChangeEvent, subscriptions: &HashSet<String>) -> bool {
         let event_path = format!("{}/{}", event.entity, event.id);
 
         for pattern in subscriptions {

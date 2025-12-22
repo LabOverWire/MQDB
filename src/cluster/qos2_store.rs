@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{NodeId, PartitionId, session_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -339,6 +340,100 @@ impl Qos2Store {
         self.states.read().unwrap().len()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` if a state with the same client/packet ID exists.
+    pub fn start_inbound_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        topic: &str,
+        payload: &[u8],
+        timestamp: u64,
+    ) -> Result<(Qos2State, Vec<u8>), Qos2StoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let mut states = self.states.write().unwrap();
+
+        if states.contains_key(&key) {
+            return Err(Qos2StoreError::AlreadyExists);
+        }
+
+        let state = Qos2State::create_inbound(client_id, packet_id, topic, payload, timestamp);
+        let data = Self::serialize(&state);
+        states.insert(key, state.clone());
+        Ok((state, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` if a state with the same client/packet ID exists.
+    pub fn start_outbound_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+        topic: &str,
+        payload: &[u8],
+        timestamp: u64,
+    ) -> Result<(Qos2State, Vec<u8>), Qos2StoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let mut states = self.states.write().unwrap();
+
+        if states.contains_key(&key) {
+            return Err(Qos2StoreError::AlreadyExists);
+        }
+
+        let state = Qos2State::create_outbound(client_id, packet_id, topic, payload, timestamp);
+        let data = Self::serialize(&state);
+        states.insert(key, state.clone());
+        Ok((state, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if no state exists, or `InvalidState` if the phase is invalid.
+    pub fn advance_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+    ) -> Result<(Qos2Phase, Vec<u8>), Qos2StoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let mut states = self.states.write().unwrap();
+
+        let state = states.get_mut(&key).ok_or(Qos2StoreError::NotFound)?;
+        state.advance_phase();
+
+        let phase = state.phase().ok_or(Qos2StoreError::InvalidState)?;
+        let data = Self::serialize(state);
+        Ok((phase, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if no state exists.
+    pub fn complete_with_data(
+        &self,
+        client_id: &str,
+        packet_id: u16,
+    ) -> Result<(Qos2State, Vec<u8>), Qos2StoreError> {
+        let key = (client_id.to_string(), packet_id);
+        let state = self
+            .states
+            .write()
+            .unwrap()
+            .remove(&key)
+            .ok_or(Qos2StoreError::NotFound)?;
+        let data = Self::serialize(&state);
+        Ok((state, data))
+    }
+
     #[must_use]
     pub fn serialize(state: &Qos2State) -> Vec<u8> {
         state.to_be_bytes()
@@ -347,6 +442,41 @@ impl Qos2Store {
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<Qos2State> {
         Qos2State::try_from_be_bytes(bytes).ok().map(|(s, _)| s)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns an error if ID parsing or deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), Qos2StoreError> {
+        let parts: Vec<&str> = id.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(Qos2StoreError::InvalidState);
+        }
+        let client_id = parts[0];
+        let packet_id: u16 = parts[1].parse().map_err(|_| Qos2StoreError::InvalidState)?;
+
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let state = Self::deserialize(data).ok_or(Qos2StoreError::SerializationError)?;
+                let key = (client_id.to_string(), packet_id);
+                let mut states = self.states.write().unwrap();
+                states.insert(key, state);
+                Ok(())
+            }
+            Operation::Delete => {
+                let key = (client_id.to_string(), packet_id);
+                let mut states = self.states.write().unwrap();
+                states.remove(&key);
+                Ok(())
+            }
+        }
     }
 }
 

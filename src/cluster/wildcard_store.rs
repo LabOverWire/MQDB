@@ -1,3 +1,4 @@
+use super::protocol::Operation;
 use super::{
     NodeId, PartitionId, SubscriberLocation, SubscriptionType, TopicTrie, WildcardSubscriber,
     is_wildcard_pattern, validate_pattern,
@@ -224,6 +225,101 @@ impl WildcardStore {
         subscription_type: SubscriptionType,
     ) -> WildcardEntry {
         WildcardEntry::create(pattern, client_id, client_partition, qos, subscription_type)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `InvalidPattern` or `NotWildcard` for invalid patterns.
+    pub fn subscribe_with_data(
+        &self,
+        pattern: &str,
+        client_id: &str,
+        client_partition: PartitionId,
+        qos: u8,
+        subscription_type: SubscriptionType,
+    ) -> Result<(WildcardEntry, Vec<u8>), WildcardStoreError> {
+        if !validate_pattern(pattern) {
+            return Err(WildcardStoreError::InvalidPattern);
+        }
+        if !is_wildcard_pattern(pattern) {
+            return Err(WildcardStoreError::NotWildcard);
+        }
+
+        let subscriber = match subscription_type {
+            SubscriptionType::Mqtt => WildcardSubscriber::mqtt(client_id, qos),
+            SubscriptionType::Db => WildcardSubscriber::db(client_id, qos),
+        };
+
+        self.trie.write().unwrap().insert(pattern, subscriber);
+
+        let entry =
+            WildcardEntry::create(pattern, client_id, client_partition, qos, subscription_type);
+        let data = Self::serialize_entry(&entry);
+        Ok((entry, data))
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `InvalidPattern` or `NotFound` for invalid/missing patterns.
+    pub fn unsubscribe_with_data(
+        &self,
+        pattern: &str,
+        client_id: &str,
+    ) -> Result<Vec<u8>, WildcardStoreError> {
+        if !validate_pattern(pattern) {
+            return Err(WildcardStoreError::InvalidPattern);
+        }
+
+        let removed = self.trie.write().unwrap().remove(pattern, client_id);
+        if removed {
+            Ok(Vec::new())
+        } else {
+            Err(WildcardStoreError::NotFound)
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns an error if ID parsing or deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), WildcardStoreError> {
+        let parts: Vec<&str> = id.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(WildcardStoreError::InvalidPattern);
+        }
+        let pattern = parts[0];
+        let client_id = parts[1];
+
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let entry =
+                    Self::deserialize_entry(data).ok_or(WildcardStoreError::SerializationError)?;
+                let subscriber = WildcardSubscriber {
+                    client_id: client_id.to_string(),
+                    client_partition: entry
+                        .partition()
+                        .unwrap_or_else(|| PartitionId::new(0).unwrap()),
+                    qos: entry.qos,
+                    subscription_type: entry.sub_type(),
+                };
+                self.trie.write().unwrap().insert(pattern, subscriber);
+                Ok(())
+            }
+            Operation::Delete => {
+                self.trie.write().unwrap().remove(pattern, client_id);
+                Ok(())
+            }
+        }
     }
 }
 
