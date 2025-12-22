@@ -13,7 +13,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-const CLUSTER_TOPIC_PREFIX: &str = "$CLUSTER";
+const CLUSTER_TOPIC_PREFIX: &str = "$SYS/mqdb/cluster";
+const REPLICATION_TOPIC_PREFIX: &str = "$DB/_repl";
 
 #[derive(Debug)]
 struct MqttTransportState {
@@ -87,9 +88,10 @@ impl MqttTransport {
     }
 
     async fn subscribe_to_cluster_topics(&self) -> Result<(), TransportError> {
-        let node_topic = format!("{}/node/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get());
+        let node_topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get());
         let broadcast_topic = format!("{CLUSTER_TOPIC_PREFIX}/broadcast");
         let heartbeat_topic = format!("{CLUSTER_TOPIC_PREFIX}/heartbeat/+");
+        let replication_topic = format!("{REPLICATION_TOPIC_PREFIX}/+/+");
 
         let tx = self.message_tx.clone();
         let node_id = self.node_id;
@@ -120,6 +122,18 @@ impl MqttTransport {
 
         self.client
             .subscribe(&heartbeat_topic, {
+                let tx = tx.clone();
+                move |msg| {
+                    if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
+                        let _ = tx.send(inbound);
+                    }
+                }
+            })
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        self.client
+            .subscribe(&replication_topic, {
                 let tx = tx.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
@@ -256,8 +270,32 @@ impl MqttTransport {
         to: NodeId,
         message: ClusterMessage,
     ) -> Result<(), TransportError> {
-        let topic = format!("{}/node/{}", CLUSTER_TOPIC_PREFIX, to.get());
+        let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
+
+        self.client
+            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns `SendFailed` if publishing the replication write fails.
+    pub async fn publish_replication_write(
+        &self,
+        partition: PartitionId,
+        sequence: u64,
+        message: &ClusterMessage,
+    ) -> Result<(), TransportError> {
+        let topic = format!(
+            "{}/p{}/seq{}",
+            REPLICATION_TOPIC_PREFIX,
+            partition.get(),
+            sequence
+        );
+        let payload = self.serialize_message(message);
 
         self.client
             .publish_qos(&topic, payload, QoS::AtLeastOnce)
@@ -316,7 +354,7 @@ impl ClusterTransport for MqttTransport {
         }
         drop(state);
 
-        let topic = format!("{}/node/{}", CLUSTER_TOPIC_PREFIX, to.get());
+        let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
 
         let client = self.client.clone();

@@ -51,6 +51,11 @@ impl<T: ClusterTransport> NodeController<T> {
         self.node_id
     }
 
+    #[must_use]
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     pub fn register_peer(&mut self, peer: NodeId) {
         self.heartbeat.register_node(peer);
     }

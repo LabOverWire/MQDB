@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use mqdb::{Database, MqdbAgent};
+use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
@@ -24,6 +24,10 @@ enum Commands {
     Agent {
         #[command(subcommand)]
         action: AgentAction,
+    },
+    Cluster {
+        #[command(subcommand)]
+        action: ClusterAction,
     },
     Passwd {
         username: String,
@@ -186,6 +190,26 @@ enum AgentAction {
 }
 
 #[derive(Subcommand)]
+enum ClusterAction {
+    Start {
+        #[arg(long)]
+        node_id: u16,
+        #[arg(long)]
+        node_name: Option<String>,
+        #[arg(long, default_value = "0.0.0.0:1883")]
+        bind: SocketAddr,
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, value_delimiter = ',')]
+        peers: Vec<String>,
+        #[arg(long)]
+        passwd: Option<PathBuf>,
+        #[arg(long)]
+        acl: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SchemaAction {
     Set {
         entity: String,
@@ -269,6 +293,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             AgentAction::Status { conn } => {
                 Box::pin(cmd_agent_status(conn)).await?;
+            }
+        },
+        Commands::Cluster { action } => match action {
+            ClusterAction::Start {
+                node_id,
+                node_name,
+                bind,
+                db,
+                peers,
+                passwd,
+                acl,
+            } => {
+                Box::pin(cmd_cluster_start(node_id, node_name, bind, db, peers, passwd, acl))
+                    .await?;
             }
         },
         Commands::Passwd {
@@ -438,6 +476,57 @@ async fn cmd_agent_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error
     println!("Connected to broker at {}", conn.broker);
     client.disconnect().await?;
     Ok(())
+}
+
+async fn cmd_cluster_start(
+    node_id: u16,
+    node_name: Option<String>,
+    bind: SocketAddr,
+    db_path: PathBuf,
+    peers: Vec<String>,
+    passwd: Option<PathBuf>,
+    acl: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let peer_configs = parse_peer_configs(&peers)?;
+
+    let db = Database::open(&db_path).await?;
+
+    let mut config = ClusterConfig::new(node_id, db_path, peer_configs);
+    config = config.with_bind_address(bind);
+
+    if let Some(name) = node_name {
+        config = config.with_node_name(name);
+    }
+    if let Some(passwd_file) = passwd {
+        config = config.with_password_file(passwd_file);
+    }
+    if let Some(acl_file) = acl {
+        config = config.with_acl_file(acl_file);
+    }
+
+    let mut agent = ClusteredAgent::new(config, db).map_err(|e| e.clone())?;
+    Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+fn parse_peer_configs(peers: &[String]) -> Result<Vec<PeerConfig>, Box<dyn std::error::Error>> {
+    peers
+        .iter()
+        .map(|peer| {
+            let parts: Vec<&str> = peer.split('@').collect();
+            if parts.len() != 2 {
+                return Err(
+                    format!("invalid peer format '{peer}': expected 'node_id@address:port'").into(),
+                );
+            }
+            let node_id: u16 = parts[0]
+                .parse()
+                .map_err(|_| format!("invalid node_id in peer '{peer}'"))?;
+            let address = parts[1].to_string();
+            Ok(PeerConfig::new(node_id, address))
+        })
+        .collect()
 }
 
 fn cmd_passwd(

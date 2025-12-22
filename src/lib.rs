@@ -16,6 +16,8 @@ pub mod types;
 #[cfg(feature = "native")]
 pub mod agent;
 #[cfg(feature = "native")]
+pub mod cluster_agent;
+#[cfg(feature = "native")]
 pub mod consumer_group;
 #[cfg(feature = "native")]
 pub mod cursor;
@@ -39,6 +41,8 @@ pub use types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
 
 #[cfg(feature = "native")]
 pub use agent::MqdbAgent;
+#[cfg(feature = "native")]
+pub use cluster_agent::{ClusterConfig, ClusteredAgent, PeerConfig};
 #[cfg(feature = "native")]
 pub use config::DatabaseConfig;
 pub use config::{DurabilityMode, OutboxConfig, SharedSubscriptionConfig};
