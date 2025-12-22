@@ -99,6 +99,7 @@ impl Cursor {
 
     /// # Errors
     /// Returns an error if reading or deserializing entities fails.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Value>> {
         if !self.sort_orders.is_empty() {
             if self.sorted_buffer.is_none() {

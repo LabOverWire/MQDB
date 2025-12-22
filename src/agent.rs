@@ -295,6 +295,7 @@ impl MqdbAgent {
 
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
@@ -559,6 +560,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(
     db: &Database,
     client: &MqttClient,
