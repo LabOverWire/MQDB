@@ -84,8 +84,9 @@ impl VirtualNetwork {
             LinkState::Lossy { loss_rate_percent } => {
                 state.rng_seed = state
                     .rng_seed
-                    .wrapping_mul(6364136223846793005)
+                    .wrapping_mul(6_364_136_223_846_793_005)
                     .wrapping_add(1);
+                #[allow(clippy::cast_possible_truncation)]
                 let rand = (state.rng_seed >> 33) as u8;
                 if rand % 100 < loss_rate_percent {
                     return false;
@@ -123,9 +124,8 @@ impl VirtualNetwork {
         let now = self.clock.now();
         let mut state = self.state.lock().unwrap();
 
-        let inbox = match state.inboxes.get_mut(&node_id) {
-            Some(i) => i,
-            None => return Vec::new(),
+        let Some(inbox) = state.inboxes.get_mut(&node_id) else {
+            return Vec::new();
         };
 
         let mut delivered = Vec::new();

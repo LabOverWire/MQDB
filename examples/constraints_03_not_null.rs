@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     let created = db.create("users".into(), user1).await?;
-    println!("✓ Created: {}\n", created);
+    println!("✓ Created: {created}\n");
 
     println!("Attempting to create user with missing email field...");
     let missing_field = json!({
@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("users".into(), missing_field).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Not-null constraint violation: {}\n", e),
+        Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }
 
     println!("Attempting to create user with explicit null email...");
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("users".into(), null_email).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Not-null constraint violation: {}\n", e),
+        Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }
 
     println!("Creating valid user for update test...");
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let created = db.create("users".into(), user).await?;
     let user_id = created["id"].as_str().unwrap();
-    println!("✓ Created user: {}\n", user_id);
+    println!("✓ Created user: {user_id}\n");
 
     println!("Attempting to update email to null...");
     let update = json!({
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.update("users".into(), user_id.to_string(), update).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Not-null constraint violation: {}\n", e),
+        Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }
 
     println!("Summary:");

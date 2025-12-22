@@ -60,17 +60,19 @@ impl ChangeEvent {
     }
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn partition(&self, num_partitions: u8) -> u8 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         if num_partitions == 0 {
             return 0;
         }
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let key = format!("{}:{}", self.entity, self.id);
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (hasher.finish() % num_partitions as u64) as u8
+        (hasher.finish() % u64::from(num_partitions)) as u8
     }
 }
 

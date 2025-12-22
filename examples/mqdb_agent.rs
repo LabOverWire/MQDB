@@ -140,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Reading Charlie by ID ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}");
         client
             .publish_with_options(&topic, vec![], opts.clone())
             .await?;
@@ -153,7 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Updating Charlie's age ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}/update", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}/update");
         let payload = json!({"age": 36});
         client
             .publish_with_options(&topic, serde_json::to_vec(&payload)?, opts.clone())
@@ -194,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Deleting Charlie ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}/delete", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}/delete");
         client
             .publish_with_options(&topic, vec![], opts.clone())
             .await?;

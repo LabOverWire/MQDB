@@ -9,10 +9,12 @@ use tokio::time::{Duration, sleep};
 const DATA_PATH: &str = "./data/parking_lot";
 
 fn now_timestamp() -> i64 {
-    SystemTime::now()
+    #[allow(clippy::cast_possible_wrap)]
+    let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
-        .as_secs() as i64
+        .as_secs() as i64;
+    ts
 }
 
 async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {

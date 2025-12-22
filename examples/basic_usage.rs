@@ -32,27 +32,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let created_alice = db.create("users".into(), alice).await?;
-    println!("Created: {}", created_alice);
+    println!("Created: {created_alice}");
 
     let created_bob = db.create("users".into(), bob).await?;
-    println!("Created: {}", created_bob);
+    println!("Created: {created_bob}");
 
     let created_charlie = db.create("users".into(), charlie).await?;
-    println!("Created: {}", created_charlie);
+    println!("Created: {created_charlie}");
 
     println!("\nReading user...");
     let alice_id = created_alice["id"].as_str().unwrap();
     let alice_data = db
         .read("users".into(), alice_id.to_string(), vec![], None)
         .await?;
-    println!("Read: {}", alice_data);
+    println!("Read: {alice_data}");
 
     println!("\nUpdating user...");
     let updates = json!({"age": 31});
     let updated_alice = db
         .update("users".into(), alice_id.to_string(), updates)
         .await?;
-    println!("Updated: {}", updated_alice);
+    println!("Updated: {updated_alice}");
 
     println!("\nListing all users...");
     let all_users = db
@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nSetting up reactive subscription...");
     let sub_id = db.subscribe("users/#".into(), Some("users".into())).await?;
-    println!("Subscription ID: {}", sub_id);
+    println!("Subscription ID: {sub_id}");
 
     let mut receiver = db.event_receiver();
 

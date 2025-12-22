@@ -171,9 +171,9 @@ impl ConstraintManager {
 
         for constraint in constraints {
             match constraint {
-                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
-                Constraint::Unique(c) => self.validate_unique(entity, c, storage)?,
-                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+                Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
+                Constraint::Unique(c) => Self::validate_unique(entity, c, storage)?,
+                Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
 
@@ -193,11 +193,11 @@ impl ConstraintManager {
 
         for constraint in constraints {
             match constraint {
-                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
+                Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
                 Constraint::Unique(c) => {
-                    self.validate_unique_update(entity, old_entity, c, storage)?;
+                    Self::validate_unique_update(entity, old_entity, c, storage)?;
                 }
-                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+                Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
 
@@ -239,7 +239,7 @@ impl ConstraintManager {
             {
                 match fk.on_delete {
                     OnDeleteAction::Restrict => {
-                        let referencing = self.find_referencing_entities(
+                        let referencing = Self::find_referencing_entities(
                             storage,
                             &fk.source_entity,
                             &fk.source_field,
@@ -254,7 +254,7 @@ impl ConstraintManager {
                         }
                     }
                     OnDeleteAction::Cascade => {
-                        let referencing = self.find_referencing_entities(
+                        let referencing = Self::find_referencing_entities(
                             storage,
                             &fk.source_entity,
                             &fk.source_field,
@@ -282,7 +282,7 @@ impl ConstraintManager {
                         }
                     }
                     OnDeleteAction::SetNull => {
-                        let referencing = self.find_referencing_entities(
+                        let referencing = Self::find_referencing_entities(
                             storage,
                             &fk.source_entity,
                             &fk.source_field,
@@ -303,7 +303,7 @@ impl ConstraintManager {
         Ok(())
     }
 
-    fn validate_not_null(&self, entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
+    fn validate_not_null(entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
         match entity.get_field(&constraint.field) {
             Some(value) if !value.is_null() => Ok(()),
             _ => Err(Error::NotNullViolation {
@@ -314,7 +314,6 @@ impl ConstraintManager {
     }
 
     fn validate_unique(
-        &self,
         entity: &Entity,
         constraint: &UniqueConstraint,
         storage: &Storage,
@@ -343,17 +342,15 @@ impl ConstraintManager {
     }
 
     fn validate_unique_update(
-        &self,
         entity: &Entity,
         _old_entity: &Entity,
         constraint: &UniqueConstraint,
         storage: &Storage,
     ) -> Result<()> {
-        self.validate_unique(entity, constraint, storage)
+        Self::validate_unique(entity, constraint, storage)
     }
 
     fn validate_foreign_key(
-        &self,
         entity: &Entity,
         constraint: &ForeignKeyConstraint,
         storage: &Storage,
@@ -379,7 +376,6 @@ impl ConstraintManager {
     }
 
     fn find_referencing_entities(
-        &self,
         storage: &Storage,
         source_entity: &str,
         source_field: &str,

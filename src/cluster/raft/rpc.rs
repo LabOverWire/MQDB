@@ -1,7 +1,7 @@
 use super::state::LogEntry;
 use bebytes::BeBytes;
 
-#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes)]
 pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: u16,
@@ -10,26 +10,30 @@ pub struct RequestVoteRequest {
 }
 
 impl RequestVoteRequest {
+    #[must_use]
     pub fn create(term: u64, candidate_id: u16, last_log_index: u64, last_log_term: u64) -> Self {
         Self::new(term, candidate_id, last_log_index, last_log_term)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes)]
 pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: u8,
 }
 
 impl RequestVoteResponse {
+    #[must_use]
     pub fn granted(term: u64) -> Self {
         Self::new(term, 1)
     }
 
+    #[must_use]
     pub fn rejected(term: u64) -> Self {
         Self::new(term, 0)
     }
 
+    #[must_use]
     pub fn is_granted(&self) -> bool {
         self.vote_granted != 0
     }
@@ -56,6 +60,7 @@ pub struct AppendEntriesRequest {
 }
 
 impl AppendEntriesRequest {
+    #[must_use]
     pub fn create(
         term: u64,
         leader_id: u16,
@@ -74,6 +79,7 @@ impl AppendEntriesRequest {
         }
     }
 
+    #[must_use]
     pub fn heartbeat(
         term: u64,
         leader_id: u16,
@@ -91,6 +97,8 @@ impl AppendEntriesRequest {
         )
     }
 
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Vec<u8> {
         let header = AppendEntriesHeader::new(
             self.term,
@@ -111,6 +119,7 @@ impl AppendEntriesRequest {
         buf
     }
 
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (header, consumed) = AppendEntriesHeader::try_from_be_bytes(bytes).ok()?;
 
@@ -149,7 +158,7 @@ impl AppendEntriesRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes)]
 pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: u8,
@@ -157,14 +166,17 @@ pub struct AppendEntriesResponse {
 }
 
 impl AppendEntriesResponse {
+    #[must_use]
     pub fn success(term: u64, match_index: u64) -> Self {
         Self::new(term, 1, match_index)
     }
 
+    #[must_use]
     pub fn failure(term: u64) -> Self {
         Self::new(term, 0, 0)
     }
 
+    #[must_use]
     pub fn is_success(&self) -> bool {
         self.success != 0
     }

@@ -70,7 +70,7 @@ impl QuorumTracker {
                 }
                 self.failed_nodes.insert(node_id);
             }
-            Some(AckStatus::NotReplica) | Some(AckStatus::SequenceGap) => {
+            Some(AckStatus::NotReplica | AckStatus::SequenceGap) => {
                 self.failed_nodes.insert(node_id);
             }
             None => {}

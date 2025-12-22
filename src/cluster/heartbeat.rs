@@ -56,6 +56,7 @@ impl HeartbeatManager {
         self.partition_map = map;
     }
 
+    #[must_use]
     pub fn should_send(&self, now: u64) -> bool {
         match self.last_sent {
             None => true,
@@ -100,7 +101,33 @@ impl HeartbeatManager {
         self.update_partition_map_from_heartbeat(from, heartbeat);
     }
 
-    fn update_partition_map_from_heartbeat(&mut self, _from: NodeId, _heartbeat: &Heartbeat) {}
+    fn update_partition_map_from_heartbeat(&mut self, from: NodeId, heartbeat: &Heartbeat) {
+        for partition in super::PartitionId::all() {
+            let sender_claims_primary = heartbeat.is_primary(partition);
+            let sender_claims_replica = heartbeat.is_replica(partition);
+
+            if sender_claims_primary || sender_claims_replica {
+                let our_role = self.partition_map.role_for(partition, from);
+                let expected_primary = sender_claims_primary
+                    && matches!(our_role, super::PartitionRole::Primary);
+                let expected_replica = sender_claims_replica
+                    && matches!(our_role, super::PartitionRole::Replica);
+
+                if (sender_claims_primary && !expected_primary)
+                    || (sender_claims_replica && !expected_replica)
+                {
+                    tracing::debug!(
+                        ?partition,
+                        ?from,
+                        sender_claims_primary,
+                        sender_claims_replica,
+                        ?our_role,
+                        "partition map discrepancy detected from heartbeat"
+                    );
+                }
+            }
+        }
+    }
 
     pub fn check_timeouts(&mut self, now: u64) -> Vec<NodeId> {
         let mut dead_nodes = Vec::new();

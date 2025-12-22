@@ -48,6 +48,7 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
+    #[must_use]
     pub fn create(node_id: NodeId, config: RaftConfig) -> Self {
         let timeout = config.election_timeout_min_ms;
         Self {
@@ -60,22 +61,27 @@ impl RaftNode {
         }
     }
 
+    #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.state.node_id()
     }
 
+    #[must_use]
     pub fn role(&self) -> RaftRole {
         self.state.role()
     }
 
+    #[must_use]
     pub fn current_term(&self) -> u64 {
         self.state.current_term()
     }
 
+    #[must_use]
     pub fn leader_id(&self) -> Option<NodeId> {
         self.state.leader_id()
     }
 
+    #[must_use]
     pub fn is_leader(&self) -> bool {
         self.state.role() == RaftRole::Leader
     }
@@ -84,6 +90,7 @@ impl RaftNode {
         self.state.add_peer(peer);
     }
 
+    #[must_use]
     pub fn peers(&self) -> &[NodeId] {
         self.state.peers()
     }
@@ -142,7 +149,7 @@ impl RaftNode {
             .into_iter()
             .map(|peer| RaftOutput::SendRequestVote {
                 to: peer,
-                request: request.clone(),
+                request,
             })
             .collect()
     }

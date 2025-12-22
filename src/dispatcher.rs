@@ -126,7 +126,7 @@ impl EventDispatcher {
         groups
             .get(group)
             .and_then(|cg| cg.get_partition_owner(partition))
-            .map(|s| s.to_string())
+            .map(ToString::to_string)
     }
 
     #[must_use]

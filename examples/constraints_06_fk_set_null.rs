@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sports = json!({"name": "Sports"});
     let created_sports = db.create("categories".into(), sports).await?;
     let sports_id = created_sports["id"].as_str().unwrap();
-    println!("✓ Created categories: {}, {}\n", tech_id, sports_id);
+    println!("✓ Created categories: {tech_id}, {sports_id}\n");
 
     println!("Creating posts with categories...");
     let post1 = json!({"title": "AI Trends", "category_id": tech_id});

@@ -35,8 +35,9 @@ impl VirtualClock {
     }
 
     pub fn advance(&self, duration: Duration) {
-        self.nanos
-            .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
+        #[allow(clippy::cast_possible_truncation)]
+        let nanos = duration.as_nanos() as u64;
+        self.nanos.fetch_add(nanos, Ordering::SeqCst);
     }
 
     pub fn advance_ms(&self, ms: u64) {

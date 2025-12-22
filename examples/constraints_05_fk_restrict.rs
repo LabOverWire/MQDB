@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = json!({"name": "Alice"});
     let created_user = db.create("users".into(), user).await?;
     let user_id = created_user["id"].as_str().unwrap();
-    println!("✓ Created user: {}\n", user_id);
+    println!("✓ Created user: {user_id}\n");
 
     println!("Creating post by this user...");
     let post = json!({"title": "My Post", "author_id": user_id});
@@ -29,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Attempting to delete user (has posts referencing it)...");
     match db.delete("users".into(), user_id.to_string()).await {
-        Ok(_) => println!("✗ Should have been prevented!"),
-        Err(e) => println!("✓ Deletion prevented: {}\n", e),
+        Ok(()) => println!("✗ Should have been prevented!"),
+        Err(e) => println!("✓ Deletion prevented: {e}\n"),
     }
 
     let users_after = db

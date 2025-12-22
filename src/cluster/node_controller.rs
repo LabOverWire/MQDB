@@ -65,7 +65,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn role(&self, partition: PartitionId) -> ReplicaRole {
         self.replicas
             .get(&partition.get())
-            .map_or(ReplicaRole::None, |s| s.role())
+            .map_or(ReplicaRole::None, super::replication::ReplicaState::role)
     }
 
     pub fn update_partition_map(&mut self, map: PartitionMap) {
@@ -87,7 +87,31 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_node_death(&mut self, _node: NodeId) {}
+    fn handle_node_death(&mut self, dead_node: NodeId) {
+        tracing::warn!(?dead_node, "node death detected");
+
+        for partition in super::PartitionId::all() {
+            let assignment = self.partition_map.get(partition);
+
+            if assignment.primary == Some(dead_node)
+                && assignment.replicas.contains(&self.node_id)
+            {
+                tracing::info!(
+                    ?partition,
+                    "primary died, this node is replica - awaiting failover"
+                );
+            }
+
+            if assignment.replicas.contains(&dead_node)
+                && assignment.primary == Some(self.node_id)
+            {
+                tracing::info!(
+                    ?partition,
+                    "replica died, this node is primary - replication factor reduced"
+                );
+            }
+        }
+    }
 
     pub fn process_messages(&mut self) {
         while let Some(msg) = self.transport.recv() {
@@ -101,7 +125,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.heartbeat
                     .receive_heartbeat(msg.from, &hb, msg.received_at);
             }
-            ClusterMessage::Write(write) => {
+            ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write);
             }
             ClusterMessage::Ack(ack) => {
@@ -118,11 +142,11 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_write(&mut self, from: NodeId, write: ReplicationWrite) {
+    fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
         let partition = write.partition;
 
         let ack = if let Some(state) = self.replicas.get_mut(&partition.get()) {
-            state.handle_write(&write)
+            state.handle_write(write)
         } else {
             ReplicationAck::not_replica(partition, self.node_id)
         };
@@ -138,8 +162,30 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn on_write_complete(&mut self, _partition: PartitionId, _seq: u64, _result: QuorumResult) {}
+    fn on_write_complete(&mut self, partition: PartitionId, seq: u64, result: QuorumResult) {
+        match result {
+            QuorumResult::Success => {
+                tracing::debug!(?partition, seq, "quorum write succeeded");
+            }
+            QuorumResult::Failed => {
+                tracing::warn!(?partition, seq, "quorum write failed");
+                if let Some(state) = self.replicas.get(&partition.get()) {
+                    tracing::debug!(
+                        ?partition,
+                        epoch = ?state.epoch(),
+                        "write failed for partition"
+                    );
+                }
+            }
+            QuorumResult::Pending => {
+                tracing::trace!(?partition, seq, "quorum write still pending");
+            }
+        }
+    }
 
+    /// # Errors
+    /// Returns `NotPrimary` if this node is not the primary for the partition.
+    /// Returns `TooManyPending` if the pending writes limit is reached.
     pub fn replicate_write(
         &mut self,
         write: ReplicationWrite,

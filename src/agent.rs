@@ -110,6 +110,8 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     }
 }
 
+/// # Errors
+/// Returns an error if the payload is invalid JSON or the operation is unknown.
 pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String> {
     let data: Value = if payload.is_empty() {
         Value::Null
@@ -235,6 +237,8 @@ pub struct MqdbAgent {
 }
 
 impl MqdbAgent {
+    /// # Panics
+    /// Panics if the default bind address cannot be parsed (should never happen).
     #[allow(clippy::must_use_candidate)]
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -289,6 +293,8 @@ impl MqdbAgent {
         self
     }
 
+    /// # Errors
+    /// Returns an error if the broker fails to start or encounters a runtime error.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
@@ -334,8 +340,7 @@ impl MqdbAgent {
                 if let (Some(user), Some(pass)) = (service_username, service_password) {
                     let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
                         .with_credentials(user, pass);
-                    client
-                        .connect_with_options(&addr, options)
+                    Box::pin(client.connect_with_options(&addr, options))
                         .await
                         .map(|_| ())
                 } else {
@@ -366,8 +371,7 @@ impl MqdbAgent {
             let response_connect = if let (Some(user), Some(pass)) = response_creds {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-response-publisher")
                     .with_credentials(user, pass);
-                response_client
-                    .connect_with_options(&addr, options)
+                Box::pin(response_client.connect_with_options(&addr, options))
                     .await
                     .map(|_| ())
             } else {
@@ -382,14 +386,11 @@ impl MqdbAgent {
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
-                        match msg {
-                            Some(message) => {
-                                handle_message(&db, &response_client, message, &backup_dir).await;
-                            }
-                            None => {
-                                debug!("Message channel closed");
-                                break;
-                            }
+                        if let Some(message) = msg {
+                            handle_message(&db, &response_client, message, &backup_dir).await;
+                        } else {
+                            debug!("Message channel closed");
+                            break;
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -418,8 +419,7 @@ impl MqdbAgent {
             {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-event-publisher")
                     .with_credentials(user, pass);
-                client
-                    .connect_with_options(&addr, options)
+                Box::pin(client.connect_with_options(&addr, options))
                     .await
                     .map(|_| ())
             } else {
@@ -496,12 +496,9 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
         return;
     }
 
-    let op = match parse_db_topic(topic) {
-        Some(op) => op,
-        None => {
-            warn!("Invalid $DB topic format: {}", topic);
-            return;
-        }
+    let Some(op) = parse_db_topic(topic) else {
+        warn!("Invalid $DB topic format: {}", topic);
+        return;
     };
 
     let request = match build_request(op.clone(), &message.payload) {
@@ -528,10 +525,10 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
     #[cfg(feature = "opentelemetry")]
     let span = {
         use opentelemetry::Context;
-        use opentelemetry::trace::{SpanContext, TraceContextExt};
+        use opentelemetry::trace::{SpanContext, TraceContextExt, TraceState};
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-        let user_props: Vec<(String, String)> = message.properties.user_properties.to_vec();
+        let user_props: Vec<(String, String)> = message.properties.user_properties.clone();
 
         if let Some(parent_cx) = propagation::extract_trace_context(&user_props) {
             let parent = SpanContext::new(
@@ -539,7 +536,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
                 parent_cx.span_id(),
                 parent_cx.trace_flags(),
                 false,
-                Default::default(),
+                TraceState::default(),
             );
             let _ = span.set_parent(Context::current().with_remote_span_context(parent));
         }
@@ -719,13 +716,11 @@ async fn handle_admin_operation(
             "restore requires agent restart - use CLI with --restore flag",
         ),
         AdminOperation::BackupList => {
-            if !backup_dir.exists() {
-                Response::ok(json!(Vec::<String>::new()))
-            } else {
+            if backup_dir.exists() {
                 match std::fs::read_dir(backup_dir) {
                     Ok(entries) => {
                         let backups: Vec<_> = entries
-                            .filter_map(|e| e.ok())
+                            .filter_map(std::result::Result::ok)
                             .filter(|e| e.path().is_dir())
                             .filter_map(|e| e.file_name().into_string().ok())
                             .collect();
@@ -736,6 +731,8 @@ async fn handle_admin_operation(
                         format!("failed to read backup directory: {e}"),
                     ),
                 }
+            } else {
+                Response::ok(json!(Vec::<String>::new()))
             }
         }
         AdminOperation::Subscribe => {

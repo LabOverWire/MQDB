@@ -206,13 +206,12 @@ async fn mqtt_lwt_death_detection() {
 
     let will_payload = node1_id.to_be_bytes().to_vec();
     let will = WillMessage::new(death_topic, will_payload).with_qos(QoS::AtLeastOnce);
-    let options = ConnectOptions::new(&format!("mqdb-node-{node1_id}"))
+    let options = ConnectOptions::new(format!("mqdb-node-{node1_id}"))
         .with_will(will)
         .with_keep_alive(Duration::from_secs(1));
 
     let dying_node = MqttClient::with_options(options.clone());
-    dying_node
-        .connect_with_options(&addr, options)
+    Box::pin(dying_node.connect_with_options(&addr, options))
         .await
         .unwrap();
 

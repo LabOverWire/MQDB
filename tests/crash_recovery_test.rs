@@ -42,7 +42,7 @@ async fn test_recovery_with_periodic_durability() {
         for i in 0..50 {
             let product = json!({
                 "name": format!("Product {}", i),
-                "price": 10.0 + i as f64,
+                "price": 10.0 + f64::from(i),
             });
             db.create("products".into(), product).await.unwrap();
         }
@@ -206,8 +206,8 @@ async fn test_recovery_maintains_data_integrity() {
     assert_eq!(records.len(), 20);
 
     for record in &records {
-        let id_field = record["id_field"].as_u64().unwrap() as usize;
-        assert_eq!(record["data"], format!("important-data-{}", id_field));
+        let id_field = record["id_field"].as_u64().unwrap();
+        assert_eq!(record["data"], format!("important-data-{id_field}"));
         assert_eq!(record["checksum"], format!("{:x}", id_field * 12345));
     }
 }
@@ -284,7 +284,7 @@ async fn test_recovery_after_delete_operations() {
             .filter_map(|u| {
                 let index = u.get("index")?.as_u64()?;
                 if index % 2 == 0 {
-                    u.get("id")?.as_str().map(|s| s.to_string())
+                    u.get("id")?.as_str().map(ToString::to_string)
                 } else {
                     None
                 }

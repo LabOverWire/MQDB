@@ -267,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cmd_agent_start(bind, db, passwd, acl, anonymous).await?;
             }
             AgentAction::Status { conn } => {
-                cmd_agent_status(conn).await?;
+                Box::pin(cmd_agent_status(conn)).await?;
             }
         },
         Commands::Passwd {
@@ -284,7 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_create(entity, data, conn, format).await?;
+            Box::pin(cmd_create(entity, data, conn, format)).await?;
         }
         Commands::Read {
             entity,
@@ -293,7 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_read(entity, id, projection, conn, format).await?;
+            Box::pin(cmd_read(entity, id, projection, conn, format)).await?;
         }
         Commands::Update {
             entity,
@@ -302,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_update(entity, id, data, conn, format).await?;
+            Box::pin(cmd_update(entity, id, data, conn, format)).await?;
         }
         Commands::Delete {
             entity,
@@ -310,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_delete(entity, id, conn, format).await?;
+            Box::pin(cmd_delete(entity, id, conn, format)).await?;
         }
         Commands::List {
             entity,
@@ -321,7 +321,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_list(entity, filter, sort, limit, offset, conn, format).await?;
+            Box::pin(cmd_list(entity, filter, sort, limit, offset, conn, format)).await?;
         }
         Commands::Watch {
             entity,
@@ -329,18 +329,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_watch(entity, filter, conn, format).await?;
+            Box::pin(cmd_watch(entity, filter, conn, format)).await?;
         }
         Commands::Schema { action } => match action {
             SchemaAction::Set { entity, file, conn } => {
-                cmd_schema_set(entity, file, conn).await?;
+                Box::pin(cmd_schema_set(entity, file, conn)).await?;
             }
             SchemaAction::Get {
                 entity,
                 conn,
                 format,
             } => {
-                cmd_schema_get(entity, conn, format).await?;
+                Box::pin(cmd_schema_get(entity, conn, format)).await?;
             }
         },
         Commands::Constraint { action } => match action {
@@ -351,26 +351,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 not_null,
                 conn,
             } => {
-                cmd_constraint_add(entity, unique, fk, not_null, conn).await?;
+                Box::pin(cmd_constraint_add(entity, unique, fk, not_null, conn)).await?;
             }
             ConstraintAction::List {
                 entity,
                 conn,
                 format,
             } => {
-                cmd_constraint_list(entity, conn, format).await?;
+                Box::pin(cmd_constraint_list(entity, conn, format)).await?;
             }
         },
         Commands::Backup { action } => match action {
             BackupAction::Create { name, conn } => {
-                cmd_backup_create(&name, &conn).await?;
+                Box::pin(cmd_backup_create(&name, &conn)).await?;
             }
             BackupAction::List { conn } => {
-                cmd_backup_list(&conn).await?;
+                Box::pin(cmd_backup_list(&conn)).await?;
             }
         },
         Commands::Restore { name, conn } => {
-            cmd_restore(&name, &conn).await?;
+            Box::pin(cmd_restore(&name, &conn)).await?;
         }
         Commands::Subscribe {
             pattern,
@@ -381,7 +381,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             conn,
             format,
         } => {
-            cmd_subscribe(
+            Box::pin(cmd_subscribe(
                 pattern,
                 entity,
                 group,
@@ -389,15 +389,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 heartbeat_interval,
                 conn,
                 format,
-            )
+            ))
             .await?;
         }
         Commands::ConsumerGroup { action } => match action {
             ConsumerGroupAction::List { conn, format } => {
-                cmd_consumer_group_list(conn, format).await?;
+                Box::pin(cmd_consumer_group_list(conn, format)).await?;
             }
             ConsumerGroupAction::Show { name, conn, format } => {
-                cmd_consumer_group_show(name, conn, format).await?;
+                Box::pin(cmd_consumer_group_show(name, conn, format)).await?;
             }
         },
     }
@@ -433,7 +433,7 @@ async fn cmd_agent_start(
 }
 
 async fn cmd_agent_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let client = connect_client(&conn).await?;
+    let client = Box::pin(connect_client(&conn)).await?;
     println!("Connected to broker at {}", conn.broker);
     client.disconnect().await?;
     Ok(())
@@ -474,7 +474,7 @@ async fn cmd_create(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/create");
-    let response = execute_request(&conn, &topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(response, format);
     Ok(())
 }
@@ -493,7 +493,7 @@ async fn cmd_read(
     } else {
         json!({})
     };
-    let response = execute_request(&conn, &topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(response, format);
     Ok(())
 }
@@ -507,7 +507,7 @@ async fn cmd_update(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/{id}/update");
-    let response = execute_request(&conn, &topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(response, format);
     Ok(())
 }
@@ -519,7 +519,7 @@ async fn cmd_delete(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/{entity}/{id}/delete");
-    let response = execute_request(&conn, &topic, json!({})).await?;
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
     output_response(response, format);
     Ok(())
 }
@@ -562,7 +562,7 @@ async fn cmd_list(
         });
     }
 
-    let response = execute_request(&conn, &topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(response, format);
     Ok(())
 }
@@ -577,7 +577,7 @@ async fn cmd_watch(
         eprintln!("Note: Client-side filtering not yet implemented, showing all events");
     }
 
-    let client = connect_client(&conn).await?;
+    let client = Box::pin(connect_client(&conn)).await?;
     let topic = format!("$DB/{entity}/events/#");
 
     let (tx, mut rx) = mpsc::channel::<Value>(100);
@@ -607,7 +607,7 @@ async fn cmd_schema_set(
     let content = std::fs::read_to_string(&file)?;
     let schema: Value = serde_json::from_str(&content)?;
     let topic = format!("$DB/_admin/schema/{entity}/set");
-    let response = execute_request(&conn, &topic, schema).await?;
+    let response = Box::pin(execute_request(&conn, &topic, schema)).await?;
     output_response(response, OutputFormat::Json);
     Ok(())
 }
@@ -618,7 +618,7 @@ async fn cmd_schema_get(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/schema/{entity}/get");
-    let response = execute_request(&conn, &topic, json!({})).await?;
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
     output_response(response, format);
     Ok(())
 }
@@ -652,7 +652,7 @@ async fn cmd_constraint_add(
         return Err("Must specify --unique, --fk, or --not-null".into());
     };
 
-    let response = execute_request(&conn, &topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(response, OutputFormat::Json);
     Ok(())
 }
@@ -663,7 +663,7 @@ async fn cmd_constraint_list(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/constraint/{entity}/list");
-    let response = execute_request(&conn, &topic, json!({})).await?;
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
     output_response(response, format);
     Ok(())
 }
@@ -674,19 +674,19 @@ async fn cmd_backup_create(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/backup";
     let payload = json!({"name": name});
-    let response = execute_request(conn, topic, payload).await?;
+    let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
     if response
         .get("ok")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         if let Some(data) = response.get("data")
-            && let Some(msg) = data.get("message").and_then(|v| v.as_str())
+            && let Some(msg) = data.get("message").and_then(serde_json::Value::as_str)
         {
             println!("{msg}");
         }
-    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -696,11 +696,11 @@ async fn cmd_backup_create(
 async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/backup/list";
     let payload = json!({});
-    let response = execute_request(conn, topic, payload).await?;
+    let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
     if response
         .get("ok")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         if let Some(backups) = response.get("data").and_then(|v| v.as_array()) {
@@ -715,7 +715,7 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
                 }
             }
         }
-    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -725,15 +725,15 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
 async fn cmd_restore(name: &str, conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/restore";
     let payload = json!({"name": name});
-    let response = execute_request(conn, topic, payload).await?;
+    let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
     if response
         .get("ok")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         println!("Restore initiated");
-    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -979,15 +979,15 @@ async fn cmd_subscribe(
         "mode": mode_str
     });
 
-    let response = execute_request(&conn, topic, payload).await?;
+    let response = Box::pin(execute_request(&conn, topic, payload)).await?;
 
     if response
         .get("ok")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
         let data = response.get("data").unwrap_or(&Value::Null);
-        let sub_id = data.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+        let sub_id = data.get("id").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         eprintln!("Subscription ID: {sub_id}");
         if let Some(partitions) = data.get("partitions").and_then(|v| v.as_array())
@@ -1002,7 +1002,7 @@ async fn cmd_subscribe(
             "$DB/+/events/#".to_string()
         };
 
-        let client = connect_client(&conn).await?;
+        let client = Box::pin(connect_client(&conn)).await?;
         let (tx, mut rx) = mpsc::channel::<Value>(100);
 
         client
@@ -1034,7 +1034,7 @@ async fn cmd_subscribe(
                     break;
                 }
                 let topic = format!("$DB/_sub/{heartbeat_sub_id}/heartbeat");
-                let _ = execute_request(&heartbeat_conn, &topic, json!({})).await;
+                let _ = Box::pin(execute_request(&heartbeat_conn, &topic, json!({}))).await;
             }
         });
 
@@ -1055,9 +1055,9 @@ async fn cmd_subscribe(
 
         eprintln!("\nUnsubscribing...");
         let unsub_topic = format!("$DB/_sub/{sub_id}/unsubscribe");
-        let _ = execute_request(&conn, &unsub_topic, json!({})).await;
+        let _ = Box::pin(execute_request(&conn, &unsub_topic, json!({}))).await;
         client.disconnect().await?;
-    } else if let Some(error) = response.get("error").and_then(|v| v.as_str()) {
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -1069,7 +1069,7 @@ async fn cmd_consumer_group_list(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/consumer-groups";
-    let response = execute_request(&conn, topic, json!({})).await?;
+    let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
     output_response(response, format);
     Ok(())
 }
@@ -1080,7 +1080,7 @@ async fn cmd_consumer_group_show(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/consumer-groups/{name}");
-    let response = execute_request(&conn, &topic, json!({})).await?;
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
     output_response(response, format);
     Ok(())
 }

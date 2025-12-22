@@ -52,8 +52,10 @@ pub async fn publish_request(client: &MqttClient, topic: &str, payload: Value) -
 }
 
 pub fn now_timestamp() -> i64 {
-    std::time::SystemTime::now()
+    #[allow(clippy::cast_possible_wrap)]
+    let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as i64
+        .as_secs() as i64;
+    ts
 }

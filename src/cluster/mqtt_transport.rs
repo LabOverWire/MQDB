@@ -35,6 +35,9 @@ impl std::fmt::Debug for MqttTransport {
 }
 
 impl MqttTransport {
+    /// # Panics
+    /// Panics if the mutex is poisoned.
+    #[must_use]
     pub fn new(node_id: NodeId) -> Self {
         let client_id = format!("mqdb-node-{}", node_id.get());
         let client = MqttClient::new(&client_id);
@@ -61,6 +64,11 @@ impl MqttTransport {
         }
     }
 
+    /// # Errors
+    /// Returns `SendFailed` if connection fails.
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
     pub async fn connect(&self, broker_addr: &str) -> Result<(), TransportError> {
         self.client
             .connect(broker_addr)
@@ -78,8 +86,8 @@ impl MqttTransport {
 
     async fn subscribe_to_cluster_topics(&self) -> Result<(), TransportError> {
         let node_topic = format!("{}/node/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get());
-        let broadcast_topic = format!("{}/broadcast", CLUSTER_TOPIC_PREFIX);
-        let heartbeat_topic = format!("{}/heartbeat/+", CLUSTER_TOPIC_PREFIX);
+        let broadcast_topic = format!("{CLUSTER_TOPIC_PREFIX}/broadcast");
+        let heartbeat_topic = format!("{CLUSTER_TOPIC_PREFIX}/heartbeat/+");
 
         let tx = self.message_tx.clone();
         let node_id = self.node_id;
@@ -178,13 +186,15 @@ impl MqttTransport {
             _ => return None,
         };
 
+        #[allow(clippy::cast_possible_truncation)]
+        let received_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+
         Some(InboundMessage {
             from,
             message,
-            received_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+            received_at,
         })
     }
 
@@ -223,6 +233,8 @@ impl MqttTransport {
         buf
     }
 
+    /// # Errors
+    /// Returns `SendFailed` if sending the message fails.
     pub async fn send_async(
         &self,
         to: NodeId,
@@ -239,12 +251,14 @@ impl MqttTransport {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns `SendFailed` if broadcasting the message fails.
     pub async fn broadcast_async(&self, message: ClusterMessage) -> Result<(), TransportError> {
         let topic = match &message {
             ClusterMessage::Heartbeat(_) => {
                 format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get())
             }
-            _ => format!("{}/broadcast", CLUSTER_TOPIC_PREFIX),
+            _ => format!("{CLUSTER_TOPIC_PREFIX}/broadcast"),
         };
 
         let payload = self.serialize_message(&message);
@@ -257,6 +271,11 @@ impl MqttTransport {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns `SendFailed` if disconnection fails.
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
     pub async fn disconnect(&self) -> Result<(), TransportError> {
         self.client
             .disconnect()
@@ -303,7 +322,7 @@ impl ClusterTransport for MqttTransport {
             ClusterMessage::Heartbeat(_) => {
                 format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get())
             }
-            _ => format!("{}/broadcast", CLUSTER_TOPIC_PREFIX),
+            _ => format!("{CLUSTER_TOPIC_PREFIX}/broadcast"),
         };
 
         let payload = self.serialize_message(&message);
@@ -318,10 +337,10 @@ impl ClusterTransport for MqttTransport {
 
     fn send_to_partition_primary(
         &self,
-        _partition: PartitionId,
+        partition: PartitionId,
         _message: ClusterMessage,
     ) -> Result<(), TransportError> {
-        Err(TransportError::PartitionNotFound(_partition))
+        Err(TransportError::PartitionNotFound(partition))
     }
 
     fn recv(&self) -> Option<InboundMessage> {

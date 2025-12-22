@@ -43,10 +43,16 @@ pub struct InboundMessage {
 pub trait ClusterTransport: Send + Sync + Debug {
     fn local_node(&self) -> NodeId;
 
+    /// # Errors
+    /// Returns a transport error if sending fails.
     fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError>;
 
+    /// # Errors
+    /// Returns a transport error if broadcasting fails.
     fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError>;
 
+    /// # Errors
+    /// Returns a transport error if sending fails or partition is not found.
     fn send_to_partition_primary(
         &self,
         partition: PartitionId,

@@ -49,7 +49,7 @@ impl SimulatedTransport {
     #[allow(dead_code)]
     pub fn set_partition_primary(&self, partition: PartitionId, primary: Option<NodeId>) {
         let mut state = self.state.lock().unwrap();
-        state.partition_primaries[partition.get() as usize] = primary.map(|n| n.get());
+        state.partition_primaries[partition.get() as usize] = primary.map(NodeId::get);
     }
 
     fn serialize_message(msg: &ClusterMessage) -> Vec<u8> {

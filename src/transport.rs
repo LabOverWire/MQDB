@@ -63,10 +63,12 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    #[must_use]
     pub fn as_u16(self) -> u16 {
         self as u16
     }
 
+    #[must_use]
     pub fn as_grpc_code(self) -> i32 {
         match self {
             ErrorCode::NotFound => 5,
@@ -91,6 +93,7 @@ pub enum Response {
 }
 
 impl Response {
+    #[must_use]
     pub fn ok(data: Value) -> Self {
         Response::Ok { data }
     }
@@ -102,10 +105,12 @@ impl Response {
         }
     }
 
+    #[must_use]
     pub fn is_ok(&self) -> bool {
         matches!(self, Response::Ok { .. })
     }
 
+    #[must_use]
     pub fn is_error(&self) -> bool {
         matches!(self, Response::Error { .. })
     }
@@ -286,7 +291,7 @@ mod tests {
                 assert_eq!(code, 404);
                 assert!(message.contains("not found"));
             }
-            _ => panic!("expected error response"),
+            Response::Ok { .. } => panic!("expected error response"),
         }
     }
 }

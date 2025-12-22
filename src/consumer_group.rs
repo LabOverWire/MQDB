@@ -59,6 +59,7 @@ impl ConsumerGroup {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_member(&mut self, consumer_id: String) -> Vec<u8> {
         if self.members.contains_key(&consumer_id) {
             return self
@@ -203,7 +204,7 @@ mod tests {
             .chain(partitions_2.iter())
             .copied()
             .collect();
-        all.sort();
+        all.sort_unstable();
         assert_eq!(all, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 

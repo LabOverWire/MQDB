@@ -148,6 +148,7 @@ impl ReplicationWrite {
     }
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Vec<u8> {
         let entity_bytes = self.entity.as_bytes();
         let id_bytes = self.id.as_bytes();
@@ -170,12 +171,16 @@ impl ReplicationWrite {
         buf
     }
 
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 20 {
             return None;
         }
 
-        let _version = bytes[0];
+        let version = bytes[0];
+        if version != Self::VERSION {
+            return None;
+        }
         let partition = u16::from_be_bytes([bytes[1], bytes[2]]);
         let operation = Operation::from_u8(bytes[3])?;
         let epoch = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
@@ -211,7 +216,7 @@ impl ReplicationWrite {
     }
 }
 
-#[derive(Debug, Clone, BeBytes)]
+#[derive(Debug, Clone, Copy, BeBytes)]
 pub struct ReplicationAck {
     version: u8,
     partition: u16,
@@ -225,6 +230,7 @@ impl ReplicationAck {
     pub const VERSION: u8 = 1;
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn ok(partition: PartitionId, epoch: Epoch, sequence: u64, node_id: NodeId) -> Self {
         Self {
             version: Self::VERSION,
@@ -237,6 +243,7 @@ impl ReplicationAck {
     }
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn stale_epoch(partition: PartitionId, current_epoch: Epoch, node_id: NodeId) -> Self {
         Self {
             version: Self::VERSION,
@@ -261,6 +268,7 @@ impl ReplicationAck {
     }
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn sequence_gap(
         partition: PartitionId,
         epoch: Epoch,
@@ -277,6 +285,8 @@ impl ReplicationAck {
         }
     }
 
+    /// # Panics
+    /// Panics if partition ID 0 is invalid (should not happen).
     #[must_use]
     pub fn partition(&self) -> PartitionId {
         PartitionId::new(self.partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
@@ -331,6 +341,8 @@ impl CatchupRequest {
         }
     }
 
+    /// # Panics
+    /// Panics if partition ID 0 is invalid (should not happen).
     #[must_use]
     pub fn partition(&self) -> PartitionId {
         PartitionId::new(self.partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
@@ -379,14 +391,14 @@ mod tests {
     #[test]
     fn heartbeat_bebytes_roundtrip() {
         let node = NodeId::validated(42).unwrap();
-        let mut hb = Heartbeat::create(node, 123456);
+        let mut hb = Heartbeat::create(node, 123_456);
         hb.set_primary(PartitionId::new(10).unwrap());
 
         let bytes = hb.to_be_bytes();
         let (decoded, _) = Heartbeat::try_from_be_bytes(&bytes).unwrap();
 
         assert_eq!(decoded.node_id(), 42);
-        assert_eq!(decoded.timestamp_ms(), 123456);
+        assert_eq!(decoded.timestamp_ms(), 123_456);
         assert!(decoded.is_primary(PartitionId::new(10).unwrap()));
     }
 

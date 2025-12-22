@@ -16,6 +16,8 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// # Errors
+    /// Returns an error if the storage backend fails to open.
     #[cfg(feature = "native")]
     pub fn open<P: AsRef<std::path::Path>>(
         path: P,
@@ -38,22 +40,32 @@ impl Storage {
         Self { backend }
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         self.backend.get(key)
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
         self.backend.insert(key, value)
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn remove(&self, key: &[u8]) -> Result<()> {
         self.backend.remove(key)
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.backend.prefix_scan(prefix)
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.backend.range_scan(start, end)
     }
@@ -65,6 +77,8 @@ impl Storage {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn flush(&self) -> Result<()> {
         self.backend.flush()
     }
@@ -87,6 +101,8 @@ impl BatchWriter {
         self.inner.expect_value(key, expected_value);
     }
 
+    /// # Errors
+    /// Returns an error if the commit fails.
     pub fn commit(self) -> Result<()> {
         self.inner.commit()
     }

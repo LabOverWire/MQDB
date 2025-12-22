@@ -30,12 +30,12 @@ async fn test_crud_operations() {
         "name": "Alice Smith"
     });
 
-    let updated = db
+    let updated_user = db
         .update("users".into(), id.clone(), updates)
         .await
         .unwrap();
-    assert_eq!(updated["name"], "Alice Smith");
-    assert_eq!(updated["email"], "alice@example.com");
+    assert_eq!(updated_user["name"], "Alice Smith");
+    assert_eq!(updated_user["email"], "alice@example.com");
 
     db.delete("users".into(), id.clone()).await.unwrap();
 
@@ -580,10 +580,10 @@ async fn test_cursor_api() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let mut cursor = db.cursor("users".into(), vec![], vec![]).await.unwrap();
+    let mut cursor = db.cursor("users".into(), vec![], vec![]).unwrap();
 
     let mut count = 0;
-    while let Some(_user) = cursor.next().await.unwrap() {
+    while let Some(_user) = cursor.next().unwrap() {
         count += 1;
     }
     assert_eq!(count, 50);
@@ -591,11 +591,10 @@ async fn test_cursor_api() {
     let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
     let mut filtered_cursor = db
         .cursor("users".into(), vec![filter], vec![])
-        .await
         .unwrap();
 
     let mut active_count = 0;
-    while let Some(user) = filtered_cursor.next().await.unwrap() {
+    while let Some(user) = filtered_cursor.next().unwrap() {
         assert_eq!(user["status"], "active");
         active_count += 1;
     }
@@ -604,10 +603,9 @@ async fn test_cursor_api() {
     let age_filter = Filter::new("age".into(), FilterOp::Gt, json!(30));
     let mut age_cursor = db
         .cursor("users".into(), vec![age_filter], vec![])
-        .await
         .unwrap();
 
-    let batch = age_cursor.next_batch(10).await.unwrap();
+    let batch = age_cursor.next_batch(10).unwrap();
     assert!(!batch.is_empty());
     for user in batch {
         let age = user["age"].as_u64().unwrap();
@@ -632,12 +630,11 @@ async fn test_cursor_with_sorting() {
     let sort_by_age_asc = vec![SortOrder::new("age".into(), SortDirection::Asc)];
     let mut cursor = db
         .cursor("users".into(), vec![], sort_by_age_asc)
-        .await
         .unwrap();
 
     let mut prev_age = 0;
     let mut count = 0;
-    while let Some(user) = cursor.next().await.unwrap() {
+    while let Some(user) = cursor.next().unwrap() {
         let age = user["age"].as_u64().unwrap();
         assert!(age >= prev_age, "ages should be in ascending order");
         prev_age = age;
@@ -648,11 +645,10 @@ async fn test_cursor_with_sorting() {
     let sort_by_age_desc = vec![SortOrder::new("age".into(), SortDirection::Desc)];
     let mut desc_cursor = db
         .cursor("users".into(), vec![], sort_by_age_desc)
-        .await
         .unwrap();
 
     let mut prev_age = u64::MAX;
-    while let Some(user) = desc_cursor.next().await.unwrap() {
+    while let Some(user) = desc_cursor.next().unwrap() {
         let age = user["age"].as_u64().unwrap();
         assert!(age <= prev_age, "ages should be in descending order");
         prev_age = age;
@@ -662,10 +658,10 @@ async fn test_cursor_with_sorting() {
         SortOrder::new("score".into(), SortDirection::Asc),
         SortOrder::new("age".into(), SortDirection::Desc),
     ];
-    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).await.unwrap();
+    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).unwrap();
 
     let mut results = vec![];
-    while let Some(user) = multi_cursor.next().await.unwrap() {
+    while let Some(user) = multi_cursor.next().unwrap() {
         results.push((
             user["score"].as_u64().unwrap(),
             user["age"].as_u64().unwrap(),
@@ -702,7 +698,7 @@ async fn test_physical_backup_and_restore() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    db.backup_physical(&backup_path).await.unwrap();
+    db.backup_physical(&backup_path).unwrap();
 
     drop(db);
 
@@ -726,13 +722,13 @@ async fn test_logical_backup_and_restore() {
     for i in 0..20 {
         let product = json!({
             "name": format!("Product {}", i),
-            "price": 10.0 + i as f64,
+            "price": 10.0 + f64::from(i),
             "stock": 100 - i,
         });
         db.create("products".into(), product).await.unwrap();
     }
 
-    db.backup_logical(&backup_file).await.unwrap();
+    db.backup_logical(&backup_file).unwrap();
 
     let new_db_path = tmp.path().join("restored_db");
     let new_db = Database::open(&new_db_path).await.unwrap();
@@ -767,7 +763,7 @@ async fn test_backup_fails_if_destination_exists() {
 
     std::fs::create_dir(&backup_path).unwrap();
 
-    let result = db.backup_physical(&backup_path).await;
+    let result = db.backup_physical(&backup_path);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
 }

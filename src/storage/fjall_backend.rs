@@ -12,9 +12,12 @@ pub struct FjallBackend {
 }
 
 impl FjallBackend {
+    /// # Errors
+    /// Returns an error if the storage fails to open.
     pub fn open<P: AsRef<Path>>(path: P, durability: DurabilityMode) -> Result<Self> {
         let keyspace = Config::new(path).open_transactional()?;
-        let partition = keyspace.open_partition("main", Default::default())?;
+        let partition =
+            keyspace.open_partition("main", fjall::PartitionCreateOptions::default())?;
 
         Ok(Self {
             keyspace: Arc::new(keyspace),

@@ -193,7 +193,7 @@ impl Database {
         if let Value::Object(ref mut obj) = data {
             obj.insert("id".to_string(), Value::String(id.clone()));
 
-            if let Some(ttl_secs) = obj.get("ttl_secs").and_then(|v| v.as_u64()) {
+            if let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
@@ -258,7 +258,7 @@ impl Database {
         }
 
         let result = if let Some(ref fields) = projection {
-            self.project_fields(result, fields)
+            Self::project_fields(result, fields)
         } else {
             result
         };
@@ -312,7 +312,7 @@ impl Database {
         })
     }
 
-    fn project_fields(&self, entity: Value, fields: &[String]) -> Value {
+    fn project_fields(entity: Value, fields: &[String]) -> Value {
         if let Value::Object(obj) = entity {
             let mut projected = serde_json::Map::new();
 
@@ -507,10 +507,7 @@ impl Database {
             }
         } else {
             let index_manager = self.index_manager.read().await;
-            let use_index = filters
-                .first()
-                .map(|f| f.op == FilterOp::Eq)
-                .unwrap_or(false);
+            let use_index = filters.first().is_some_and(|f| f.op == FilterOp::Eq);
 
             if use_index {
                 if let Some(filter) = filters.first() {
@@ -528,7 +525,7 @@ impl Database {
                             .await
                         {
                             Ok(entity_data) => {
-                                if self.matches_filters(&entity_data, &filters) {
+                                if Self::matches_filters(&entity_data, &filters) {
                                     results.push(entity_data);
                                 }
                             }
@@ -551,7 +548,7 @@ impl Database {
                     let (_, id) = keys::decode_data_key(&key)?;
                     let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
                     let entity_data = entity.to_json();
-                    if self.matches_filters(&entity_data, &filters) {
+                    if Self::matches_filters(&entity_data, &filters) {
                         results.push(entity_data);
                     }
                 }
@@ -559,11 +556,11 @@ impl Database {
         }
 
         if !sort.is_empty() {
-            self.sort_results(&mut results, &sort);
+            Self::sort_results(&mut results, &sort);
         }
 
-        let offset = pagination.as_ref().map(|p| p.offset).unwrap_or(0);
-        let limit = pagination.as_ref().map(|p| p.limit).unwrap_or(usize::MAX);
+        let offset = pagination.as_ref().map_or(0, |p| p.offset);
+        let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
 
         let requested_end = offset.saturating_add(limit).min(results.len());
 
@@ -597,7 +594,7 @@ impl Database {
         let paginated_results = if let Some(ref fields) = projection {
             paginated_results
                 .into_iter()
-                .map(|e| self.project_fields(e, fields))
+                .map(|e| Self::project_fields(e, fields))
                 .collect()
         } else {
             paginated_results
@@ -608,7 +605,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if creating the cursor fails.
-    pub async fn cursor(
+    pub fn cursor(
         &self,
         entity_name: String,
         filters: Vec<Filter>,
@@ -624,14 +621,14 @@ impl Database {
         )
     }
 
-    fn sort_results(&self, results: &mut [Value], sort: &[SortOrder]) {
+    fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
         results.sort_by(|a, b| {
             for order in sort {
                 let a_val = a.get(&order.field);
                 let b_val = b.get(&order.field);
 
                 let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => self.compare_json_values(av, bv),
+                    (Some(av), Some(bv)) => Self::compare_json_values(av, bv),
                     (Some(_), None) => std::cmp::Ordering::Greater,
                     (None, Some(_)) => std::cmp::Ordering::Less,
                     (None, None) => std::cmp::Ordering::Equal,
@@ -650,7 +647,7 @@ impl Database {
         });
     }
 
-    fn compare_json_values(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+    fn compare_json_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
             (Value::Number(a_num), Value::Number(b_num)) => {
                 let a_f64 = a_num.as_f64().unwrap_or(0.0);
@@ -661,12 +658,11 @@ impl Database {
             }
             (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
             (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
-            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
             _ => std::cmp::Ordering::Equal,
         }
     }
 
-    fn matches_filters(&self, entity: &Value, filters: &[Filter]) -> bool {
+    fn matches_filters(entity: &Value, filters: &[Filter]) -> bool {
         for filter in filters {
             if let Some(field_value) = entity.get(&filter.field) {
                 if !filter.matches(field_value) {
@@ -1009,22 +1005,9 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the backup fails.
-    pub async fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+    pub fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs;
         use std::io;
-
-        let dest = destination.as_ref();
-
-        self.storage.flush()?;
-
-        if dest.exists() {
-            return Err(crate::error::Error::BackupFailed(format!(
-                "destination already exists: {}",
-                dest.display()
-            )));
-        }
-
-        let src = &self.config.path;
 
         fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(dst)?;
@@ -1043,6 +1026,19 @@ impl Database {
             Ok(())
         }
 
+        let dest = destination.as_ref();
+
+        self.storage.flush()?;
+
+        if dest.exists() {
+            return Err(crate::error::Error::BackupFailed(format!(
+                "destination already exists: {}",
+                dest.display()
+            )));
+        }
+
+        let src = &self.config.path;
+
         copy_dir_recursive(src, dest).map_err(|e| {
             crate::error::Error::BackupFailed(format!("failed to copy database: {e}"))
         })?;
@@ -1057,7 +1053,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the backup fails.
-    pub async fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+    pub fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
 
@@ -1194,17 +1190,15 @@ async fn ttl_cleanup_task(
         };
 
         let prefix = b"data/";
-        let items = match storage.prefix_scan(prefix) {
-            Ok(items) => items,
-            Err(_) => continue,
+        let Ok(items) = storage.prefix_scan(prefix) else {
+            continue;
         };
 
         let mut expired_entities = Vec::new();
 
         for (key, value) in items {
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
             };
 
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -1215,13 +1209,13 @@ async fn ttl_cleanup_task(
             let entity_name = parts[1];
             let id = parts[2];
 
-            let entity = match Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
-            {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(entity) =
+                Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
+            else {
+                continue;
             };
 
-            if let Some(expires_at) = entity.data.get("_expires_at").and_then(|v| v.as_u64())
+            if let Some(expires_at) = entity.data.get("_expires_at").and_then(Value::as_u64)
                 && expires_at <= now
             {
                 expired_entities.push((key, entity));

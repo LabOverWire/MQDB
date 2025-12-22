@@ -26,6 +26,8 @@ pub enum RaftCommand {
 }
 
 impl RaftCommand {
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
     pub fn update_partition(
         partition: PartitionId,
         primary: NodeId,
@@ -41,6 +43,7 @@ impl RaftCommand {
         ))
     }
 
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
@@ -63,6 +66,7 @@ impl RaftCommand {
         buf
     }
 
+    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() {
             return None;
@@ -94,12 +98,15 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn create(index: u64, term: u64, command: RaftCommand) -> Self {
         let cmd_bytes = command.to_bytes();
         let cmd_len = cmd_bytes.len() as u16;
         Self::new(index, term, cmd_len, cmd_bytes)
     }
 
+    #[must_use]
     pub fn command(&self) -> Option<RaftCommand> {
         RaftCommand::from_bytes(&self.cmd_bytes)
     }
@@ -122,6 +129,7 @@ pub struct RaftState {
 }
 
 impl RaftState {
+    #[must_use]
     pub fn create(node_id: NodeId) -> Self {
         Self {
             node_id,
@@ -139,42 +147,52 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
 
+    #[must_use]
     pub fn current_term(&self) -> u64 {
         self.current_term
     }
 
+    #[must_use]
     pub fn role(&self) -> RaftRole {
         self.role
     }
 
+    #[must_use]
     pub fn leader_id(&self) -> Option<NodeId> {
         self.leader_id
     }
 
+    #[must_use]
     pub fn voted_for(&self) -> Option<NodeId> {
         self.voted_for
     }
 
+    #[must_use]
     pub fn commit_index(&self) -> u64 {
         self.commit_index
     }
 
+    #[must_use]
     pub fn last_applied(&self) -> u64 {
         self.last_applied
     }
 
+    #[must_use]
     pub fn last_log_index(&self) -> u64 {
         self.log.last().map_or(0, |e| e.index)
     }
 
+    #[must_use]
     pub fn last_log_term(&self) -> u64 {
         self.log.last().map_or(0, |e| e.term)
     }
 
+    #[must_use]
     pub fn log_term_at(&self, index: u64) -> Option<u64> {
         if index == 0 {
             return Some(0);
@@ -188,12 +206,14 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn peers(&self) -> &[NodeId] {
         &self.peers
     }
 
+    #[must_use]
     pub fn quorum_size(&self) -> usize {
-        (self.peers.len() + 1) / 2 + 1
+        self.peers.len().div_ceil(2) + 1
     }
 
     pub fn become_follower(&mut self, term: u64, leader: Option<NodeId>) {
@@ -227,6 +247,7 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn record_vote(&mut self, from: NodeId) -> bool {
         if !self.votes_received.contains(&from) {
             self.votes_received.push(from);
@@ -234,6 +255,7 @@ impl RaftState {
         self.votes_received.len() >= self.quorum_size()
     }
 
+    #[must_use]
     pub fn can_grant_vote(
         &self,
         candidate_term: u64,
@@ -279,6 +301,7 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn append_entries(
         &mut self,
         prev_log_index: u64,
@@ -305,6 +328,7 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn entries_from(&self, start_index: u64) -> Vec<LogEntry> {
         self.log
             .iter()
@@ -313,6 +337,7 @@ impl RaftState {
             .collect()
     }
 
+    #[must_use]
     pub fn next_index_for(&self, peer: NodeId) -> u64 {
         self.next_index
             .iter()
@@ -333,10 +358,10 @@ impl RaftState {
     }
 
     pub fn decrement_next_index(&mut self, peer: NodeId) {
-        if let Some(entry) = self.next_index.iter_mut().find(|(n, _)| *n == peer) {
-            if entry.1 > 1 {
-                entry.1 -= 1;
-            }
+        if let Some(entry) = self.next_index.iter_mut().find(|(n, _)| *n == peer)
+            && entry.1 > 1
+        {
+            entry.1 -= 1;
         }
     }
 
@@ -346,9 +371,8 @@ impl RaftState {
         }
 
         for n in (self.commit_index + 1)..=self.last_log_index() {
-            let term_at_n = match self.log_term_at(n) {
-                Some(t) => t,
-                None => continue,
+            let Some(term_at_n) = self.log_term_at(n) else {
+                continue;
             };
 
             if term_at_n != self.current_term {
@@ -363,19 +387,21 @@ impl RaftState {
         }
     }
 
+    #[must_use]
     pub fn pending_commands(&mut self) -> Vec<RaftCommand> {
         let mut commands = Vec::new();
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            if let Some(entry) = self.log.iter().find(|e| e.index == self.last_applied) {
-                if let Some(cmd) = entry.command() {
-                    commands.push(cmd);
-                }
+            if let Some(entry) = self.log.iter().find(|e| e.index == self.last_applied)
+                && let Some(cmd) = entry.command()
+            {
+                commands.push(cmd);
             }
         }
         commands
     }
 
+    #[must_use]
     pub fn propose(&mut self, command: RaftCommand) -> Option<u64> {
         if self.role != RaftRole::Leader {
             return None;
@@ -485,7 +511,7 @@ mod tests {
         state.become_candidate();
         state.become_leader();
 
-        state.propose(RaftCommand::Noop);
+        let _ = state.propose(RaftCommand::Noop);
         assert_eq!(state.commit_index(), 0);
 
         state.update_match_index(node2, 1);

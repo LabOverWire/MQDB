@@ -57,6 +57,7 @@ impl IndexManager {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn add_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
@@ -66,6 +67,7 @@ impl IndexManager {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn remove_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
@@ -75,6 +77,8 @@ impl IndexManager {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the storage prefix scan fails.
     pub fn lookup_by_field(
         &self,
         storage: &crate::storage::Storage,

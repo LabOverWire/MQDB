@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = json!({"name": "Alice"});
     let created_user = db.create("users".into(), user).await?;
     let user_id = created_user["id"].as_str().unwrap();
-    println!("✓ Created user: {}\n", user_id);
+    println!("✓ Created user: {user_id}\n");
 
     println!("Creating 2 posts by this user...");
     let post1 = json!({"title": "First Post", "author_id": user_id});
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let post2 = json!({"title": "Second Post", "author_id": user_id});
     let created_post2 = db.create("posts".into(), post2).await?;
     let post2_id = created_post2["id"].as_str().unwrap();
-    println!("✓ Created posts: {}, {}\n", post1_id, post2_id);
+    println!("✓ Created posts: {post1_id}, {post2_id}\n");
 
     println!("Creating 3 comments on posts...");
     db.create(

@@ -199,7 +199,7 @@ mod processor {
             tracing::info!("outbox processor started");
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(self.config.retry_interval_ms)) => {
+                    () = tokio::time::sleep(Duration::from_millis(self.config.retry_interval_ms)) => {
                         self.process_pending().await;
                     }
                     _ = self.shutdown_rx.changed() => {

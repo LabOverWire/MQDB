@@ -13,6 +13,7 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    #[must_use]
     pub fn new(id: String) -> Self {
         Self {
             id,
@@ -28,6 +29,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -160,7 +162,7 @@ impl EventRouter {
         let sessions = self.sessions.sessions.read().await;
 
         for (client_id, session) in sessions.iter() {
-            if self.event_matches_subscriptions(&event, &session.subscriptions)
+            if Self::event_matches_subscriptions(&event, &session.subscriptions)
                 && let Some(sender) = senders.get(client_id)
             {
                 let _ = sender.try_send(event.clone());
@@ -169,43 +171,42 @@ impl EventRouter {
     }
 
     fn event_matches_subscriptions(
-        &self,
         event: &ChangeEvent,
         subscriptions: &HashSet<String>,
     ) -> bool {
         let event_path = format!("{}/{}", event.entity, event.id);
 
         for pattern in subscriptions {
-            if self.pattern_matches(&event_path, pattern) {
+            if Self::pattern_matches(&event_path, pattern) {
                 return true;
             }
         }
         false
     }
 
-    fn pattern_matches(&self, path: &str, pattern: &str) -> bool {
+    fn pattern_matches(path: &str, pattern: &str) -> bool {
         let path_parts: Vec<&str> = path.split('/').collect();
         let pattern_parts: Vec<&str> = pattern.split('/').collect();
 
         let mut path_idx = 0;
-        let mut pat_idx = 0;
+        let mut pattern_idx = 0;
 
-        while path_idx < path_parts.len() && pat_idx < pattern_parts.len() {
-            match pattern_parts[pat_idx] {
+        while path_idx < path_parts.len() && pattern_idx < pattern_parts.len() {
+            match pattern_parts[pattern_idx] {
                 "#" => return true,
                 "+" => {
                     path_idx += 1;
-                    pat_idx += 1;
+                    pattern_idx += 1;
                 }
                 part if part == path_parts[path_idx] => {
                     path_idx += 1;
-                    pat_idx += 1;
+                    pattern_idx += 1;
                 }
                 _ => return false,
             }
         }
 
-        path_idx == path_parts.len() && pat_idx == pattern_parts.len()
+        path_idx == path_parts.len() && pattern_idx == pattern_parts.len()
     }
 
     pub fn database(&self) -> &Database {
@@ -282,11 +283,12 @@ mod tests {
         let sessions = Arc::new(SessionManager::new());
         let router = EventRouter::new(db, sessions);
 
-        assert!(router.pattern_matches("users/123", "users/123"));
-        assert!(router.pattern_matches("users/123", "users/+"));
-        assert!(router.pattern_matches("users/123", "#"));
-        assert!(router.pattern_matches("users/123/profile", "users/#"));
-        assert!(!router.pattern_matches("users/123", "posts/+"));
-        assert!(!router.pattern_matches("users/123", "users/456"));
+        let _ = router;
+        assert!(EventRouter::pattern_matches("users/123", "users/123"));
+        assert!(EventRouter::pattern_matches("users/123", "users/+"));
+        assert!(EventRouter::pattern_matches("users/123", "#"));
+        assert!(EventRouter::pattern_matches("users/123/profile", "users/#"));
+        assert!(!EventRouter::pattern_matches("users/123", "posts/+"));
+        assert!(!EventRouter::pattern_matches("users/123", "users/456"));
     }
 }

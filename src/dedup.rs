@@ -70,9 +70,9 @@ impl DedupStore {
 
     /// # Errors
     /// Returns an error if serializing or storing fails.
-    pub fn set(&self, correlation_id: String, response: serde_json::Value) -> Result<()> {
-        let cached = CachedResponse::new(correlation_id.clone(), response);
-        let key = keys::encode_dedup_key(&correlation_id);
+    pub fn set(&self, correlation_id: &str, response: serde_json::Value) -> Result<()> {
+        let cached = CachedResponse::new(correlation_id.to_string(), response);
+        let key = keys::encode_dedup_key(correlation_id);
         let value = serde_json::to_vec(&cached)?;
 
         self.storage.insert(&key, &value)?;
@@ -128,7 +128,7 @@ mod tests {
         let dedup = DedupStore::new(storage, 3600);
 
         let response = json!({"status": "ok", "id": 123});
-        dedup.set("req-1".into(), response.clone()).unwrap();
+        dedup.set("req-1", response.clone()).unwrap();
 
         let cached = dedup.get("req-1").unwrap();
         assert_eq!(cached, Some(response));

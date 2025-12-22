@@ -39,8 +39,7 @@ async fn test_update_race_condition_within_transaction() {
     let value = final_user["value"].as_str().unwrap();
     assert!(
         value.starts_with("update-"),
-        "final value should be from one of the updates: {}",
-        value
+        "final value should be from one of the updates: {value}",
     );
 }
 
@@ -95,11 +94,11 @@ async fn test_atomicity_all_or_nothing() {
     db.create("users".into(), user2).await.unwrap();
     db.create("users".into(), user3).await.unwrap();
 
-    let users = db
+    let all_users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(users.len(), 3);
+    assert_eq!(all_users.len(), 3);
 
     let indexed_users = db
         .list(
