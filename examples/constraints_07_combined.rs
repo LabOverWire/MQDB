@@ -2,6 +2,7 @@ use mqdb::{Database, FieldDefinition, FieldType, OnDeleteAction, Schema};
 use serde_json::json;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open("data/combined_example").await?;
 

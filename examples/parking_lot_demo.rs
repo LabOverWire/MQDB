@@ -5,6 +5,7 @@ use mqtt5::broker::auth::PasswordAuthProvider;
 use mqtt5::client::MqttClient;
 use parking_lot_mqtt::{Result, now_timestamp, publish_request};
 use serde_json::json;
+use std::fmt::Write as _;
 use tokio::time::{Duration, sleep};
 
 #[tokio::main]
@@ -58,7 +59,6 @@ async fn start_agent() -> Result<(tokio::task::JoinHandle<()>, tempfile::TempDir
         ("mqdb-service", "service123"),
     ] {
         let hash = PasswordAuthProvider::hash_password(pass)?;
-        use std::fmt::Write;
         let _ = writeln!(passwd_content, "{user}:{hash}");
     }
     std::fs::write(&passwd_path, passwd_content)?;

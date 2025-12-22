@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(

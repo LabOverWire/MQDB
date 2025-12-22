@@ -42,13 +42,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
     info!("\n=== Testing as 'admin' (full access) ===");
-    test_user("admin", &["users", "orders"]).await?;
+    Box::pin(test_user("admin", &["users", "orders"])).await?;
 
     info!("\n=== Testing as 'alice' (users only) ===");
-    test_user("alice", &["users"]).await?;
+    Box::pin(test_user("alice", &["users"])).await?;
 
     info!("\n=== Testing as 'bob' (read-only) ===");
-    test_read_only_user("bob").await?;
+    Box::pin(test_read_only_user("bob")).await?;
 
     info!("\n=== Demo complete ===");
 
@@ -62,37 +62,35 @@ async fn test_user(
     username: &str,
     allowed_entities: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = MqttClient::new(format!("{}-client", username));
+    let client = MqttClient::new(format!("{username}-client"));
 
-    let options = ConnectOptions::new(format!("{}-client", username))
-        .with_credentials(username, format!("{}123", username));
+    let options = ConnectOptions::new(format!("{username}-client"))
+        .with_credentials(username, format!("{username}123"));
 
-    client
-        .connect_with_options("127.0.0.1:1884", options)
-        .await?;
-    info!("{} connected successfully", username);
+    Box::pin(client.connect_with_options("127.0.0.1:1884", options)).await?;
+    info!("{username} connected successfully");
 
     let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
     let callback_tx = response_tx.clone();
     client
-        .subscribe(&format!("{}/responses", username), move |msg| {
+        .subscribe(&format!("{username}/responses"), move |msg| {
             let _ = callback_tx.try_send(String::from_utf8_lossy(&msg.payload).to_string());
         })
         .await?;
 
     let opts = PublishOptions {
         properties: PublishProperties {
-            response_topic: Some(format!("{}/responses", username)),
+            response_topic: Some(format!("{username}/responses")),
             ..Default::default()
         },
         ..Default::default()
     };
 
     for entity in allowed_entities {
-        let payload = json!({"name": format!("Test from {}", username), "value": 42});
+        let payload = json!({"name": format!("Test from {username}"), "value": 42});
         client
             .publish_with_options(
-                &format!("$DB/{}/create", entity),
+                &format!("$DB/{entity}/create"),
                 serde_json::to_vec(&payload)?,
                 opts.clone(),
             )
@@ -101,7 +99,7 @@ async fn test_user(
         if let Some(response) = response_rx.recv().await {
             let parsed: serde_json::Value = serde_json::from_str(&response)?;
             let status = parsed["status"].as_str().unwrap_or("unknown");
-            info!("{} -> $DB/{}/create: {}", username, entity, status);
+            info!("{username} -> $DB/{entity}/create: {status}");
         }
     }
 
@@ -110,27 +108,25 @@ async fn test_user(
 }
 
 async fn test_read_only_user(username: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let client = MqttClient::new(format!("{}-client", username));
+    let client = MqttClient::new(format!("{username}-client"));
 
-    let options = ConnectOptions::new(format!("{}-client", username))
-        .with_credentials(username, format!("{}123", username));
+    let options = ConnectOptions::new(format!("{username}-client"))
+        .with_credentials(username, format!("{username}123"));
 
-    client
-        .connect_with_options("127.0.0.1:1884", options)
-        .await?;
-    info!("{} connected successfully", username);
+    Box::pin(client.connect_with_options("127.0.0.1:1884", options)).await?;
+    info!("{username} connected successfully");
 
     let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
     let callback_tx = response_tx.clone();
     client
-        .subscribe(&format!("{}/responses", username), move |msg| {
+        .subscribe(&format!("{username}/responses"), move |msg| {
             let _ = callback_tx.try_send(String::from_utf8_lossy(&msg.payload).to_string());
         })
         .await?;
 
     let opts = PublishOptions {
         properties: PublishProperties {
-            response_topic: Some(format!("{}/responses", username)),
+            response_topic: Some(format!("{username}/responses")),
             ..Default::default()
         },
         ..Default::default()
@@ -147,7 +143,7 @@ async fn test_read_only_user(username: &str) -> Result<(), Box<dyn std::error::E
     if let Some(response) = response_rx.recv().await {
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         let status = parsed["status"].as_str().unwrap_or("unknown");
-        info!("{} -> $DB/users/list: {}", username, status);
+        info!("{username} -> $DB/users/list: {status}");
     }
 
     let payload = json!({"name": "Should fail", "value": 0});
@@ -163,12 +159,9 @@ async fn test_read_only_user(username: &str) -> Result<(), Box<dyn std::error::E
     if let Ok(response) = response_rx.try_recv() {
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         let status = parsed["status"].as_str().unwrap_or("unknown");
-        info!(
-            "{} -> $DB/users/create: {} (expected: denied)",
-            username, status
-        );
+        info!("{username} -> $DB/users/create: {status} (expected: denied)");
     } else {
-        info!("{} -> $DB/users/create: denied (no response)", username);
+        info!("{username} -> $DB/users/create: denied (no response)");
     }
 
     client.disconnect().await?;

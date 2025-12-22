@@ -261,6 +261,7 @@ async fn test_extended_filter_operators() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_sorting_and_pagination() {
     use mqdb::{Pagination, SortOrder};
 

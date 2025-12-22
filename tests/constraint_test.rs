@@ -325,19 +325,19 @@ async fn test_foreign_key_cascade_delete_simple() {
     .await
     .unwrap();
 
-    let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
-    let post2 = json!({"title": "Post 2", "author_id": user_id.clone()});
-    db.create("posts".into(), post1).await.unwrap();
-    db.create("posts".into(), post2).await.unwrap();
+    let post_entry1 = json!({"title": "Post 1", "author_id": user_id.clone()});
+    let post_entry2 = json!({"title": "Post 2", "author_id": user_id.clone()});
+    db.create("posts".into(), post_entry1).await.unwrap();
+    db.create("posts".into(), post_entry2).await.unwrap();
 
     let result = db.delete("users".into(), user_id).await;
     assert!(result.is_ok());
 
-    let posts = db
+    let all_posts = db
         .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(posts.len(), 0, "all posts should be cascaded deleted");
+    assert_eq!(all_posts.len(), 0, "all posts should be cascaded deleted");
 }
 
 #[tokio::test]
@@ -373,25 +373,25 @@ async fn test_foreign_key_cascade_delete_multilevel() {
     .await
     .unwrap();
 
-    let comment1 = json!({"text": "Comment 1", "post_id": post_id.clone()});
-    let comment2 = json!({"text": "Comment 2", "post_id": post_id.clone()});
-    db.create("comments".into(), comment1).await.unwrap();
-    db.create("comments".into(), comment2).await.unwrap();
+    let comment_entry1 = json!({"text": "Comment 1", "post_id": post_id.clone()});
+    let comment_entry2 = json!({"text": "Comment 2", "post_id": post_id.clone()});
+    db.create("comments".into(), comment_entry1).await.unwrap();
+    db.create("comments".into(), comment_entry2).await.unwrap();
 
     let result = db.delete("users".into(), user_id).await;
     assert!(result.is_ok());
 
-    let posts = db
+    let all_posts = db
         .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(posts.len(), 0, "posts should be cascaded");
+    assert_eq!(all_posts.len(), 0, "posts should be cascaded");
 
-    let comments = db
+    let all_comments = db
         .list("comments".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(comments.len(), 0, "comments should be cascaded from posts");
+    assert_eq!(all_comments.len(), 0, "comments should be cascaded from posts");
 }
 
 #[tokio::test]

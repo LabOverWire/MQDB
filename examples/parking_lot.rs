@@ -17,6 +17,7 @@ fn now_timestamp() -> i64 {
     ts
 }
 
+#[allow(clippy::too_many_lines)]
 async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║     BACKEND SETUP: MQTT Broker + Database (ONE-TIME)        ║");
@@ -184,7 +185,7 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
     Ok(db)
 }
 
-fn mqtt_publish(topic: &str, payload: serde_json::Value) {
+fn mqtt_publish(topic: &str, payload: &serde_json::Value) {
     println!("📤 mqtt.publish('{topic}', {payload})\n");
 }
 
@@ -192,18 +193,18 @@ fn mqtt_subscribe(topic: &str) {
     println!("📡 mqtt.subscribe('{topic}')\n");
 }
 
-fn mqtt_event(topic: &str, payload: serde_json::Value) {
+fn mqtt_event(topic: &str, payload: &serde_json::Value) {
     println!("⚡ mqtt.on('{topic}'): {payload}\n");
 }
 
-fn mqtt_response(correlation_id: &str, result: serde_json::Value) {
+fn mqtt_response(correlation_id: &str, result: &serde_json::Value) {
     println!(
-        "📥 Response [{}]: {}\n",
-        correlation_id,
-        serde_json::to_string_pretty(&result).unwrap()
+        "📥 Response [{correlation_id}]: {}\n",
+        serde_json::to_string_pretty(result).unwrap()
     );
 }
 
+#[allow(clippy::too_many_lines)]
 async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std::error::Error>> {
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║     KIOSK CLIENT: Driver Requests Parking Spot              ║");
@@ -213,7 +214,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     mqtt_publish(
         "db/spots/list",
-        json!({
+        &json!({
             "op": "list",
             "entity": "spots",
             "data": {
@@ -249,7 +250,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     mqtt_response(
         "req-1",
-        json!({
+        &json!({
             "status": "ok",
             "result": {"items": spots, "total": 5}
         }),
@@ -273,7 +274,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     mqtt_publish(
         "db/reservations/create",
-        json!({
+        &json!({
             "op": "create",
             "entity": "reservations",
             "data": {
@@ -305,7 +306,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     mqtt_response(
         "req-2",
-        json!({
+        &json!({
             "status": "ok",
             "result": reservation
         }),
@@ -313,7 +314,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
 
     mqtt_publish(
         "db/spots/update",
-        json!({
+        &json!({
             "op": "update",
             "entity": "spots",
             "data": {
@@ -334,7 +335,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
     )
     .await?;
 
-    mqtt_response("req-3", json!({"status": "ok"}));
+    mqtt_response("req-3", &json!({"status": "ok"}));
 
     println!(
         "🖥️  Display: 'Proceed to {} at {}'\n",
@@ -344,6 +345,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
     Ok((spot_id, reservation_id))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn gate_camera_client(
     db: Arc<Database>,
     spot_id: String,
@@ -358,7 +360,7 @@ async fn gate_camera_client(
 
     mqtt_publish(
         "camera/a1/detection",
-        json!({
+        &json!({
             "license_plate": "ABC-123",
             "timestamp": now_timestamp(),
             "confidence": 0.98
@@ -371,14 +373,14 @@ async fn gate_camera_client(
 
     mqtt_event(
         "camera/a1/detection",
-        json!({"license_plate": "ABC-123", "confidence": 0.98}),
+        &json!({"license_plate": "ABC-123", "confidence": 0.98}),
     );
 
     println!("Gate controller validates plate against DB...\n");
 
     mqtt_publish(
         "db/vehicles/list",
-        json!({
+        &json!({
             "op": "list",
             "entity": "vehicles",
             "data": {
@@ -410,14 +412,14 @@ async fn gate_camera_client(
 
     mqtt_response(
         "gate-1",
-        json!({"status": "ok", "result": {"items": vehicles}}),
+        &json!({"status": "ok", "result": {"items": vehicles}}),
     );
 
     println!("✅ Vehicle validated, opening gate...\n");
 
     mqtt_publish(
         "gate/a1/status",
-        json!({
+        &json!({
             "state": "opening",
             "reason": "vehicle_entry",
             "license_plate": "ABC-123"
@@ -428,7 +430,7 @@ async fn gate_camera_client(
 
     mqtt_publish(
         "db/parking_sessions/create",
-        json!({
+        &json!({
             "op": "create",
             "entity": "parking_sessions",
             "data": {
@@ -458,11 +460,11 @@ async fn gate_camera_client(
 
     let session_id = session["id"].as_str().unwrap().to_string();
 
-    mqtt_response("gate-2", json!({"status": "ok", "result": session}));
+    mqtt_response("gate-2", &json!({"status": "ok", "result": session}));
 
     mqtt_publish(
         "db/spots/update",
-        json!({
+        &json!({
             "op": "update",
             "entity": "spots",
             "data": {"id": &spot_id, "fields": {"status": "occupied"}}
@@ -474,7 +476,7 @@ async fn gate_camera_client(
 
     mqtt_publish(
         "gate/a1/status",
-        json!({
+        &json!({
             "state": "closed",
             "reason": "vehicle_entered"
         }),
@@ -497,7 +499,7 @@ async fn payment_booth_client(
 
     mqtt_publish(
         "db/parking_sessions/read",
-        json!({
+        &json!({
             "op": "read",
             "entity": "parking_sessions",
             "data": {"id": &session_id},
@@ -514,9 +516,10 @@ async fn payment_booth_client(
 
     let entry_time = session["entry_time"].as_i64().unwrap();
     let duration = (now_timestamp() - entry_time) / 3600;
+    #[allow(clippy::cast_precision_loss)]
     let amount = (duration.max(1) * 5) as f64;
 
-    mqtt_response("pay-1", json!({"status": "ok", "result": session}));
+    mqtt_response("pay-1", &json!({"status": "ok", "result": session}));
 
     println!(
         "💰 Fee calculated: ${} ({} hours)\n",
@@ -528,7 +531,7 @@ async fn payment_booth_client(
 
     mqtt_publish(
         "db/payments/create",
-        json!({
+        &json!({
             "op": "create",
             "entity": "payments",
             "data": {
@@ -556,13 +559,14 @@ async fn payment_booth_client(
         )
         .await?;
 
-    mqtt_response("pay-2", json!({"status": "ok", "result": payment}));
+    mqtt_response("pay-2", &json!({"status": "ok", "result": payment}));
 
     println!("🧾 Receipt printed: {receipt_code}\n");
 
     Ok(receipt_code)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn exit_gate_client(
     db: Arc<Database>,
     receipt_code: String,
@@ -576,7 +580,7 @@ async fn exit_gate_client(
 
     mqtt_publish(
         "scanner/b1/scan",
-        json!({
+        &json!({
             "receipt_code": &receipt_code,
             "timestamp": now_timestamp()
         }),
@@ -586,13 +590,13 @@ async fn exit_gate_client(
 
     println!("--- IoT Device: Exit Gate Controller (exit_b1) ---\n");
 
-    mqtt_event("scanner/b1/scan", json!({"receipt_code": &receipt_code}));
+    mqtt_event("scanner/b1/scan", &json!({"receipt_code": &receipt_code}));
 
     println!("Gate controller validates receipt against DB...\n");
 
     mqtt_publish(
         "db/payments/list",
-        json!({
+        &json!({
             "op": "list",
             "entity": "payments",
             "data": {
@@ -627,7 +631,7 @@ async fn exit_gate_client(
 
     mqtt_response(
         "exit-1",
-        json!({"status": "ok", "result": {"items": payments}}),
+        &json!({"status": "ok", "result": {"items": payments}}),
     );
 
     let session = db
@@ -645,7 +649,7 @@ async fn exit_gate_client(
 
     mqtt_publish(
         "gate/b1/status",
-        json!({
+        &json!({
             "state": "opening",
             "reason": "vehicle_exit",
             "receipt_code": &receipt_code
@@ -654,7 +658,7 @@ async fn exit_gate_client(
 
     mqtt_publish(
         "db/parking_sessions/update",
-        json!({
+        &json!({
             "op": "update",
             "entity": "parking_sessions",
             "data": {
@@ -679,7 +683,7 @@ async fn exit_gate_client(
 
     mqtt_publish(
         "db/spots/update",
-        json!({
+        &json!({
             "op": "update",
             "entity": "spots",
             "data": {"id": spot_id, "fields": {"status": "available"}}
@@ -695,7 +699,7 @@ async fn exit_gate_client(
 
     mqtt_publish(
         "gate/b1/status",
-        json!({
+        &json!({
             "state": "closed",
             "reason": "vehicle_exited"
         }),

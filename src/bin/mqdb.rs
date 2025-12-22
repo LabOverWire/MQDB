@@ -252,6 +252,7 @@ enum SubscriptionModeArg {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -274,9 +275,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             username,
             batch,
             delete,
-            stdout,
+            stdout: _,
         } => {
-            cmd_passwd(username, batch, delete, stdout).await?;
+            cmd_passwd(&username, batch, delete)?;
         }
         Commands::Create {
             entity,
@@ -439,25 +440,23 @@ async fn cmd_agent_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-async fn cmd_passwd(
-    username: String,
+fn cmd_passwd(
+    username: &str,
     batch: Option<String>,
     delete: bool,
-    _stdout: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if delete {
         eprintln!("Delete operation not yet implemented");
         return Ok(());
     }
 
-    let password = match batch {
-        Some(p) => p,
-        None => {
-            eprint!("Password: ");
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            input.trim().to_string()
-        }
+    let password = if let Some(p) = batch {
+        p
+    } else {
+        eprint!("Password: ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        input.trim().to_string()
     };
 
     let hash = mqtt5::broker::auth::PasswordAuthProvider::hash_password(&password)?;
@@ -475,7 +474,7 @@ async fn cmd_create(
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/create");
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -494,7 +493,7 @@ async fn cmd_read(
         json!({})
     };
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -508,7 +507,7 @@ async fn cmd_update(
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/{id}/update");
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -520,7 +519,7 @@ async fn cmd_delete(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/{entity}/{id}/delete");
     let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -563,7 +562,7 @@ async fn cmd_list(
     }
 
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -593,7 +592,7 @@ async fn cmd_watch(
     eprintln!("Watching {entity} events (Ctrl+C to stop)...");
 
     while let Some(event) = rx.recv().await {
-        output_response(event, format.clone());
+        output_response(&event, &format);
     }
 
     Ok(())
@@ -608,7 +607,7 @@ async fn cmd_schema_set(
     let schema: Value = serde_json::from_str(&content)?;
     let topic = format!("$DB/_admin/schema/{entity}/set");
     let response = Box::pin(execute_request(&conn, &topic, schema)).await?;
-    output_response(response, OutputFormat::Json);
+    output_response(&response, &OutputFormat::Json);
     Ok(())
 }
 
@@ -619,7 +618,7 @@ async fn cmd_schema_get(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/schema/{entity}/get");
     let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -653,7 +652,7 @@ async fn cmd_constraint_add(
     };
 
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(response, OutputFormat::Json);
+    output_response(&response, &OutputFormat::Json);
     Ok(())
 }
 
@@ -664,7 +663,7 @@ async fn cmd_constraint_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/constraint/{entity}/list");
     let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -745,7 +744,7 @@ async fn connect_client(conn: &ConnectionArgs) -> Result<MqttClient, Box<dyn std
 
     if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
         let options = ConnectOptions::new("mqdb-cli").with_credentials(user.clone(), pass.clone());
-        client.connect_with_options(&conn.broker, options).await?;
+        Box::pin(client.connect_with_options(&conn.broker, options)).await?;
     } else {
         client.connect(&conn.broker).await?;
     }
@@ -758,7 +757,7 @@ async fn execute_request(
     topic: &str,
     payload: Value,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let client = connect_client(conn).await?;
+    let client = Box::pin(connect_client(conn)).await?;
 
     let response_topic = format!("mqdb-cli/responses/{}", uuid::Uuid::new_v4());
     let (tx, mut rx) = mpsc::channel::<Value>(1);
@@ -808,7 +807,6 @@ fn parse_filters(filter_str: &str) -> Vec<Value> {
                     let value_str = part[pos + op.len()..].trim();
 
                     let filter_op = match op {
-                        "=" => "eq",
                         "!=" => "ne",
                         ">" => "gt",
                         "<" => "lt",
@@ -848,10 +846,10 @@ fn parse_filters(filter_str: &str) -> Vec<Value> {
         .collect()
 }
 
-fn output_response(response: Value, format: OutputFormat) {
+fn output_response(response: &Value, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&response).unwrap());
+            println!("{}", serde_json::to_string_pretty(response).unwrap());
         }
         OutputFormat::Table => {
             if let Some(data) = response.get("data") {
@@ -860,10 +858,10 @@ fn output_response(response: Value, format: OutputFormat) {
                 } else if data.is_object() {
                     output_table(std::slice::from_ref(data));
                 } else {
-                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                    println!("{}", serde_json::to_string_pretty(response).unwrap());
                 }
             } else {
-                println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                println!("{}", serde_json::to_string_pretty(response).unwrap());
             }
         }
         OutputFormat::Csv => {
@@ -873,10 +871,10 @@ fn output_response(response: Value, format: OutputFormat) {
                 } else if data.is_object() {
                     output_csv(std::slice::from_ref(data));
                 } else {
-                    println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                    println!("{}", serde_json::to_string_pretty(response).unwrap());
                 }
             } else {
-                println!("{}", serde_json::to_string_pretty(&response).unwrap());
+                println!("{}", serde_json::to_string_pretty(response).unwrap());
             }
         }
     }
@@ -895,7 +893,7 @@ fn output_table(data: &[Value]) {
 
     let first = &data[0];
     if let Some(obj) = first.as_object() {
-        let headers: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        let headers: Vec<&str> = obj.keys().map(String::as_str).collect();
         table.set_header(&headers);
 
         for item in data {
@@ -927,7 +925,7 @@ fn output_csv(data: &[Value]) {
 
     let first = &data[0];
     if let Some(obj) = first.as_object() {
-        let headers: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
+        let headers: Vec<&str> = obj.keys().map(String::as_str).collect();
         println!("{}", headers.join(","));
 
         for item in data {
@@ -944,7 +942,7 @@ fn output_csv(data: &[Value]) {
                                         s.clone()
                                     }
                                 }
-                                Value::Null => "".to_string(),
+                                Value::Null => String::new(),
                                 _ => v.to_string(),
                             })
                             .unwrap_or_default()
@@ -1042,10 +1040,10 @@ async fn cmd_subscribe(
             tokio::select! {
                 event = rx.recv() => {
                     if let Some(event) = event {
-                        output_response(event, format.clone());
+                        output_response(&event, &format);
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                () = tokio::time::sleep(Duration::from_millis(100)) => {
                     if shutdown.load(Ordering::SeqCst) {
                         break;
                     }
@@ -1070,7 +1068,7 @@ async fn cmd_consumer_group_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/consumer-groups";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
 
@@ -1081,6 +1079,6 @@ async fn cmd_consumer_group_show(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/_admin/consumer-groups/{name}");
     let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
-    output_response(response, format);
+    output_response(&response, &format);
     Ok(())
 }
