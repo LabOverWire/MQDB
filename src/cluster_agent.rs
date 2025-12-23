@@ -157,7 +157,11 @@ impl ClusteredAgent {
             broker_config.auth_config.acl_file = Some(path.clone());
         }
 
-        let broker = MqttBroker::with_config(broker_config).await?;
+        let mut broker = MqttBroker::with_config(broker_config).await?;
+
+        let broker_handle = tokio::spawn(async move {
+            let _ = broker.run().await;
+        });
 
         info!(
             node_id = self.node_id.get(),
@@ -211,7 +215,7 @@ impl ClusteredAgent {
             }
         }
 
-        broker.shutdown().await?;
+        broker_handle.abort();
         Ok(())
     }
 

@@ -488,10 +488,9 @@ async fn cmd_cluster_start(
     acl: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let peer_configs = parse_peer_configs(&peers)?;
-
     let db = Database::open(&db_path).await?;
 
-    let mut config = ClusterConfig::new(node_id, db_path, peer_configs);
+    let mut config = ClusterConfig::new(node_id, db_path.clone(), peer_configs);
     config = config.with_bind_address(bind);
 
     if let Some(name) = node_name {
