@@ -1,5 +1,7 @@
 pub mod entity;
 mod epoch;
+#[cfg(feature = "native")]
+mod event_handler;
 mod heartbeat;
 mod inflight_store;
 mod lwt;
@@ -33,6 +35,8 @@ pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inf
 pub use lwt::{
     LwtAction, LwtError, LwtPrepared, LwtPublisher, determine_lwt_action, generate_lwt_token,
 };
+#[cfg(feature = "native")]
+pub use event_handler::ClusterEventHandler;
 #[cfg(feature = "native")]
 pub use mqtt_transport::MqttTransport;
 pub use node::NodeId;
