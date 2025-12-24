@@ -1,5 +1,5 @@
 use crate::cluster::{
-    MqttTransport, NodeController, NodeId, PartitionId, TransportConfig,
+    ClusterEventHandler, MqttTransport, NodeController, NodeId, PartitionId, TransportConfig,
 };
 use crate::Database;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
@@ -9,7 +9,7 @@ use mqtt5::QoS;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::interval;
 use tracing::info;
 
@@ -44,7 +44,7 @@ impl ClusterConfig {
         Self {
             node_id,
             node_name: format!("node-{node_id}"),
-            bind_address: "0.0.0.0:1883".parse().unwrap(),
+            bind_address: "0.0.0.0:1883".parse().expect("valid default address"),
             db_path,
             peers,
             password_file: None,
@@ -81,7 +81,7 @@ pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
     db: Arc<Database>,
-    controller: NodeController<MqttTransport>,
+    controller: Arc<RwLock<NodeController<MqttTransport>>>,
     shutdown_tx: broadcast::Sender<()>,
     bind_address: SocketAddr,
     peers: Vec<PeerConfig>,
@@ -106,7 +106,7 @@ impl ClusteredAgent {
             node_id,
             node_name: config.node_name,
             db: Arc::new(db),
-            controller,
+            controller: Arc::new(RwLock::new(controller)),
             shutdown_tx,
             bind_address: config.bind_address,
             peers: config.peers,
@@ -132,8 +132,13 @@ impl ClusteredAgent {
     }
 
     /// # Errors
-    /// Returns an error if broker startup, transport connection, or cluster event loop fails.
+    /// Returns an error if broker startup or transport connection fails.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let event_handler = Arc::new(ClusterEventHandler::new(
+            self.node_id,
+            self.controller.clone(),
+        ));
+
         let mut broker_config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: 10000,
@@ -147,7 +152,8 @@ impl ClusteredAgent {
             topic_alias_maximum: 100,
             bridges: self.create_bridge_configs(),
             ..Default::default()
-        };
+        }
+        .with_event_handler(event_handler);
 
         if let Some(ref path) = self.password_file {
             broker_config.auth_config.password_file = Some(path.clone());
@@ -174,27 +180,31 @@ impl ClusteredAgent {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let broker_addr = format!("127.0.0.1:{}", self.bind_address.port());
-        self.controller
-            .transport()
-            .connect(&broker_addr)
-            .await
-            .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
+        {
+            let ctrl = self.controller.read().await;
+            ctrl.transport()
+                .connect(&broker_addr)
+                .await
+                .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
+        }
 
         info!("transport connected to local broker");
 
-        for peer in &self.peers {
-            if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
-                self.controller.register_peer(peer_node_id);
-                info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
+        {
+            let mut ctrl = self.controller.write().await;
+            for peer in &self.peers {
+                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                    ctrl.register_peer(peer_node_id);
+                    info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
+                }
             }
-        }
 
-        for partition in PartitionId::all() {
-            let partition_num = partition.get();
-            let is_primary = partition_num % 2 == (self.node_id.get() % 2);
-            if is_primary {
-                self.controller
-                    .become_primary(partition, crate::cluster::Epoch::new(1));
+            for partition in PartitionId::all() {
+                let partition_num = partition.get();
+                let is_primary = partition_num % 2 == (self.node_id.get() % 2);
+                if is_primary {
+                    ctrl.become_primary(partition, crate::cluster::Epoch::new(1));
+                }
             }
         }
 
@@ -205,8 +215,9 @@ impl ClusteredAgent {
             tokio::select! {
                 _ = tick_interval.tick() => {
                     let now = current_time_ms();
-                    self.controller.tick(now);
-                    self.controller.process_messages();
+                    let mut ctrl = self.controller.write().await;
+                    ctrl.tick(now);
+                    ctrl.process_messages();
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
@@ -234,18 +245,13 @@ impl ClusteredAgent {
     }
 
     #[must_use]
-    pub fn controller(&self) -> &NodeController<MqttTransport> {
+    pub fn controller(&self) -> &Arc<RwLock<NodeController<MqttTransport>>> {
         &self.controller
-    }
-
-    pub fn controller_mut(&mut self) -> &mut NodeController<MqttTransport> {
-        &mut self.controller
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
+        .map_or(0, |d| d.as_secs() * 1000 + u64::from(d.subsec_millis()))
 }
