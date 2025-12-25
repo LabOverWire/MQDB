@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
+use tracing_subscriber::EnvFilter;
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
@@ -278,6 +279,10 @@ enum SubscriptionModeArg {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -488,9 +493,8 @@ async fn cmd_cluster_start(
     acl: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let peer_configs = parse_peer_configs(&peers)?;
-    let db = Database::open(&db_path).await?;
 
-    let mut config = ClusterConfig::new(node_id, db_path.clone(), peer_configs);
+    let mut config = ClusterConfig::new(node_id, db_path, peer_configs);
     config = config.with_bind_address(bind);
 
     if let Some(name) = node_name {
@@ -503,7 +507,7 @@ async fn cmd_cluster_start(
         config = config.with_acl_file(acl_file);
     }
 
-    let mut agent = ClusteredAgent::new(config, db).map_err(|e| e.clone())?;
+    let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
     Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
 
     Ok(())

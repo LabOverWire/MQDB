@@ -22,6 +22,7 @@ struct MqttTransportState {
     connected: bool,
 }
 
+#[derive(Clone)]
 pub struct MqttTransport {
     node_id: NodeId,
     client: MqttClient,

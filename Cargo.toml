@@ -17,15 +17,17 @@ comfy-table = { version = "7.2.1", optional = true }
 fjall = { version = "2.11.2", optional = true }
 mqtt5 = { version = "0.16", optional = true }
 tokio = { version = "1.48.0", features = ["full"], optional = true }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"], optional = true }
 
 [features]
 default = ["native"]
-native = ["dep:clap", "dep:comfy-table", "dep:fjall", "dep:mqtt5", "dep:tokio"]
+native = ["dep:clap", "dep:comfy-table", "dep:fjall", "dep:mqtt5", "dep:tokio", "dep:tracing-subscriber"]
 opentelemetry = [
     "mqtt5/opentelemetry",
     "dep:opentelemetry",
     "dep:tracing-opentelemetry",
 ]
+tracing-subscriber = ["dep:tracing-subscriber"]
 
 [dependencies.opentelemetry]
 version = "0.31"

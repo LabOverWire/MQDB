@@ -1,8 +1,8 @@
 use crate::cluster::{
     ClusterEventHandler, MqttTransport, NodeController, NodeId, PartitionId, TransportConfig,
 };
-use crate::Database;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
+use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
 use mqtt5::QoS;
@@ -80,7 +80,6 @@ impl ClusterConfig {
 pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
-    db: Arc<Database>,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
     shutdown_tx: broadcast::Sender<()>,
     bind_address: SocketAddr,
@@ -92,7 +91,7 @@ pub struct ClusteredAgent {
 impl ClusteredAgent {
     /// # Errors
     /// Returns an error if the node ID is invalid (must be 1-65535).
-    pub fn new(config: ClusterConfig, db: Database) -> Result<Self, String> {
+    pub fn new(config: ClusterConfig) -> Result<Self, String> {
         let node_id =
             NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
 
@@ -105,7 +104,6 @@ impl ClusteredAgent {
         Ok(Self {
             node_id,
             node_name: config.node_name,
-            db: Arc::new(db),
             controller: Arc::new(RwLock::new(controller)),
             shutdown_tx,
             bind_address: config.bind_address,
@@ -139,6 +137,12 @@ impl ClusteredAgent {
             self.controller.clone(),
         ));
 
+        let storage_config = StorageConfig {
+            backend: StorageBackend::Memory,
+            enable_persistence: true,
+            ..Default::default()
+        };
+
         let mut broker_config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: 10000,
@@ -153,6 +157,7 @@ impl ClusteredAgent {
             bridges: self.create_bridge_configs(),
             ..Default::default()
         }
+        .with_storage(storage_config)
         .with_event_handler(event_handler);
 
         if let Some(ref path) = self.password_file {
@@ -164,10 +169,15 @@ impl ClusteredAgent {
         }
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
+        let mut ready_rx = broker.ready_receiver();
 
         let broker_handle = tokio::spawn(async move {
             let _ = broker.run().await;
         });
+
+        info!("waiting for broker ready signal");
+        let _ = ready_rx.changed().await;
+        info!("broker ready signal received");
 
         info!(
             node_id = self.node_id.get(),
@@ -177,17 +187,16 @@ impl ClusteredAgent {
             "cluster node started"
         );
 
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
         let broker_addr = format!("127.0.0.1:{}", self.bind_address.port());
-        {
+        info!(broker_addr = %broker_addr, "connecting transport to local broker");
+        let transport = {
             let ctrl = self.controller.read().await;
-            ctrl.transport()
-                .connect(&broker_addr)
-                .await
-                .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
-        }
-
+            ctrl.transport().clone()
+        };
+        transport
+            .connect(&broker_addr)
+            .await
+            .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
 
         {
