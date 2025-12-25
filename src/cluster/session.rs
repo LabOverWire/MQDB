@@ -84,6 +84,15 @@ impl SessionData {
         self.last_seen = timestamp;
     }
 
+    pub fn set_clean_session(&mut self, clean: bool) {
+        self.clean_session = u8::from(clean);
+    }
+
+    #[must_use]
+    pub fn is_clean_session(&self) -> bool {
+        self.clean_session != 0
+    }
+
     #[allow(clippy::cast_possible_truncation)]
     pub fn set_will(&mut self, qos: u8, retain: bool, topic: &str, payload: &[u8]) {
         self.has_will = 1;

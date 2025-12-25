@@ -1,7 +1,8 @@
 use crate::cluster::{
-    ClusterEventHandler, Epoch, MqttTransport, NodeController, NodeId, PartitionAssignment,
-    PartitionId, PartitionMap, TransportConfig,
+    ClusterEventHandler, Epoch, MqttTransport, NodeController, NodeId, PartitionId, RaftMessage,
+    TransportConfig,
 };
+use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
@@ -82,6 +83,7 @@ pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
+    raft: Arc<RwLock<RaftCoordinator<MqttTransport>>>,
     shutdown_tx: broadcast::Sender<()>,
     bind_address: SocketAddr,
     peers: Vec<PeerConfig>,
@@ -98,7 +100,8 @@ impl ClusteredAgent {
 
         let transport = MqttTransport::new(node_id);
         let transport_config = TransportConfig::default();
-        let controller = NodeController::new(node_id, transport, transport_config);
+        let controller = NodeController::new(node_id, transport.clone(), transport_config);
+        let raft = RaftCoordinator::new(node_id, transport, RaftConfig::default());
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -106,6 +109,7 @@ impl ClusteredAgent {
             node_id,
             node_name: config.node_name,
             controller: Arc::new(RwLock::new(controller)),
+            raft: Arc::new(RwLock::new(raft)),
             shutdown_tx,
             bind_address: config.bind_address,
             peers: config.peers,
@@ -133,6 +137,7 @@ impl ClusteredAgent {
 
     /// # Errors
     /// Returns an error if broker startup or transport connection fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event_handler = Arc::new(ClusterEventHandler::new(
             self.node_id,
@@ -203,48 +208,29 @@ impl ClusteredAgent {
 
         {
             let mut ctrl = self.controller.write().await;
+            let mut raft = self.raft.write().await;
             for peer in &self.peers {
                 if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
                     ctrl.register_peer(peer_node_id);
+                    raft.add_peer(peer_node_id);
                     info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
                 }
             }
 
-            let mut all_nodes: Vec<NodeId> = self
+        }
+
+        let all_nodes: Vec<NodeId> = {
+            let mut nodes: Vec<NodeId> = self
                 .peers
                 .iter()
                 .filter_map(|p| NodeId::validated(p.node_id))
                 .collect();
-            all_nodes.push(self.node_id);
-            all_nodes.sort_by_key(|n| n.get());
+            nodes.push(self.node_id);
+            nodes.sort_by_key(|n| n.get());
+            nodes
+        };
 
-            let node_count = all_nodes.len();
-            let mut partition_map = PartitionMap::new();
-
-            for partition in PartitionId::all() {
-                let partition_num = partition.get() as usize;
-                let primary_idx = partition_num % node_count;
-                let replica_idx = (partition_num + 1) % node_count;
-
-                let primary = all_nodes[primary_idx];
-                let replicas = if node_count > 1 {
-                    vec![all_nodes[replica_idx]]
-                } else {
-                    vec![]
-                };
-
-                let assignment = PartitionAssignment::new(primary, replicas, Epoch::new(1));
-                partition_map.set(partition, assignment);
-
-                if primary == self.node_id {
-                    ctrl.become_primary(partition, Epoch::new(1));
-                } else if node_count > 1 && all_nodes[replica_idx] == self.node_id {
-                    ctrl.become_replica(partition, Epoch::new(1), 0);
-                }
-            }
-
-            ctrl.update_partition_map(partition_map);
-        }
+        let mut partitions_initialized = false;
 
         let mut tick_interval = interval(Duration::from_millis(100));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -256,6 +242,95 @@ impl ClusteredAgent {
                     let mut ctrl = self.controller.write().await;
                     ctrl.tick(now);
                     ctrl.process_messages();
+
+                    let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
+                    let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes().collect();
+                    drop(ctrl);
+
+                    let mut raft = self.raft.write().await;
+
+                    for msg in raft_msgs {
+                        match msg {
+                            RaftMessage::RequestVote { from, request } => {
+                                let response = raft.handle_request_vote(from, request, now);
+                                let _ = raft.send(from, crate::cluster::ClusterMessage::RequestVoteResponse(response));
+                            }
+                            RaftMessage::RequestVoteResponse { from, response } => {
+                                raft.handle_request_vote_response(from, response);
+                            }
+                            RaftMessage::AppendEntries { from, request } => {
+                                let response = raft.handle_append_entries(from, request, now);
+                                let _ = raft.send(from, crate::cluster::ClusterMessage::AppendEntriesResponse(response));
+                            }
+                            RaftMessage::AppendEntriesResponse { from, response } => {
+                                raft.handle_append_entries_response(from, response);
+                            }
+                        }
+                    }
+
+                    for dead_node in dead_nodes {
+                        let proposed = raft.handle_node_death(dead_node);
+                        if !proposed.is_empty() {
+                            info!(
+                                ?dead_node,
+                                proposals = proposed.len(),
+                                "Raft leader proposing partition reassignments"
+                            );
+                        }
+                    }
+
+                    if raft.is_leader() && !partitions_initialized {
+                        info!("Raft leader initializing partition assignments");
+                        let node_count = all_nodes.len();
+
+                        for partition in PartitionId::all() {
+                            let partition_num = partition.get() as usize;
+                            let primary_idx = partition_num % node_count;
+                            let replica_idx = (partition_num + 1) % node_count;
+
+                            let primary = all_nodes[primary_idx];
+                            let replicas = if node_count > 1 {
+                                vec![all_nodes[replica_idx]]
+                            } else {
+                                vec![]
+                            };
+
+                            let cmd = crate::cluster::raft::RaftCommand::update_partition(
+                                partition,
+                                primary,
+                                &replicas,
+                                Epoch::new(1),
+                            );
+                            let _ = raft.propose_partition_update(cmd);
+                        }
+                        partitions_initialized = true;
+                    }
+
+                    raft.tick(now);
+
+                    let raft_partition_map = raft.partition_map().clone();
+                    drop(raft);
+
+                    let mut ctrl = self.controller.write().await;
+                    let current_map = ctrl.partition_map().clone();
+                    if current_map != raft_partition_map {
+                        for partition in PartitionId::all() {
+                            let new_assignment = raft_partition_map.get(partition);
+                            let old_assignment = current_map.get(partition);
+
+                            if new_assignment != old_assignment {
+                                let is_primary = new_assignment.primary == Some(self.node_id);
+                                let is_replica = new_assignment.replicas.contains(&self.node_id);
+
+                                if is_primary {
+                                    ctrl.become_primary(partition, new_assignment.epoch);
+                                } else if is_replica {
+                                    ctrl.become_replica(partition, new_assignment.epoch, 0);
+                                }
+                            }
+                        }
+                        ctrl.update_partition_map(raft_partition_map);
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");

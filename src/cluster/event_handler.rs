@@ -49,12 +49,30 @@ impl BrokerEventHandler for ClusterEventHandler {
             let mut ctrl = self.controller.write().await;
             let client_id = event.client_id.as_ref();
 
+            if event.clean_start {
+                let existing = ctrl.stores().sessions.get(client_id);
+                if existing.is_some() {
+                    debug!(client_id, "clean_start=true, clearing old session state");
+                    clear_client_subscriptions(&mut ctrl, client_id);
+                    let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+                }
+            }
+
             let result = ctrl.stores_mut().create_session_replicated(client_id);
             if let Err(e) = result {
                 warn!(client_id, error = %e, "failed to create session");
                 return;
             }
             let (_session, create_write) = result.unwrap();
+
+            let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
+                s.set_clean_session(event.clean_start);
+            });
+            if let Err(e) = result {
+                warn!(client_id, error = ?e, "failed to set clean_session flag");
+            } else if let Ok((_session, write)) = result {
+                ctrl.write_or_forward(write);
+            }
 
             if let Some(ref topic) = event.will_topic {
                 let will_qos = qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce));
@@ -155,6 +173,7 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                     if !remote_nodes.is_empty() {
                         let transport = ctrl.transport().clone();
+                        let is_clean_session = session.is_clean_session();
                         drop(ctrl);
 
                         for (target_node, targets) in remote_nodes {
@@ -173,8 +192,25 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 debug!(target = target_node.get(), %topic, "forwarded LWT to node");
                             }
                         }
+
+                        if is_clean_session {
+                            let mut ctrl = self.controller.write().await;
+                            debug!(client_id, "clean_session disconnect - clearing subscriptions");
+                            clear_client_subscriptions(&mut ctrl, client_id);
+                            let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+                        }
+                        return;
                     }
                 }
+            }
+
+            let session = ctrl.stores().sessions.get(client_id);
+            if let Some(session) = session
+                && session.is_clean_session()
+            {
+                debug!(client_id, "clean_session disconnect - clearing subscriptions");
+                clear_client_subscriptions(&mut ctrl, client_id);
+                let _ = ctrl.stores_mut().remove_session_replicated(client_id);
             }
         })
     }
@@ -524,4 +560,43 @@ impl SubAckReasonCodeExt for mqtt5::broker::events::SubAckReasonCode {
                 | mqtt5::broker::events::SubAckReasonCode::GrantedQoS2
         )
     }
+}
+
+fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_id: &str) {
+    let client_partition = crate::cluster::session_partition(client_id);
+
+    let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);
+    if let Some(snapshot) = snapshot {
+        for entry in &snapshot.topics {
+            let topic = std::str::from_utf8(&entry.topic).unwrap_or("");
+            if topic.is_empty() {
+                continue;
+            }
+
+            let is_wildcard = entry.is_wildcard != 0;
+            if is_wildcard {
+                let result = ctrl.stores_mut().unsubscribe_wildcard_replicated(
+                    topic,
+                    client_id,
+                    client_partition,
+                );
+                if let Ok(write) = result {
+                    ctrl.write_or_forward(write);
+                }
+            } else {
+                let result = ctrl.stores_mut().unsubscribe_topic_replicated(topic, client_id);
+                if let Ok((_entry, write)) = result {
+                    ctrl.write_or_forward(write);
+                }
+            }
+
+            let result = ctrl.stores_mut().remove_subscription_replicated(client_id, topic);
+            if let Ok((_snapshot, write)) = result {
+                ctrl.write_or_forward(write);
+            }
+        }
+    }
+
+    let _ = ctrl.stores().qos2.clear_client(client_id);
+    let _ = ctrl.stores().inflight.clear_client(client_id);
 }

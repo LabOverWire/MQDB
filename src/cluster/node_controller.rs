@@ -1,6 +1,7 @@
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::protocol::{CatchupResponse, ForwardedPublish, ReplicationAck, ReplicationWrite};
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
+use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::replication::{ReplicaRole, ReplicaState};
 use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
@@ -9,6 +10,14 @@ use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
+
+#[derive(Debug)]
+pub enum RaftMessage {
+    RequestVote { from: NodeId, request: RequestVoteRequest },
+    RequestVoteResponse { from: NodeId, response: RequestVoteResponse },
+    AppendEntries { from: NodeId, request: AppendEntriesRequest },
+    AppendEntriesResponse { from: NodeId, response: AppendEntriesResponse },
+}
 
 #[derive(Debug)]
 pub struct NodeController<T: ClusterTransport> {
@@ -23,6 +32,8 @@ pub struct NodeController<T: ClusterTransport> {
     write_log: PartitionWriteLog,
     forward_dedup: HashSet<u64>,
     forward_dedup_order: VecDeque<u64>,
+    raft_messages: VecDeque<RaftMessage>,
+    dead_nodes: VecDeque<NodeId>,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -39,6 +50,8 @@ impl<T: ClusterTransport> NodeController<T> {
             write_log: PartitionWriteLog::new(),
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
+            raft_messages: VecDeque::new(),
+            dead_nodes: VecDeque::new(),
         }
     }
 
@@ -123,6 +136,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn handle_node_death(&mut self, dead_node: NodeId) {
         tracing::warn!(?dead_node, "node death detected");
+        self.dead_nodes.push_back(dead_node);
 
         for partition in super::PartitionId::all() {
             let assignment = self.partition_map.get(partition);
@@ -151,6 +165,14 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub fn drain_raft_messages(&mut self) -> impl Iterator<Item = RaftMessage> + '_ {
+        self.raft_messages.drain(..)
+    }
+
+    pub fn drain_dead_nodes(&mut self) -> impl Iterator<Item = NodeId> + '_ {
+        self.dead_nodes.drain(..)
+    }
+
     fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
@@ -170,10 +192,30 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.heartbeat.handle_death_notice(node_id);
                 self.handle_node_death(node_id);
             }
-            ClusterMessage::RequestVote(_)
-            | ClusterMessage::RequestVoteResponse(_)
-            | ClusterMessage::AppendEntries(_)
-            | ClusterMessage::AppendEntriesResponse(_) => {}
+            ClusterMessage::RequestVote(req) => {
+                self.raft_messages.push_back(RaftMessage::RequestVote {
+                    from: msg.from,
+                    request: req,
+                });
+            }
+            ClusterMessage::RequestVoteResponse(resp) => {
+                self.raft_messages.push_back(RaftMessage::RequestVoteResponse {
+                    from: msg.from,
+                    response: resp,
+                });
+            }
+            ClusterMessage::AppendEntries(req) => {
+                self.raft_messages.push_back(RaftMessage::AppendEntries {
+                    from: msg.from,
+                    request: req,
+                });
+            }
+            ClusterMessage::AppendEntriesResponse(resp) => {
+                self.raft_messages.push_back(RaftMessage::AppendEntriesResponse {
+                    from: msg.from,
+                    response: resp,
+                });
+            }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
                     msg.from,

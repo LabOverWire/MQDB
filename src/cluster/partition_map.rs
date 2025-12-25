@@ -7,7 +7,7 @@ pub enum PartitionRole {
     Replica,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PartitionAssignment {
     pub primary: Option<NodeId>,
     pub replicas: Vec<NodeId>,
@@ -55,7 +55,7 @@ impl PartitionAssignment {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PartitionMap {
     version: u64,
     assignments: [PartitionAssignment; NUM_PARTITIONS as usize],
