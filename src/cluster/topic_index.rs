@@ -299,9 +299,16 @@ impl TopicIndex {
     ) -> Result<(), TopicIndexError> {
         match operation {
             Operation::Insert | Operation::Update => {
-                let entry = Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
+                let incoming = Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
                 let mut entries = self.entries.write().unwrap();
-                entries.insert(id.to_string(), entry);
+                let entry = entries
+                    .entry(id.to_string())
+                    .or_insert_with(|| TopicIndexEntry::create(id));
+                for sub in &incoming.subscribers {
+                    if let Some(partition) = sub.partition() {
+                        entry.add_subscriber(sub.client_id_str(), partition, sub.qos);
+                    }
+                }
                 Ok(())
             }
             Operation::Delete => {

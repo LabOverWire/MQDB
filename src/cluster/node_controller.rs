@@ -6,7 +6,9 @@ use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+const FORWARD_DEDUP_CAPACITY: usize = 1000;
 
 #[derive(Debug)]
 pub struct NodeController<T: ClusterTransport> {
@@ -19,6 +21,8 @@ pub struct NodeController<T: ClusterTransport> {
     current_time: u64,
     stores: StoreManager,
     write_log: PartitionWriteLog,
+    forward_dedup: HashSet<u64>,
+    forward_dedup_order: VecDeque<u64>,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -33,6 +37,8 @@ impl<T: ClusterTransport> NodeController<T> {
             current_time: 0,
             stores: StoreManager::new(node_id),
             write_log: PartitionWriteLog::new(),
+            forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
+            forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
         }
     }
 
@@ -721,6 +727,25 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
+        let fingerprint = Self::forward_fingerprint(fwd);
+
+        if self.forward_dedup.contains(&fingerprint) {
+            tracing::trace!(
+                ?from,
+                topic = %fwd.topic,
+                "deduplicated forwarded publish"
+            );
+            return;
+        }
+
+        if self.forward_dedup.len() >= FORWARD_DEDUP_CAPACITY
+            && let Some(old) = self.forward_dedup_order.pop_front()
+        {
+            self.forward_dedup.remove(&old);
+        }
+        self.forward_dedup.insert(fingerprint);
+        self.forward_dedup_order.push_back(fingerprint);
+
         tracing::debug!(
             local_node = ?self.node_id,
             origin = ?fwd.origin_node,
@@ -738,6 +763,17 @@ impl<T: ClusterTransport> NodeController<T> {
             fwd.payload.clone(),
             fwd.qos,
         );
+    }
+
+    fn forward_fingerprint(fwd: &ForwardedPublish) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        fwd.origin_node.hash(&mut hasher);
+        fwd.topic.hash(&mut hasher);
+        fwd.payload.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
