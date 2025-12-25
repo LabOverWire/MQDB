@@ -388,6 +388,9 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         );
 
+        self.write_log.append(partition, sequence, write_msg.clone());
+        let _ = self.stores.apply_write(&write_msg);
+
         let tracker = QuorumTracker::new(sequence, state.epoch(), replicas, required_acks);
 
         if !self.pending.add(tracker) {
@@ -578,6 +581,9 @@ impl<T: ClusterTransport> NodeController<T> {
             write.id,
             write.data,
         );
+
+        self.write_log.append(partition, sequence, write_msg.clone());
+        let _ = self.stores.apply_write(&write_msg);
 
         for &replica in replicas {
             let _ = self
@@ -1120,5 +1126,80 @@ mod tests {
 
         let result = rx.try_recv().unwrap();
         assert_eq!(result, QuorumResult::Success);
+    }
+
+    #[test]
+    fn primary_has_local_data_after_replicate_write() {
+        use crate::cluster::entity::SESSIONS;
+        use bebytes::BeBytes;
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = PartitionId::new(0).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        let session_data = crate::cluster::session::SessionData::create("test-client", node1);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Insert,
+            Epoch::new(1),
+            0,
+            SESSIONS.to_string(),
+            "test-client".to_string(),
+            session_data.to_be_bytes(),
+        );
+
+        let seq = ctrl.replicate_write(write, &[node2], 1).unwrap();
+        assert_eq!(seq, 1);
+
+        let session = ctrl.stores().sessions.get("test-client");
+        assert!(session.is_some(), "Primary should have session locally after write");
+        assert_eq!(session.unwrap().client_id_str(), "test-client");
+
+        assert!(
+            ctrl.write_log().can_catchup(partition, 1),
+            "Write log should contain the write for catchup"
+        );
+    }
+
+    #[test]
+    fn primary_has_local_data_after_replicate_write_async() {
+        use crate::cluster::entity::SESSIONS;
+        use bebytes::BeBytes;
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = PartitionId::new(0).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        let session_data = crate::cluster::session::SessionData::create("async-client", node1);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Insert,
+            Epoch::new(1),
+            0,
+            SESSIONS.to_string(),
+            "async-client".to_string(),
+            session_data.to_be_bytes(),
+        );
+
+        let seq = ctrl.replicate_write_async(write, &[node2]).unwrap();
+        assert_eq!(seq, 1);
+
+        let session = ctrl.stores().sessions.get("async-client");
+        assert!(session.is_some(), "Primary should have session locally after async write");
+
+        assert!(
+            ctrl.write_log().can_catchup(partition, 1),
+            "Write log should contain the async write for catchup"
+        );
     }
 }
