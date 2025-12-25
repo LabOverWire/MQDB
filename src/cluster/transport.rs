@@ -1,5 +1,5 @@
 use super::protocol::{
-    CatchupRequest, CatchupResponse, Heartbeat, ReplicationAck, ReplicationWrite,
+    CatchupRequest, CatchupResponse, ForwardedPublish, Heartbeat, ReplicationAck, ReplicationWrite,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -11,6 +11,7 @@ use std::fmt::Debug;
 pub enum ClusterMessage {
     Heartbeat(Heartbeat),
     Write(ReplicationWrite),
+    WriteRequest(ReplicationWrite),
     Ack(ReplicationAck),
     DeathNotice { node_id: NodeId },
     RequestVote(RequestVoteRequest),
@@ -19,6 +20,7 @@ pub enum ClusterMessage {
     AppendEntriesResponse(AppendEntriesResponse),
     CatchupRequest(CatchupRequest),
     CatchupResponse(CatchupResponse),
+    ForwardedPublish(ForwardedPublish),
 }
 
 impl ClusterMessage {
@@ -27,6 +29,7 @@ impl ClusterMessage {
         match self {
             Self::Heartbeat(_) => 0,
             Self::Write(_) => 10,
+            Self::WriteRequest(_) => 15,
             Self::Ack(_) => 11,
             Self::DeathNotice { .. } => 2,
             Self::RequestVote(_) => 20,
@@ -35,6 +38,7 @@ impl ClusterMessage {
             Self::AppendEntriesResponse(_) => 23,
             Self::CatchupRequest(_) => 12,
             Self::CatchupResponse(_) => 13,
+            Self::ForwardedPublish(_) => 30,
         }
     }
 }
@@ -68,6 +72,10 @@ pub trait ClusterTransport: Send + Sync + Debug {
     fn recv(&self) -> Option<InboundMessage>;
 
     fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage>;
+
+    fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let _ = (topic, payload, qos);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

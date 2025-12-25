@@ -1,14 +1,18 @@
-use crate::cluster::{MqttTransport, NodeController, NodeId, SubscriptionType};
+use crate::cluster::{
+    ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
+    SubscriptionType,
+};
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
 };
 use mqtt5::QoS;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 pub struct ClusterEventHandler {
     node_id: NodeId,
@@ -30,6 +34,11 @@ impl BrokerEventHandler for ClusterEventHandler {
         event: ClientConnectEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if event.client_id.starts_with("mqdb-") {
+                trace!("skipping internal client connect");
+                return;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 clean_start = event.clean_start,
@@ -60,9 +69,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 });
             }
 
-            let partition = write.partition;
-            let replicas = ctrl.partition_map().replicas(partition).to_vec();
-            let _ = ctrl.replicate_write_async(write, &replicas);
+            ctrl.write_or_forward(write);
         })
     }
 
@@ -72,6 +79,11 @@ impl BrokerEventHandler for ClusterEventHandler {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let node_id = self.node_id;
         Box::pin(async move {
+            if event.client_id.starts_with("mqdb-") {
+                trace!("skipping internal client disconnect");
+                return;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 reason = ?event.reason,
@@ -88,9 +100,7 @@ impl BrokerEventHandler for ClusterEventHandler {
             });
 
             if let Ok((_session, write)) = result {
-                let partition = write.partition;
-                let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                let _ = ctrl.replicate_write_async(write, &replicas);
+                ctrl.write_or_forward(write);
             }
 
             if event.unexpected
@@ -107,6 +117,11 @@ impl BrokerEventHandler for ClusterEventHandler {
         event: ClientSubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if event.client_id.starts_with("mqdb-") {
+                trace!("skipping internal client subscription");
+                return;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 subscriptions = event.subscriptions.len(),
@@ -117,20 +132,22 @@ impl BrokerEventHandler for ClusterEventHandler {
             let client_id = event.client_id.as_ref();
 
             for sub in &event.subscriptions {
+                let topic = sub.topic_filter.as_ref();
+                if topic.starts_with("_mqdb/") || topic.starts_with("$SYS/") {
+                    trace!(topic, "skipping internal topic subscription");
+                    continue;
+                }
                 if !sub.result.is_success() {
                     continue;
                 }
 
-                let topic = sub.topic_filter.as_ref();
                 let qos = qos_to_u8(sub.qos);
 
                 let (_snapshot, write) = ctrl
                     .stores_mut()
                     .add_subscription_replicated(client_id, topic, qos);
 
-                let partition = write.partition;
-                let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                let _ = ctrl.replicate_write_async(write, &replicas);
+                ctrl.write_or_forward(write);
 
                 let is_wildcard = topic.contains('+') || topic.contains('#');
                 if is_wildcard {
@@ -143,21 +160,25 @@ impl BrokerEventHandler for ClusterEventHandler {
                         SubscriptionType::Mqtt,
                     );
                     if let Ok((_entry, write)) = result {
-                        let partition = write.partition;
-                        let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                        let _ = ctrl.replicate_write_async(write, &replicas);
+                        ctrl.write_or_forward(write);
                     }
                 } else {
                     let client_partition = crate::cluster::session_partition(client_id);
+                    let topic_partition = crate::cluster::topic_partition(topic);
+                    debug!(
+                        client_id,
+                        topic,
+                        ?topic_partition,
+                        ?client_partition,
+                        "adding topic subscription"
+                    );
                     let (_entry, write) = ctrl.stores_mut().subscribe_topic_replicated(
                         topic,
                         client_id,
                         client_partition,
                         qos,
                     );
-                    let partition = write.partition;
-                    let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                    let _ = ctrl.replicate_write_async(write, &replicas);
+                    ctrl.write_or_forward(write);
                 }
             }
         })
@@ -168,6 +189,11 @@ impl BrokerEventHandler for ClusterEventHandler {
         event: ClientUnsubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if event.client_id.starts_with("mqdb-") {
+                trace!("skipping internal client unsubscribe");
+                return;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 topics = event.topic_filters.len(),
@@ -179,15 +205,17 @@ impl BrokerEventHandler for ClusterEventHandler {
 
             for topic_filter in &event.topic_filters {
                 let topic = topic_filter.as_ref();
+                if topic.starts_with("_mqdb/") || topic.starts_with("$SYS/") {
+                    trace!(topic, "skipping internal topic unsubscribe");
+                    continue;
+                }
 
                 let result = ctrl
                     .stores_mut()
                     .remove_subscription_replicated(client_id, topic);
 
                 if let Ok((_snapshot, write)) = result {
-                    let partition = write.partition;
-                    let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                    let _ = ctrl.replicate_write_async(write, &replicas);
+                    ctrl.write_or_forward(write);
                 }
 
                 let is_wildcard = topic.contains('+') || topic.contains('#');
@@ -197,18 +225,14 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .stores_mut()
                         .unsubscribe_wildcard_replicated(topic, client_id, client_partition);
                     if let Ok(write) = result {
-                        let partition = write.partition;
-                        let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                        let _ = ctrl.replicate_write_async(write, &replicas);
+                        ctrl.write_or_forward(write);
                     }
                 } else {
                     let result = ctrl
                         .stores_mut()
                         .unsubscribe_topic_replicated(topic, client_id);
                     if let Ok((_entry, write)) = result {
-                        let partition = write.partition;
-                        let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                        let _ = ctrl.replicate_write_async(write, &replicas);
+                        ctrl.write_or_forward(write);
                     }
                 }
             }
@@ -219,6 +243,7 @@ impl BrokerEventHandler for ClusterEventHandler {
         &'a self,
         event: ClientPublishEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let node_id = self.node_id;
         Box::pin(async move {
             debug!(
                 client_id = %event.client_id,
@@ -227,6 +252,87 @@ impl BrokerEventHandler for ClusterEventHandler {
                 retain = event.retain,
                 "client published"
             );
+
+            if event.client_id.starts_with("mqdb-forward-") {
+                trace!("skipping forwarded publish from internal client");
+                return;
+            }
+
+            if event.topic.starts_with("_mqdb/") {
+                trace!("skipping internal cluster topic");
+                return;
+            }
+
+            let ctrl = self.controller.read().await;
+            let topic = event.topic.as_ref();
+
+            let wildcards = ctrl.stores().wildcards.match_topic(topic);
+            let router = PublishRouter::new(&ctrl.stores().topics);
+            let route = router.route_with_wildcards(topic, &wildcards);
+
+            debug!(
+                topic,
+                target_count = route.targets.len(),
+                wildcard_matches = wildcards.len(),
+                "routing publish"
+            );
+
+            let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+            for target in route.targets {
+                let session = ctrl.stores().sessions.get(&target.client_id);
+                let connected_node = session
+                    .as_ref()
+                    .filter(|s| s.connected == 1)
+                    .and_then(|s| NodeId::validated(s.connected_node));
+
+                let is_local = connected_node == Some(node_id);
+
+                debug!(
+                    client_id = %target.client_id,
+                    client_partition = ?target.client_partition,
+                    ?connected_node,
+                    is_local,
+                    "routing target"
+                );
+
+                if let Some(target_node) = connected_node
+                    && target_node != node_id
+                {
+                    remote_nodes
+                        .entry(target_node)
+                        .or_default()
+                        .push(ForwardTarget::new(target.client_id, target.qos));
+                }
+            }
+
+            if remote_nodes.is_empty() {
+                drop(ctrl);
+            } else {
+                let transport = ctrl.transport().clone();
+                let fwd_topic = topic.to_string();
+                let fwd_qos = qos_to_u8(event.qos);
+                let fwd_payload = event.payload.to_vec();
+                let fwd_retain = event.retain;
+
+                drop(ctrl);
+
+                for (target_node, targets) in remote_nodes {
+                    let fwd = ForwardedPublish::new(
+                        node_id,
+                        fwd_topic.clone(),
+                        fwd_qos,
+                        fwd_retain,
+                        fwd_payload.clone(),
+                        targets,
+                    );
+                    let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
+                    if let Err(e) = transport.send_async(target_node, fwd_msg).await {
+                        warn!(target = target_node.get(), error = %e, "failed to forward publish");
+                    } else {
+                        debug!(target = target_node.get(), topic = %fwd_topic, "forwarded publish to node");
+                    }
+                }
+            }
 
             if event.qos == QoS::ExactlyOnce
                 && let Some(packet_id) = event.packet_id
@@ -242,9 +348,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 );
 
                 if let Ok((_state, write)) = result {
-                    let partition = write.partition;
-                    let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                    let _ = ctrl.replicate_write_async(write, &replicas);
+                    ctrl.write_or_forward(write);
                 }
             }
         })
@@ -255,6 +359,11 @@ impl BrokerEventHandler for ClusterEventHandler {
         event: RetainedSetEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if event.topic.starts_with("$SYS/") || event.topic.starts_with("_mqdb/") {
+                trace!("skipping internal retained message");
+                return;
+            }
+
             debug!(
                 topic = %event.topic,
                 cleared = event.cleared,
@@ -272,9 +381,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 .stores_mut()
                 .set_retained_replicated(topic, qos, &payload, timestamp);
 
-            let partition = write.partition;
-            let replicas = ctrl.partition_map().replicas(partition).to_vec();
-            let _ = ctrl.replicate_write_async(write, &replicas);
+            ctrl.write_or_forward(write);
         })
     }
 
@@ -283,6 +390,11 @@ impl BrokerEventHandler for ClusterEventHandler {
         event: MessageDeliveredEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            if event.client_id.starts_with("mqdb-") {
+                trace!("skipping internal client message delivered");
+                return;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 packet_id = event.packet_id,
@@ -300,9 +412,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .acknowledge_inflight_replicated(client_id, event.packet_id);
 
                     if let Ok((_msg, write)) = result {
-                        let partition = write.partition;
-                        let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                        let _ = ctrl.replicate_write_async(write, &replicas);
+                        ctrl.write_or_forward(write);
                     }
                 }
                 QoS::ExactlyOnce => {
@@ -311,9 +421,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .complete_qos2_replicated(client_id, event.packet_id);
 
                     if let Ok((_state, write)) = result {
-                        let partition = write.partition;
-                        let replicas = ctrl.partition_map().replicas(partition).to_vec();
-                        let _ = ctrl.replicate_write_async(write, &replicas);
+                        ctrl.write_or_forward(write);
                     }
                 }
                 QoS::AtMostOnce => {}

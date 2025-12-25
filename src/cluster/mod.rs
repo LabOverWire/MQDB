@@ -45,8 +45,8 @@ pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key
 pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};
 pub use protocol::{
-    AckStatus, CatchupRequest, CatchupResponse, Heartbeat, MessageType, Operation, ReplicationAck,
-    ReplicationWrite,
+    AckStatus, CatchupRequest, CatchupResponse, ForwardTarget, ForwardedPublish, Heartbeat,
+    MessageType, Operation, ReplicationAck, ReplicationWrite,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};
 pub use qos2_store::{

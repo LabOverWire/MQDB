@@ -1,5 +1,5 @@
 use super::heartbeat::{HeartbeatManager, NodeStatus};
-use super::protocol::{CatchupResponse, ReplicationAck, ReplicationWrite};
+use super::protocol::{CatchupResponse, ForwardedPublish, ReplicationAck, ReplicationWrite};
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
 use super::replication::{ReplicaRole, ReplicaState};
 use super::store_manager::StoreManager;
@@ -54,6 +54,13 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn transport(&self) -> &T {
         &self.transport
+    }
+
+    #[must_use]
+    pub fn is_local_partition(&self, partition: PartitionId) -> bool {
+        self.replicas
+            .get(&partition.get())
+            .is_some_and(|s| s.role() == ReplicaRole::Primary)
     }
 
     pub fn register_peer(&mut self, peer: NodeId) {
@@ -147,6 +154,9 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write);
             }
+            ClusterMessage::WriteRequest(write) => {
+                self.handle_write_request(msg.from, write);
+            }
             ClusterMessage::Ack(ack) => {
                 self.handle_ack(ack);
             }
@@ -169,27 +179,95 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::CatchupResponse(resp) => {
                 self.handle_catchup_response(resp);
             }
+            ClusterMessage::ForwardedPublish(ref fwd) => {
+                self.handle_forwarded_publish(msg.from, fwd);
+            }
         }
     }
 
     fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
         let partition = write.partition;
 
+        tracing::debug!(
+            ?partition,
+            from = from.get(),
+            sequence = write.sequence,
+            entity = ?write.entity,
+            "received replication write"
+        );
+
         let ack = if let Some(state) = self.replicas.get_mut(&partition.get()) {
             let ack = state.handle_write(write);
+            tracing::debug!(
+                ?partition,
+                sequence = write.sequence,
+                ack_ok = ack.is_ok(),
+                ack_status = ?ack.status(),
+                "handle_write result"
+            );
             if ack.is_ok() {
                 if let Err(e) = self.stores.apply_write(write) {
                     tracing::error!(?partition, ?e, "failed to apply write to stores");
+                } else {
+                    tracing::debug!(
+                        ?partition,
+                        sequence = write.sequence,
+                        entity = ?write.entity,
+                        id = ?write.id,
+                        "applied write to stores"
+                    );
                 }
                 self.write_log
                     .append(partition, write.sequence, write.clone());
             }
             ack
         } else {
+            tracing::warn!(
+                ?partition,
+                from = from.get(),
+                "not a replica for partition, rejecting write"
+            );
             ReplicationAck::not_replica(partition, self.node_id)
         };
 
         let _ = self.transport.send(from, ClusterMessage::Ack(ack));
+    }
+
+    fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
+        let partition = write.partition;
+
+        tracing::debug!(
+            ?partition,
+            from = from.get(),
+            entity = ?write.entity,
+            "received write request"
+        );
+
+        if !self.is_local_partition(partition) {
+            tracing::warn!(
+                ?partition,
+                from = from.get(),
+                "received write request but not primary"
+            );
+            return;
+        }
+
+        if let Err(e) = self.stores.apply_write(&write) {
+            tracing::error!(?partition, ?e, "failed to apply write request to stores");
+            return;
+        }
+
+        tracing::debug!(
+            ?partition,
+            entity = ?write.entity,
+            id = ?write.id,
+            "applied write request to stores"
+        );
+
+        let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
+        if let Err(e) = self.replicate_write_async(write, &replicas) {
+            tracing::warn!(?partition, ?e, "failed to replicate write request");
+        }
     }
 
     fn handle_ack(&mut self, ack: ReplicationAck) {
@@ -504,6 +582,36 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(sequence)
     }
 
+    pub fn write_or_forward(&mut self, write: ReplicationWrite) {
+        let partition = write.partition;
+
+        if self.is_local_partition(partition) {
+            tracing::debug!(
+                ?partition,
+                entity = ?write.entity,
+                "write_or_forward: local partition, replicating"
+            );
+            let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
+            let _ = self.replicate_write_async(write, &replicas);
+        } else if let Some(primary) = self.partition_map.primary(partition) {
+            tracing::debug!(
+                ?partition,
+                primary = primary.get(),
+                entity = ?write.entity,
+                "write_or_forward: forwarding to primary"
+            );
+            let _ = self
+                .transport
+                .send(primary, ClusterMessage::WriteRequest(write));
+        } else {
+            tracing::warn!(
+                ?partition,
+                entity = ?write.entity,
+                "write_or_forward: no primary found for partition"
+            );
+        }
+    }
+
     /// # Errors
     /// Returns `WildcardStoreError` if the wildcard subscription fails.
     pub fn subscribe_wildcard_broadcast(
@@ -610,6 +718,26 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
             }
         }
+    }
+
+    fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
+        tracing::debug!(
+            local_node = ?self.node_id,
+            origin = ?fwd.origin_node,
+            topic = %fwd.topic,
+            qos = fwd.qos,
+            retain = fwd.retain,
+            payload_len = fwd.payload.len(),
+            target_count = fwd.targets.len(),
+            ?from,
+            "received forwarded publish"
+        );
+
+        self.transport.queue_local_publish(
+            fwd.topic.clone(),
+            fwd.payload.clone(),
+            fwd.qos,
+        );
     }
 }
 

@@ -1,5 +1,5 @@
 use super::protocol::{
-    CatchupRequest, CatchupResponse, Heartbeat, ReplicationAck, ReplicationWrite,
+    CatchupRequest, CatchupResponse, ForwardedPublish, Heartbeat, ReplicationAck, ReplicationWrite,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -13,8 +13,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-const CLUSTER_TOPIC_PREFIX: &str = "$SYS/mqdb/cluster";
-const REPLICATION_TOPIC_PREFIX: &str = "$DB/_repl";
+const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
+const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
+const FORWARD_TOPIC_PREFIX: &str = "_mqdb/forward";
 
 #[derive(Debug)]
 struct MqttTransportState {
@@ -26,6 +27,7 @@ struct MqttTransportState {
 pub struct MqttTransport {
     node_id: NodeId,
     client: MqttClient,
+    forward_client: MqttClient,
     state: Arc<Mutex<MqttTransportState>>,
     message_tx: mpsc::UnboundedSender<InboundMessage>,
 }
@@ -45,6 +47,10 @@ impl MqttTransport {
     pub fn new(node_id: NodeId) -> Self {
         let client_id = format!("mqdb-node-{}", node_id.get());
         let client = MqttClient::new(&client_id);
+
+        let forward_client_id = format!("mqdb-forward-{}", node_id.get());
+        let forward_client = MqttClient::new(&forward_client_id);
+
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let state = Arc::new(Mutex::new(MqttTransportState {
@@ -63,6 +69,7 @@ impl MqttTransport {
         Self {
             node_id,
             client,
+            forward_client,
             state,
             message_tx: tx,
         }
@@ -75,6 +82,11 @@ impl MqttTransport {
     /// Panics if the mutex is poisoned.
     pub async fn connect(&self, broker_addr: &str) -> Result<(), TransportError> {
         self.client
+            .connect(broker_addr)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        self.forward_client
             .connect(broker_addr)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
@@ -145,6 +157,19 @@ impl MqttTransport {
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
+        let forward_topic = format!("{FORWARD_TOPIC_PREFIX}/+");
+        self.client
+            .subscribe(&forward_topic, {
+                let tx = tx.clone();
+                move |msg| {
+                    if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
+                        let _ = tx.send(inbound);
+                    }
+                }
+            })
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
         Ok(())
     }
 
@@ -171,6 +196,10 @@ impl MqttTransport {
             10 => {
                 let w = ReplicationWrite::from_bytes(data)?;
                 ClusterMessage::Write(w)
+            }
+            15 => {
+                let w = ReplicationWrite::from_bytes(data)?;
+                ClusterMessage::WriteRequest(w)
             }
             11 => {
                 let (ack, _) = ReplicationAck::try_from_be_bytes(data).ok()?;
@@ -208,6 +237,10 @@ impl MqttTransport {
                 let resp = CatchupResponse::from_bytes(data)?;
                 ClusterMessage::CatchupResponse(resp)
             }
+            30 => {
+                let fwd = ForwardedPublish::from_bytes(data)?;
+                ClusterMessage::ForwardedPublish(fwd)
+            }
             _ => return None,
         };
 
@@ -215,6 +248,12 @@ impl MqttTransport {
         let received_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);
+
+        tracing::trace!(
+            from = from.get(),
+            msg_type = message.message_type(),
+            "received cluster message"
+        );
 
         Some(InboundMessage {
             from,
@@ -232,7 +271,7 @@ impl MqttTransport {
             ClusterMessage::Heartbeat(hb) => {
                 buf.extend_from_slice(&hb.to_be_bytes());
             }
-            ClusterMessage::Write(w) => {
+            ClusterMessage::Write(w) | ClusterMessage::WriteRequest(w) => {
                 buf.extend_from_slice(&w.to_bytes());
             }
             ClusterMessage::Ack(ack) => {
@@ -258,6 +297,9 @@ impl MqttTransport {
             }
             ClusterMessage::CatchupResponse(resp) => {
                 buf.extend_from_slice(&resp.to_bytes());
+            }
+            ClusterMessage::ForwardedPublish(fwd) => {
+                buf.extend_from_slice(&fwd.to_bytes());
             }
         }
 
@@ -307,6 +349,25 @@ impl MqttTransport {
     }
 
     /// # Errors
+    /// Returns `SendFailed` if publishing the forwarded message fails.
+    pub async fn forward_publish(
+        &self,
+        partition: PartitionId,
+        message: &ForwardedPublish,
+    ) -> Result<(), TransportError> {
+        let topic = format!("{}/{}", FORWARD_TOPIC_PREFIX, partition.get());
+        let msg = ClusterMessage::ForwardedPublish(message.clone());
+        let payload = self.serialize_message(&msg);
+
+        self.forward_client
+            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// # Errors
     /// Returns `SendFailed` if broadcasting the message fails.
     pub async fn broadcast_async(&self, message: ClusterMessage) -> Result<(), TransportError> {
         let topic = match &message {
@@ -326,6 +387,31 @@ impl MqttTransport {
         Ok(())
     }
 
+    /// Publish a message to the local broker using the forward client.
+    /// This prevents the `on_client_publish` handler from re-forwarding.
+    ///
+    /// # Errors
+    /// Returns `SendFailed` if publishing fails.
+    pub async fn publish_locally_with_marker(
+        &self,
+        topic: &str,
+        payload: &[u8],
+        qos: u8,
+    ) -> Result<(), TransportError> {
+        let mqtt_qos = match qos {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            _ => QoS::ExactlyOnce,
+        };
+
+        self.forward_client
+            .publish_qos(topic, payload.to_vec(), mqtt_qos)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        Ok(())
+    }
+
     /// # Errors
     /// Returns `SendFailed` if disconnection fails.
     ///
@@ -336,6 +422,8 @@ impl MqttTransport {
             .disconnect()
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+        let _ = self.forward_client.disconnect().await;
 
         let mut state = self.state.lock().unwrap();
         state.connected = false;
@@ -357,6 +445,14 @@ impl ClusterTransport for MqttTransport {
 
         let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
+
+        tracing::trace!(
+            to = to.get(),
+            msg_type = message.message_type(),
+            %topic,
+            payload_len = payload.len(),
+            "sending cluster message"
+        );
 
         let client = self.client.clone();
         tokio::spawn(async move {
@@ -406,6 +502,19 @@ impl ClusterTransport for MqttTransport {
     fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
         self.recv()
     }
+
+    fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let mqtt_qos = match qos {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            _ => QoS::ExactlyOnce,
+        };
+
+        let client = self.forward_client.clone();
+        tokio::spawn(async move {
+            let _ = client.publish_qos(&topic, payload, mqtt_qos).await;
+        });
+    }
 }
 
 #[cfg(test)]
@@ -421,7 +530,7 @@ mod tests {
             ClusterMessage::Heartbeat(hb) => {
                 buf.extend_from_slice(&hb.to_be_bytes());
             }
-            ClusterMessage::Write(w) => {
+            ClusterMessage::Write(w) | ClusterMessage::WriteRequest(w) => {
                 buf.extend_from_slice(&w.to_bytes());
             }
             ClusterMessage::Ack(ack) => {
@@ -447,6 +556,9 @@ mod tests {
             }
             ClusterMessage::CatchupResponse(resp) => {
                 buf.extend_from_slice(&resp.to_bytes());
+            }
+            ClusterMessage::ForwardedPublish(fwd) => {
+                buf.extend_from_slice(&fwd.to_bytes());
             }
         }
 

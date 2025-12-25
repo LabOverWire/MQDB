@@ -1,5 +1,6 @@
 use crate::cluster::{
-    ClusterEventHandler, MqttTransport, NodeController, NodeId, PartitionId, TransportConfig,
+    ClusterEventHandler, Epoch, MqttTransport, NodeController, NodeId, PartitionAssignment,
+    PartitionId, PartitionMap, TransportConfig,
 };
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
@@ -119,8 +120,9 @@ impl ClusteredAgent {
             .map(|peer| {
                 let bridge_name = format!("bridge-to-node-{}", peer.node_id);
                 let mut config = BridgeConfig::new(&bridge_name, &peer.address)
-                    .add_topic("$SYS/mqdb/cluster/#", BridgeDirection::Both, QoS::AtLeastOnce)
-                    .add_topic("$DB/_repl/#", BridgeDirection::Both, QoS::AtLeastOnce);
+                    .add_topic("_mqdb/cluster/#", BridgeDirection::Both, QoS::AtLeastOnce)
+                    .add_topic("_mqdb/forward/#", BridgeDirection::Both, QoS::AtLeastOnce)
+                    .add_topic("_mqdb/repl/#", BridgeDirection::Both, QoS::AtLeastOnce);
                 config.client_id = format!("{}-to-node-{}", self.node_name, peer.node_id);
                 config.clean_start = false;
                 config.try_private = true;
@@ -208,13 +210,40 @@ impl ClusteredAgent {
                 }
             }
 
+            let mut all_nodes: Vec<NodeId> = self
+                .peers
+                .iter()
+                .filter_map(|p| NodeId::validated(p.node_id))
+                .collect();
+            all_nodes.push(self.node_id);
+            all_nodes.sort_by_key(|n| n.get());
+
+            let node_count = all_nodes.len();
+            let mut partition_map = PartitionMap::new();
+
             for partition in PartitionId::all() {
-                let partition_num = partition.get();
-                let is_primary = partition_num % 2 == (self.node_id.get() % 2);
-                if is_primary {
-                    ctrl.become_primary(partition, crate::cluster::Epoch::new(1));
+                let partition_num = partition.get() as usize;
+                let primary_idx = partition_num % node_count;
+                let replica_idx = (partition_num + 1) % node_count;
+
+                let primary = all_nodes[primary_idx];
+                let replicas = if node_count > 1 {
+                    vec![all_nodes[replica_idx]]
+                } else {
+                    vec![]
+                };
+
+                let assignment = PartitionAssignment::new(primary, replicas, Epoch::new(1));
+                partition_map.set(partition, assignment);
+
+                if primary == self.node_id {
+                    ctrl.become_primary(partition, Epoch::new(1));
+                } else if node_count > 1 && all_nodes[replica_idx] == self.node_id {
+                    ctrl.become_replica(partition, Epoch::new(1), 0);
                 }
             }
+
+            ctrl.update_partition_map(partition_map);
         }
 
         let mut tick_interval = interval(Duration::from_millis(100));

@@ -2,8 +2,9 @@ use mqdb::cluster::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use mqdb::cluster::{
-    CatchupRequest, CatchupResponse, ClusterMessage, ClusterTransport, Epoch, Heartbeat,
-    InboundMessage, NodeId, PartitionId, ReplicationAck, ReplicationWrite, TransportError,
+    CatchupRequest, CatchupResponse, ClusterMessage, ClusterTransport, Epoch, ForwardedPublish,
+    Heartbeat, InboundMessage, NodeId, PartitionId, ReplicationAck, ReplicationWrite,
+    TransportError,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -60,7 +61,7 @@ impl SimulatedTransport {
             ClusterMessage::Heartbeat(hb) => {
                 buf.extend_from_slice(&hb.to_be_bytes());
             }
-            ClusterMessage::Write(w) => {
+            ClusterMessage::Write(w) | ClusterMessage::WriteRequest(w) => {
                 buf.extend_from_slice(&w.to_bytes());
             }
             ClusterMessage::Ack(ack) => {
@@ -87,6 +88,9 @@ impl SimulatedTransport {
             ClusterMessage::CatchupResponse(resp) => {
                 buf.extend_from_slice(&resp.to_bytes());
             }
+            ClusterMessage::ForwardedPublish(fwd) => {
+                buf.extend_from_slice(&fwd.to_bytes());
+            }
         }
 
         buf
@@ -112,6 +116,10 @@ impl SimulatedTransport {
             11 => {
                 let (ack, _) = ReplicationAck::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::Ack(ack))
+            }
+            15 => {
+                let w = ReplicationWrite::from_bytes(payload)?;
+                Some(ClusterMessage::WriteRequest(w))
             }
             2 => {
                 if payload.len() < 2 {
@@ -144,6 +152,10 @@ impl SimulatedTransport {
             13 => {
                 let resp = CatchupResponse::from_bytes(payload)?;
                 Some(ClusterMessage::CatchupResponse(resp))
+            }
+            30 => {
+                let fwd = ForwardedPublish::from_bytes(payload)?;
+                Some(ClusterMessage::ForwardedPublish(fwd))
             }
             _ => None,
         }
