@@ -42,6 +42,7 @@ impl BrokerEventHandler for ClusterEventHandler {
             debug!(
                 client_id = %event.client_id,
                 clean_start = event.clean_start,
+                has_will_topic = event.will_topic.is_some(),
                 "client connected"
             );
 
@@ -53,7 +54,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 warn!(client_id, error = %e, "failed to create session");
                 return;
             }
-            let (_session, write) = result.unwrap();
+            let (_session, create_write) = result.unwrap();
 
             if let Some(ref topic) = event.will_topic {
                 let will_qos = qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce));
@@ -64,12 +65,22 @@ impl BrokerEventHandler for ClusterEventHandler {
                     .map(|b| b.to_vec())
                     .unwrap_or_default();
 
-                let _ = ctrl.stores_mut().sessions.update(client_id, |s| {
+                let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
                     s.set_will(will_qos, will_retain, topic.as_ref(), &will_payload);
                 });
+                match result {
+                    Ok((session, will_write)) => {
+                        debug!(client_id, has_will = session.has_will, "will stored in session");
+                        ctrl.write_or_forward(will_write);
+                    }
+                    Err(e) => {
+                        warn!(client_id, error = ?e, "failed to store will in session");
+                        ctrl.write_or_forward(create_write);
+                    }
+                }
+            } else {
+                ctrl.write_or_forward(create_write);
             }
-
-            ctrl.write_or_forward(write);
         })
     }
 
@@ -103,11 +114,67 @@ impl BrokerEventHandler for ClusterEventHandler {
                 ctrl.write_or_forward(write);
             }
 
-            if event.unexpected
-                && let Some(session) = ctrl.stores().sessions.get(client_id)
-                && session.needs_lwt_publish()
-            {
-                debug!(client_id, "triggering LWT publication");
+            if event.unexpected {
+                let session = ctrl.stores().sessions.get(client_id);
+                debug!(
+                    client_id,
+                    session_found = session.is_some(),
+                    has_will = session.as_ref().map_or(0, |s| s.has_will),
+                    lwt_published = session.as_ref().map_or(0, |s| s.lwt_published),
+                    "checking LWT conditions"
+                );
+                if let Some(session) = session
+                    && session.needs_lwt_publish()
+                {
+                    let topic = String::from_utf8_lossy(&session.will_topic).to_string();
+                    let payload = session.will_payload.clone();
+                    let qos = session.will_qos;
+                    debug!(client_id, %topic, qos, "routing LWT to remote subscribers");
+
+                    let wildcards = ctrl.stores().wildcards.match_topic(&topic);
+                    let router = PublishRouter::new(&ctrl.stores().topics);
+                    let route = router.route_with_wildcards(&topic, &wildcards);
+
+                    let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+                    for target in route.targets {
+                        let target_session = ctrl.stores().sessions.get(&target.client_id);
+                        let connected_node = target_session
+                            .as_ref()
+                            .filter(|s| s.connected == 1)
+                            .and_then(|s| NodeId::validated(s.connected_node));
+
+                        if let Some(target_node) = connected_node
+                            && target_node != node_id
+                        {
+                            remote_nodes
+                                .entry(target_node)
+                                .or_default()
+                                .push(ForwardTarget::new(target.client_id, target.qos));
+                        }
+                    }
+
+                    if !remote_nodes.is_empty() {
+                        let transport = ctrl.transport().clone();
+                        drop(ctrl);
+
+                        for (target_node, targets) in remote_nodes {
+                            let fwd = ForwardedPublish::new(
+                                node_id,
+                                topic.clone(),
+                                qos,
+                                session.will_retain != 0,
+                                payload.clone(),
+                                targets,
+                            );
+                            let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
+                            if let Err(e) = transport.send_async(target_node, fwd_msg).await {
+                                warn!(target = target_node.get(), error = %e, "failed to forward LWT");
+                            } else {
+                                debug!(target = target_node.get(), %topic, "forwarded LWT to node");
+                            }
+                        }
+                    }
+                }
             }
         })
     }
