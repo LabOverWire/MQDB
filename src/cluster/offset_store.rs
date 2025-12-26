@@ -242,6 +242,108 @@ impl OffsetStore {
             }
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let offsets = self.offsets.read().unwrap();
+        let partition_offsets: Vec<_> = offsets
+            .iter()
+            .filter(|((cid, _), _)| session_partition(cid) == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(partition_offsets.len() as u32).to_be_bytes());
+
+        for ((consumer_id, part_num), offset) in partition_offsets {
+            let id = format!("{consumer_id}:{part_num}");
+            let id_bytes = id.as_bytes();
+            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(id_bytes);
+
+            let data = offset.to_be_bytes();
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if UTF-8 parsing fails.
+    pub fn import_offsets(&self, data: &[u8]) -> Result<usize, OffsetStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let id_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + id_len > data.len() {
+                break;
+            }
+            let id = std::str::from_utf8(&data[offset..offset + id_len])
+                .map_err(|_| OffsetStoreError::SerializationError)?;
+            offset += id_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let offset_data = &data[offset..offset + data_len];
+            offset += data_len;
+
+            let parts: Vec<&str> = id.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let consumer_id = parts[0];
+            let partition_num: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if let Some(consumer_offset) = Self::deserialize(offset_data) {
+                let key = (consumer_id.to_string(), partition_num);
+                self.offsets.write().unwrap().insert(key, consumer_offset);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut offsets = self.offsets.write().unwrap();
+        let before = offsets.len();
+        offsets.retain(|(cid, _), _| session_partition(cid) != partition);
+        before - offsets.len()
+    }
 }
 
 impl std::fmt::Debug for OffsetStore {

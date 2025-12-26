@@ -4,6 +4,7 @@ use super::protocol::{
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
+use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::{NodeId, PartitionId};
 use std::fmt::Debug;
 
@@ -21,6 +22,9 @@ pub enum ClusterMessage {
     CatchupRequest(CatchupRequest),
     CatchupResponse(CatchupResponse),
     ForwardedPublish(ForwardedPublish),
+    SnapshotRequest(SnapshotRequest),
+    SnapshotChunk(SnapshotChunk),
+    SnapshotComplete(SnapshotComplete),
 }
 
 impl ClusterMessage {
@@ -39,6 +43,9 @@ impl ClusterMessage {
             Self::CatchupRequest(_) => 12,
             Self::CatchupResponse(_) => 13,
             Self::ForwardedPublish(_) => 30,
+            Self::SnapshotRequest(_) => 40,
+            Self::SnapshotChunk(_) => 41,
+            Self::SnapshotComplete(_) => 42,
         }
     }
 }

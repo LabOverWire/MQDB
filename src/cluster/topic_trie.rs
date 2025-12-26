@@ -185,6 +185,67 @@ impl TopicTrie {
     pub fn is_empty(&self) -> bool {
         self.pattern_count == 0
     }
+
+    #[must_use]
+    pub fn all_subscriptions(&self) -> Vec<(String, &WildcardSubscriber)> {
+        let mut result = Vec::new();
+        Self::collect_subscriptions(&self.root, "", &mut result);
+        result
+    }
+
+    fn collect_subscriptions<'a>(
+        node: &'a TrieNode,
+        current_pattern: &str,
+        result: &mut Vec<(String, &'a WildcardSubscriber)>,
+    ) {
+        for subscriber in &node.subscribers {
+            result.push((current_pattern.to_string(), subscriber));
+        }
+
+        for (segment, child) in &node.children {
+            let pattern = if current_pattern.is_empty() {
+                segment.clone()
+            } else {
+                format!("{current_pattern}/{segment}")
+            };
+            Self::collect_subscriptions(child, &pattern, result);
+        }
+
+        if let Some(ref single) = node.single_wildcard {
+            let pattern = if current_pattern.is_empty() {
+                "+".to_string()
+            } else {
+                format!("{current_pattern}/+")
+            };
+            Self::collect_subscriptions(single, &pattern, result);
+        }
+
+        if let Some(ref multi) = node.multi_wildcard {
+            let pattern = if current_pattern.is_empty() {
+                "#".to_string()
+            } else {
+                format!("{current_pattern}/#")
+            };
+            Self::collect_subscriptions(multi, &pattern, result);
+        }
+    }
+
+    pub fn clear_for_partition(&mut self, partition: PartitionId) -> usize {
+        let subscriptions_to_remove: Vec<(String, String)> = self
+            .all_subscriptions()
+            .iter()
+            .filter(|(_, sub)| sub.client_partition == partition)
+            .map(|(pattern, sub)| (pattern.clone(), sub.client_id.clone()))
+            .collect();
+
+        let mut removed = 0;
+        for (pattern, client_id) in subscriptions_to_remove {
+            if self.remove(&pattern, &client_id) {
+                removed += 1;
+            }
+        }
+        removed
+    }
 }
 
 #[must_use]

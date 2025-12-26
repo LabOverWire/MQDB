@@ -13,6 +13,9 @@ pub enum MessageType {
     CatchupResponse = 13,
     WriteRequest = 20,
     ForwardedPublish = 30,
+    SnapshotRequest = 40,
+    SnapshotChunk = 41,
+    SnapshotComplete = 42,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

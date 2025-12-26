@@ -4,7 +4,7 @@ use mqdb::cluster::raft::{
 use mqdb::cluster::{
     CatchupRequest, CatchupResponse, ClusterMessage, ClusterTransport, Epoch, ForwardedPublish,
     Heartbeat, InboundMessage, NodeId, PartitionId, ReplicationAck, ReplicationWrite,
-    TransportError,
+    SnapshotChunk, SnapshotComplete, SnapshotRequest, TransportError,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -91,6 +91,15 @@ impl SimulatedTransport {
             ClusterMessage::ForwardedPublish(fwd) => {
                 buf.extend_from_slice(&fwd.to_bytes());
             }
+            ClusterMessage::SnapshotRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::SnapshotChunk(chunk) => {
+                buf.extend_from_slice(&chunk.to_bytes());
+            }
+            ClusterMessage::SnapshotComplete(complete) => {
+                buf.extend_from_slice(&complete.to_be_bytes());
+            }
         }
 
         buf
@@ -156,6 +165,18 @@ impl SimulatedTransport {
             30 => {
                 let fwd = ForwardedPublish::from_bytes(payload)?;
                 Some(ClusterMessage::ForwardedPublish(fwd))
+            }
+            40 => {
+                let (req, _) = SnapshotRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::SnapshotRequest(req))
+            }
+            41 => {
+                let chunk = SnapshotChunk::from_bytes(payload)?;
+                Some(ClusterMessage::SnapshotChunk(chunk))
+            }
+            42 => {
+                let (complete, _) = SnapshotComplete::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::SnapshotComplete(complete))
             }
             _ => None,
         }

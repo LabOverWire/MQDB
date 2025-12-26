@@ -4,6 +4,7 @@ use super::protocol::{
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
+use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -241,6 +242,18 @@ impl MqttTransport {
                 let fwd = ForwardedPublish::from_bytes(data)?;
                 ClusterMessage::ForwardedPublish(fwd)
             }
+            40 => {
+                let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::SnapshotRequest(req)
+            }
+            41 => {
+                let chunk = SnapshotChunk::from_bytes(data)?;
+                ClusterMessage::SnapshotChunk(chunk)
+            }
+            42 => {
+                let (complete, _) = SnapshotComplete::try_from_be_bytes(data).ok()?;
+                ClusterMessage::SnapshotComplete(complete)
+            }
             _ => return None,
         };
 
@@ -300,6 +313,15 @@ impl MqttTransport {
             }
             ClusterMessage::ForwardedPublish(fwd) => {
                 buf.extend_from_slice(&fwd.to_bytes());
+            }
+            ClusterMessage::SnapshotRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::SnapshotChunk(chunk) => {
+                buf.extend_from_slice(&chunk.to_bytes());
+            }
+            ClusterMessage::SnapshotComplete(complete) => {
+                buf.extend_from_slice(&complete.to_be_bytes());
             }
         }
 
@@ -559,6 +581,15 @@ mod tests {
             }
             ClusterMessage::ForwardedPublish(fwd) => {
                 buf.extend_from_slice(&fwd.to_bytes());
+            }
+            ClusterMessage::SnapshotRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::SnapshotChunk(chunk) => {
+                buf.extend_from_slice(&chunk.to_bytes());
+            }
+            ClusterMessage::SnapshotComplete(complete) => {
+                buf.extend_from_slice(&complete.to_be_bytes());
             }
         }
 

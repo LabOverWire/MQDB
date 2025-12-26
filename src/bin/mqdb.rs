@@ -208,6 +208,14 @@ enum ClusterAction {
         #[arg(long)]
         acl: Option<PathBuf>,
     },
+    Rebalance {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
+    Status {
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -312,6 +320,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 Box::pin(cmd_cluster_start(node_id, node_name, bind, db, peers, passwd, acl))
                     .await?;
+            }
+            ClusterAction::Rebalance { conn } => {
+                Box::pin(cmd_cluster_rebalance(conn)).await?;
+            }
+            ClusterAction::Status { conn } => {
+                Box::pin(cmd_cluster_status(conn)).await?;
             }
         },
         Commands::Passwd {
@@ -509,6 +523,52 @@ async fn cmd_cluster_start(
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
     Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = "$SYS/mqdb/cluster/rebalance";
+    let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
+
+    if response
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        if let Some(data) = response.get("data") {
+            if let Some(id) = data.get("rebalance_id").and_then(serde_json::Value::as_str) {
+                println!("Rebalance initiated: {id}");
+            } else {
+                println!("Rebalance initiated");
+            }
+        } else {
+            println!("Rebalance initiated");
+        }
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+        eprintln!("Error: {error}");
+    }
+
+    Ok(())
+}
+
+async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = "$SYS/mqdb/cluster/status";
+    let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
+
+    if response
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        if let Some(data) = response.get("data") {
+            println!("{}", serde_json::to_string_pretty(data)?);
+        }
+    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+        eprintln!("Error: {error}");
+    } else {
+        output_response(&response, &OutputFormat::Json);
+    }
 
     Ok(())
 }

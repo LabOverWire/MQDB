@@ -478,6 +478,108 @@ impl Qos2Store {
             }
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let states = self.states.read().unwrap();
+        let partition_states: Vec<_> = states
+            .iter()
+            .filter(|((cid, _), _)| session_partition(cid) == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(partition_states.len() as u32).to_be_bytes());
+
+        for ((client_id, packet_id), state) in partition_states {
+            let id = format!("{client_id}:{packet_id}");
+            let id_bytes = id.as_bytes();
+            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(id_bytes);
+
+            let data = state.to_be_bytes();
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if UTF-8 parsing fails.
+    pub fn import_states(&self, data: &[u8]) -> Result<usize, Qos2StoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let id_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + id_len > data.len() {
+                break;
+            }
+            let id = std::str::from_utf8(&data[offset..offset + id_len])
+                .map_err(|_| Qos2StoreError::SerializationError)?;
+            offset += id_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let state_data = &data[offset..offset + data_len];
+            offset += data_len;
+
+            let parts: Vec<&str> = id.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let client_id = parts[0];
+            let packet_id: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if let Some(state) = Self::deserialize(state_data) {
+                let key = (client_id.to_string(), packet_id);
+                self.states.write().unwrap().insert(key, state);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut states = self.states.write().unwrap();
+        let before = states.len();
+        states.retain(|(cid, _), _| session_partition(cid) != partition);
+        before - states.len()
+    }
 }
 
 impl std::fmt::Debug for Qos2Store {

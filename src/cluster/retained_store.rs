@@ -207,6 +207,96 @@ impl RetainedStore {
             }
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let messages = self.messages.read().unwrap();
+        let partition_messages: Vec<_> = messages
+            .iter()
+            .filter(|(topic, _)| topic_partition(topic) == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(partition_messages.len() as u32).to_be_bytes());
+
+        for (topic, msg) in partition_messages {
+            let id_bytes = topic.as_bytes();
+            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(id_bytes);
+
+            let data = msg.to_be_bytes();
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if UTF-8 parsing fails.
+    pub fn import_retained(&self, data: &[u8]) -> Result<usize, RetainedStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let id_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + id_len > data.len() {
+                break;
+            }
+            let topic = std::str::from_utf8(&data[offset..offset + id_len])
+                .map_err(|_| RetainedStoreError::SerializationError)?;
+            offset += id_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let msg_data = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(msg) = Self::deserialize(msg_data) {
+                self.messages.write().unwrap().insert(topic.to_string(), msg);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut messages = self.messages.write().unwrap();
+        let before = messages.len();
+        messages.retain(|topic, _| topic_partition(topic) != partition);
+        before - messages.len()
+    }
 }
 
 impl std::fmt::Debug for RetainedStore {

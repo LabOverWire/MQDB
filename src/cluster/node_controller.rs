@@ -1,8 +1,10 @@
 use super::heartbeat::{HeartbeatManager, NodeStatus};
+use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{CatchupResponse, ForwardedPublish, ReplicationAck, ReplicationWrite};
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
 use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::replication::{ReplicaRole, ReplicaState};
+use super::snapshot::{SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
 use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
@@ -34,6 +36,10 @@ pub struct NodeController<T: ClusterTransport> {
     forward_dedup_order: VecDeque<u64>,
     raft_messages: VecDeque<RaftMessage>,
     dead_nodes: VecDeque<NodeId>,
+    migration_manager: MigrationManager,
+    pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
+    outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
+    draining: bool,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -52,6 +58,10 @@ impl<T: ClusterTransport> NodeController<T> {
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
             raft_messages: VecDeque::new(),
             dead_nodes: VecDeque::new(),
+            migration_manager: MigrationManager::new(node_id),
+            pending_snapshots: HashMap::new(),
+            outgoing_snapshots: HashMap::new(),
+            draining: false,
         }
     }
 
@@ -229,6 +239,15 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::ForwardedPublish(ref fwd) => {
                 self.handle_forwarded_publish(msg.from, fwd);
+            }
+            ClusterMessage::SnapshotRequest(ref req) => {
+                self.handle_snapshot_request(msg.from, req);
+            }
+            ClusterMessage::SnapshotChunk(ref chunk) => {
+                self.handle_snapshot_chunk(msg.from, chunk);
+            }
+            ClusterMessage::SnapshotComplete(ref complete) => {
+                self.handle_snapshot_complete(msg.from, complete);
             }
         }
     }
@@ -822,6 +841,217 @@ impl<T: ClusterTransport> NodeController<T> {
         fwd.topic.hash(&mut hasher);
         fwd.payload.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn handle_snapshot_request(&mut self, from: NodeId, req: &SnapshotRequest) {
+        let Some(partition) = req.partition() else {
+            tracing::warn!(?from, "received snapshot request with invalid partition");
+            return;
+        };
+
+        tracing::info!(
+            ?partition,
+            requester = from.get(),
+            "received snapshot request, starting snapshot send"
+        );
+
+        let data = self.stores.export_partition(partition);
+        let sequence = self.sequence(partition).unwrap_or(0);
+        let sender = SnapshotSender::new(partition, data, sequence);
+
+        self.outgoing_snapshots.insert((from, partition), sender);
+        self.send_next_snapshot_chunk(from, partition);
+    }
+
+    fn send_next_snapshot_chunk(&mut self, to: NodeId, partition: PartitionId) {
+        let Some(sender) = self.outgoing_snapshots.get_mut(&(to, partition)) else {
+            return;
+        };
+
+        if let Some(chunk) = sender.next_chunk() {
+            let is_last = chunk.is_last();
+            let _ = self.transport.send(to, ClusterMessage::SnapshotChunk(chunk));
+
+            if is_last {
+                self.outgoing_snapshots.remove(&(to, partition));
+            }
+        }
+    }
+
+    fn handle_snapshot_chunk(&mut self, from: NodeId, chunk: &SnapshotChunk) {
+        let partition = chunk.partition;
+
+        tracing::debug!(
+            ?partition,
+            from = from.get(),
+            chunk_index = chunk.chunk_index,
+            total_chunks = chunk.total_chunks,
+            "received snapshot chunk"
+        );
+
+        let builder = self.pending_snapshots.entry(partition).or_insert_with(|| {
+            SnapshotBuilder::new(partition, chunk.total_chunks, chunk.sequence_at_snapshot)
+        });
+
+        if !builder.add_chunk(chunk) {
+            tracing::warn!(?partition, "failed to add snapshot chunk");
+            let complete = SnapshotComplete::failed(partition);
+            let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+            self.pending_snapshots.remove(&partition);
+            return;
+        }
+
+        if builder.is_complete() {
+            let sequence = builder.sequence_at_snapshot();
+            let Some(data) = self.pending_snapshots.remove(&partition).and_then(SnapshotBuilder::assemble) else {
+                tracing::error!(?partition, "failed to assemble snapshot");
+                let complete = SnapshotComplete::failed(partition);
+                let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                return;
+            };
+
+            match self.stores.import_partition(&data) {
+                Ok(count) => {
+                    tracing::info!(
+                        ?partition,
+                        imported = count,
+                        sequence,
+                        "snapshot import complete"
+                    );
+
+                    if let Err(e) = self.migration_manager.mark_snapshot_complete(partition, sequence) {
+                        tracing::debug!(?partition, ?e, "no active migration for snapshot");
+                    }
+
+                    let complete = SnapshotComplete::ok(partition, sequence);
+                    let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                }
+                Err(e) => {
+                    tracing::error!(?partition, ?e, "failed to import snapshot");
+                    let complete = SnapshotComplete::failed(partition);
+                    let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                }
+            }
+        }
+    }
+
+    fn handle_snapshot_complete(&mut self, from: NodeId, complete: &SnapshotComplete) {
+        let Some(partition) = complete.partition() else {
+            tracing::warn!(?from, "received snapshot complete with invalid partition");
+            return;
+        };
+
+        let status = complete.status();
+        let final_sequence = complete.final_sequence();
+
+        tracing::info!(
+            ?partition,
+            from = from.get(),
+            ?status,
+            final_sequence,
+            "received snapshot complete"
+        );
+
+        if complete.is_ok() {
+            if self.migration_manager.is_sending(partition)
+                && let Err(e) = self.migration_manager.advance_phase(partition, MigrationPhase::Overlapping)
+            {
+                tracing::debug!(?partition, ?e, "could not advance migration phase");
+            }
+        } else {
+            tracing::warn!(?partition, ?status, "snapshot transfer failed");
+        }
+    }
+
+    pub fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
+        tracing::info!(
+            ?partition,
+            source = from.get(),
+            "requesting snapshot"
+        );
+
+        let request = SnapshotRequest::create(partition, self.node_id);
+        let _ = self.transport.send(from, ClusterMessage::SnapshotRequest(request));
+    }
+
+    pub fn start_partition_migration(
+        &mut self,
+        partition: PartitionId,
+        old_primary: NodeId,
+        new_primary: NodeId,
+        epoch: Epoch,
+    ) {
+        self.migration_manager.start_migration(
+            partition,
+            old_primary,
+            new_primary,
+            epoch,
+            self.current_time,
+        );
+
+        if new_primary == self.node_id {
+            self.request_snapshot(partition, old_primary);
+        }
+    }
+
+    #[must_use]
+    pub fn is_migrating(&self, partition: PartitionId) -> bool {
+        self.migration_manager.is_migrating(partition)
+    }
+
+    #[must_use]
+    pub fn migration_phase(&self, partition: PartitionId) -> Option<MigrationPhase> {
+        self.migration_manager.get_phase(partition)
+    }
+
+    pub fn complete_migration(&mut self, partition: PartitionId) {
+        if let Some(state) = self.migration_manager.complete_migration(partition) {
+            tracing::info!(
+                ?partition,
+                old_primary = state.old_primary.get(),
+                new_primary = state.new_primary.get(),
+                "migration completed"
+            );
+        }
+    }
+
+    #[must_use]
+    pub fn migration_manager(&self) -> &MigrationManager {
+        &self.migration_manager
+    }
+
+    pub fn set_draining(&mut self, draining: bool) {
+        self.draining = draining;
+        if draining {
+            tracing::info!(node_id = self.node_id.get(), "node entering draining mode");
+        } else {
+            tracing::info!(node_id = self.node_id.get(), "node exiting draining mode");
+        }
+    }
+
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    #[must_use]
+    pub fn pending_writes_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    #[must_use]
+    pub fn pending_write_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[must_use]
+    pub fn can_shutdown_safely(&self) -> bool {
+        self.draining && self.pending.is_empty() && self.outgoing_snapshots.is_empty()
+    }
+
+    #[must_use]
+    pub fn active_migrations_count(&self) -> usize {
+        self.migration_manager.migration_count()
     }
 }
 

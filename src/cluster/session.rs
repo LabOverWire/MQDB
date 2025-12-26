@@ -434,6 +434,96 @@ impl SessionStore {
             }
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let sessions = self.sessions.read().unwrap();
+        let partition_sessions: Vec<_> = sessions
+            .iter()
+            .filter(|(_, s)| s.partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(partition_sessions.len() as u32).to_be_bytes());
+
+        for (client_id, session) in partition_sessions {
+            let id_bytes = client_id.as_bytes();
+            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(id_bytes);
+
+            let data = session.to_be_bytes();
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if UTF-8 parsing fails.
+    pub fn import_sessions(&self, data: &[u8]) -> Result<usize, SessionError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let id_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + id_len > data.len() {
+                break;
+            }
+            let id = std::str::from_utf8(&data[offset..offset + id_len])
+                .map_err(|_| SessionError::SerializationError)?;
+            offset += id_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let session_data = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(session) = Self::deserialize(session_data) {
+                self.sessions.write().unwrap().insert(id.to_string(), session);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut sessions = self.sessions.write().unwrap();
+        let before = sessions.len();
+        sessions.retain(|_, s| s.partition() != partition);
+        before - sessions.len()
+    }
 }
 
 impl std::fmt::Debug for SessionStore {

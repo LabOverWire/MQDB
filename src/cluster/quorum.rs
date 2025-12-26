@@ -251,6 +251,16 @@ impl PendingWrites {
     }
 
     #[must_use]
+    pub fn len(&self) -> usize {
+        self.trackers.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.trackers.is_empty()
+    }
+
+    #[must_use]
     pub fn is_full(&self) -> bool {
         self.trackers.len() >= self.max_pending
     }
