@@ -5,12 +5,16 @@ use super::rpc::{
 use super::state::RaftCommand;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
+use std::collections::HashSet;
 
 pub struct RaftCoordinator<T: ClusterTransport> {
     node: RaftNode,
     partition_map: PartitionMap,
     transport: T,
     cluster_members: Vec<NodeId>,
+    pending_dead_nodes: HashSet<NodeId>,
+    processed_dead_nodes: HashSet<NodeId>,
+    was_leader: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -20,6 +24,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             partition_map: PartitionMap::new(),
             transport,
             cluster_members: vec![node_id],
+            pending_dead_nodes: HashSet::new(),
+            processed_dead_nodes: HashSet::new(),
+            was_leader: false,
         }
     }
 
@@ -46,9 +53,53 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    pub fn tick(&mut self, now_ms: u64) {
+    pub fn tick(&mut self, now_ms: u64) -> Vec<u64> {
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs);
+
+        let is_leader = self.is_leader();
+        let just_became_leader = is_leader && !self.was_leader;
+        self.was_leader = is_leader;
+
+        if just_became_leader {
+            tracing::info!("became Raft leader, processing pending dead nodes");
+            return self.process_pending_dead_nodes();
+        }
+
+        Vec::new()
+    }
+
+    fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
+        let mut proposed_indices = Vec::new();
+        let pending: Vec<NodeId> = self.pending_dead_nodes.drain().collect();
+
+        for dead_node in pending {
+            if self.processed_dead_nodes.insert(dead_node) {
+                let indices = self.reassign_partitions_for_dead_node(dead_node);
+                proposed_indices.extend(indices);
+            }
+        }
+
+        self.scan_partition_map_for_dead_primaries(&mut proposed_indices);
+
+        proposed_indices
+    }
+
+    fn scan_partition_map_for_dead_primaries(&mut self, proposed_indices: &mut Vec<u64>) {
+        let alive_nodes: Vec<NodeId> = self.cluster_members.clone();
+
+        for partition in PartitionId::all() {
+            if let Some(primary) = self.partition_map.primary(partition)
+                && !alive_nodes.contains(&primary)
+                && !self.pending_dead_nodes.contains(&primary)
+                && !self.processed_dead_nodes.contains(&primary)
+            {
+                tracing::warn!(?partition, ?primary, "found stale primary in partition map");
+                self.processed_dead_nodes.insert(primary);
+                let indices = self.reassign_partitions_for_dead_node(primary);
+                proposed_indices.extend(indices);
+            }
+        }
     }
 
     /// # Errors
@@ -172,10 +223,35 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
+        self.cluster_members.retain(|&n| n != dead_node);
+
         if !self.is_leader() {
+            tracing::info!(?dead_node, "not leader, queuing dead node for later processing");
+            self.pending_dead_nodes.insert(dead_node);
             return Vec::new();
         }
 
+        if !self.processed_dead_nodes.insert(dead_node) {
+            tracing::debug!(?dead_node, "already processed dead node, skipping");
+            return Vec::new();
+        }
+
+        self.reassign_partitions_for_dead_node(dead_node)
+    }
+
+    pub fn handle_node_alive(&mut self, node: NodeId) {
+        if self.pending_dead_nodes.remove(&node) {
+            tracing::debug!(?node, "removed node from pending dead nodes (now alive)");
+        }
+        if self.processed_dead_nodes.remove(&node) {
+            tracing::debug!(?node, "removed node from processed dead nodes (now alive)");
+        }
+        if !self.cluster_members.contains(&node) {
+            self.cluster_members.push(node);
+        }
+    }
+
+    fn reassign_partitions_for_dead_node(&mut self, dead_node: NodeId) -> Vec<u64> {
         let mut proposed_indices = Vec::new();
         let alive_nodes: Vec<NodeId> = self
             .cluster_members
@@ -190,6 +266,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             match role {
                 PartitionRole::Primary => {
                     if let Some(new_primary) = self.select_new_primary(partition, &alive_nodes) {
+                        tracing::info!(
+                            ?partition,
+                            ?dead_node,
+                            ?new_primary,
+                            "promoting replica to primary"
+                        );
                         let epoch = self.partition_map.epoch(partition).next();
                         let remaining_replicas: Vec<NodeId> = self
                             .partition_map
@@ -209,10 +291,17 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                         if let Ok(idx) = self.propose_partition_update(cmd) {
                             proposed_indices.push(idx);
                         }
+                    } else {
+                        tracing::error!(?partition, ?dead_node, "no replica available to promote");
                     }
                 }
                 PartitionRole::Replica => {
                     if let Some(current_primary) = self.partition_map.primary(partition) {
+                        tracing::info!(
+                            ?partition,
+                            ?dead_node,
+                            "removing dead replica from partition"
+                        );
                         let epoch = self.partition_map.epoch(partition).next();
                         let remaining_replicas: Vec<NodeId> = self
                             .partition_map

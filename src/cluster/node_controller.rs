@@ -125,6 +125,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.register_node(peer);
     }
 
+    pub fn alive_nodes(&self) -> Vec<NodeId> {
+        self.heartbeat.alive_nodes()
+    }
+
     pub fn become_primary(&mut self, partition: PartitionId, epoch: Epoch) {
         let state = self
             .replicas

@@ -250,9 +250,14 @@ impl ClusteredAgent {
 
                     let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
                     let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes().collect();
+                    let alive_nodes: Vec<NodeId> = ctrl.alive_nodes();
                     drop(ctrl);
 
                     let mut raft = self.raft.write().await;
+
+                    for alive_node in alive_nodes {
+                        raft.handle_node_alive(alive_node);
+                    }
 
                     for msg in raft_msgs {
                         match msg {
@@ -311,7 +316,13 @@ impl ClusteredAgent {
                         partitions_initialized = true;
                     }
 
-                    raft.tick(now);
+                    let leader_proposals = raft.tick(now);
+                    if !leader_proposals.is_empty() {
+                        info!(
+                            proposals = leader_proposals.len(),
+                            "new Raft leader proposed partition reassignments"
+                        );
+                    }
 
                     let raft_partition_map = raft.partition_map().clone();
                     drop(raft);
