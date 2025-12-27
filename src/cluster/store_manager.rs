@@ -2,6 +2,7 @@ use bebytes::BeBytes;
 
 use super::SubscriptionType;
 use super::entity;
+use super::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
 use super::inflight_store::{InflightMessage, InflightStore, InflightStoreError};
 use super::offset_store::{ConsumerOffset, OffsetStore};
 use super::protocol::{Operation, ReplicationWrite};
@@ -26,6 +27,7 @@ pub enum StoreApplyError {
     WildcardError,
     InflightError,
     OffsetError,
+    IdempotencyError,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -40,6 +42,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::WildcardError => write!(f, "wildcard store error"),
             Self::InflightError => write!(f, "inflight store error"),
             Self::OffsetError => write!(f, "offset store error"),
+            Self::IdempotencyError => write!(f, "idempotency store error"),
         }
     }
 }
@@ -55,6 +58,7 @@ pub struct StoreManager {
     pub wildcards: WildcardStore,
     pub inflight: InflightStore,
     pub offsets: OffsetStore,
+    pub idempotency: IdempotencyStore,
 }
 
 impl StoreManager {
@@ -69,6 +73,7 @@ impl StoreManager {
             wildcards: WildcardStore::new(node_id),
             inflight: InflightStore::new(node_id),
             offsets: OffsetStore::new(node_id),
+            idempotency: IdempotencyStore::new(node_id),
         }
     }
 
@@ -84,6 +89,7 @@ impl StoreManager {
             entity::WILDCARDS => self.apply_wildcard(write),
             entity::INFLIGHT => self.apply_inflight(write),
             entity::OFFSETS => self.apply_offset(write),
+            entity::IDEMPOTENCY => self.apply_idempotency(write),
             _ => Err(StoreApplyError::UnknownEntity),
         }
     }
@@ -134,6 +140,12 @@ impl StoreManager {
         self.offsets
             .apply_replicated(write.operation, &write.id, &write.data)
             .map_err(|_| StoreApplyError::OffsetError)
+    }
+
+    fn apply_idempotency(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.idempotency
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::IdempotencyError)
     }
 
     /// # Errors
@@ -576,6 +588,7 @@ impl StoreManager {
             (entity::WILDCARDS, self.wildcards.export_for_partition(partition)),
             (entity::INFLIGHT, self.inflight.export_for_partition(partition)),
             (entity::OFFSETS, self.offsets.export_for_partition(partition)),
+            (entity::IDEMPOTENCY, self.idempotency.export_for_partition(partition)),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -667,6 +680,10 @@ impl StoreManager {
                     .offsets
                     .import_offsets(store_data)
                     .map_err(|_| StoreApplyError::OffsetError)?,
+                entity::IDEMPOTENCY => self
+                    .idempotency
+                    .import_records(store_data)
+                    .map_err(|_| StoreApplyError::IdempotencyError)?,
                 _ => continue,
             };
 
@@ -688,6 +705,7 @@ impl StoreManager {
         total_cleared += self.wildcards.clear_partition(partition);
         total_cleared += self.inflight.clear_partition(partition);
         total_cleared += self.offsets.clear_partition(partition);
+        total_cleared += self.idempotency.clear_partition(partition);
         total_cleared
     }
 
@@ -769,6 +787,64 @@ impl StoreManager {
             _ => None,
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `IdempotencyError` if the key exists and is processing or has mismatched parameters.
+    pub fn check_idempotency(
+        &self,
+        idempotency_key: &str,
+        partition: PartitionId,
+        epoch: Epoch,
+        entity: &str,
+        id: &str,
+        timestamp: u64,
+    ) -> Result<IdempotencyCheck, IdempotencyError> {
+        self.idempotency.check_or_insert_processing(
+            idempotency_key,
+            partition,
+            epoch,
+            entity,
+            id,
+            timestamp,
+        )
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn commit_idempotency(
+        &self,
+        partition: PartitionId,
+        idempotency_key: &str,
+        response: &[u8],
+    ) -> ReplicationWrite {
+        self.idempotency.mark_committed(partition, idempotency_key, response.to_vec());
+        let record = self.idempotency.get(partition, idempotency_key);
+        let data = record.map(|r| IdempotencyStore::serialize(&r)).unwrap_or_default();
+        ReplicationWrite::new(
+            partition,
+            Operation::Update,
+            Epoch::ZERO,
+            0,
+            entity::IDEMPOTENCY.to_string(),
+            format!("{}:{idempotency_key}", partition.get()),
+            data,
+        )
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn rollback_idempotency(&self, partition: PartitionId, idempotency_key: &str) {
+        self.idempotency.remove_processing(partition, idempotency_key);
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_expired_idempotency(&self, now: u64) -> usize {
+        self.idempotency.cleanup_expired(now)
+    }
 }
 
 impl std::fmt::Debug for StoreManager {
@@ -782,6 +858,7 @@ impl std::fmt::Debug for StoreManager {
             .field("wildcards", &self.wildcards.pattern_count())
             .field("inflight", &self.inflight.count())
             .field("offsets", &self.offsets.count())
+            .field("idempotency", &self.idempotency.count())
             .finish()
     }
 }

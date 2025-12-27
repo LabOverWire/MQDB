@@ -6,3 +6,4 @@ pub const RETAINED: &str = "_mqtt_retained";
 pub const TOPIC_INDEX: &str = "_topic_index";
 pub const WILDCARDS: &str = "_wildcards";
 pub const OFFSETS: &str = "_offsets";
+pub const IDEMPOTENCY: &str = "_idemp";

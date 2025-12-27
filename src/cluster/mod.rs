@@ -4,6 +4,7 @@ mod epoch;
 #[cfg(feature = "native")]
 mod event_handler;
 mod heartbeat;
+mod idempotency_store;
 mod inflight_store;
 mod lwt;
 mod migration;
@@ -36,6 +37,10 @@ mod write_log;
 
 pub use epoch::Epoch;
 pub use heartbeat::{HeartbeatManager, NodeStatus};
+pub use idempotency_store::{
+    IdempotencyCheck, IdempotencyError, IdempotencyRecord, IdempotencyStatus, IdempotencyStore,
+    idempotency_storage_key,
+};
 pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inflight_key};
 pub use lwt::{
     LwtAction, LwtError, LwtPrepared, LwtPublisher, determine_lwt_action, generate_lwt_token,
