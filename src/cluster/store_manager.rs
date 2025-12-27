@@ -369,6 +369,8 @@ impl StoreManager {
         (msg, write)
     }
 
+    /// Returns writes for ALL 64 partitions since topic index must be available
+    /// on every node for correct publish routing.
     #[must_use]
     pub fn subscribe_topic_replicated(
         &self,
@@ -376,46 +378,58 @@ impl StoreManager {
         client_id: &str,
         client_partition: PartitionId,
         qos: u8,
-    ) -> (TopicIndexEntry, ReplicationWrite) {
+    ) -> (TopicIndexEntry, Vec<ReplicationWrite>) {
         let (entry, data) =
             self.topics
                 .subscribe_with_data(topic, client_id, client_partition, qos);
-        let partition = topic_partition(topic);
-        let write = ReplicationWrite::new(
-            partition,
-            Operation::Update,
-            Epoch::ZERO,
-            0,
-            entity::TOPIC_INDEX.to_string(),
-            topic.to_string(),
-            data,
-        );
-        (entry, write)
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|partition| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Update,
+                    Epoch::ZERO,
+                    0,
+                    entity::TOPIC_INDEX.to_string(),
+                    topic.to_string(),
+                    data.clone(),
+                )
+            })
+            .collect();
+        (entry, writes)
     }
 
     /// # Errors
     /// Returns `TopicIndexError::NotFound` if topic does not exist.
+    ///
+    /// Returns writes for ALL 64 partitions since topic index must be available
+    /// on every node for correct publish routing.
     pub fn unsubscribe_topic_replicated(
         &self,
         topic: &str,
         client_id: &str,
-    ) -> Result<(TopicIndexEntry, ReplicationWrite), TopicIndexError> {
+    ) -> Result<(TopicIndexEntry, Vec<ReplicationWrite>), TopicIndexError> {
         let (entry, data) = self.topics.unsubscribe_with_data(topic, client_id)?;
-        let partition = topic_partition(topic);
-        let write = ReplicationWrite::new(
-            partition,
-            Operation::Update,
-            Epoch::ZERO,
-            0,
-            entity::TOPIC_INDEX.to_string(),
-            topic.to_string(),
-            data,
-        );
-        Ok((entry, write))
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|partition| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Update,
+                    Epoch::ZERO,
+                    0,
+                    entity::TOPIC_INDEX.to_string(),
+                    topic.to_string(),
+                    data.clone(),
+                )
+            })
+            .collect();
+        Ok((entry, writes))
     }
 
     /// # Errors
     /// Returns `WildcardStoreError::InvalidPattern` or `NotWildcard` for invalid patterns.
+    ///
+    /// Returns writes for ALL 64 partitions since wildcards must be broadcast
+    /// to every partition for correct publish routing.
     pub fn subscribe_wildcard_replicated(
         &self,
         pattern: &str,
@@ -423,7 +437,7 @@ impl StoreManager {
         client_partition: PartitionId,
         qos: u8,
         subscription_type: SubscriptionType,
-    ) -> Result<(WildcardEntry, ReplicationWrite), WildcardStoreError> {
+    ) -> Result<(WildcardEntry, Vec<ReplicationWrite>), WildcardStoreError> {
         let (entry, data) = self.wildcards.subscribe_with_data(
             pattern,
             client_id,
@@ -431,38 +445,46 @@ impl StoreManager {
             qos,
             subscription_type,
         )?;
-        let partition = client_partition;
-        let write = ReplicationWrite::new(
-            partition,
-            Operation::Insert,
-            Epoch::ZERO,
-            0,
-            entity::WILDCARDS.to_string(),
-            format!("{pattern}:{client_id}"),
-            data,
-        );
-        Ok((entry, write))
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|partition| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Insert,
+                    Epoch::ZERO,
+                    0,
+                    entity::WILDCARDS.to_string(),
+                    format!("{pattern}:{client_id}"),
+                    data.clone(),
+                )
+            })
+            .collect();
+        Ok((entry, writes))
     }
 
     /// # Errors
     /// Returns `WildcardStoreError::InvalidPattern` or `NotFound` for invalid/missing patterns.
+    ///
+    /// Returns writes for ALL 64 partitions since wildcards must be broadcast.
     pub fn unsubscribe_wildcard_replicated(
         &self,
         pattern: &str,
         client_id: &str,
-        client_partition: PartitionId,
-    ) -> Result<ReplicationWrite, WildcardStoreError> {
+    ) -> Result<Vec<ReplicationWrite>, WildcardStoreError> {
         let _ = self.wildcards.unsubscribe_with_data(pattern, client_id)?;
-        let write = ReplicationWrite::new(
-            client_partition,
-            Operation::Delete,
-            Epoch::ZERO,
-            0,
-            entity::WILDCARDS.to_string(),
-            format!("{pattern}:{client_id}"),
-            Vec::new(),
-        );
-        Ok(write)
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|partition| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Delete,
+                    Epoch::ZERO,
+                    0,
+                    entity::WILDCARDS.to_string(),
+                    format!("{pattern}:{client_id}"),
+                    Vec::new(),
+                )
+            })
+            .collect();
+        Ok(writes)
     }
 
     /// # Errors

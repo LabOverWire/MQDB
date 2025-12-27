@@ -573,6 +573,24 @@ impl ClusterTransport for MqttTransport {
             let _ = client.publish_qos(&topic, payload, mqtt_qos).await;
         });
     }
+
+    fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let mqtt_qos = match qos {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            _ => QoS::ExactlyOnce,
+        };
+
+        let client = self.forward_client.clone();
+        tokio::spawn(async move {
+            let options = mqtt5::PublishOptions {
+                qos: mqtt_qos,
+                retain: true,
+                ..Default::default()
+            };
+            let _ = client.publish_with_options(&topic, payload, options).await;
+        });
+    }
 }
 
 #[cfg(test)]

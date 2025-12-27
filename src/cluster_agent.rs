@@ -144,6 +144,11 @@ impl ClusteredAgent {
             self.controller.clone(),
         ));
 
+        {
+            let mut ctrl = self.controller.write().await;
+            ctrl.set_synced_retained_topics(event_handler.synced_retained_topics());
+        }
+
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
             enable_persistence: true,

@@ -92,6 +92,10 @@ pub trait ClusterTransport: Send + Sync + Debug {
     fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
         let _ = (topic, payload, qos);
     }
+
+    fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let _ = (topic, payload, qos);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

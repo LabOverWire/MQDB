@@ -2,12 +2,13 @@ use crate::cluster::{
     ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
     SubscriptionType,
 };
+use crate::cluster::transport::ClusterTransport;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
 };
 use mqtt5::QoS;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use tracing::{debug, trace, warn};
 pub struct ClusterEventHandler {
     node_id: NodeId,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
+    synced_retained_topics: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ClusterEventHandler {
@@ -24,7 +26,16 @@ impl ClusterEventHandler {
         node_id: NodeId,
         controller: Arc<RwLock<NodeController<MqttTransport>>>,
     ) -> Self {
-        Self { node_id, controller }
+        Self {
+            node_id,
+            controller,
+            synced_retained_topics: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    #[must_use]
+    pub fn synced_retained_topics(&self) -> Arc<RwLock<HashSet<String>>> {
+        Arc::clone(&self.synced_retained_topics)
     }
 }
 
@@ -215,10 +226,12 @@ impl BrokerEventHandler for ClusterEventHandler {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_client_subscribe<'a>(
         &'a self,
         event: ClientSubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let synced_topics = Arc::clone(&self.synced_retained_topics);
         Box::pin(async move {
             if event.client_id.starts_with("mqdb-") {
                 trace!("skipping internal client subscription");
@@ -231,57 +244,109 @@ impl BrokerEventHandler for ClusterEventHandler {
                 "client subscribed"
             );
 
-            let mut ctrl = self.controller.write().await;
-            let client_id = event.client_id.as_ref();
+            let mut retained_to_deliver: Vec<super::retained_store::RetainedMessage> = Vec::new();
+            let mut pending_queries: Vec<(String, tokio::sync::oneshot::Receiver<Vec<super::retained_store::RetainedMessage>>)> = Vec::new();
 
-            for sub in &event.subscriptions {
-                let topic = sub.topic_filter.as_ref();
-                if topic.starts_with("_mqdb/") || topic.starts_with("$SYS/") {
-                    trace!(topic, "skipping internal topic subscription");
-                    continue;
-                }
-                if !sub.result.is_success() {
-                    continue;
-                }
+            {
+                let mut ctrl = self.controller.write().await;
+                let client_id = event.client_id.as_ref();
 
-                let qos = qos_to_u8(sub.qos);
-
-                let (_snapshot, write) = ctrl
-                    .stores_mut()
-                    .add_subscription_replicated(client_id, topic, qos);
-
-                ctrl.write_or_forward(write);
-
-                let is_wildcard = topic.contains('+') || topic.contains('#');
-                if is_wildcard {
-                    let client_partition = crate::cluster::session_partition(client_id);
-                    let result = ctrl.stores_mut().subscribe_wildcard_replicated(
-                        topic,
-                        client_id,
-                        client_partition,
-                        qos,
-                        SubscriptionType::Mqtt,
-                    );
-                    if let Ok((_entry, write)) = result {
-                        ctrl.write_or_forward(write);
+                for sub in &event.subscriptions {
+                    let topic = sub.topic_filter.as_ref();
+                    if topic.starts_with("_mqdb/") || topic.starts_with("$SYS/") {
+                        trace!(topic, "skipping internal topic subscription");
+                        continue;
                     }
-                } else {
-                    let client_partition = crate::cluster::session_partition(client_id);
-                    let topic_partition = crate::cluster::topic_partition(topic);
-                    debug!(
-                        client_id,
-                        topic,
-                        ?topic_partition,
-                        ?client_partition,
-                        "adding topic subscription"
-                    );
-                    let (_entry, write) = ctrl.stores_mut().subscribe_topic_replicated(
-                        topic,
-                        client_id,
-                        client_partition,
-                        qos,
-                    );
+                    if !sub.result.is_success() {
+                        continue;
+                    }
+
+                    let qos = qos_to_u8(sub.qos);
+                    let is_wildcard = topic.contains('+') || topic.contains('#');
+
+                    if is_wildcard {
+                        trace!(topic, "wildcard subscription - broker handles local retained");
+                    } else if ctrl.query_local_retained_exact(topic).is_some() {
+                        trace!(topic, "local retained exists - broker handles delivery");
+                    } else if let Some(rx) = ctrl.start_async_retained_query(topic) {
+                        debug!(topic, "started remote retained query");
+                        pending_queries.push((topic.to_string(), rx));
+                    }
+
+                    let (_snapshot, write) = ctrl
+                        .stores_mut()
+                        .add_subscription_replicated(client_id, topic, qos);
+
                     ctrl.write_or_forward(write);
+
+                    if is_wildcard {
+                        let client_partition = crate::cluster::session_partition(client_id);
+                        let result = ctrl.stores_mut().subscribe_wildcard_replicated(
+                            topic,
+                            client_id,
+                            client_partition,
+                            qos,
+                            SubscriptionType::Mqtt,
+                        );
+                        if let Ok((_entry, writes)) = result {
+                            for write in writes {
+                                ctrl.write_or_forward(write);
+                            }
+                        }
+                    } else {
+                        let client_partition = crate::cluster::session_partition(client_id);
+                        let topic_partition = crate::cluster::topic_partition(topic);
+                        debug!(
+                            client_id,
+                            topic,
+                            ?topic_partition,
+                            ?client_partition,
+                            "adding topic subscription"
+                        );
+                        let (_entry, writes) = ctrl.stores_mut().subscribe_topic_replicated(
+                            topic,
+                            client_id,
+                            client_partition,
+                            qos,
+                        );
+                        for write in writes {
+                            ctrl.write_or_forward(write);
+                        }
+                    }
+                }
+            }
+
+            for (topic, rx) in pending_queries {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                    Ok(Ok(messages)) => {
+                        debug!(topic, count = messages.len(), "received remote retained messages");
+                        retained_to_deliver.extend(messages);
+                    }
+                    Ok(Err(_)) => {
+                        warn!(topic, "retained query channel closed");
+                    }
+                    Err(_) => {
+                        warn!(topic, "retained query timed out");
+                    }
+                }
+            }
+
+            if !retained_to_deliver.is_empty() {
+                let ctrl = self.controller.read().await;
+                let transport = ctrl.transport().clone();
+                drop(ctrl);
+
+                let mut synced = synced_topics.write().await;
+                for msg in retained_to_deliver {
+                    let topic = msg.topic_str().to_string();
+                    synced.insert(topic.clone());
+                    debug!(
+                        topic,
+                        qos = msg.qos,
+                        payload_len = msg.payload.len(),
+                        "delivering retained message to subscriber"
+                    );
+                    transport.queue_local_publish_retained(topic, msg.payload.clone(), msg.qos);
                 }
             }
         })
@@ -323,19 +388,22 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                 let is_wildcard = topic.contains('+') || topic.contains('#');
                 if is_wildcard {
-                    let client_partition = crate::cluster::session_partition(client_id);
                     let result = ctrl
                         .stores_mut()
-                        .unsubscribe_wildcard_replicated(topic, client_id, client_partition);
-                    if let Ok(write) = result {
-                        ctrl.write_or_forward(write);
+                        .unsubscribe_wildcard_replicated(topic, client_id);
+                    if let Ok(writes) = result {
+                        for write in writes {
+                            ctrl.write_or_forward(write);
+                        }
                     }
                 } else {
                     let result = ctrl
                         .stores_mut()
                         .unsubscribe_topic_replicated(topic, client_id);
-                    if let Ok((_entry, write)) = result {
-                        ctrl.write_or_forward(write);
+                    if let Ok((_entry, writes)) = result {
+                        for write in writes {
+                            ctrl.write_or_forward(write);
+                        }
                     }
                 }
             }
@@ -461,10 +529,20 @@ impl BrokerEventHandler for ClusterEventHandler {
         &'a self,
         event: RetainedSetEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        let synced_topics = Arc::clone(&self.synced_retained_topics);
         Box::pin(async move {
             if event.topic.starts_with("$SYS/") || event.topic.starts_with("_mqdb/") {
                 trace!("skipping internal retained message");
                 return;
+            }
+
+            let topic_str = event.topic.as_ref().to_string();
+            {
+                let mut synced = synced_topics.write().await;
+                if synced.remove(&topic_str) {
+                    trace!(topic = %topic_str, "skipping synced retained message");
+                    return;
+                }
             }
 
             debug!(
@@ -563,8 +641,6 @@ impl SubAckReasonCodeExt for mqtt5::broker::events::SubAckReasonCode {
 }
 
 fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_id: &str) {
-    let client_partition = crate::cluster::session_partition(client_id);
-
     let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);
     if let Some(snapshot) = snapshot {
         for entry in &snapshot.topics {
@@ -575,18 +651,20 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
 
             let is_wildcard = entry.is_wildcard != 0;
             if is_wildcard {
-                let result = ctrl.stores_mut().unsubscribe_wildcard_replicated(
-                    topic,
-                    client_id,
-                    client_partition,
-                );
-                if let Ok(write) = result {
-                    ctrl.write_or_forward(write);
+                let result = ctrl
+                    .stores_mut()
+                    .unsubscribe_wildcard_replicated(topic, client_id);
+                if let Ok(writes) = result {
+                    for write in writes {
+                        ctrl.write_or_forward(write);
+                    }
                 }
             } else {
                 let result = ctrl.stores_mut().unsubscribe_topic_replicated(topic, client_id);
-                if let Ok((_entry, write)) = result {
-                    ctrl.write_or_forward(write);
+                if let Ok((_entry, writes)) = result {
+                    for write in writes {
+                        ctrl.write_or_forward(write);
+                    }
                 }
             }
 

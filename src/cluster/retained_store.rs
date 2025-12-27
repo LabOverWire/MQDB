@@ -4,6 +4,35 @@ use bebytes::BeBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+pub fn topic_matches_pattern(topic: &str, pattern: &str) -> bool {
+    let topic_parts: Vec<&str> = topic.split('/').collect();
+    let pattern_parts: Vec<&str> = pattern.split('/').collect();
+
+    let mut t_idx = 0;
+    let mut p_idx = 0;
+
+    while p_idx < pattern_parts.len() {
+        let p = pattern_parts[p_idx];
+
+        if p == "#" {
+            return true;
+        }
+
+        if t_idx >= topic_parts.len() {
+            return false;
+        }
+
+        if p == "+" || p == topic_parts[t_idx] {
+            t_idx += 1;
+            p_idx += 1;
+        } else {
+            return false;
+        }
+    }
+
+    t_idx == topic_parts.len() && p_idx == pattern_parts.len()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct RetainedMessage {
     pub version: u8,
@@ -332,6 +361,23 @@ impl RetainedStore {
         let data = results.into_iter().map(|(_, v)| v.clone()).collect();
         (data, has_more, next_cursor)
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn query_matching_pattern(&self, pattern: &str) -> Vec<RetainedMessage> {
+        let messages = self.messages.read().unwrap();
+        messages
+            .iter()
+            .filter(|(topic, _)| topic_matches_pattern(topic, pattern))
+            .map(|(_, msg)| msg.clone())
+            .collect()
+    }
+
+    #[must_use]
+    pub fn get_exact(&self, topic: &str) -> Option<RetainedMessage> {
+        self.get(topic)
+    }
 }
 
 impl std::fmt::Debug for RetainedStore {
@@ -417,5 +463,55 @@ mod tests {
 
         let topics = store.all_topics();
         assert_eq!(topics.len(), 3);
+    }
+
+    #[test]
+    fn topic_matches_pattern_exact() {
+        assert!(topic_matches_pattern("sensors/temp", "sensors/temp"));
+        assert!(!topic_matches_pattern("sensors/temp", "sensors/humidity"));
+        assert!(!topic_matches_pattern("sensors/temp", "sensors"));
+    }
+
+    #[test]
+    fn topic_matches_pattern_single_level_wildcard() {
+        assert!(topic_matches_pattern("sensors/building1/temp", "sensors/+/temp"));
+        assert!(topic_matches_pattern("sensors/building2/temp", "sensors/+/temp"));
+        assert!(!topic_matches_pattern("sensors/temp", "sensors/+/temp"));
+        assert!(!topic_matches_pattern("sensors/a/b/temp", "sensors/+/temp"));
+    }
+
+    #[test]
+    fn topic_matches_pattern_multi_level_wildcard() {
+        assert!(topic_matches_pattern("sensors", "sensors/#"));
+        assert!(topic_matches_pattern("sensors/temp", "sensors/#"));
+        assert!(topic_matches_pattern("sensors/building1/temp", "sensors/#"));
+        assert!(topic_matches_pattern("sensors/a/b/c/d", "sensors/#"));
+        assert!(!topic_matches_pattern("actuators/fan", "sensors/#"));
+    }
+
+    #[test]
+    fn topic_matches_pattern_combined() {
+        assert!(topic_matches_pattern("home/living/temp", "home/+/temp"));
+        assert!(topic_matches_pattern("home/kitchen/temp", "home/+/temp"));
+        assert!(topic_matches_pattern("home/living/sensors/temp", "home/+/sensors/#"));
+        assert!(topic_matches_pattern("home/living/sensors/a/b", "home/+/sensors/#"));
+    }
+
+    #[test]
+    fn query_matching_pattern_returns_matches() {
+        let store = RetainedStore::new(node(1));
+        store.set("sensors/building1/temp", 1, b"25.0", 1000);
+        store.set("sensors/building2/temp", 1, b"26.0", 1000);
+        store.set("sensors/building1/humidity", 1, b"65%", 1000);
+        store.set("actuators/fan", 0, b"on", 1000);
+
+        let matches = store.query_matching_pattern("sensors/+/temp");
+        assert_eq!(matches.len(), 2);
+
+        let matches = store.query_matching_pattern("sensors/#");
+        assert_eq!(matches.len(), 3);
+
+        let matches = store.query_matching_pattern("actuators/+");
+        assert_eq!(matches.len(), 1);
     }
 }

@@ -1,19 +1,24 @@
+use super::entity;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupResponse, ForwardedPublish, QueryRequest,
-    QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
+    BatchReadRequest, BatchReadResponse, CatchupResponse, ForwardedPublish, Operation,
+    QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
 use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::replication::{ReplicaRole, ReplicaState};
+use super::retained_store::RetainedMessage;
 use super::snapshot::{SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
 use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
+use bebytes::BeBytes;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use tokio::sync::oneshot;
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 
@@ -25,7 +30,6 @@ pub enum RaftMessage {
     AppendEntriesResponse { from: NodeId, response: AppendEntriesResponse },
 }
 
-#[derive(Debug)]
 pub struct NodeController<T: ClusterTransport> {
     node_id: NodeId,
     transport: T,
@@ -45,6 +49,16 @@ pub struct NodeController<T: ClusterTransport> {
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     draining: bool,
     query_coordinator: QueryCoordinator,
+    synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
+    pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
+}
+
+impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeController")
+            .field("node_id", &self.node_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -68,7 +82,16 @@ impl<T: ClusterTransport> NodeController<T> {
             outgoing_snapshots: HashMap::new(),
             draining: false,
             query_coordinator: QueryCoordinator::new(node_id),
+            synced_retained_topics: None,
+            pending_retained_queries: HashMap::new(),
         }
+    }
+
+    pub fn set_synced_retained_topics(
+        &mut self,
+        topics: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    ) {
+        self.synced_retained_topics = Some(topics);
     }
 
     #[must_use]
@@ -264,7 +287,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 let _ = self.transport.send(msg.from, response_msg);
             }
             ClusterMessage::QueryResponse(ref response) => {
-                if let Some(result) = self.query_coordinator.receive_response(response.clone()) {
+                if self.pending_retained_queries.contains_key(&response.query_id) {
+                    let results = Self::parse_retained_query_response(response);
+                    self.complete_retained_query(response.query_id, results);
+                } else if let Some(result) = self.query_coordinator.receive_response(response.clone()) {
                     tracing::debug!(
                         query_id = result.query_id,
                         partial = result.partial,
@@ -312,6 +338,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         id = ?write.id,
                         "applied write to stores"
                     );
+                    self.sync_retained_to_broker(write);
                 }
                 self.write_log
                     .append(partition, write.sequence, write.clone());
@@ -359,6 +386,7 @@ impl<T: ClusterTransport> NodeController<T> {
             id = ?write.id,
             "applied write request to stores"
         );
+        self.sync_retained_to_broker(&write);
 
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         if let Err(e) = self.replicate_write_async(write, &replicas) {
@@ -457,21 +485,23 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<u64, ReplicationError> {
         let partition = write.partition;
 
-        let state = self
-            .replicas
-            .get_mut(&partition.get())
-            .ok_or(ReplicationError::NotPrimary)?;
+        let (sequence, epoch) = {
+            let state = self
+                .replicas
+                .get_mut(&partition.get())
+                .ok_or(ReplicationError::NotPrimary)?;
 
-        if state.role() != ReplicaRole::Primary {
-            return Err(ReplicationError::NotPrimary);
-        }
+            if state.role() != ReplicaRole::Primary {
+                return Err(ReplicationError::NotPrimary);
+            }
 
-        let sequence = state.advance_sequence();
+            (state.advance_sequence(), state.epoch())
+        };
 
         let write_msg = ReplicationWrite::new(
             partition,
             write.operation,
-            state.epoch(),
+            epoch,
             sequence,
             write.entity,
             write.id,
@@ -481,7 +511,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.write_log.append(partition, sequence, write_msg.clone());
         let _ = self.stores.apply_write(&write_msg);
 
-        let tracker = QuorumTracker::new(sequence, state.epoch(), replicas, required_acks);
+        let tracker = QuorumTracker::new(sequence, epoch, replicas, required_acks);
 
         if !self.pending.add(tracker) {
             return Err(ReplicationError::TooManyPending);
@@ -808,6 +838,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 if ack.is_ok() {
                     if let Err(e) = self.stores.apply_write(write) {
                         tracing::error!(?partition, ?e, "failed to apply catchup write to stores");
+                    } else {
+                        self.sync_retained_to_broker(write);
                     }
                     self.write_log
                         .append(partition, write.sequence, write.clone());
@@ -1123,6 +1155,178 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect();
 
         BatchReadResponse::new(request.request_id, request.partition, results)
+    }
+
+    #[must_use]
+    pub fn query_local_retained_exact(&self, topic: &str) -> Option<RetainedMessage> {
+        self.stores.retained.get(topic)
+    }
+
+    #[must_use]
+    pub fn query_local_retained_pattern(&self, pattern: &str) -> Vec<RetainedMessage> {
+        self.stores.retained.query_matching_pattern(pattern)
+    }
+
+    pub fn start_retained_query(
+        &mut self,
+        topic_filter: &str,
+        timeout_ms: u32,
+        now: u64,
+    ) -> (u64, Vec<(PartitionId, QueryRequest)>) {
+        let is_wildcard = topic_filter.contains('+') || topic_filter.contains('#');
+
+        let partitions = if is_wildcard {
+            QueryCoordinator::all_partitions()
+        } else {
+            vec![super::topic_partition(topic_filter)]
+        };
+
+        let filter = if is_wildcard {
+            None
+        } else {
+            Some(format!("topic={topic_filter}"))
+        };
+
+        let (query_id, requests) = self.query_coordinator.start_query(
+            "retained",
+            filter.as_deref(),
+            1000,
+            None,
+            Some(timeout_ms),
+            partitions.clone(),
+            now,
+        );
+
+        let requests_with_partitions: Vec<_> = partitions
+            .into_iter()
+            .zip(requests)
+            .collect();
+
+        (query_id, requests_with_partitions)
+    }
+
+    pub fn send_retained_query(
+        &self,
+        partition: PartitionId,
+        request: QueryRequest,
+    ) {
+        if let Some(primary) = self.partition_map.primary(partition) {
+            if primary == self.node_id {
+                return;
+            }
+            let msg = ClusterMessage::QueryRequest { partition, request };
+            let _ = self.transport.send(primary, msg);
+        }
+    }
+
+    #[must_use]
+    pub fn is_partition_primary(&self, partition: PartitionId) -> bool {
+        self.partition_map.primary(partition) == Some(self.node_id)
+    }
+
+    #[must_use]
+    pub fn check_query_complete(&mut self, query_id: u64) -> bool {
+        !self.query_coordinator.has_pending(query_id)
+    }
+
+    pub fn check_query_timeouts(&mut self, now: u64) -> Vec<super::query_coordinator::QueryResult> {
+        self.query_coordinator.check_timeouts(now)
+    }
+
+    pub fn start_async_retained_query(
+        &mut self,
+        topic: &str,
+    ) -> Option<oneshot::Receiver<Vec<RetainedMessage>>> {
+        let partition = super::topic_partition(topic);
+        let primary = self.partition_map.primary(partition)?;
+
+        if primary == self.node_id {
+            return None;
+        }
+
+        let query_id = self.current_time;
+        let request = QueryRequest::new(
+            query_id,
+            5000,
+            entity::RETAINED.to_string(),
+            Some(format!("topic={topic}")),
+            10,
+            None,
+        );
+
+        let (tx, rx) = oneshot::channel();
+        self.pending_retained_queries.insert(query_id, tx);
+
+        let msg = ClusterMessage::QueryRequest { partition, request };
+        if self.transport.send(primary, msg).is_err() {
+            self.pending_retained_queries.remove(&query_id);
+            return None;
+        }
+
+        tracing::debug!(
+            topic,
+            ?partition,
+            ?primary,
+            query_id,
+            "started async retained query"
+        );
+
+        Some(rx)
+    }
+
+    pub fn complete_retained_query(&mut self, query_id: u64, results: Vec<RetainedMessage>) {
+        if let Some(sender) = self.pending_retained_queries.remove(&query_id) {
+            let _ = sender.send(results);
+        }
+    }
+
+    fn parse_retained_query_response(response: &QueryResponse) -> Vec<RetainedMessage> {
+        if !response.status.is_ok() || response.results.is_empty() {
+            return Vec::new();
+        }
+
+        let mut messages = Vec::new();
+        let mut offset = 0;
+        while offset < response.results.len() {
+            match RetainedMessage::try_from_be_bytes(&response.results[offset..]) {
+                Ok((msg, consumed)) => {
+                    messages.push(msg);
+                    offset += consumed;
+                }
+                Err(_) => break,
+            }
+        }
+        messages
+    }
+
+    pub fn sync_retained_to_broker(&self, write: &ReplicationWrite) {
+        if write.entity != entity::RETAINED {
+            return;
+        }
+
+        if write.operation == Operation::Delete {
+            let topic = write.id.clone();
+            tracing::debug!(topic, "clearing retained message from local broker");
+            self.transport.queue_local_publish_retained(topic, Vec::new(), 0);
+            return;
+        }
+
+        if let Ok((msg, _)) = RetainedMessage::try_from_be_bytes(&write.data) {
+            let topic = msg.topic_str().to_string();
+            let payload = msg.payload.clone();
+            let qos = msg.qos;
+
+            if let Some(ref synced_topics) = self.synced_retained_topics {
+                let synced = synced_topics.clone();
+                let topic_clone = topic.clone();
+                tokio::spawn(async move {
+                    synced.write().await.insert(topic_clone);
+                });
+            }
+
+            tracing::debug!(topic, qos, payload_len = payload.len(), "syncing retained message to local broker");
+            self.transport.queue_local_publish_retained(topic, payload, qos);
+        }
     }
 }
 

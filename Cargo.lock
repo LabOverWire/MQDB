@@ -138,9 +138,9 @@ checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
 name = "bebytes"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b7ed36f4aa56da3ca71dc6bfa527b47d35a844d330b07a0ea814a36cd89d457"
+checksum = "801a1451dde19a5265545b0b11b28df6ea8a180f0ee2d4a178df6ac62d8bf185"
 dependencies = [
  "bebytes_derive",
  "bytes",
@@ -148,9 +148,9 @@ dependencies = [
 
 [[package]]
 name = "bebytes_derive"
-version = "3.0.0"
+version = "3.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7dc45e9c143ee51401818c13b1ab001d015d80a4c464757e2e76b1f22d789f9"
+checksum = "f938e01c37898c26cac8d2117d8c74eb444e9bc8f6fe315587b8d1ead6311b44"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1241,9 +1241,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.16.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bee08ad19fc95faa91070b92b06ce66284b94909d4724d22ddb3b157a1d041a"
+checksum = "4f21a618d3f04c6fe9ef8735fea064eed6a23f313635769284fb354052fdcf28"
 dependencies = [
  "argon2",
  "base64",
