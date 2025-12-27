@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 const TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_PER_PARTITION: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes, Default)]
 #[repr(u8)]
@@ -113,6 +114,7 @@ impl IdempotencyRecord {
 pub enum IdempotencyError {
     AlreadyProcessing,
     ParameterMismatch,
+    PartitionFull,
     SerializationError,
 }
 
@@ -121,6 +123,7 @@ impl std::fmt::Display for IdempotencyError {
         match self {
             Self::AlreadyProcessing => write!(f, "write with this idempotency key is already processing"),
             Self::ParameterMismatch => write!(f, "idempotency key was used with different entity/id"),
+            Self::PartitionFull => write!(f, "partition has reached maximum idempotency records"),
             Self::SerializationError => write!(f, "serialization error"),
         }
     }
@@ -159,7 +162,7 @@ impl IdempotencyStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `AlreadyProcessing` or `ParameterMismatch` if the idempotency key exists.
+    /// Returns `AlreadyProcessing`, `ParameterMismatch`, or `PartitionFull`.
     pub fn check_or_insert_processing(
         &self,
         idempotency_key: &str,
@@ -185,6 +188,14 @@ impl IdempotencyStore {
                     return Err(IdempotencyError::AlreadyProcessing);
                 }
             }
+        }
+
+        let partition_count = records
+            .keys()
+            .filter(|(p, _)| *p == partition.get())
+            .count();
+        if partition_count >= MAX_PER_PARTITION {
+            return Err(IdempotencyError::PartitionFull);
         }
 
         let record = IdempotencyRecord::processing(

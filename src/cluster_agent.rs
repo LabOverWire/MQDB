@@ -238,6 +238,7 @@ impl ClusteredAgent {
         let mut partitions_initialized = false;
 
         let mut tick_interval = interval(Duration::from_millis(100));
+        let mut cleanup_interval = interval(Duration::from_secs(3600));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         loop {
@@ -346,6 +347,14 @@ impl ClusteredAgent {
                             }
                         }
                         ctrl.update_partition_map(raft_partition_map);
+                    }
+                }
+                _ = cleanup_interval.tick() => {
+                    let now = current_time_ms();
+                    let ctrl = self.controller.read().await;
+                    let expired = ctrl.stores().idempotency.cleanup_expired(now);
+                    if expired > 0 {
+                        info!(expired, "cleaned up expired idempotency records");
                     }
                 }
                 _ = shutdown_rx.recv() => {
