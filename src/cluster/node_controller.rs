@@ -1,6 +1,10 @@
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::migration::{MigrationManager, MigrationPhase};
-use super::protocol::{CatchupResponse, ForwardedPublish, ReplicationAck, ReplicationWrite};
+use super::protocol::{
+    BatchReadRequest, BatchReadResponse, CatchupResponse, ForwardedPublish, QueryRequest,
+    QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
+};
+use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
 use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
 use super::replication::{ReplicaRole, ReplicaState};
@@ -40,6 +44,7 @@ pub struct NodeController<T: ClusterTransport> {
     pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     draining: bool,
+    query_coordinator: QueryCoordinator,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -62,6 +67,7 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_snapshots: HashMap::new(),
             outgoing_snapshots: HashMap::new(),
             draining: false,
+            query_coordinator: QueryCoordinator::new(node_id),
         }
     }
 
@@ -249,6 +255,29 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::SnapshotComplete(ref complete) => {
                 self.handle_snapshot_complete(msg.from, complete);
             }
+            ClusterMessage::QueryRequest {
+                partition,
+                ref request,
+            } => {
+                let response = self.handle_query_request(partition, request);
+                let response_msg = ClusterMessage::QueryResponse(response);
+                let _ = self.transport.send(msg.from, response_msg);
+            }
+            ClusterMessage::QueryResponse(ref response) => {
+                if let Some(result) = self.query_coordinator.receive_response(response.clone()) {
+                    tracing::debug!(
+                        query_id = result.query_id,
+                        partial = result.partial,
+                        "query completed"
+                    );
+                }
+            }
+            ClusterMessage::BatchReadRequest(ref request) => {
+                let response = self.handle_batch_read_request(request);
+                let response_msg = ClusterMessage::BatchReadResponse(response);
+                let _ = self.transport.send(msg.from, response_msg);
+            }
+            ClusterMessage::BatchReadResponse(_) => {}
         }
     }
 
@@ -1052,6 +1081,48 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn active_migrations_count(&self) -> usize {
         self.migration_manager.migration_count()
+    }
+
+    #[must_use]
+    pub fn query_coordinator(&self) -> &QueryCoordinator {
+        &self.query_coordinator
+    }
+
+    pub fn query_coordinator_mut(&mut self) -> &mut QueryCoordinator {
+        &mut self.query_coordinator
+    }
+
+    pub fn handle_query_request(&self, partition: PartitionId, request: &QueryRequest) -> QueryResponse {
+        if self.partition_map.primary(partition) != Some(self.node_id) {
+            return QueryResponse::error(request.query_id, partition, QueryStatus::NotPrimary);
+        }
+
+        let results = self.stores.query_entity(
+            &request.entity,
+            request.filter.as_deref(),
+            request.limit,
+            request.cursor.as_deref(),
+        );
+
+        match results {
+            Ok((data, has_more, cursor)) => {
+                QueryResponse::ok(request.query_id, partition, data, has_more, cursor)
+            }
+            Err(_) => QueryResponse::error(request.query_id, partition, QueryStatus::Error),
+        }
+    }
+
+    pub fn handle_batch_read_request(&self, request: &BatchReadRequest) -> BatchReadResponse {
+        let results = request
+            .ids
+            .iter()
+            .map(|id| {
+                let data = self.stores.get_entity(&request.entity, id);
+                (id.clone(), data)
+            })
+            .collect();
+
+        BatchReadResponse::new(request.request_id, request.partition, results)
     }
 }
 

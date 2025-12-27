@@ -1,5 +1,6 @@
 use super::protocol::{
-    CatchupRequest, CatchupResponse, ForwardedPublish, Heartbeat, ReplicationAck, ReplicationWrite,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
+    Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -174,6 +175,7 @@ impl MqttTransport {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn parse_message(payload: &[u8], local_node: NodeId) -> Option<InboundMessage> {
         if payload.len() < 3 {
             return None;
@@ -254,6 +256,27 @@ impl MqttTransport {
                 let (complete, _) = SnapshotComplete::try_from_be_bytes(data).ok()?;
                 ClusterMessage::SnapshotComplete(complete)
             }
+            50 => {
+                if data.len() < 2 {
+                    return None;
+                }
+                let partition_id = u16::from_be_bytes([data[0], data[1]]);
+                let partition = PartitionId::new(partition_id)?;
+                let request = QueryRequest::from_bytes(&data[2..])?;
+                ClusterMessage::QueryRequest { partition, request }
+            }
+            51 => {
+                let response = QueryResponse::from_bytes(data)?;
+                ClusterMessage::QueryResponse(response)
+            }
+            52 => {
+                let request = BatchReadRequest::from_bytes(data)?;
+                ClusterMessage::BatchReadRequest(request)
+            }
+            53 => {
+                let response = BatchReadResponse::from_bytes(data)?;
+                ClusterMessage::BatchReadResponse(response)
+            }
             _ => return None,
         };
 
@@ -322,6 +345,19 @@ impl MqttTransport {
             }
             ClusterMessage::SnapshotComplete(complete) => {
                 buf.extend_from_slice(&complete.to_be_bytes());
+            }
+            ClusterMessage::QueryRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::QueryResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::BatchReadRequest(request) => {
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::BatchReadResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
             }
         }
 
@@ -590,6 +626,19 @@ mod tests {
             }
             ClusterMessage::SnapshotComplete(complete) => {
                 buf.extend_from_slice(&complete.to_be_bytes());
+            }
+            ClusterMessage::QueryRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::QueryResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::BatchReadRequest(request) => {
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::BatchReadResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
             }
         }
 

@@ -1,3 +1,5 @@
+use bebytes::BeBytes;
+
 use super::SubscriptionType;
 use super::entity;
 use super::inflight_store::{InflightMessage, InflightStore, InflightStoreError};
@@ -665,6 +667,85 @@ impl StoreManager {
         total_cleared += self.inflight.clear_partition(partition);
         total_cleared += self.offsets.clear_partition(partition);
         total_cleared
+    }
+
+    /// # Errors
+    /// Returns an error if the entity type is unknown.
+    #[allow(clippy::type_complexity)]
+    pub fn query_entity(
+        &self,
+        entity: &str,
+        filter: Option<&str>,
+        limit: u32,
+        cursor: Option<&[u8]>,
+    ) -> Result<(Vec<u8>, bool, Option<Vec<u8>>), StoreApplyError> {
+        match entity {
+            entity::SESSIONS => {
+                let (sessions, has_more, next_cursor) = self.sessions.query(filter, limit, cursor);
+                let data = sessions
+                    .into_iter()
+                    .flat_map(|s| s.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::RETAINED => {
+                let (messages, has_more, next_cursor) = self.retained.query(filter, limit, cursor);
+                let data = messages
+                    .into_iter()
+                    .flat_map(|m| m.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::SUBSCRIPTIONS => {
+                let (subs, has_more, next_cursor) = self.subscriptions.query(filter, limit, cursor);
+                let data = subs.into_iter().flat_map(|s| s.to_be_bytes()).collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::TOPIC_INDEX => {
+                let (entries, has_more, next_cursor) = self.topics.query(filter, limit, cursor);
+                let data = entries
+                    .into_iter()
+                    .flat_map(|e| e.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::WILDCARDS => {
+                let (entries, has_more, next_cursor) = self.wildcards.query(filter, limit, cursor);
+                let data = entries
+                    .into_iter()
+                    .flat_map(|e| e.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::INFLIGHT => {
+                let (messages, has_more, next_cursor) = self.inflight.query(filter, limit, cursor);
+                let data = messages
+                    .into_iter()
+                    .flat_map(|m| m.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            entity::OFFSETS => {
+                let (offsets, has_more, next_cursor) = self.offsets.query(filter, limit, cursor);
+                let data = offsets
+                    .into_iter()
+                    .flat_map(|o| o.to_be_bytes())
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            _ => Err(StoreApplyError::UnknownEntity),
+        }
+    }
+
+    #[must_use]
+    pub fn get_entity(&self, entity: &str, id: &str) -> Option<Vec<u8>> {
+        match entity {
+            entity::SESSIONS => self.sessions.get(id).map(|s| s.to_be_bytes()),
+            entity::RETAINED => self.retained.get(id).map(|m| m.to_be_bytes()),
+            entity::SUBSCRIPTIONS => self.subscriptions.get_snapshot(id).map(|s| s.to_be_bytes()),
+            entity::TOPIC_INDEX => self.topics.get_entry(id).map(|e| e.to_be_bytes()),
+            _ => None,
+        }
     }
 }
 

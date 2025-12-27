@@ -2,9 +2,10 @@ use mqdb::cluster::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use mqdb::cluster::{
-    CatchupRequest, CatchupResponse, ClusterMessage, ClusterTransport, Epoch, ForwardedPublish,
-    Heartbeat, InboundMessage, NodeId, PartitionId, ReplicationAck, ReplicationWrite,
-    SnapshotChunk, SnapshotComplete, SnapshotRequest, TransportError,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
+    ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, NodeId, PartitionId,
+    QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete,
+    SnapshotRequest, TransportError,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -100,6 +101,19 @@ impl SimulatedTransport {
             ClusterMessage::SnapshotComplete(complete) => {
                 buf.extend_from_slice(&complete.to_be_bytes());
             }
+            ClusterMessage::QueryRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::QueryResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::BatchReadRequest(request) => {
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::BatchReadResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
+            }
         }
 
         buf
@@ -177,6 +191,27 @@ impl SimulatedTransport {
             42 => {
                 let (complete, _) = SnapshotComplete::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::SnapshotComplete(complete))
+            }
+            50 => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let partition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                let partition = PartitionId::new(partition_id)?;
+                let request = QueryRequest::from_bytes(&payload[2..])?;
+                Some(ClusterMessage::QueryRequest { partition, request })
+            }
+            51 => {
+                let response = QueryResponse::from_bytes(payload)?;
+                Some(ClusterMessage::QueryResponse(response))
+            }
+            52 => {
+                let request = BatchReadRequest::from_bytes(payload)?;
+                Some(ClusterMessage::BatchReadRequest(request))
+            }
+            53 => {
+                let response = BatchReadResponse::from_bytes(payload)?;
+                Some(ClusterMessage::BatchReadResponse(response))
             }
             _ => None,
         }
@@ -346,5 +381,165 @@ mod tests {
         assert!(t2.recv().is_some());
         assert!(t3.recv().is_some());
         assert!(t1.recv().is_none());
+    }
+
+    #[test]
+    fn send_and_receive_query_request() {
+        let clock = VirtualClock::new();
+        let network = VirtualNetwork::new(clock.clone());
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let t1 = SimulatedTransport::new(node1, network.clone(), clock.clone());
+        let t2 = SimulatedTransport::new(node2, network.clone(), clock.clone());
+
+        t1.register_peer(node2);
+
+        let partition = PartitionId::new(5).unwrap();
+        let request = QueryRequest::new(
+            12345,
+            5000,
+            "users".to_string(),
+            Some("age > 30".to_string()),
+            100,
+            Some(b"cursor".to_vec()),
+        );
+
+        t1.send(node2, ClusterMessage::QueryRequest { partition, request })
+            .unwrap();
+        clock.advance(Duration::from_millis(1));
+
+        let msg = t2.recv().unwrap();
+        assert_eq!(msg.from, node1);
+        match msg.message {
+            ClusterMessage::QueryRequest {
+                partition: p,
+                request: r,
+            } => {
+                assert_eq!(p, PartitionId::new(5).unwrap());
+                assert_eq!(r.query_id, 12345);
+                assert_eq!(r.timeout_ms, 5000);
+                assert_eq!(r.entity, "users");
+                assert_eq!(r.filter, Some("age > 30".to_string()));
+                assert_eq!(r.limit, 100);
+                assert_eq!(r.cursor, Some(b"cursor".to_vec()));
+            }
+            _ => panic!("expected query request"),
+        }
+    }
+
+    #[test]
+    fn send_and_receive_query_response() {
+        let clock = VirtualClock::new();
+        let network = VirtualNetwork::new(clock.clone());
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let t1 = SimulatedTransport::new(node1, network.clone(), clock.clone());
+        let t2 = SimulatedTransport::new(node2, network.clone(), clock.clone());
+
+        t1.register_peer(node2);
+
+        let partition = PartitionId::new(10).unwrap();
+        let response = QueryResponse::ok(
+            999,
+            partition,
+            b"result-data".to_vec(),
+            true,
+            Some(b"next-cursor".to_vec()),
+        );
+
+        t1.send(node2, ClusterMessage::QueryResponse(response))
+            .unwrap();
+        clock.advance(Duration::from_millis(1));
+
+        let msg = t2.recv().unwrap();
+        match msg.message {
+            ClusterMessage::QueryResponse(r) => {
+                assert_eq!(r.query_id, 999);
+                assert_eq!(r.partition, partition);
+                assert!(r.status.is_ok());
+                assert_eq!(r.results, b"result-data");
+                assert!(r.has_more);
+                assert_eq!(r.cursor, Some(b"next-cursor".to_vec()));
+            }
+            _ => panic!("expected query response"),
+        }
+    }
+
+    #[test]
+    fn send_and_receive_batch_read_request() {
+        let clock = VirtualClock::new();
+        let network = VirtualNetwork::new(clock.clone());
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let t1 = SimulatedTransport::new(node1, network.clone(), clock.clone());
+        let t2 = SimulatedTransport::new(node2, network.clone(), clock.clone());
+
+        t1.register_peer(node2);
+
+        let partition = PartitionId::new(7).unwrap();
+        let request = BatchReadRequest::new(
+            555,
+            partition,
+            "sessions".to_string(),
+            vec!["id1".to_string(), "id2".to_string()],
+        );
+
+        t1.send(node2, ClusterMessage::BatchReadRequest(request))
+            .unwrap();
+        clock.advance(Duration::from_millis(1));
+
+        let msg = t2.recv().unwrap();
+        match msg.message {
+            ClusterMessage::BatchReadRequest(r) => {
+                assert_eq!(r.request_id, 555);
+                assert_eq!(r.partition, partition);
+                assert_eq!(r.entity, "sessions");
+                assert_eq!(r.ids, vec!["id1", "id2"]);
+            }
+            _ => panic!("expected batch read request"),
+        }
+    }
+
+    #[test]
+    fn send_and_receive_batch_read_response() {
+        let clock = VirtualClock::new();
+        let network = VirtualNetwork::new(clock.clone());
+
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let t1 = SimulatedTransport::new(node1, network.clone(), clock.clone());
+        let t2 = SimulatedTransport::new(node2, network.clone(), clock.clone());
+
+        t1.register_peer(node2);
+
+        let partition = PartitionId::new(15).unwrap();
+        let results = vec![
+            ("id1".to_string(), Some(b"data1".to_vec())),
+            ("id2".to_string(), None),
+        ];
+        let response = BatchReadResponse::new(777, partition, results);
+
+        t1.send(node2, ClusterMessage::BatchReadResponse(response))
+            .unwrap();
+        clock.advance(Duration::from_millis(1));
+
+        let msg = t2.recv().unwrap();
+        match msg.message {
+            ClusterMessage::BatchReadResponse(r) => {
+                assert_eq!(r.request_id, 777);
+                assert_eq!(r.partition, partition);
+                assert_eq!(r.results.len(), 2);
+                assert_eq!(r.results[0], ("id1".to_string(), Some(b"data1".to_vec())));
+                assert_eq!(r.results[1], ("id2".to_string(), None));
+            }
+            _ => panic!("expected batch read response"),
+        }
     }
 }

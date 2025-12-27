@@ -1,5 +1,6 @@
 use super::protocol::{
-    CatchupRequest, CatchupResponse, ForwardedPublish, Heartbeat, ReplicationAck, ReplicationWrite,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
+    Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -25,6 +26,10 @@ pub enum ClusterMessage {
     SnapshotRequest(SnapshotRequest),
     SnapshotChunk(SnapshotChunk),
     SnapshotComplete(SnapshotComplete),
+    QueryRequest { partition: PartitionId, request: QueryRequest },
+    QueryResponse(QueryResponse),
+    BatchReadRequest(BatchReadRequest),
+    BatchReadResponse(BatchReadResponse),
 }
 
 impl ClusterMessage {
@@ -46,6 +51,10 @@ impl ClusterMessage {
             Self::SnapshotRequest(_) => 40,
             Self::SnapshotChunk(_) => 41,
             Self::SnapshotComplete(_) => 42,
+            Self::QueryRequest { .. } => 50,
+            Self::QueryResponse(_) => 51,
+            Self::BatchReadRequest(_) => 52,
+            Self::BatchReadResponse(_) => 53,
         }
     }
 }

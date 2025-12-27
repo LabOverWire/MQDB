@@ -344,6 +344,44 @@ impl OffsetStore {
         offsets.retain(|(cid, _), _| session_partition(cid) != partition);
         before - offsets.len()
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn query(
+        &self,
+        _filter: Option<&str>,
+        limit: u32,
+        cursor: Option<&[u8]>,
+    ) -> (Vec<ConsumerOffset>, bool, Option<Vec<u8>>) {
+        let offsets = self.offsets.read().unwrap();
+        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+
+        let mut results: Vec<_> = offsets
+            .iter()
+            .filter(|((cid, topic), _)| {
+                let key = format!("{cid}:{topic}");
+                start_key.is_none_or(|sk| key.as_str() > sk)
+            })
+            .take(limit as usize + 1)
+            .collect();
+
+        results.sort_by_key(|((cid, topic), _)| format!("{cid}:{topic}"));
+        let has_more = results.len() > limit as usize;
+        if has_more {
+            results.pop();
+        }
+
+        let next_cursor = if has_more {
+            results.last().map(|((cid, topic), _)| format!("{cid}:{topic}").into_bytes())
+        } else {
+            None
+        };
+
+        let data = results.into_iter().map(|(_, v)| v.clone()).collect();
+        (data, has_more, next_cursor)
+    }
 }
 
 impl std::fmt::Debug for OffsetStore {

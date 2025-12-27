@@ -510,6 +510,44 @@ impl InflightStore {
         messages.retain(|(cid, _), _| session_partition(cid) != partition);
         before - messages.len()
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn query(
+        &self,
+        _filter: Option<&str>,
+        limit: u32,
+        cursor: Option<&[u8]>,
+    ) -> (Vec<InflightMessage>, bool, Option<Vec<u8>>) {
+        let messages = self.messages.read().unwrap();
+        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+
+        let mut results: Vec<_> = messages
+            .iter()
+            .filter(|((cid, pid), _)| {
+                let key = format!("{cid}:{pid}");
+                start_key.is_none_or(|sk| key.as_str() > sk)
+            })
+            .take(limit as usize + 1)
+            .collect();
+
+        results.sort_by_key(|((cid, pid), _)| format!("{cid}:{pid}"));
+        let has_more = results.len() > limit as usize;
+        if has_more {
+            results.pop();
+        }
+
+        let next_cursor = if has_more {
+            results.last().map(|((cid, pid), _)| format!("{cid}:{pid}").into_bytes())
+        } else {
+            None
+        };
+
+        let data = results.into_iter().map(|(_, v)| v.clone()).collect();
+        (data, has_more, next_cursor)
+    }
 }
 
 impl std::fmt::Debug for InflightStore {

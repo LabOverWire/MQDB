@@ -421,6 +421,41 @@ impl SubscriptionCache {
         snapshots.retain(|cid, _| session_partition(cid) != partition);
         before - snapshots.len()
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn query(
+        &self,
+        _filter: Option<&str>,
+        limit: u32,
+        cursor: Option<&[u8]>,
+    ) -> (Vec<MqttSubscriptionSnapshot>, bool, Option<Vec<u8>>) {
+        let snapshots = self.snapshots.read().unwrap();
+        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+
+        let mut results: Vec<_> = snapshots
+            .iter()
+            .filter(|(key, _)| start_key.is_none_or(|sk| key.as_str() > sk))
+            .take(limit as usize + 1)
+            .collect();
+
+        results.sort_by_key(|(k, _)| k.as_str());
+        let has_more = results.len() > limit as usize;
+        if has_more {
+            results.pop();
+        }
+
+        let next_cursor = if has_more {
+            results.last().map(|(k, _)| k.as_bytes().to_vec())
+        } else {
+            None
+        };
+
+        let data = results.into_iter().map(|(_, v)| v.clone()).collect();
+        (data, has_more, next_cursor)
+    }
 }
 
 impl std::fmt::Debug for SubscriptionCache {

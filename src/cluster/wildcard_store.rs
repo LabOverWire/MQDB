@@ -48,6 +48,26 @@ impl WildcardEntry {
     }
 
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn from_subscriber(pattern: &str, sub: &WildcardSubscriber) -> Self {
+        let pattern_bytes = pattern.as_bytes().to_vec();
+        let client_bytes = sub.client_id.as_bytes().to_vec();
+        Self {
+            version: 1,
+            pattern_len: pattern_bytes.len() as u16,
+            pattern: pattern_bytes,
+            client_id_len: client_bytes.len() as u8,
+            client_id: client_bytes,
+            client_partition: sub.client_partition.get(),
+            qos: sub.qos,
+            subscription_type: match sub.subscription_type {
+                SubscriptionType::Mqtt => 0,
+                SubscriptionType::Db => 1,
+            },
+        }
+    }
+
+    #[must_use]
     pub fn pattern_str(&self) -> &str {
         std::str::from_utf8(&self.pattern).unwrap_or("")
     }
@@ -432,6 +452,45 @@ impl WildcardStore {
     /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
         self.trie.write().unwrap().clear_for_partition(partition)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn query(
+        &self,
+        _filter: Option<&str>,
+        limit: u32,
+        cursor: Option<&[u8]>,
+    ) -> (Vec<WildcardEntry>, bool, Option<Vec<u8>>) {
+        let trie = self.trie.read().unwrap();
+        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+
+        let mut results: Vec<_> = trie
+            .all_subscriptions()
+            .into_iter()
+            .filter(|(pattern, _)| start_key.is_none_or(|sk| pattern.as_str() > sk))
+            .take(limit as usize + 1)
+            .collect();
+
+        results.sort_by_key(|(k, _)| k.clone());
+        let has_more = results.len() > limit as usize;
+        if has_more {
+            results.pop();
+        }
+
+        let next_cursor = if has_more {
+            results.last().map(|(k, _)| k.as_bytes().to_vec())
+        } else {
+            None
+        };
+
+        let data = results
+            .into_iter()
+            .map(|(pattern, sub)| WildcardEntry::from_subscriber(&pattern, sub))
+            .collect();
+        (data, has_more, next_cursor)
     }
 }
 

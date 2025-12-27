@@ -1,3 +1,4 @@
+mod cursor;
 pub mod entity;
 mod epoch;
 #[cfg(feature = "native")]
@@ -15,6 +16,7 @@ mod partition;
 mod partition_map;
 mod protocol;
 mod publish_router;
+mod query_coordinator;
 mod qos2_store;
 mod quorum;
 pub mod raft;
@@ -50,11 +52,14 @@ pub use node_controller::{NodeController, RaftMessage};
 pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key};
 pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};
+pub use cursor::{PartitionCursor, ScatterCursor};
 pub use protocol::{
-    AckStatus, CatchupRequest, CatchupResponse, ForwardTarget, ForwardedPublish, Heartbeat,
-    MessageType, Operation, ReplicationAck, ReplicationWrite,
+    AckStatus, BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardTarget,
+    ForwardedPublish, Heartbeat, MessageType, Operation, QueryRequest, QueryResponse, QueryStatus,
+    ReplicationAck, ReplicationWrite,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};
+pub use query_coordinator::{QueryCoordinator, QueryResult};
 pub use qos2_store::{
     Qos2Direction, Qos2Phase, Qos2State, Qos2Store, Qos2StoreError, qos2_state_key,
 };
