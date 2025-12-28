@@ -156,6 +156,22 @@ impl SessionData {
     pub fn lwt_in_progress(&self) -> bool {
         self.has_will != 0 && self.lwt_published == 0 && self.lwt_token_present != 0
     }
+
+    #[must_use]
+    pub fn is_expired(&self, now: u64) -> bool {
+        if self.is_connected() {
+            return false;
+        }
+        if self.session_expiry_interval == 0 {
+            return false;
+        }
+        let expiry_ms = u64::from(self.session_expiry_interval) * 1000;
+        now.saturating_sub(self.last_seen) > expiry_ms
+    }
+
+    pub fn set_session_expiry_interval(&mut self, interval_secs: u32) {
+        self.session_expiry_interval = interval_secs;
+    }
 }
 
 /// # Panics
@@ -531,6 +547,37 @@ impl SessionStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
+    pub fn expired_sessions(&self, now: u64) -> Vec<SessionData> {
+        self.sessions
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.is_expired(now))
+            .cloned()
+            .collect()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_expired_sessions(&self, now: u64) -> Vec<SessionData> {
+        let mut sessions = self.sessions.write().unwrap();
+        let mut expired = Vec::new();
+
+        sessions.retain(|_, session| {
+            if session.is_expired(now) {
+                expired.push(session.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        expired
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
@@ -701,5 +748,88 @@ mod tests {
         let partition = session_partition("client0");
         let on_partition = store.sessions_on_partition(partition);
         assert!(!on_partition.is_empty());
+    }
+
+    #[test]
+    fn session_is_expired_connected_never_expires() {
+        let mut session = SessionData::create("client1", node(1));
+        session.session_expiry_interval = 60;
+        session.last_seen = 0;
+        assert!(!session.is_expired(1_000_000));
+    }
+
+    #[test]
+    fn session_is_expired_zero_interval_never_expires() {
+        let mut session = SessionData::create("client1", node(1));
+        session.connected = 0;
+        session.session_expiry_interval = 0;
+        session.last_seen = 0;
+        assert!(!session.is_expired(1_000_000));
+    }
+
+    #[test]
+    fn session_is_expired_within_interval_not_expired() {
+        let mut session = SessionData::create("client1", node(1));
+        session.connected = 0;
+        session.session_expiry_interval = 60;
+        session.last_seen = 1000;
+        assert!(!session.is_expired(30_000));
+    }
+
+    #[test]
+    fn session_is_expired_beyond_interval_expires() {
+        let mut session = SessionData::create("client1", node(1));
+        session.connected = 0;
+        session.session_expiry_interval = 60;
+        session.last_seen = 1000;
+        assert!(session.is_expired(100_000));
+    }
+
+    #[test]
+    fn cleanup_expired_sessions_removes_expired() {
+        let store = SessionStore::new(node(1));
+        store.create_session("client1").unwrap();
+        store.create_session("client2").unwrap();
+        store.create_session("client3").unwrap();
+
+        store
+            .update("client1", |s| {
+                s.set_connected(false, node(1), 1000);
+                s.set_session_expiry_interval(60);
+            })
+            .unwrap();
+
+        store
+            .update("client2", |s| {
+                s.set_connected(false, node(1), 50_000);
+                s.set_session_expiry_interval(60);
+            })
+            .unwrap();
+
+        let expired = store.cleanup_expired_sessions(100_000);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].client_id_str(), "client1");
+
+        assert!(store.get("client1").is_none());
+        assert!(store.get("client2").is_some());
+        assert!(store.get("client3").is_some());
+    }
+
+    #[test]
+    fn expired_sessions_returns_list_without_removing() {
+        let store = SessionStore::new(node(1));
+        store.create_session("client1").unwrap();
+
+        store
+            .update("client1", |s| {
+                s.set_connected(false, node(1), 1000);
+                s.set_session_expiry_interval(60);
+            })
+            .unwrap();
+
+        let expired = store.expired_sessions(100_000);
+        assert_eq!(expired.len(), 1);
+
+        assert!(store.get("client1").is_some());
     }
 }

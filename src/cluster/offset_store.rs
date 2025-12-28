@@ -44,6 +44,11 @@ impl ConsumerOffset {
     pub fn partition_id(&self) -> Option<PartitionId> {
         PartitionId::new(self.partition)
     }
+
+    #[must_use]
+    pub fn is_stale(&self, now: u64, ttl_ms: u64) -> bool {
+        now.saturating_sub(self.timestamp) > ttl_ms
+    }
 }
 
 #[must_use]
@@ -77,6 +82,8 @@ impl std::fmt::Display for OffsetStoreError {
 impl std::error::Error for OffsetStoreError {}
 
 type OffsetKey = (String, u16);
+
+pub const OFFSET_STALE_TTL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 pub struct OffsetStore {
     node_id: NodeId,
@@ -162,6 +169,21 @@ impl OffsetStore {
     #[must_use]
     pub fn count(&self) -> usize {
         self.offsets.read().unwrap().len()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_stale(&self, now: u64) -> usize {
+        self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_stale_with_ttl(&self, now: u64, ttl_ms: u64) -> usize {
+        let mut offsets = self.offsets.write().unwrap();
+        let before = offsets.len();
+        offsets.retain(|_, offset| !offset.is_stale(now, ttl_ms));
+        before - offsets.len()
     }
 
     /// # Panics
@@ -480,5 +502,35 @@ mod tests {
         assert_eq!(store.count(), 1);
         assert!(store.get("consumer1", partition(0)).is_none());
         assert!(store.get("consumer2", partition(0)).is_some());
+    }
+
+    #[test]
+    fn cleanup_stale_removes_old_offsets() {
+        let store = OffsetStore::new(node(1));
+
+        store.commit("old-consumer", partition(0), 100, 1000);
+        store.commit("recent-consumer", partition(0), 200, 5000);
+        store.commit("new-consumer", partition(0), 300, 9000);
+
+        assert_eq!(store.count(), 3);
+
+        let ttl_ms = 5000;
+        let now = 10000;
+        let removed = store.cleanup_stale_with_ttl(now, ttl_ms);
+
+        assert_eq!(removed, 1);
+        assert_eq!(store.count(), 2);
+        assert!(store.get("old-consumer", partition(0)).is_none());
+        assert!(store.get("recent-consumer", partition(0)).is_some());
+        assert!(store.get("new-consumer", partition(0)).is_some());
+    }
+
+    #[test]
+    fn is_stale_checks_timestamp() {
+        let offset = ConsumerOffset::create("consumer1", partition(0), 100, 1000);
+
+        assert!(!offset.is_stale(5000, 5000));
+        assert!(offset.is_stale(7000, 5000));
+        assert!(!offset.is_stale(6000, 5000));
     }
 }

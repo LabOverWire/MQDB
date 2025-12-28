@@ -18,7 +18,10 @@ pub struct ReplicaState {
     sequence: u64,
     pending_writes: BTreeMap<u64, ReplicationWrite>,
     max_pending_gap: u64,
+    last_catchup_request_ms: u64,
 }
+
+pub const CATCHUP_REQUEST_INTERVAL_MS: u64 = 5000;
 
 impl ReplicaState {
     #[must_use]
@@ -31,6 +34,7 @@ impl ReplicaState {
             sequence: 0,
             pending_writes: BTreeMap::new(),
             max_pending_gap: 1000,
+            last_catchup_request_ms: 0,
         }
     }
 
@@ -152,6 +156,21 @@ impl ReplicaState {
 
         let first_pending = *self.pending_writes.first_key_value()?.0;
         Some((self.sequence + 1, first_pending - 1))
+    }
+
+    #[must_use]
+    pub fn needs_catchup_request(&self, now: u64) -> bool {
+        if self.role != ReplicaRole::Replica {
+            return false;
+        }
+        if !self.has_gap() {
+            return false;
+        }
+        now.saturating_sub(self.last_catchup_request_ms) >= CATCHUP_REQUEST_INTERVAL_MS
+    }
+
+    pub fn mark_catchup_requested(&mut self, now: u64) {
+        self.last_catchup_request_ms = now;
     }
 }
 
@@ -325,5 +344,38 @@ mod tests {
 
         assert_eq!(state.role(), ReplicaRole::None);
         assert_eq!(state.pending_count(), 0);
+    }
+
+    #[test]
+    fn needs_catchup_only_when_replica_with_gap() {
+        let mut state = ReplicaState::new(partition(), node());
+
+        assert!(!state.needs_catchup_request(10_000));
+
+        state.become_primary(Epoch::new(1));
+        state.handle_write(&write(1, 5));
+        assert!(!state.needs_catchup_request(10_000));
+
+        state.step_down();
+        state.become_replica(Epoch::new(2), 0);
+        assert!(!state.needs_catchup_request(10_000));
+
+        state.handle_write(&write(2, 5));
+        assert!(state.needs_catchup_request(10_000));
+    }
+
+    #[test]
+    fn catchup_request_respects_interval() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_replica(Epoch::new(1), 0);
+        state.handle_write(&write(1, 5));
+
+        assert!(state.needs_catchup_request(10_000));
+
+        state.mark_catchup_requested(10_000);
+        assert!(!state.needs_catchup_request(10_000));
+        assert!(!state.needs_catchup_request(14_000));
+
+        assert!(state.needs_catchup_request(15_001));
     }
 }

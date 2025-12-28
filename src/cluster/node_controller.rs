@@ -4,8 +4,8 @@ use super::idempotency_store::{IdempotencyCheck, IdempotencyError};
 use super::migration::{MigrationManager, MigrationPhase};
 use super::offset_store::ConsumerOffset;
 use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupResponse, ForwardedPublish, Operation,
-    QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
+    Operation, QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
@@ -194,6 +194,44 @@ impl<T: ClusterTransport> NodeController<T> {
         let dead = self.heartbeat.check_timeouts(now);
         for node in dead {
             self.handle_node_death(node);
+        }
+
+        self.initiate_catchup_requests(now);
+    }
+
+    fn initiate_catchup_requests(&mut self, now: u64) {
+        for (&partition_id, state) in &mut self.replicas {
+            if !state.needs_catchup_request(now) {
+                continue;
+            }
+
+            let Some((from_seq, to_seq)) = state.gap_range() else {
+                continue;
+            };
+
+            let Some(partition) = PartitionId::new(partition_id) else {
+                continue;
+            };
+
+            let assignment = self.partition_map.get(partition);
+            let Some(primary) = assignment.primary else {
+                continue;
+            };
+
+            tracing::debug!(
+                ?partition,
+                from_seq,
+                to_seq,
+                ?primary,
+                "initiating catchup request as replica"
+            );
+
+            let req = CatchupRequest::create(partition, from_seq, to_seq, self.node_id);
+            let _ = self
+                .transport
+                .send(primary, ClusterMessage::CatchupRequest(req));
+
+            state.mark_catchup_requested(now);
         }
     }
 

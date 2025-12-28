@@ -32,6 +32,7 @@ mod subscription_cache;
 mod topic_index;
 mod topic_trie;
 mod transport;
+mod wildcard_pending;
 mod wildcard_store;
 mod write_log;
 
@@ -100,6 +101,9 @@ pub use topic_trie::{
 };
 pub use transport::{
     ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError,
+};
+pub use wildcard_pending::{
+    PendingWildcard, WildcardPendingStore, WILDCARD_RECONCILIATION_INTERVAL_MS,
 };
 pub use wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError, wildcard_key};
 pub use write_log::PartitionWriteLog;

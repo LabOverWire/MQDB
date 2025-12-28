@@ -13,6 +13,7 @@ use super::subscription_cache::{
     MqttSubscriptionSnapshot, SubscriptionCache, SubscriptionCacheError,
 };
 use super::topic_index::{TopicIndex, TopicIndexEntry, TopicIndexError, topic_partition};
+use super::wildcard_pending::WildcardPendingStore;
 use super::wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError};
 use super::{Epoch, NodeId, PartitionId};
 
@@ -56,6 +57,7 @@ pub struct StoreManager {
     pub retained: RetainedStore,
     pub topics: TopicIndex,
     pub wildcards: WildcardStore,
+    pub wildcard_pending: WildcardPendingStore,
     pub inflight: InflightStore,
     pub offsets: OffsetStore,
     pub idempotency: IdempotencyStore,
@@ -71,6 +73,7 @@ impl StoreManager {
             retained: RetainedStore::new(node_id),
             topics: TopicIndex::new(node_id),
             wildcards: WildcardStore::new(node_id),
+            wildcard_pending: WildcardPendingStore::new(node_id),
             inflight: InflightStore::new(node_id),
             offsets: OffsetStore::new(node_id),
             idempotency: IdempotencyStore::new(node_id),
@@ -852,6 +855,23 @@ impl StoreManager {
     pub fn cleanup_expired_idempotency(&self, now: u64) -> usize {
         self.idempotency.cleanup_expired(now)
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_expired_sessions(&self, now: u64) -> Vec<SessionData> {
+        self.sessions.cleanup_expired_sessions(now)
+    }
+
+    #[must_use]
+    pub fn expired_sessions(&self, now: u64) -> Vec<SessionData> {
+        self.sessions.expired_sessions(now)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_stale_offsets(&self, now: u64) -> usize {
+        self.offsets.cleanup_stale(now)
+    }
 }
 
 impl std::fmt::Debug for StoreManager {
@@ -863,6 +883,7 @@ impl std::fmt::Debug for StoreManager {
             .field("retained", &self.retained.message_count())
             .field("topics", &self.topics.topic_count())
             .field("wildcards", &self.wildcards.pattern_count())
+            .field("wildcard_pending", &self.wildcard_pending.count())
             .field("inflight", &self.inflight.count())
             .field("offsets", &self.offsets.count())
             .field("idempotency", &self.idempotency.count())

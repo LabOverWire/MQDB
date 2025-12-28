@@ -1,7 +1,7 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
-    ClusterEventHandler, Epoch, MqttTransport, NodeController, NodeId, PartitionId, RaftMessage,
-    TransportConfig,
+    ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, MqttTransport, NodeController,
+    NodeId, PartitionId, RaftMessage, TransportConfig,
 };
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::interval;
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
@@ -238,6 +238,7 @@ impl ClusteredAgent {
 
         let mut tick_interval = interval(Duration::from_millis(100));
         let mut cleanup_interval = interval(Duration::from_secs(3600));
+        let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         loop {
@@ -370,9 +371,47 @@ impl ClusteredAgent {
                 _ = cleanup_interval.tick() => {
                     let now = current_time_ms();
                     let ctrl = self.controller.read().await;
-                    let expired = ctrl.stores().idempotency.cleanup_expired(now);
-                    if expired > 0 {
-                        info!(expired, "cleaned up expired idempotency records");
+                    let expired_idempotency = ctrl.stores().idempotency.cleanup_expired(now);
+                    if expired_idempotency > 0 {
+                        info!(expired_idempotency, "cleaned up expired idempotency records");
+                    }
+                    let expired_sessions = ctrl.stores().cleanup_expired_sessions(now);
+                    if !expired_sessions.is_empty() {
+                        info!(count = expired_sessions.len(), "cleaned up expired sessions");
+                    }
+                    let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
+                    if stale_offsets > 0 {
+                        info!(stale_offsets, "cleaned up stale consumer offsets");
+                    }
+                }
+                _ = wildcard_reconciliation_interval.tick() => {
+                    let now = current_time_ms();
+                    let ctrl = self.controller.read().await;
+                    let pending_store = &ctrl.stores().wildcard_pending;
+                    if pending_store.needs_reconciliation(now) {
+                        let pending = pending_store.get_pending_for_retry();
+                        if !pending.is_empty() {
+                            debug!(
+                                count = pending.len(),
+                                "retrying pending wildcard broadcasts"
+                            );
+                            for p in &pending {
+                                let broadcast = p.to_broadcast();
+                                let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                                let _ = ctrl.transport().broadcast(msg);
+                                pending_store.mark_retried(&p.pattern, &p.client_id);
+                            }
+                            info!(
+                                count = pending.len(),
+                                "rebroadcast pending wildcard subscriptions"
+                            );
+                        }
+                        pending_store.mark_reconciliation(now);
+                        let max_age_ms = 5 * 60 * 1000;
+                        let removed = pending_store.clear_old_entries(now, max_age_ms);
+                        if removed > 0 {
+                            debug!(removed, "cleared old wildcard pending entries");
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => {
