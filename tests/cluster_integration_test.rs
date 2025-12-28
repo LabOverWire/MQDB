@@ -2061,3 +2061,95 @@ fn graceful_shutdown_drain() {
         "Cannot shutdown safely when not draining"
     );
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn raft_command_application_updates_partition_map() {
+    use mqdb::cluster::raft::RaftCommand;
+    use mqdb::cluster::PartitionMap;
+
+    let mut cluster = TestCluster::new(3);
+
+    let n1 = cluster.nodes[0].id;
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    let outputs = cluster.nodes[0].raft.tick(1000);
+    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
+
+    let mut vote_requests = Vec::new();
+    for output in outputs {
+        if let RaftOutput::SendRequestVote { to, request } = output {
+            vote_requests.push((to, request));
+        }
+    }
+
+    for (to, req) in &vote_requests {
+        if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
+            let (resp, _) = follower.raft.handle_request_vote(n1, *req, 1000);
+            cluster.nodes[0].raft.handle_request_vote_response(*to, resp);
+        }
+    }
+
+    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Leader);
+
+    let partition = PartitionId::new(10).unwrap();
+    let cmd = RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
+    let idx = cluster.nodes[0].raft.propose(cmd).unwrap();
+    assert_eq!(idx, 1);
+
+    let heartbeat_outputs = cluster.nodes[0].raft.tick(1100);
+    let mut append_requests = Vec::new();
+    for output in heartbeat_outputs {
+        if let RaftOutput::SendAppendEntries { to, request } = output {
+            append_requests.push((to, request));
+        }
+    }
+    assert!(!append_requests.is_empty(), "Leader should send AppendEntries");
+
+    for (to, request) in &append_requests {
+        if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
+            let (response, _outputs) = follower.raft.handle_append_entries(n1, request.clone(), 1100);
+            assert!(response.is_success(), "Follower should accept AppendEntries");
+
+            let leader_outputs = cluster.nodes[0].raft.handle_append_entries_response(*to, response);
+
+            for output in &leader_outputs {
+                if let RaftOutput::ApplyCommand(RaftCommand::UpdatePartition(update)) = output {
+                    let mut map = PartitionMap::new();
+                    map.apply_update(update);
+                    assert_eq!(map.primary(partition), Some(n2));
+                    assert_eq!(map.replicas(partition), &[n3]);
+                }
+            }
+        }
+    }
+
+    let commit_outputs = cluster.nodes[0].raft.tick(1200);
+    let mut commit_requests = Vec::new();
+    for output in commit_outputs {
+        if let RaftOutput::SendAppendEntries { to, request } = output {
+            commit_requests.push((to, request));
+        }
+    }
+
+    let mut applied_count = 0;
+    for (to, request) in &commit_requests {
+        if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
+            let (response, outputs) = follower.raft.handle_append_entries(n1, request.clone(), 1200);
+            assert!(response.is_success());
+
+            for output in outputs {
+                if let RaftOutput::ApplyCommand(RaftCommand::UpdatePartition(update)) = output {
+                    applied_count += 1;
+                    let mut map = PartitionMap::new();
+                    map.apply_update(&update);
+                    assert_eq!(map.primary(partition), Some(n2));
+                    assert_eq!(map.replicas(partition), &[n3]);
+                }
+            }
+        }
+    }
+
+    assert!(applied_count >= 1, "At least one follower should have applied the command");
+}
