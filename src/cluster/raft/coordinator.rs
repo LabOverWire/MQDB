@@ -3,6 +3,7 @@ use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use super::state::RaftCommand;
+use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
 use std::collections::HashSet;
@@ -263,16 +264,78 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.reassign_partitions_for_dead_node(dead_node)
     }
 
-    pub fn handle_node_alive(&mut self, node: NodeId) {
+    pub fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
         if self.pending_dead_nodes.remove(&node) {
             tracing::debug!(?node, "removed node from pending dead nodes (now alive)");
         }
         if self.processed_dead_nodes.remove(&node) {
             tracing::debug!(?node, "removed node from processed dead nodes (now alive)");
         }
-        if !self.cluster_members.contains(&node) {
+
+        let is_new_member = !self.cluster_members.contains(&node);
+        if is_new_member {
             self.cluster_members.push(node);
         }
+
+        if !self.is_leader() {
+            return Vec::new();
+        }
+
+        let node_has_partitions = self.node_has_partitions(node);
+        let partitions_initialized = self.partitions_initialized();
+
+        if is_new_member && !node_has_partitions && partitions_initialized {
+            tracing::info!(?node, "new node joined, triggering rebalance");
+            return self.trigger_rebalance_for_new_node();
+        }
+
+        Vec::new()
+    }
+
+    fn node_has_partitions(&self, node: NodeId) -> bool {
+        for partition in PartitionId::all() {
+            let role = self.partition_map.role_for(partition, node);
+            if role != PartitionRole::None {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn partitions_initialized(&self) -> bool {
+        PartitionId::all().any(|p| self.partition_map.primary(p).is_some())
+    }
+
+    fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
+        let config = RebalanceConfig::default();
+        let reassignments =
+            compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config);
+
+        if reassignments.is_empty() {
+            tracing::debug!("no partition reassignments needed");
+            return Vec::new();
+        }
+
+        tracing::info!(
+            count = reassignments.len(),
+            "proposing partition reassignments for new node"
+        );
+
+        let mut proposed_indices = Vec::new();
+        for reassignment in reassignments {
+            let cmd = RaftCommand::update_partition(
+                reassignment.partition,
+                reassignment.new_primary,
+                &reassignment.new_replicas,
+                reassignment.new_epoch,
+            );
+
+            if let Ok(idx) = self.propose_partition_update(cmd) {
+                proposed_indices.push(idx);
+            }
+        }
+
+        proposed_indices
     }
 
     fn reassign_partitions_for_dead_node(&mut self, dead_node: NodeId) -> Vec<u64> {

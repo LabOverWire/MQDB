@@ -256,7 +256,14 @@ impl ClusteredAgent {
                     let mut raft = self.raft.write().await;
 
                     for alive_node in alive_nodes {
-                        raft.handle_node_alive(alive_node);
+                        let rebalance_proposals = raft.handle_node_alive(alive_node);
+                        if !rebalance_proposals.is_empty() {
+                            info!(
+                                ?alive_node,
+                                count = rebalance_proposals.len(),
+                                "triggered rebalance for new node"
+                            );
+                        }
                     }
 
                     for msg in raft_msgs {

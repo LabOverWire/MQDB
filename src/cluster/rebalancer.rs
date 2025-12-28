@@ -54,91 +54,106 @@ pub fn compute_balanced_assignments(
 #[must_use]
 pub fn compute_incremental_assignments(
     current: &PartitionMap,
-    new_nodes: &[NodeId],
+    all_nodes: &[NodeId],
     config: &RebalanceConfig,
 ) -> Vec<PartitionReassignment> {
-    if new_nodes.is_empty() {
+    if all_nodes.is_empty() {
         return Vec::new();
     }
 
-    let mut reassignments = Vec::new();
-    let node_count = new_nodes.len();
+    let node_count = all_nodes.len();
     let rf = config.replication_factor.min(node_count);
+    let ideal_per_node = NUM_PARTITIONS as usize / node_count;
+    let remainder = NUM_PARTITIONS as usize % node_count;
 
-    let mut primary_counts: Vec<(NodeId, usize)> = new_nodes
+    let mut primary_counts: Vec<(NodeId, usize)> = all_nodes
         .iter()
         .map(|n| (*n, current.primary_count(*n)))
         .collect();
 
-    primary_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    let nodes_with_zero: Vec<NodeId> = primary_counts
+        .iter()
+        .filter(|(_, count)| *count == 0)
+        .map(|(n, _)| *n)
+        .collect();
 
-    for partition in PartitionId::all() {
-        let assignment = current.get(partition);
+    if nodes_with_zero.is_empty() {
+        return Vec::new();
+    }
 
-        let needs_primary = assignment.primary.is_none()
-            || assignment.primary.is_none_or(|p| !new_nodes.contains(&p));
+    let mut reassignments = Vec::new();
 
-        let valid_replicas: Vec<NodeId> = assignment
-            .replicas
-            .iter()
-            .filter(|r| new_nodes.contains(r))
-            .copied()
-            .collect();
-        let needs_replicas = valid_replicas.len() < rf.saturating_sub(1);
+    let overloaded: Vec<(NodeId, usize)> = primary_counts
+        .iter()
+        .filter(|(_, count)| *count > ideal_per_node + usize::from(remainder > 0))
+        .copied()
+        .collect();
 
-        if needs_primary || needs_replicas {
-            let (new_primary, new_replicas) =
-                select_nodes_for_partition(partition, new_nodes, rf, &primary_counts);
+    let partitions_to_move = nodes_with_zero.len() * ideal_per_node;
+    let mut moved = 0;
+    let mut target_idx = 0;
 
+    for (overloaded_node, count) in &overloaded {
+        if moved >= partitions_to_move || target_idx >= nodes_with_zero.len() {
+            break;
+        }
+
+        let excess = count.saturating_sub(ideal_per_node);
+        let mut moved_from_node = 0;
+
+        for partition in PartitionId::all() {
+            if moved >= partitions_to_move || target_idx >= nodes_with_zero.len() {
+                break;
+            }
+            if moved_from_node >= excess {
+                break;
+            }
+
+            let assignment = current.get(partition);
+            if assignment.primary != Some(*overloaded_node) {
+                continue;
+            }
+
+            let target_node = nodes_with_zero[target_idx];
             let new_epoch = Epoch::new(assignment.epoch.get() + 1);
+
+            let mut new_replicas: Vec<NodeId> = assignment
+                .replicas
+                .iter()
+                .filter(|r| **r != target_node)
+                .copied()
+                .collect();
+
+            if !new_replicas.contains(overloaded_node) && new_replicas.len() < rf.saturating_sub(1) {
+                new_replicas.push(*overloaded_node);
+            }
+
+            new_replicas.truncate(rf.saturating_sub(1));
 
             reassignments.push(PartitionReassignment {
                 partition,
                 old_primary: assignment.primary,
-                new_primary,
+                new_primary: target_node,
                 old_replicas: assignment.replicas.clone(),
                 new_replicas,
                 new_epoch,
             });
 
-            for (node, count) in &mut primary_counts {
-                if *node == new_primary {
-                    *count += 1;
+            moved += 1;
+            moved_from_node += 1;
+
+            for (node, c) in &mut primary_counts {
+                if *node == target_node {
+                    *c += 1;
+                    if *c >= ideal_per_node {
+                        target_idx += 1;
+                    }
                 }
             }
         }
     }
 
     reassignments
-}
-
-fn select_nodes_for_partition(
-    partition: PartitionId,
-    nodes: &[NodeId],
-    rf: usize,
-    primary_counts: &[(NodeId, usize)],
-) -> (NodeId, Vec<NodeId>) {
-    let least_loaded = primary_counts
-        .iter()
-        .min_by_key(|(_, count)| *count)
-        .map_or_else(
-            || nodes[partition.get() as usize % nodes.len()],
-            |(n, _)| *n,
-        );
-
-    let primary = least_loaded;
-
-    let mut replicas = Vec::with_capacity(rf.saturating_sub(1));
-    let primary_idx = nodes.iter().position(|n| *n == primary).unwrap_or(0);
-
-    for r in 1..rf {
-        let replica_idx = (primary_idx + r) % nodes.len();
-        if nodes[replica_idx] != primary {
-            replicas.push(nodes[replica_idx]);
-        }
-    }
-
-    (primary, replicas)
 }
 
 #[must_use]
@@ -334,9 +349,22 @@ mod tests {
         let config = RebalanceConfig::default();
         let map = compute_balanced_assignments(&initial_nodes, &config, Epoch::ZERO);
 
-        let new_nodes = vec![node(1), node(2), node(3)];
-        let reassignments = compute_incremental_assignments(&map, &new_nodes, &config);
+        assert_eq!(map.primary_count(node(1)), 32);
+        assert_eq!(map.primary_count(node(2)), 32);
+        assert_eq!(map.primary_count(node(3)), 0);
 
-        assert!(reassignments.is_empty() || !reassignments.is_empty());
+        let all_nodes = vec![node(1), node(2), node(3)];
+        let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
+
+        assert!(!reassignments.is_empty());
+        assert!(reassignments.len() >= 20);
+
+        let mut new_node3_count = 0;
+        for r in &reassignments {
+            if r.new_primary == node(3) {
+                new_node3_count += 1;
+            }
+        }
+        assert!(new_node3_count >= 20);
     }
 }
