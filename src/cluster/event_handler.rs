@@ -1,13 +1,13 @@
+use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
     ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
-    SubscriptionType,
+    SubscriptionType, WildcardBroadcast,
 };
-use crate::cluster::transport::ClusterTransport;
+use mqtt5::QoS;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
 };
-use mqtt5::QoS;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -22,10 +22,7 @@ pub struct ClusterEventHandler {
 }
 
 impl ClusterEventHandler {
-    pub fn new(
-        node_id: NodeId,
-        controller: Arc<RwLock<NodeController<MqttTransport>>>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, controller: Arc<RwLock<NodeController<MqttTransport>>>) -> Self {
         Self {
             node_id,
             controller,
@@ -99,7 +96,11 @@ impl BrokerEventHandler for ClusterEventHandler {
                 });
                 match result {
                     Ok((session, will_write)) => {
-                        debug!(client_id, has_will = session.has_will, "will stored in session");
+                        debug!(
+                            client_id,
+                            has_will = session.has_will,
+                            "will stored in session"
+                        );
                         ctrl.write_or_forward(will_write);
                     }
                     Err(e) => {
@@ -113,6 +114,7 @@ impl BrokerEventHandler for ClusterEventHandler {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_client_disconnect<'a>(
         &'a self,
         event: ClientDisconnectEvent,
@@ -206,7 +208,10 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                         if is_clean_session {
                             let mut ctrl = self.controller.write().await;
-                            debug!(client_id, "clean_session disconnect - clearing subscriptions");
+                            debug!(
+                                client_id,
+                                "clean_session disconnect - clearing subscriptions"
+                            );
                             clear_client_subscriptions(&mut ctrl, client_id);
                             let _ = ctrl.stores_mut().remove_session_replicated(client_id);
                         }
@@ -219,7 +224,10 @@ impl BrokerEventHandler for ClusterEventHandler {
             if let Some(session) = session
                 && session.is_clean_session()
             {
-                debug!(client_id, "clean_session disconnect - clearing subscriptions");
+                debug!(
+                    client_id,
+                    "clean_session disconnect - clearing subscriptions"
+                );
                 clear_client_subscriptions(&mut ctrl, client_id);
                 let _ = ctrl.stores_mut().remove_session_replicated(client_id);
             }
@@ -245,7 +253,10 @@ impl BrokerEventHandler for ClusterEventHandler {
             );
 
             let mut retained_to_deliver: Vec<super::retained_store::RetainedMessage> = Vec::new();
-            let mut pending_queries: Vec<(String, tokio::sync::oneshot::Receiver<Vec<super::retained_store::RetainedMessage>>)> = Vec::new();
+            let mut pending_queries: Vec<(
+                String,
+                tokio::sync::oneshot::Receiver<Vec<super::retained_store::RetainedMessage>>,
+            )> = Vec::new();
 
             {
                 let mut ctrl = self.controller.write().await;
@@ -265,7 +276,10 @@ impl BrokerEventHandler for ClusterEventHandler {
                     let is_wildcard = topic.contains('+') || topic.contains('#');
 
                     if is_wildcard {
-                        trace!(topic, "wildcard subscription - broker handles local retained");
+                        trace!(
+                            topic,
+                            "wildcard subscription - broker handles local retained"
+                        );
                     } else if ctrl.query_local_retained_exact(topic).is_some() {
                         trace!(topic, "local retained exists - broker handles delivery");
                     } else if let Some(rx) = ctrl.start_async_retained_query(topic) {
@@ -288,10 +302,21 @@ impl BrokerEventHandler for ClusterEventHandler {
                             qos,
                             SubscriptionType::Mqtt,
                         );
-                        if let Ok((_entry, writes)) = result {
-                            for write in writes {
-                                ctrl.write_or_forward(write);
-                            }
+                        if result.is_ok() {
+                            let broadcast = WildcardBroadcast::subscribe(
+                                topic,
+                                client_id,
+                                client_partition,
+                                qos,
+                                SubscriptionType::Mqtt as u8,
+                            );
+                            let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                            let _ = ctrl.transport().broadcast(msg);
+                            debug!(
+                                topic,
+                                client_id,
+                                "broadcast wildcard subscription to cluster"
+                            );
                         }
                     } else {
                         let client_partition = crate::cluster::session_partition(client_id);
@@ -319,7 +344,11 @@ impl BrokerEventHandler for ClusterEventHandler {
             for (topic, rx) in pending_queries {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
                     Ok(Ok(messages)) => {
-                        debug!(topic, count = messages.len(), "received remote retained messages");
+                        debug!(
+                            topic,
+                            count = messages.len(),
+                            "received remote retained messages"
+                        );
                         retained_to_deliver.extend(messages);
                     }
                     Ok(Err(_)) => {
@@ -391,10 +420,15 @@ impl BrokerEventHandler for ClusterEventHandler {
                     let result = ctrl
                         .stores_mut()
                         .unsubscribe_wildcard_replicated(topic, client_id);
-                    if let Ok(writes) = result {
-                        for write in writes {
-                            ctrl.write_or_forward(write);
-                        }
+                    if result.is_ok() {
+                        let broadcast = WildcardBroadcast::unsubscribe(topic, client_id);
+                        let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                        let _ = ctrl.transport().broadcast(msg);
+                        debug!(
+                            topic,
+                            client_id,
+                            "broadcast wildcard unsubscription to cluster"
+                        );
                     }
                 } else {
                     let result = ctrl
@@ -654,13 +688,15 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
                 let result = ctrl
                     .stores_mut()
                     .unsubscribe_wildcard_replicated(topic, client_id);
-                if let Ok(writes) = result {
-                    for write in writes {
-                        ctrl.write_or_forward(write);
-                    }
+                if result.is_ok() {
+                    let broadcast = WildcardBroadcast::unsubscribe(topic, client_id);
+                    let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                    let _ = ctrl.transport().broadcast(msg);
                 }
             } else {
-                let result = ctrl.stores_mut().unsubscribe_topic_replicated(topic, client_id);
+                let result = ctrl
+                    .stores_mut()
+                    .unsubscribe_topic_replicated(topic, client_id);
                 if let Ok((_entry, writes)) = result {
                     for write in writes {
                         ctrl.write_or_forward(write);
@@ -668,7 +704,9 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
                 }
             }
 
-            let result = ctrl.stores_mut().remove_subscription_replicated(client_id, topic);
+            let result = ctrl
+                .stores_mut()
+                .remove_subscription_replicated(client_id, topic);
             if let Ok((_snapshot, write)) = result {
                 ctrl.write_or_forward(write);
             }

@@ -1,6 +1,6 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
+    Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
@@ -277,6 +277,10 @@ impl MqttTransport {
                 let response = BatchReadResponse::from_bytes(data)?;
                 ClusterMessage::BatchReadResponse(response)
             }
+            60 => {
+                let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
+                ClusterMessage::WildcardBroadcast(broadcast)
+            }
             _ => return None,
         };
 
@@ -358,6 +362,9 @@ impl MqttTransport {
             }
             ClusterMessage::BatchReadResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
             }
         }
 
@@ -657,6 +664,9 @@ mod tests {
             }
             ClusterMessage::BatchReadResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
             }
         }
 

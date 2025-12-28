@@ -234,6 +234,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.dead_nodes.drain(..)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
@@ -333,6 +334,64 @@ impl<T: ClusterTransport> NodeController<T> {
                 let _ = self.transport.send(msg.from, response_msg);
             }
             ClusterMessage::BatchReadResponse(_) => {}
+            ClusterMessage::WildcardBroadcast(ref broadcast) => {
+                self.handle_wildcard_broadcast(msg.from, broadcast);
+            }
+        }
+    }
+
+    fn handle_wildcard_broadcast(
+        &mut self,
+        from: NodeId,
+        broadcast: &super::protocol::WildcardBroadcast,
+    ) {
+        let pattern = broadcast.pattern_str();
+        let client_id = broadcast.client_id_str();
+
+        match broadcast.operation() {
+            Some(super::protocol::WildcardOp::Subscribe) => {
+                let subscription_type = if broadcast.subscription_type() == 1 {
+                    super::topic_trie::SubscriptionType::Db
+                } else {
+                    super::topic_trie::SubscriptionType::Mqtt
+                };
+                let result = self.stores.wildcards.subscribe(
+                    pattern,
+                    client_id,
+                    broadcast.qos(),
+                    subscription_type,
+                );
+                match result {
+                    Ok(()) => {
+                        tracing::debug!(
+                            pattern,
+                            client_id,
+                            from = from.get(),
+                            "applied wildcard subscription from broadcast"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            pattern,
+                            client_id,
+                            ?e,
+                            "failed to apply wildcard subscription from broadcast"
+                        );
+                    }
+                }
+            }
+            Some(super::protocol::WildcardOp::Unsubscribe) => {
+                let _ = self.stores.wildcards.unsubscribe(pattern, client_id);
+                tracing::debug!(
+                    pattern,
+                    client_id,
+                    from = from.get(),
+                    "applied wildcard unsubscription from broadcast"
+                );
+            }
+            None => {
+                tracing::warn!("unknown wildcard broadcast operation");
+            }
         }
     }
 
@@ -1933,7 +1992,7 @@ mod tests {
             Ok(IdempotencyCheck::ReturnCached(cached)) => {
                 assert_eq!(cached, response.to_vec());
             }
-            other => panic!("Expected ReturnCached, got {:?}", other),
+            other => panic!("Expected ReturnCached, got {other:?}"),
         }
     }
 

@@ -549,15 +549,10 @@ impl ForwardedPublish {
     pub fn to_bytes(&self) -> Vec<u8> {
         let topic_bytes = self.topic.as_bytes();
 
-        let targets_size: usize = self
-            .targets
-            .iter()
-            .map(|t| 2 + t.client_id.len())
-            .sum();
+        let targets_size: usize = self.targets.iter().map(|t| 2 + t.client_id.len()).sum();
 
-        let mut buf = Vec::with_capacity(
-            12 + topic_bytes.len() + self.payload.len() + targets_size,
-        );
+        let mut buf =
+            Vec::with_capacity(12 + topic_bytes.len() + self.payload.len() + targets_size);
 
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.origin_node.get().to_be_bytes());
@@ -1130,6 +1125,111 @@ impl BatchReadResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WildcardOp {
+    Subscribe = 0,
+    Unsubscribe = 1,
+}
+
+impl WildcardOp {
+    #[must_use]
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Subscribe),
+            1 => Some(Self::Unsubscribe),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct WildcardBroadcast {
+    version: u8,
+    operation: u8,
+    pattern_len: u16,
+    #[FromField(pattern_len)]
+    pattern: Vec<u8>,
+    client_id_len: u8,
+    #[FromField(client_id_len)]
+    client_id: Vec<u8>,
+    client_partition: u16,
+    qos: u8,
+    subscription_type: u8,
+}
+
+impl WildcardBroadcast {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn subscribe(
+        pattern: &str,
+        client_id: &str,
+        client_partition: PartitionId,
+        qos: u8,
+        subscription_type: u8,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            operation: WildcardOp::Subscribe as u8,
+            pattern_len: pattern.len() as u16,
+            pattern: pattern.as_bytes().to_vec(),
+            client_id_len: client_id.len() as u8,
+            client_id: client_id.as_bytes().to_vec(),
+            client_partition: client_partition.get(),
+            qos,
+            subscription_type,
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn unsubscribe(pattern: &str, client_id: &str) -> Self {
+        Self {
+            version: Self::VERSION,
+            operation: WildcardOp::Unsubscribe as u8,
+            pattern_len: pattern.len() as u16,
+            pattern: pattern.as_bytes().to_vec(),
+            client_id_len: client_id.len() as u8,
+            client_id: client_id.as_bytes().to_vec(),
+            client_partition: 0,
+            qos: 0,
+            subscription_type: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<WildcardOp> {
+        WildcardOp::from_u8(self.operation)
+    }
+
+    #[must_use]
+    pub fn pattern_str(&self) -> &str {
+        std::str::from_utf8(&self.pattern).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn client_id_str(&self) -> &str {
+        std::str::from_utf8(&self.client_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn client_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.client_partition)
+    }
+
+    #[must_use]
+    pub fn qos(&self) -> u8 {
+        self.qos
+    }
+
+    #[must_use]
+    pub fn subscription_type(&self) -> u8 {
+        self.subscription_type
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1335,14 +1435,7 @@ mod tests {
     #[test]
     fn forwarded_publish_empty_targets() {
         let origin = NodeId::validated(1).unwrap();
-        let fwd = ForwardedPublish::new(
-            origin,
-            "test/topic".to_string(),
-            0,
-            true,
-            vec![],
-            vec![],
-        );
+        let fwd = ForwardedPublish::new(origin, "test/topic".to_string(), 0, true, vec![], vec![]);
 
         let bytes = fwd.to_bytes();
         let decoded = ForwardedPublish::from_bytes(&bytes).unwrap();
@@ -1461,9 +1554,15 @@ mod tests {
         assert_eq!(decoded.request_id, 777);
         assert_eq!(decoded.partition, partition);
         assert_eq!(decoded.results.len(), 3);
-        assert_eq!(decoded.results[0], ("id1".to_string(), Some(b"data1".to_vec())));
+        assert_eq!(
+            decoded.results[0],
+            ("id1".to_string(), Some(b"data1".to_vec()))
+        );
         assert_eq!(decoded.results[1], ("id2".to_string(), None));
-        assert_eq!(decoded.results[2], ("id3".to_string(), Some(b"data3".to_vec())));
+        assert_eq!(
+            decoded.results[2],
+            ("id3".to_string(), Some(b"data3".to_vec()))
+        );
     }
 
     #[test]

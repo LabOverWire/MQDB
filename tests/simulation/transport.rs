@@ -5,7 +5,7 @@ use mqdb::cluster::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
     ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, NodeId, PartitionId,
     QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete,
-    SnapshotRequest, TransportError,
+    SnapshotRequest, TransportError, WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -114,6 +114,9 @@ impl SimulatedTransport {
             ClusterMessage::BatchReadResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
             }
+            ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
         }
 
         buf
@@ -212,6 +215,10 @@ impl SimulatedTransport {
             53 => {
                 let response = BatchReadResponse::from_bytes(payload)?;
                 Some(ClusterMessage::BatchReadResponse(response))
+            }
+            60 => {
+                let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::WildcardBroadcast(broadcast))
             }
             _ => None,
         }
