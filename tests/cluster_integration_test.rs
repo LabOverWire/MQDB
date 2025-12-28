@@ -1353,9 +1353,32 @@ fn replica_catches_up_after_partition() {
     cluster.heal_node(n3);
     cluster.advance_ms(10);
 
-    for node in &mut cluster.nodes {
-        node.controller.process_messages();
+    let write = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::new(1),
+        5,
+        "items".to_string(),
+        "item-5".to_string(),
+        b"data-5".to_vec(),
+    );
+    cluster.nodes[0]
+        .controller
+        .replicate_write(write, &[n2, n3], 2)
+        .unwrap();
+
+    for _ in 0..10 {
+        cluster.advance_ms(5);
+        for node in &mut cluster.nodes {
+            node.controller.process_messages();
+        }
     }
+
+    assert_eq!(
+        cluster.nodes[2].controller.sequence(partition),
+        Some(6),
+        "Node 3 should have caught up to sequence 6 after healing"
+    );
 }
 
 #[test]
