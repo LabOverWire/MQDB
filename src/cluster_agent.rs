@@ -1,13 +1,13 @@
+use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
     ClusterEventHandler, Epoch, MqttTransport, NodeController, NodeId, PartitionId, RaftMessage,
     TransportConfig,
 };
-use crate::cluster::raft::{RaftConfig, RaftCoordinator};
+use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
-use mqtt5::QoS;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -221,7 +221,6 @@ impl ClusteredAgent {
                     info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
                 }
             }
-
         }
 
         let all_nodes: Vec<NodeId> = {

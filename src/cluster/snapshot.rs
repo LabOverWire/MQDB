@@ -121,8 +121,7 @@ impl SnapshotChunk {
         let sequence_at_snapshot = u64::from_be_bytes([
             bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18],
         ]);
-        let data_len =
-            u32::from_be_bytes([bytes[19], bytes[20], bytes[21], bytes[22]]) as usize;
+        let data_len = u32::from_be_bytes([bytes[19], bytes[20], bytes[21], bytes[22]]) as usize;
 
         if bytes.len() < 23 + data_len {
             return None;

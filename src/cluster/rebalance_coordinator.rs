@@ -1,5 +1,5 @@
-use super::rebalancer::PartitionReassignment;
 use super::NodeId;
+use super::rebalancer::PartitionReassignment;
 use bebytes::BeBytes;
 
 const DEFAULT_REBALANCE_TIMEOUT_MS: u64 = 60_000;
@@ -221,7 +221,10 @@ impl RebalanceCoordinator {
 
     /// # Errors
     /// Returns `NoActiveProposal` if there's no proposal in progress.
-    pub fn receive_ack(&mut self, ack: RebalanceAck) -> Result<Option<RebalanceCommit>, RebalanceError> {
+    pub fn receive_ack(
+        &mut self,
+        ack: RebalanceAck,
+    ) -> Result<Option<RebalanceCommit>, RebalanceError> {
         let active = self
             .current_proposal
             .as_mut()
@@ -236,10 +239,8 @@ impl RebalanceCoordinator {
         }
 
         if Self::has_quorum_internal(active) {
-            let commit = RebalanceCommit::create(
-                &active.proposal.id,
-                active.proposal.proposed_version,
-            );
+            let commit =
+                RebalanceCommit::create(&active.proposal.id, active.proposal.proposed_version);
             self.current_proposal = None;
             return Ok(Some(commit));
         }
@@ -257,11 +258,7 @@ impl RebalanceCoordinator {
             .acks
             .iter()
             .filter(|a| {
-                a.is_accepted()
-                    && active
-                        .expected_nodes
-                        .iter()
-                        .any(|n| n.get() == a.node_id)
+                a.is_accepted() && active.expected_nodes.iter().any(|n| n.get() == a.node_id)
             })
             .count();
 
@@ -301,14 +298,14 @@ impl RebalanceCoordinator {
 
     #[must_use]
     pub fn active_proposal_id(&self) -> Option<&str> {
-        self.current_proposal.as_ref().map(|p| p.proposal.id.as_str())
+        self.current_proposal
+            .as_ref()
+            .map(|p| p.proposal.id.as_str())
     }
 
     #[must_use]
     pub fn ack_count(&self) -> usize {
-        self.current_proposal
-            .as_ref()
-            .map_or(0, |p| p.acks.len())
+        self.current_proposal.as_ref().map_or(0, |p| p.acks.len())
     }
 }
 
@@ -368,12 +365,7 @@ mod tests {
         let mut coordinator = RebalanceCoordinator::new(node(1));
 
         let proposal = coordinator
-            .propose_rebalance(
-                vec![sample_reassignment()],
-                1,
-                vec![node(2), node(3)],
-                1000,
-            )
+            .propose_rebalance(vec![sample_reassignment()], 1, vec![node(2), node(3)], 1000)
             .unwrap();
 
         assert!(proposal.id.starts_with("rb-1-"));

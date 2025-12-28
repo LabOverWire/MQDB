@@ -44,7 +44,12 @@ pub struct MigrationCheckpoint {
 
 impl MigrationCheckpoint {
     #[must_use]
-    pub fn create(partition: PartitionId, migrated_seq: u64, snapshot_complete: bool, timestamp: u64) -> Self {
+    pub fn create(
+        partition: PartitionId,
+        migrated_seq: u64,
+        snapshot_complete: bool,
+        timestamp: u64,
+    ) -> Self {
         Self {
             version: 1,
             partition: partition.get(),
@@ -374,7 +379,10 @@ mod tests {
         manager.start_migration(partition(5), node(1), node(2), Epoch::new(10), 1000);
 
         manager.checkpoint(partition(5), 100).unwrap();
-        assert_eq!(manager.get_state(partition(5)).unwrap().catchup_sequence, 100);
+        assert_eq!(
+            manager.get_state(partition(5)).unwrap().catchup_sequence,
+            100
+        );
 
         manager.mark_snapshot_complete(partition(5), 200).unwrap();
         let state = manager.get_state(partition(5)).unwrap();

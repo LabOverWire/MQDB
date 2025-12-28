@@ -102,7 +102,11 @@ impl PendingQuery {
             query_id: self.query_id,
             results: all_results,
             has_more,
-            cursor: if cursor.is_empty() { None } else { Some(cursor) },
+            cursor: if cursor.is_empty() {
+                None
+            } else {
+                Some(cursor)
+            },
             partial,
             missing_partitions: missing,
         }
@@ -212,7 +216,11 @@ impl QueryCoordinator {
     }
 
     #[must_use]
-    pub fn prune_partitions(entity: &str, filter: Option<&str>, id: Option<&str>) -> Option<PartitionId> {
+    pub fn prune_partitions(
+        entity: &str,
+        filter: Option<&str>,
+        id: Option<&str>,
+    ) -> Option<PartitionId> {
         if let Some(entity_id) = id {
             let key = format!("{entity}/{entity_id}");
             let hash = crc32fast::hash(key.as_bytes());
@@ -250,9 +258,7 @@ impl QueryCoordinator {
 
     #[must_use]
     pub fn all_partitions() -> Vec<PartitionId> {
-        (0..NUM_PARTITIONS)
-            .filter_map(PartitionId::new)
-            .collect()
+        (0..NUM_PARTITIONS).filter_map(PartitionId::new).collect()
     }
 
     #[must_use]
@@ -420,11 +426,23 @@ mod tests {
             coordinator.start_query("users", None, 10, None, None, partitions, 1000);
 
         let cursor0 = PartitionCursor::new(partition(0), 100, None).to_bytes();
-        let resp0 = QueryResponse::ok(query_id, partition(0), b"data".to_vec(), true, Some(cursor0));
+        let resp0 = QueryResponse::ok(
+            query_id,
+            partition(0),
+            b"data".to_vec(),
+            true,
+            Some(cursor0),
+        );
         coordinator.receive_response(resp0);
 
         let cursor1 = PartitionCursor::new(partition(1), 200, None).to_bytes();
-        let resp1 = QueryResponse::ok(query_id, partition(1), b"data".to_vec(), true, Some(cursor1));
+        let resp1 = QueryResponse::ok(
+            query_id,
+            partition(1),
+            b"data".to_vec(),
+            true,
+            Some(cursor1),
+        );
         let result = coordinator.receive_response(resp1).unwrap();
 
         assert!(result.cursor.is_some());

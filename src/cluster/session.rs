@@ -508,7 +508,10 @@ impl SessionStore {
             offset += data_len;
 
             if let Some(session) = Self::deserialize(session_data) {
-                self.sessions.write().unwrap().insert(id.to_string(), session);
+                self.sessions
+                    .write()
+                    .unwrap()
+                    .insert(id.to_string(), session);
                 imported += 1;
             }
         }

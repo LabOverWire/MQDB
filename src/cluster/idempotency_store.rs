@@ -121,8 +121,12 @@ pub enum IdempotencyError {
 impl std::fmt::Display for IdempotencyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AlreadyProcessing => write!(f, "write with this idempotency key is already processing"),
-            Self::ParameterMismatch => write!(f, "idempotency key was used with different entity/id"),
+            Self::AlreadyProcessing => {
+                write!(f, "write with this idempotency key is already processing")
+            }
+            Self::ParameterMismatch => {
+                write!(f, "idempotency key was used with different entity/id")
+            }
             Self::PartitionFull => write!(f, "partition has reached maximum idempotency records"),
             Self::SerializationError => write!(f, "serialization error"),
         }
@@ -198,26 +202,15 @@ impl IdempotencyStore {
             return Err(IdempotencyError::PartitionFull);
         }
 
-        let record = IdempotencyRecord::processing(
-            idempotency_key,
-            partition,
-            epoch,
-            entity,
-            id,
-            timestamp,
-        );
+        let record =
+            IdempotencyRecord::processing(idempotency_key, partition, epoch, entity, id, timestamp);
         records.insert(store_key, record);
         Ok(IdempotencyCheck::Proceed)
     }
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn mark_committed(
-        &self,
-        partition: PartitionId,
-        idempotency_key: &str,
-        response: Vec<u8>,
-    ) {
+    pub fn mark_committed(&self, partition: PartitionId, idempotency_key: &str, response: Vec<u8>) {
         let store_key = (partition.get(), idempotency_key.to_string());
         let mut records = self.records.write().unwrap();
         if let Some(record) = records.get_mut(&store_key) {
@@ -308,8 +301,7 @@ impl IdempotencyStore {
 
         match operation {
             Operation::Insert | Operation::Update => {
-                let record = Self::deserialize(data)
-                    .ok_or(IdempotencyError::SerializationError)?;
+                let record = Self::deserialize(data).ok_or(IdempotencyError::SerializationError)?;
                 let store_key = (partition_num, idemp_key.to_string());
                 self.records.write().unwrap().insert(store_key, record);
                 Ok(())
@@ -452,14 +444,8 @@ mod tests {
 
     #[test]
     fn idempotency_record_bebytes_roundtrip() {
-        let record = IdempotencyRecord::processing(
-            "req-123",
-            partition(10),
-            epoch(5),
-            "users",
-            "456",
-            1000,
-        );
+        let record =
+            IdempotencyRecord::processing("req-123", partition(10), epoch(5), "users", "456", 1000);
         let bytes = IdempotencyStore::serialize(&record);
         let parsed = IdempotencyStore::deserialize(&bytes).unwrap();
 
@@ -644,24 +630,12 @@ mod tests {
     fn export_import_roundtrip() {
         let store1 = IdempotencyStore::new(node(1));
 
-        let _ = store1.check_or_insert_processing(
-            "req-1",
-            partition(5),
-            epoch(1),
-            "users",
-            "a",
-            1000,
-        );
+        let _ =
+            store1.check_or_insert_processing("req-1", partition(5), epoch(1), "users", "a", 1000);
         store1.mark_committed(partition(5), "req-1", b"resp1".to_vec());
 
-        let _ = store1.check_or_insert_processing(
-            "req-2",
-            partition(5),
-            epoch(2),
-            "posts",
-            "b",
-            2000,
-        );
+        let _ =
+            store1.check_or_insert_processing("req-2", partition(5), epoch(2), "posts", "b", 2000);
         store1.mark_committed(partition(5), "req-2", b"resp2".to_vec());
 
         let exported = store1.export_for_partition(partition(5));

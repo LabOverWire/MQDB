@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
-use tracing_subscriber::EnvFilter;
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
@@ -10,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "mqdb")]
@@ -318,8 +318,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 passwd,
                 acl,
             } => {
-                Box::pin(cmd_cluster_start(node_id, node_name, bind, db, peers, passwd, acl))
-                    .await?;
+                Box::pin(cmd_cluster_start(
+                    node_id, node_name, bind, db, peers, passwd, acl,
+                ))
+                .await?;
             }
             ClusterAction::Rebalance { conn } => {
                 Box::pin(cmd_cluster_rebalance(conn)).await?;
@@ -579,9 +581,10 @@ fn parse_peer_configs(peers: &[String]) -> Result<Vec<PeerConfig>, Box<dyn std::
         .map(|peer| {
             let parts: Vec<&str> = peer.split('@').collect();
             if parts.len() != 2 {
-                return Err(
-                    format!("invalid peer format '{peer}': expected 'node_id@address:port'").into(),
-                );
+                return Err(format!(
+                    "invalid peer format '{peer}': expected 'node_id@address:port'"
+                )
+                .into());
             }
             let node_id: u16 = parts[0]
                 .parse()

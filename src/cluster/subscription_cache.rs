@@ -405,7 +405,10 @@ impl SubscriptionCache {
             offset += data_len;
 
             if let Some(snapshot) = Self::deserialize(snapshot_data) {
-                self.snapshots.write().unwrap().insert(id.to_string(), snapshot);
+                self.snapshots
+                    .write()
+                    .unwrap()
+                    .insert(id.to_string(), snapshot);
                 imported += 1;
             }
         }

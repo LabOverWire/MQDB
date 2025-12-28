@@ -374,7 +374,9 @@ impl OffsetStore {
         }
 
         let next_cursor = if has_more {
-            results.last().map(|((cid, topic), _)| format!("{cid}:{topic}").into_bytes())
+            results
+                .last()
+                .map(|((cid, topic), _)| format!("{cid}:{topic}").into_bytes())
         } else {
             None
         };

@@ -577,18 +577,39 @@ impl StoreManager {
         let mut buf = Vec::new();
 
         let store_data = [
-            (entity::SESSIONS, self.sessions.export_for_partition(partition)),
+            (
+                entity::SESSIONS,
+                self.sessions.export_for_partition(partition),
+            ),
             (entity::QOS2, self.qos2.export_for_partition(partition)),
             (
                 entity::SUBSCRIPTIONS,
                 self.subscriptions.export_for_partition(partition),
             ),
-            (entity::RETAINED, self.retained.export_for_partition(partition)),
-            (entity::TOPIC_INDEX, self.topics.export_for_partition(partition)),
-            (entity::WILDCARDS, self.wildcards.export_for_partition(partition)),
-            (entity::INFLIGHT, self.inflight.export_for_partition(partition)),
-            (entity::OFFSETS, self.offsets.export_for_partition(partition)),
-            (entity::IDEMPOTENCY, self.idempotency.export_for_partition(partition)),
+            (
+                entity::RETAINED,
+                self.retained.export_for_partition(partition),
+            ),
+            (
+                entity::TOPIC_INDEX,
+                self.topics.export_for_partition(partition),
+            ),
+            (
+                entity::WILDCARDS,
+                self.wildcards.export_for_partition(partition),
+            ),
+            (
+                entity::INFLIGHT,
+                self.inflight.export_for_partition(partition),
+            ),
+            (
+                entity::OFFSETS,
+                self.offsets.export_for_partition(partition),
+            ),
+            (
+                entity::IDEMPOTENCY,
+                self.idempotency.export_for_partition(partition),
+            ),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -722,18 +743,12 @@ impl StoreManager {
         match entity {
             entity::SESSIONS => {
                 let (sessions, has_more, next_cursor) = self.sessions.query(filter, limit, cursor);
-                let data = sessions
-                    .into_iter()
-                    .flat_map(|s| s.to_be_bytes())
-                    .collect();
+                let data = sessions.into_iter().flat_map(|s| s.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::RETAINED => {
                 let (messages, has_more, next_cursor) = self.retained.query(filter, limit, cursor);
-                let data = messages
-                    .into_iter()
-                    .flat_map(|m| m.to_be_bytes())
-                    .collect();
+                let data = messages.into_iter().flat_map(|m| m.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::SUBSCRIPTIONS => {
@@ -743,34 +758,22 @@ impl StoreManager {
             }
             entity::TOPIC_INDEX => {
                 let (entries, has_more, next_cursor) = self.topics.query(filter, limit, cursor);
-                let data = entries
-                    .into_iter()
-                    .flat_map(|e| e.to_be_bytes())
-                    .collect();
+                let data = entries.into_iter().flat_map(|e| e.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::WILDCARDS => {
                 let (entries, has_more, next_cursor) = self.wildcards.query(filter, limit, cursor);
-                let data = entries
-                    .into_iter()
-                    .flat_map(|e| e.to_be_bytes())
-                    .collect();
+                let data = entries.into_iter().flat_map(|e| e.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::INFLIGHT => {
                 let (messages, has_more, next_cursor) = self.inflight.query(filter, limit, cursor);
-                let data = messages
-                    .into_iter()
-                    .flat_map(|m| m.to_be_bytes())
-                    .collect();
+                let data = messages.into_iter().flat_map(|m| m.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::OFFSETS => {
                 let (offsets, has_more, next_cursor) = self.offsets.query(filter, limit, cursor);
-                let data = offsets
-                    .into_iter()
-                    .flat_map(|o| o.to_be_bytes())
-                    .collect();
+                let data = offsets.into_iter().flat_map(|o| o.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
             _ => Err(StoreApplyError::UnknownEntity),
@@ -820,9 +823,12 @@ impl StoreManager {
         idempotency_key: &str,
         response: &[u8],
     ) -> ReplicationWrite {
-        self.idempotency.mark_committed(partition, idempotency_key, response.to_vec());
+        self.idempotency
+            .mark_committed(partition, idempotency_key, response.to_vec());
         let record = self.idempotency.get(partition, idempotency_key);
-        let data = record.map(|r| IdempotencyStore::serialize(&r)).unwrap_or_default();
+        let data = record
+            .map(|r| IdempotencyStore::serialize(&r))
+            .unwrap_or_default();
         ReplicationWrite::new(
             partition,
             Operation::Update,
@@ -837,7 +843,8 @@ impl StoreManager {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn rollback_idempotency(&self, partition: PartitionId, idempotency_key: &str) {
-        self.idempotency.remove_processing(partition, idempotency_key);
+        self.idempotency
+            .remove_processing(partition, idempotency_key);
     }
 
     /// # Panics

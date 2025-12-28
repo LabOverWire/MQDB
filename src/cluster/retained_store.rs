@@ -310,7 +310,10 @@ impl RetainedStore {
             offset += data_len;
 
             if let Some(msg) = Self::deserialize(msg_data) {
-                self.messages.write().unwrap().insert(topic.to_string(), msg);
+                self.messages
+                    .write()
+                    .unwrap()
+                    .insert(topic.to_string(), msg);
                 imported += 1;
             }
         }
@@ -474,8 +477,14 @@ mod tests {
 
     #[test]
     fn topic_matches_pattern_single_level_wildcard() {
-        assert!(topic_matches_pattern("sensors/building1/temp", "sensors/+/temp"));
-        assert!(topic_matches_pattern("sensors/building2/temp", "sensors/+/temp"));
+        assert!(topic_matches_pattern(
+            "sensors/building1/temp",
+            "sensors/+/temp"
+        ));
+        assert!(topic_matches_pattern(
+            "sensors/building2/temp",
+            "sensors/+/temp"
+        ));
         assert!(!topic_matches_pattern("sensors/temp", "sensors/+/temp"));
         assert!(!topic_matches_pattern("sensors/a/b/temp", "sensors/+/temp"));
     }
@@ -493,8 +502,14 @@ mod tests {
     fn topic_matches_pattern_combined() {
         assert!(topic_matches_pattern("home/living/temp", "home/+/temp"));
         assert!(topic_matches_pattern("home/kitchen/temp", "home/+/temp"));
-        assert!(topic_matches_pattern("home/living/sensors/temp", "home/+/sensors/#"));
-        assert!(topic_matches_pattern("home/living/sensors/a/b", "home/+/sensors/#"));
+        assert!(topic_matches_pattern(
+            "home/living/sensors/temp",
+            "home/+/sensors/#"
+        ));
+        assert!(topic_matches_pattern(
+            "home/living/sensors/a/b",
+            "home/+/sensors/#"
+        ));
     }
 
     #[test]

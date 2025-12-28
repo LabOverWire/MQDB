@@ -115,11 +115,7 @@ impl ScatterCursor {
     }
 
     pub fn update(&mut self, partition: PartitionId, sequence: u64, last_key: Option<Vec<u8>>) {
-        if let Some(existing) = self
-            .cursors
-            .iter_mut()
-            .find(|c| c.partition == partition)
-        {
+        if let Some(existing) = self.cursors.iter_mut().find(|c| c.partition == partition) {
             existing.sequence = sequence;
             existing.last_key = last_key;
         } else {
@@ -171,8 +167,7 @@ impl ScatterCursor {
                 return None;
             }
 
-            let key_len =
-                u16::from_be_bytes([bytes[offset + 10], bytes[offset + 11]]) as usize;
+            let key_len = u16::from_be_bytes([bytes[offset + 10], bytes[offset + 11]]) as usize;
             let cursor_len = 12 + key_len;
 
             if offset + cursor_len > bytes.len() {
@@ -228,7 +223,11 @@ mod tests {
     fn scatter_cursor_encode_decode() {
         let mut scatter = ScatterCursor::new();
         scatter.add(PartitionCursor::new(partition(10), 100, None));
-        scatter.add(PartitionCursor::new(partition(20), 200, Some(b"key".to_vec())));
+        scatter.add(PartitionCursor::new(
+            partition(20),
+            200,
+            Some(b"key".to_vec()),
+        ));
         scatter.add(PartitionCursor::new(partition(30), 300, None));
 
         let bytes = scatter.encode();
@@ -265,7 +264,11 @@ mod tests {
     fn scatter_cursor_add_updates_existing() {
         let mut scatter = ScatterCursor::new();
         scatter.add(PartitionCursor::new(partition(5), 10, None));
-        scatter.add(PartitionCursor::new(partition(5), 20, Some(b"new".to_vec())));
+        scatter.add(PartitionCursor::new(
+            partition(5),
+            20,
+            Some(b"new".to_vec()),
+        ));
 
         assert_eq!(scatter.len(), 1);
         assert_eq!(scatter.get(partition(5)).unwrap().sequence, 20);

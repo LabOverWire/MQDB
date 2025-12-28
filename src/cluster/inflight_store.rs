@@ -540,7 +540,9 @@ impl InflightStore {
         }
 
         let next_cursor = if has_more {
-            results.last().map(|((cid, pid), _)| format!("{cid}:{pid}").into_bytes())
+            results
+                .last()
+                .map(|((cid, pid), _)| format!("{cid}:{pid}").into_bytes())
         } else {
             None
         };

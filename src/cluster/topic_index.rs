@@ -299,7 +299,8 @@ impl TopicIndex {
     ) -> Result<(), TopicIndexError> {
         match operation {
             Operation::Insert | Operation::Update => {
-                let incoming = Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
+                let incoming =
+                    Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
                 let mut entries = self.entries.write().unwrap();
                 let entry = entries
                     .entry(id.to_string())
@@ -392,7 +393,10 @@ impl TopicIndex {
             offset += data_len;
 
             if let Some(entry) = Self::deserialize(entry_data) {
-                self.entries.write().unwrap().insert(topic.to_string(), entry);
+                self.entries
+                    .write()
+                    .unwrap()
+                    .insert(topic.to_string(), entry);
                 imported += 1;
             }
         }

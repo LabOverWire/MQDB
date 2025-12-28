@@ -123,7 +123,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         request: RequestVoteRequest,
         now_ms: u64,
     ) -> RequestVoteResponse {
-        tracing::debug!(from = from.get(), term = request.term, "received RequestVote");
+        tracing::debug!(
+            from = from.get(),
+            term = request.term,
+            "received RequestVote"
+        );
         let (response, outputs) = self.node.handle_request_vote(from, request, now_ms);
         tracing::debug!(granted = response.is_granted(), "responding to RequestVote");
         self.process_outputs(outputs);
@@ -131,7 +135,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub fn handle_request_vote_response(&mut self, from: NodeId, response: RequestVoteResponse) {
-        tracing::debug!(from = from.get(), granted = response.is_granted(), "received RequestVoteResponse");
+        tracing::debug!(
+            from = from.get(),
+            granted = response.is_granted(),
+            "received RequestVoteResponse"
+        );
         let outputs = self.node.handle_request_vote_response(from, response);
         self.process_outputs(outputs);
     }
@@ -142,7 +150,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         request: AppendEntriesRequest,
         now_ms: u64,
     ) -> AppendEntriesResponse {
-        tracing::trace!(from = from.get(), term = request.term, entries = request.entries.len(), "received AppendEntries");
+        tracing::trace!(
+            from = from.get(),
+            term = request.term,
+            entries = request.entries.len(),
+            "received AppendEntries"
+        );
         let (response, outputs) = self.node.handle_append_entries(from, request, now_ms);
         self.process_outputs(outputs);
         response
@@ -153,7 +166,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         from: NodeId,
         response: AppendEntriesResponse,
     ) {
-        tracing::trace!(from = from.get(), success = response.is_success(), "received AppendEntriesResponse");
+        tracing::trace!(
+            from = from.get(),
+            success = response.is_success(),
+            "received AppendEntriesResponse"
+        );
         let outputs = self.node.handle_append_entries_response(from, response);
         self.process_outputs(outputs);
     }
@@ -186,7 +203,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 tracing::info!(node = self.node.node_id().get(), "became Raft leader");
             }
             RaftOutput::BecameFollower { leader } => {
-                tracing::info!(node = self.node.node_id().get(), ?leader, "became Raft follower");
+                tracing::info!(
+                    node = self.node.node_id().get(),
+                    ?leader,
+                    "became Raft follower"
+                );
             }
         }
     }
@@ -226,7 +247,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.cluster_members.retain(|&n| n != dead_node);
 
         if !self.is_leader() {
-            tracing::info!(?dead_node, "not leader, queuing dead node for later processing");
+            tracing::info!(
+                ?dead_node,
+                "not leader, queuing dead node for later processing"
+            );
             self.pending_dead_nodes.insert(dead_node);
             return Vec::new();
         }
