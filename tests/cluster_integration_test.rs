@@ -1964,3 +1964,100 @@ fn snapshot_transfer_on_partition_migration() {
         "Retained message payload should match"
     );
 }
+
+#[test]
+fn graceful_shutdown_drain() {
+    let mut cluster = TestCluster::new(2);
+
+    let n2 = cluster.nodes[1].id;
+
+    let partition = PartitionId::new(0).unwrap();
+
+    cluster.nodes[0]
+        .controller
+        .become_primary(partition, Epoch::new(1));
+    cluster.nodes[1]
+        .controller
+        .become_replica(partition, Epoch::new(1), 0);
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    assert!(
+        !cluster.nodes[0].controller.is_draining(),
+        "Node should not be draining initially"
+    );
+    assert!(
+        cluster.nodes[0].controller.pending_writes_empty(),
+        "No pending writes initially"
+    );
+    assert!(
+        !cluster.nodes[0].controller.can_shutdown_safely(),
+        "Cannot shutdown safely when not draining"
+    );
+
+    let write = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::new(1),
+        0,
+        "_sess".to_string(),
+        "drain-test-client".to_string(),
+        b"session data".to_vec(),
+    );
+
+    let seq = cluster.nodes[0]
+        .controller
+        .replicate_write(write, &[n2], 1)
+        .unwrap();
+    assert_eq!(seq, 1);
+
+    assert!(
+        !cluster.nodes[0].controller.pending_writes_empty(),
+        "Should have pending write after replicate_write"
+    );
+    assert_eq!(cluster.nodes[0].controller.pending_write_count(), 1);
+
+    cluster.nodes[0].controller.set_draining(true);
+
+    assert!(
+        cluster.nodes[0].controller.is_draining(),
+        "Node should be draining after set_draining(true)"
+    );
+    assert!(
+        !cluster.nodes[0].controller.can_shutdown_safely(),
+        "Cannot shutdown safely with pending writes"
+    );
+
+    cluster.advance_ms(5);
+    cluster.nodes[1].controller.process_messages();
+
+    assert_eq!(
+        cluster.nodes[1].controller.sequence(partition),
+        Some(1),
+        "Replica should have received the write"
+    );
+
+    cluster.advance_ms(5);
+    cluster.nodes[0].controller.process_messages();
+
+    assert!(
+        cluster.nodes[0].controller.pending_writes_empty(),
+        "Pending writes should be empty after receiving ack"
+    );
+    assert!(
+        cluster.nodes[0].controller.can_shutdown_safely(),
+        "Should be able to shutdown safely after draining completes"
+    );
+
+    cluster.nodes[0].controller.set_draining(false);
+    assert!(
+        !cluster.nodes[0].controller.can_shutdown_safely(),
+        "Cannot shutdown safely when not draining"
+    );
+}
