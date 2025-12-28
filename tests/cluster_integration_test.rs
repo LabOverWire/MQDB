@@ -2153,3 +2153,61 @@ fn raft_command_application_updates_partition_map() {
 
     assert!(applied_count >= 1, "At least one follower should have applied the command");
 }
+
+#[test]
+fn wildcard_broadcast_replication() {
+    use mqdb::cluster::{ClusterMessage, ClusterTransport, WildcardBroadcast, SubscriptionType};
+
+    let mut cluster = TestCluster::new(2);
+
+    let client_partition = PartitionId::new(5).unwrap();
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let matches_before = cluster.nodes[1]
+        .controller
+        .stores()
+        .wildcards
+        .match_topic("sensors/temp/1");
+    assert!(
+        matches_before.is_empty(),
+        "Node 2 should have no wildcard subscriptions initially"
+    );
+
+    let broadcast = WildcardBroadcast::subscribe(
+        "sensors/+/1",
+        "wildcard-client",
+        client_partition,
+        1,
+        SubscriptionType::Mqtt as u8,
+    );
+    let msg = ClusterMessage::WildcardBroadcast(broadcast);
+    let _ = cluster.nodes[0].controller.transport().broadcast(msg);
+
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let matches_after = cluster.nodes[1]
+        .controller
+        .stores()
+        .wildcards
+        .match_topic("sensors/temp/1");
+
+    assert_eq!(
+        matches_after.len(),
+        1,
+        "Node 2 should have the wildcard subscription after broadcast"
+    );
+
+    let subscriber = &matches_after[0];
+    assert_eq!(subscriber.client_id_str(), "wildcard-client");
+    assert_eq!(subscriber.qos, 1);
+}
