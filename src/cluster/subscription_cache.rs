@@ -1,8 +1,10 @@
 use super::protocol::Operation;
-use super::{NodeId, PartitionId, session_partition};
+use super::{NodeId, PartitionId, TopicIndex, WildcardStore, session_partition};
 use bebytes::BeBytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
+
+pub const SUBSCRIPTION_RECONCILIATION_INTERVAL_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct MqttTopicEntry {
@@ -142,6 +144,14 @@ impl std::error::Error for SubscriptionCacheError {}
 pub struct SubscriptionCache {
     node_id: NodeId,
     snapshots: RwLock<HashMap<String, MqttSubscriptionSnapshot>>,
+    last_reconciliation: RwLock<u64>,
+}
+
+#[derive(Debug, Default)]
+pub struct ReconciliationResult {
+    pub clients_checked: usize,
+    pub subscriptions_added: usize,
+    pub subscriptions_removed: usize,
 }
 
 impl SubscriptionCache {
@@ -150,7 +160,111 @@ impl SubscriptionCache {
         Self {
             node_id,
             snapshots: RwLock::new(HashMap::new()),
+            last_reconciliation: RwLock::new(0),
         }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn needs_reconciliation(&self, now: u64) -> bool {
+        let last = *self.last_reconciliation.read().unwrap();
+        now.saturating_sub(last) >= SUBSCRIPTION_RECONCILIATION_INTERVAL_MS
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn mark_reconciliation(&self, now: u64) {
+        *self.last_reconciliation.write().unwrap() = now;
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn reconcile(
+        &self,
+        topic_index: &TopicIndex,
+        wildcard_store: &WildcardStore,
+    ) -> ReconciliationResult {
+        let mut result = ReconciliationResult::default();
+        let mut snapshots = self.snapshots.write().unwrap();
+
+        let client_ids: Vec<String> = snapshots.keys().cloned().collect();
+
+        for client_id in &client_ids {
+            result.clients_checked += 1;
+
+            let authoritative_exact: HashSet<String> = topic_index
+                .get_client_topics(client_id)
+                .into_iter()
+                .map(|(topic, _)| topic)
+                .collect();
+
+            let authoritative_wildcards: HashSet<String> = wildcard_store
+                .get_client_patterns(client_id)
+                .into_iter()
+                .map(|(pattern, _)| pattern)
+                .collect();
+
+            if let Some(snapshot) = snapshots.get_mut(client_id) {
+                let cached_topics: HashSet<String> = snapshot
+                    .topics
+                    .iter()
+                    .map(|t| t.topic_str().to_string())
+                    .collect();
+
+                for cached_topic in &cached_topics {
+                    let is_wildcard = cached_topic.contains('+') || cached_topic.contains('#');
+                    let exists = if is_wildcard {
+                        authoritative_wildcards.contains(cached_topic)
+                    } else {
+                        authoritative_exact.contains(cached_topic)
+                    };
+
+                    if !exists {
+                        let _ = snapshot.remove_subscription(cached_topic);
+                        result.subscriptions_removed += 1;
+                    }
+                }
+
+                for topic in &authoritative_exact {
+                    if !snapshot.has_subscription(topic)
+                        && let Some((_, qos)) = topic_index
+                            .get_client_topics(client_id)
+                            .into_iter()
+                            .find(|(t, _)| t == topic)
+                    {
+                        snapshot.add_subscription(topic, qos);
+                        result.subscriptions_added += 1;
+                    }
+                }
+
+                for pattern in &authoritative_wildcards {
+                    if !snapshot.has_subscription(pattern)
+                        && let Some((_, qos)) = wildcard_store
+                            .get_client_patterns(client_id)
+                            .into_iter()
+                            .find(|(p, _)| p == pattern)
+                    {
+                        snapshot.add_subscription(pattern, qos);
+                        result.subscriptions_added += 1;
+                    }
+                }
+
+                if snapshot.topics.is_empty() {
+                    snapshots.remove(client_id);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn all_client_ids(&self) -> Vec<String> {
+        self.snapshots.read().unwrap().keys().cloned().collect()
     }
 
     /// # Panics
@@ -571,5 +685,94 @@ mod tests {
 
         assert!(v2 > v1);
         assert!(v3 > v2);
+    }
+
+    fn partition() -> PartitionId {
+        PartitionId::new(5).unwrap()
+    }
+
+    #[test]
+    fn reconcile_removes_stale_entries() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("client1", "topic/a", 1).unwrap();
+        cache.add_subscription("client1", "topic/b", 1).unwrap();
+
+        topic_index
+            .subscribe("topic/a", "client1", partition(), 1)
+            .unwrap();
+
+        let result = cache.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.clients_checked, 1);
+        assert_eq!(result.subscriptions_removed, 1);
+        assert_eq!(result.subscriptions_added, 0);
+
+        let subs = cache.get_subscriptions("client1");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].topic_str(), "topic/a");
+    }
+
+    #[test]
+    fn reconcile_adds_missing_entries() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("client1", "topic/a", 1).unwrap();
+
+        topic_index
+            .subscribe("topic/a", "client1", partition(), 1)
+            .unwrap();
+        topic_index
+            .subscribe("topic/b", "client1", partition(), 2)
+            .unwrap();
+
+        let result = cache.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.clients_checked, 1);
+        assert_eq!(result.subscriptions_removed, 0);
+        assert_eq!(result.subscriptions_added, 1);
+
+        let subs = cache.get_subscriptions("client1");
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn reconcile_handles_wildcards() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("client1", "sensors/+/temp", 1).unwrap();
+        cache.add_subscription("client1", "stale/+/pattern", 1).unwrap();
+
+        wildcard_store
+            .subscribe_mqtt("sensors/+/temp", "client1", 1)
+            .unwrap();
+
+        let result = cache.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.clients_checked, 1);
+        assert_eq!(result.subscriptions_removed, 1);
+
+        let subs = cache.get_subscriptions("client1");
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].topic_str(), "sensors/+/temp");
+    }
+
+    #[test]
+    fn needs_reconciliation_respects_interval() {
+        let cache = SubscriptionCache::new(node(1));
+
+        assert!(cache.needs_reconciliation(SUBSCRIPTION_RECONCILIATION_INTERVAL_MS));
+
+        cache.mark_reconciliation(100_000);
+
+        assert!(!cache.needs_reconciliation(200_000));
+        assert!(!cache.needs_reconciliation(399_999));
+        assert!(cache.needs_reconciliation(400_001));
     }
 }

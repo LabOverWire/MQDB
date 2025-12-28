@@ -1,8 +1,12 @@
 use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
-use super::state::{RaftCommand, RaftRole, RaftState};
+use super::state::{LogEntry, RaftCommand, RaftRole, RaftState};
+use super::storage::RaftStorage;
 use crate::cluster::NodeId;
+use crate::error::Result;
+use crate::storage::StorageBackend;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct RaftConfig {
@@ -41,6 +45,7 @@ pub enum RaftOutput {
 pub struct RaftNode {
     state: RaftState,
     config: RaftConfig,
+    storage: Option<RaftStorage>,
     last_heartbeat_time: u64,
     election_timeout: u64,
     last_election_time: u64,
@@ -54,11 +59,43 @@ impl RaftNode {
         Self {
             state: RaftState::create(node_id),
             config,
+            storage: None,
             last_heartbeat_time: 0,
             election_timeout: timeout,
             last_election_time: 0,
             random_seed: u64::from(node_id.get()),
         }
+    }
+
+    /// # Errors
+    /// Returns an error if loading persisted state fails.
+    pub fn create_with_storage(
+        node_id: NodeId,
+        config: RaftConfig,
+        backend: Arc<dyn StorageBackend>,
+    ) -> Result<Self> {
+        let storage = RaftStorage::new(backend);
+
+        let (current_term, voted_for, log) = match storage.load_state()? {
+            Some(persisted) => {
+                let log = storage.load_log()?;
+                (persisted.current_term, persisted.voted_for_node(), log)
+            }
+            None => (0, None, Vec::new()),
+        };
+
+        let state = RaftState::recover(node_id, current_term, voted_for, log);
+        let timeout = config.election_timeout_min_ms;
+
+        Ok(Self {
+            state,
+            config,
+            storage: Some(storage),
+            last_heartbeat_time: 0,
+            election_timeout: timeout,
+            last_election_time: 0,
+            random_seed: u64::from(node_id.get()),
+        })
     }
 
     #[must_use]
@@ -109,6 +146,18 @@ impl RaftNode {
         self.election_timeout = self.config.election_timeout_min_ms + offset;
     }
 
+    fn persist_state(&self) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.persist_state(self.state.current_term(), self.state.voted_for());
+        }
+    }
+
+    fn persist_log_entry(&self, entry: &LogEntry) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.append_log_entry(entry);
+        }
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         let mut outputs = Vec::new();
 
@@ -132,6 +181,7 @@ impl RaftNode {
 
     fn start_election(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         self.state.become_candidate();
+        self.persist_state();
         self.last_election_time = now_ms;
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
@@ -201,6 +251,7 @@ impl RaftNode {
 
         if request.term > self.state.current_term() {
             self.state.become_follower(request.term, None);
+            self.persist_state();
             outputs.push(RaftOutput::BecameFollower { leader: None });
         }
 
@@ -217,6 +268,7 @@ impl RaftNode {
         let response = if can_grant {
             if let Some(c) = candidate {
                 self.state.grant_vote(request.term, c);
+                self.persist_state();
                 self.last_heartbeat_time = now_ms;
                 self.reset_election_timeout();
             }
@@ -237,6 +289,7 @@ impl RaftNode {
 
         if response.term > self.state.current_term() {
             self.state.become_follower(response.term, None);
+            self.persist_state();
             outputs.push(RaftOutput::BecameFollower { leader: None });
             return outputs;
         }
@@ -284,11 +337,16 @@ impl RaftNode {
 
         if request.term > self.state.current_term() || self.state.role() != RaftRole::Follower {
             self.state.become_follower(request.term, leader);
+            self.persist_state();
             outputs.push(RaftOutput::BecameFollower { leader });
         }
 
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
+
+        for entry in &request.entries {
+            self.persist_log_entry(entry);
+        }
 
         let success = self.state.append_entries(
             request.prev_log_index,
@@ -324,6 +382,7 @@ impl RaftNode {
 
         if response.term > self.state.current_term() {
             self.state.become_follower(response.term, None);
+            self.persist_state();
             outputs.push(RaftOutput::BecameFollower { leader: None });
             return outputs;
         }
@@ -345,7 +404,11 @@ impl RaftNode {
     }
 
     pub fn propose(&mut self, command: RaftCommand) -> Option<u64> {
-        self.state.propose(command)
+        let index = self.state.propose(command)?;
+        if let Some(entry) = self.state.last_log_entry() {
+            self.persist_log_entry(entry);
+        }
+        Some(index)
     }
 }
 

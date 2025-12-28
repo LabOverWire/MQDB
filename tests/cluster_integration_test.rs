@@ -2248,3 +2248,94 @@ fn drain_notification_triggers_partition_reassignment() {
         "Node 1 should have received drain notification for node 3"
     );
 }
+
+#[test]
+fn raft_state_persisted_and_recovered() {
+    use mqdb::cluster::raft::RaftStorage;
+    use mqdb::storage::MemoryBackend;
+    use std::sync::Arc;
+
+    let backend = Arc::new(MemoryBackend::new());
+    let node_id = NodeId::validated(1).unwrap();
+    let peer_id = NodeId::validated(2).unwrap();
+
+    {
+        let mut node = RaftNode::create_with_storage(
+            node_id,
+            RaftConfig::default(),
+            backend.clone(),
+        )
+        .unwrap();
+
+        node.add_peer(peer_id);
+
+        node.tick(1000);
+        assert_eq!(node.role(), RaftRole::Candidate);
+        assert_eq!(node.current_term(), 1);
+
+        let storage = RaftStorage::new(backend.clone());
+        let persisted = storage.load_state().unwrap().unwrap();
+        assert_eq!(persisted.current_term, 1);
+        assert_eq!(persisted.voted_for, node_id.get());
+    }
+
+    {
+        let node = RaftNode::create_with_storage(
+            node_id,
+            RaftConfig::default(),
+            backend.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(node.current_term(), 1);
+        assert_eq!(node.role(), RaftRole::Follower);
+    }
+}
+
+#[test]
+fn raft_log_persisted_and_recovered() {
+    use mqdb::cluster::raft::{RaftCommand, RaftStorage};
+    use mqdb::storage::MemoryBackend;
+    use std::sync::Arc;
+
+    let backend = Arc::new(MemoryBackend::new());
+    let node_id = NodeId::validated(1).unwrap();
+    let peer_id = NodeId::validated(2).unwrap();
+
+    {
+        let mut node = RaftNode::create_with_storage(
+            node_id,
+            RaftConfig::default(),
+            backend.clone(),
+        )
+        .unwrap();
+
+        node.add_peer(peer_id);
+
+        node.tick(1000);
+
+        let vote_response = mqdb::cluster::raft::RequestVoteResponse::granted(1);
+        let outputs = node.handle_request_vote_response(peer_id, vote_response);
+        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameLeader)));
+        assert_eq!(node.role(), RaftRole::Leader);
+
+        let partition = PartitionId::new(5).unwrap();
+        let cmd = RaftCommand::update_partition(partition, node_id, &[peer_id], Epoch::new(1));
+        let idx = node.propose(cmd);
+        assert_eq!(idx, Some(1));
+
+        let storage = RaftStorage::new(backend.clone());
+        let log = storage.load_log().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].index, 1);
+        assert_eq!(log[0].term, 1);
+    }
+
+    {
+        let storage = RaftStorage::new(backend.clone());
+        let log = storage.load_log().unwrap();
+        assert_eq!(log.len(), 1, "Log should survive restart");
+        assert_eq!(log[0].index, 1);
+        assert_eq!(log[0].term, 1);
+    }
+}

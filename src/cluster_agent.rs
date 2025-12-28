@@ -3,6 +3,8 @@ use crate::cluster::{
     ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, MqttTransport, NodeController,
     NodeId, PartitionId, RaftMessage, TransportConfig,
 };
+use crate::config::DurabilityMode;
+use crate::storage::FjallBackend;
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
@@ -93,7 +95,7 @@ pub struct ClusteredAgent {
 
 impl ClusteredAgent {
     /// # Errors
-    /// Returns an error if the node ID is invalid (must be 1-65535).
+    /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
     pub fn new(config: ClusterConfig) -> Result<Self, String> {
         let node_id =
             NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
@@ -101,7 +103,20 @@ impl ClusteredAgent {
         let transport = MqttTransport::new(node_id);
         let transport_config = TransportConfig::default();
         let controller = NodeController::new(node_id, transport.clone(), transport_config);
-        let raft = RaftCoordinator::new(node_id, transport, RaftConfig::default());
+
+        let raft_path = config.db_path.join("raft");
+        let raft_backend = Arc::new(
+            FjallBackend::open(&raft_path, DurabilityMode::Immediate)
+                .map_err(|e| format!("failed to open raft storage at {}: {e}", raft_path.display()))?,
+        );
+
+        let raft = RaftCoordinator::new_with_storage(
+            node_id,
+            transport,
+            RaftConfig::default(),
+            raft_backend,
+        )
+        .map_err(|e| format!("failed to initialize raft coordinator: {e}"))?;
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -239,6 +254,7 @@ impl ClusteredAgent {
         let mut tick_interval = interval(Duration::from_millis(100));
         let mut cleanup_interval = interval(Duration::from_secs(3600));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
+        let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         loop {
@@ -412,6 +428,26 @@ impl ClusteredAgent {
                         if removed > 0 {
                             debug!(removed, "cleared old wildcard pending entries");
                         }
+                    }
+                }
+                _ = subscription_reconciliation_interval.tick() => {
+                    let now = current_time_ms();
+                    let ctrl = self.controller.read().await;
+                    let stores = ctrl.stores();
+                    if stores.subscriptions.needs_reconciliation(now) {
+                        let result = stores.subscriptions.reconcile(
+                            &stores.topics,
+                            &stores.wildcards,
+                        );
+                        if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+                            info!(
+                                clients = result.clients_checked,
+                                added = result.subscriptions_added,
+                                removed = result.subscriptions_removed,
+                                "reconciled subscription cache"
+                            );
+                        }
+                        stores.subscriptions.mark_reconciliation(now);
                     }
                 }
                 _ = shutdown_rx.recv() => {

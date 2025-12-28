@@ -225,6 +225,20 @@ impl WildcardStore {
         self.trie.read().unwrap().is_empty()
     }
 
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn get_client_patterns(&self, client_id: &str) -> Vec<(String, u8)> {
+        self.trie
+            .read()
+            .unwrap()
+            .all_subscriptions()
+            .into_iter()
+            .filter(|(_, sub)| sub.client_id == client_id)
+            .map(|(pattern, sub)| (pattern, sub.qos))
+            .collect()
+    }
+
     #[must_use]
     pub fn serialize_entry(entry: &WildcardEntry) -> Vec<u8> {
         entry.to_be_bytes()

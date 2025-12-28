@@ -6,7 +6,9 @@ use super::state::RaftCommand;
 use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments, compute_removal_assignments};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
+use crate::storage::StorageBackend;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 pub struct RaftCoordinator<T: ClusterTransport> {
     node: RaftNode,
@@ -32,6 +34,41 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_draining_nodes: HashSet::new(),
             processed_draining_nodes: HashSet::new(),
             was_leader: false,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if loading persisted state fails.
+    pub fn new_with_storage(
+        node_id: NodeId,
+        transport: T,
+        config: RaftConfig,
+        backend: Arc<dyn StorageBackend>,
+    ) -> crate::error::Result<Self> {
+        let node = RaftNode::create_with_storage(node_id, config, backend)?;
+
+        let mut coordinator = Self {
+            node,
+            partition_map: PartitionMap::new(),
+            transport,
+            cluster_members: vec![node_id],
+            pending_dead_nodes: HashSet::new(),
+            processed_dead_nodes: HashSet::new(),
+            pending_draining_nodes: HashSet::new(),
+            processed_draining_nodes: HashSet::new(),
+            was_leader: false,
+        };
+
+        coordinator.rebuild_partition_map();
+        Ok(coordinator)
+    }
+
+    fn rebuild_partition_map(&mut self) {
+        let outputs = self.node.tick(0);
+        for output in outputs {
+            if let RaftOutput::ApplyCommand(cmd) = output {
+                self.apply_command(cmd);
+            }
         }
     }
 

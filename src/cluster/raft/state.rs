@@ -148,6 +148,29 @@ impl RaftState {
     }
 
     #[must_use]
+    pub fn recover(
+        node_id: NodeId,
+        current_term: u64,
+        voted_for: Option<NodeId>,
+        log: Vec<LogEntry>,
+    ) -> Self {
+        Self {
+            node_id,
+            current_term,
+            voted_for,
+            log,
+            commit_index: 0,
+            last_applied: 0,
+            role: RaftRole::Follower,
+            leader_id: None,
+            next_index: Vec::new(),
+            match_index: Vec::new(),
+            votes_received: Vec::new(),
+            peers: Vec::new(),
+        }
+    }
+
+    #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
@@ -190,6 +213,11 @@ impl RaftState {
     #[must_use]
     pub fn last_log_term(&self) -> u64 {
         self.log.last().map_or(0, |e| e.term)
+    }
+
+    #[must_use]
+    pub fn last_log_entry(&self) -> Option<&LogEntry> {
+        self.log.last()
     }
 
     #[must_use]

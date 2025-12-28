@@ -89,8 +89,8 @@ pub use snapshot::{
 };
 pub use store_manager::{StoreApplyError, StoreManager};
 pub use subscription_cache::{
-    MqttSubscriptionSnapshot, MqttTopicEntry, SubscriptionCache, SubscriptionCacheError,
-    mqtt_subscription_key,
+    MqttSubscriptionSnapshot, MqttTopicEntry, ReconciliationResult, SubscriptionCache,
+    SubscriptionCacheError, SUBSCRIPTION_RECONCILIATION_INTERVAL_MS, mqtt_subscription_key,
 };
 pub use topic_index::{
     SubscriberLocation, TopicIndex, TopicIndexEntry, TopicIndexError, topic_index_key,

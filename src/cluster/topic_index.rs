@@ -234,6 +234,24 @@ impl TopicIndex {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn get_client_topics(&self, client_id: &str) -> Vec<(String, u8)> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .filter_map(|(topic, entry)| {
+                entry
+                    .subscribers
+                    .iter()
+                    .find(|s| s.client_id_str() == client_id)
+                    .map(|s| (topic.clone(), s.qos))
+            })
+            .collect()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     pub fn subscribe_with_data(
         &self,
         topic: &str,
