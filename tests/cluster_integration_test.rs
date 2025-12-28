@@ -5,6 +5,7 @@ use mqdb::cluster::{
     Epoch, NodeController, NodeId, NodeStatus, Operation, PartitionAssignment, PartitionId,
     PartitionMap, PublishRouter, Qos2Store, ReplicationWrite, RetainedStore, SessionStore,
     SubscriptionCache, TopicIndex, TransportConfig, WildcardStore, session_partition,
+    topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
@@ -1881,4 +1882,85 @@ fn node_crash_restart_rejoins_cluster() {
     for node in &mut cluster.nodes {
         node.controller.process_messages();
     }
+}
+
+#[test]
+fn snapshot_transfer_on_partition_migration() {
+    let mut cluster = TestCluster::new(2);
+
+    let n1 = cluster.nodes[0].id;
+    let n2 = cluster.nodes[1].id;
+
+    let topic = "test/snapshot/topic";
+    let partition = topic_partition(topic);
+
+    cluster.nodes[0]
+        .controller
+        .become_primary(partition, Epoch::new(1));
+    cluster.nodes[1]
+        .controller
+        .become_replica(partition, Epoch::new(1), 0);
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    cluster.nodes[0]
+        .controller
+        .stores_mut()
+        .retained
+        .set(topic, 1, b"snapshot-payload", 0);
+
+    let retained_before = cluster.nodes[0]
+        .controller
+        .stores()
+        .retained
+        .get(topic);
+    assert!(
+        retained_before.is_some(),
+        "Retained message should exist on node 1"
+    );
+
+    let retained_on_n2_before = cluster.nodes[1]
+        .controller
+        .stores()
+        .retained
+        .get(topic);
+    assert!(
+        retained_on_n2_before.is_none(),
+        "Node 2 should NOT have retained message before migration"
+    );
+
+    cluster.nodes[1]
+        .controller
+        .start_partition_migration(partition, n1, n2, Epoch::new(2));
+
+    for _ in 0..20 {
+        cluster.advance_ms(10);
+        for node in &mut cluster.nodes {
+            node.controller.tick(cluster.runtime.clock().now());
+            node.controller.process_messages();
+        }
+    }
+
+    let retained_on_n2_after = cluster.nodes[1]
+        .controller
+        .stores()
+        .retained
+        .get(topic);
+    assert!(
+        retained_on_n2_after.is_some(),
+        "Node 2 should have retained message after snapshot transfer"
+    );
+
+    let msg = retained_on_n2_after.unwrap();
+    assert_eq!(
+        msg.payload,
+        b"snapshot-payload".to_vec(),
+        "Retained message payload should match"
+    );
 }
