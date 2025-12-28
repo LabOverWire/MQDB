@@ -3,7 +3,7 @@ use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use super::state::RaftCommand;
-use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments};
+use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments, compute_removal_assignments};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
 use std::collections::HashSet;
@@ -15,6 +15,8 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     cluster_members: Vec<NodeId>,
     pending_dead_nodes: HashSet<NodeId>,
     processed_dead_nodes: HashSet<NodeId>,
+    pending_draining_nodes: HashSet<NodeId>,
+    processed_draining_nodes: HashSet<NodeId>,
     was_leader: bool,
 }
 
@@ -27,6 +29,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             cluster_members: vec![node_id],
             pending_dead_nodes: HashSet::new(),
             processed_dead_nodes: HashSet::new(),
+            pending_draining_nodes: HashSet::new(),
+            processed_draining_nodes: HashSet::new(),
             was_leader: false,
         }
     }
@@ -63,11 +67,27 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.was_leader = is_leader;
 
         if just_became_leader {
-            tracing::info!("became Raft leader, processing pending dead nodes");
-            return self.process_pending_dead_nodes();
+            tracing::info!("became Raft leader, processing pending nodes");
+            let mut indices = self.process_pending_dead_nodes();
+            indices.extend(self.process_pending_draining_nodes());
+            return indices;
         }
 
         Vec::new()
+    }
+
+    fn process_pending_draining_nodes(&mut self) -> Vec<u64> {
+        let mut proposed_indices = Vec::new();
+        let pending: Vec<NodeId> = self.pending_draining_nodes.drain().collect();
+
+        for draining_node in pending {
+            if self.processed_draining_nodes.insert(draining_node) {
+                let indices = self.trigger_drain_rebalance(draining_node);
+                proposed_indices.extend(indices);
+            }
+        }
+
+        proposed_indices
     }
 
     fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
@@ -292,6 +312,24 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         Vec::new()
     }
 
+    pub fn handle_drain_notification(&mut self, draining_node: NodeId) -> Vec<u64> {
+        if !self.is_leader() {
+            tracing::info!(
+                ?draining_node,
+                "not leader, queuing draining node for later processing"
+            );
+            self.pending_draining_nodes.insert(draining_node);
+            return Vec::new();
+        }
+
+        if !self.processed_draining_nodes.insert(draining_node) {
+            tracing::debug!(?draining_node, "already processed draining node, skipping");
+            return Vec::new();
+        }
+
+        self.trigger_drain_rebalance(draining_node)
+    }
+
     fn node_has_partitions(&self, node: NodeId) -> bool {
         for partition in PartitionId::all() {
             let role = self.partition_map.role_for(partition, node);
@@ -319,6 +357,46 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         tracing::info!(
             count = reassignments.len(),
             "proposing partition reassignments for new node"
+        );
+
+        let mut proposed_indices = Vec::new();
+        for reassignment in reassignments {
+            let cmd = RaftCommand::update_partition(
+                reassignment.partition,
+                reassignment.new_primary,
+                &reassignment.new_replicas,
+                reassignment.new_epoch,
+            );
+
+            if let Ok(idx) = self.propose_partition_update(cmd) {
+                proposed_indices.push(idx);
+            }
+        }
+
+        proposed_indices
+    }
+
+    fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
+        let remaining_nodes: Vec<NodeId> = self
+            .cluster_members
+            .iter()
+            .filter(|&&n| n != draining_node)
+            .copied()
+            .collect();
+
+        let config = RebalanceConfig::default();
+        let reassignments =
+            compute_removal_assignments(&self.partition_map, &remaining_nodes, draining_node, &config);
+
+        if reassignments.is_empty() {
+            tracing::debug!(?draining_node, "no partition reassignments needed for drain");
+            return Vec::new();
+        }
+
+        tracing::info!(
+            ?draining_node,
+            count = reassignments.len(),
+            "proposing partition reassignments for draining node"
         );
 
         let mut proposed_indices = Vec::new();

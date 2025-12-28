@@ -216,6 +216,14 @@ impl MqttTransport {
                 let dead_node = NodeId::validated(dead_id)?;
                 ClusterMessage::DeathNotice { node_id: dead_node }
             }
+            3 => {
+                if data.len() < 2 {
+                    return None;
+                }
+                let drain_id = u16::from_be_bytes([data[0], data[1]]);
+                let drain_node = NodeId::validated(drain_id)?;
+                ClusterMessage::DrainNotification { node_id: drain_node }
+            }
             20 => {
                 let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;
                 ClusterMessage::RequestVote(req)
@@ -317,7 +325,8 @@ impl MqttTransport {
             ClusterMessage::Ack(ack) => {
                 buf.extend_from_slice(&ack.to_be_bytes());
             }
-            ClusterMessage::DeathNotice { node_id } => {
+            ClusterMessage::DeathNotice { node_id }
+            | ClusterMessage::DrainNotification { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
             }
             ClusterMessage::RequestVote(req) => {
@@ -619,7 +628,8 @@ mod tests {
             ClusterMessage::Ack(ack) => {
                 buf.extend_from_slice(&ack.to_be_bytes());
             }
-            ClusterMessage::DeathNotice { node_id } => {
+            ClusterMessage::DeathNotice { node_id }
+            | ClusterMessage::DrainNotification { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
             }
             ClusterMessage::RequestVote(req) => {

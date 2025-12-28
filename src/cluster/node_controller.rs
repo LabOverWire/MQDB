@@ -62,6 +62,7 @@ pub struct NodeController<T: ClusterTransport> {
     forward_dedup_order: VecDeque<u64>,
     raft_messages: VecDeque<RaftMessage>,
     dead_nodes: VecDeque<NodeId>,
+    draining_nodes: VecDeque<NodeId>,
     migration_manager: MigrationManager,
     pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
@@ -95,6 +96,7 @@ impl<T: ClusterTransport> NodeController<T> {
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
             raft_messages: VecDeque::new(),
             dead_nodes: VecDeque::new(),
+            draining_nodes: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             pending_snapshots: HashMap::new(),
             outgoing_snapshots: HashMap::new(),
@@ -234,6 +236,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.dead_nodes.drain(..)
     }
 
+    pub fn drain_draining_nodes(&mut self) -> impl Iterator<Item = NodeId> + '_ {
+        self.draining_nodes.drain(..)
+    }
+
     #[allow(clippy::too_many_lines)]
     fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
@@ -253,6 +259,10 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::DeathNotice { node_id } => {
                 self.heartbeat.handle_death_notice(node_id);
                 self.handle_node_death(node_id);
+            }
+            ClusterMessage::DrainNotification { node_id } => {
+                tracing::info!(?node_id, "received drain notification");
+                self.draining_nodes.push_back(node_id);
             }
             ClusterMessage::RequestVote(req) => {
                 self.raft_messages.push_back(RaftMessage::RequestVote {
@@ -1244,6 +1254,8 @@ impl<T: ClusterTransport> NodeController<T> {
         self.draining = draining;
         if draining {
             tracing::info!(node_id = self.node_id.get(), "node entering draining mode");
+            let msg = ClusterMessage::DrainNotification { node_id: self.node_id };
+            let _ = self.transport.broadcast(msg);
         } else {
             tracing::info!(node_id = self.node_id.get(), "node exiting draining mode");
         }

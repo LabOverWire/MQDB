@@ -2211,3 +2211,40 @@ fn wildcard_broadcast_replication() {
     assert_eq!(subscriber.client_id_str(), "wildcard-client");
     assert_eq!(subscriber.qos, 1);
 }
+
+#[test]
+fn drain_notification_triggers_partition_reassignment() {
+    use mqdb::cluster::{ClusterMessage, ClusterTransport};
+
+    let mut cluster = TestCluster::new(3);
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let draining_node_id = cluster.nodes[2].controller.node_id();
+    let drain_msg = ClusterMessage::DrainNotification {
+        node_id: draining_node_id,
+    };
+    let _ = cluster.nodes[2].controller.transport().broadcast(drain_msg);
+
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let draining_nodes: Vec<_> = cluster.nodes[0]
+        .controller
+        .drain_draining_nodes()
+        .collect();
+
+    assert!(
+        draining_nodes.contains(&draining_node_id),
+        "Node 1 should have received drain notification for node 3"
+    );
+}

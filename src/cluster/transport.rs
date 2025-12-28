@@ -18,6 +18,9 @@ pub enum ClusterMessage {
     DeathNotice {
         node_id: NodeId,
     },
+    DrainNotification {
+        node_id: NodeId,
+    },
     RequestVote(RequestVoteRequest),
     RequestVoteResponse(RequestVoteResponse),
     AppendEntries(AppendEntriesRequest),
@@ -47,6 +50,7 @@ impl ClusterMessage {
             Self::WriteRequest(_) => 15,
             Self::Ack(_) => 11,
             Self::DeathNotice { .. } => 2,
+            Self::DrainNotification { .. } => 3,
             Self::RequestVote(_) => 20,
             Self::RequestVoteResponse(_) => 21,
             Self::AppendEntries(_) => 22,

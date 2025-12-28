@@ -250,6 +250,7 @@ impl ClusteredAgent {
 
                     let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
                     let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes().collect();
+                    let draining_nodes: Vec<NodeId> = ctrl.drain_draining_nodes().collect();
                     let alive_nodes: Vec<NodeId> = ctrl.alive_nodes();
                     drop(ctrl);
 
@@ -292,6 +293,17 @@ impl ClusteredAgent {
                                 ?dead_node,
                                 proposals = proposed.len(),
                                 "Raft leader proposing partition reassignments"
+                            );
+                        }
+                    }
+
+                    for draining_node in draining_nodes {
+                        let proposed = raft.handle_drain_notification(draining_node);
+                        if !proposed.is_empty() {
+                            info!(
+                                ?draining_node,
+                                proposals = proposed.len(),
+                                "Raft leader proposing partition reassignments for draining node"
                             );
                         }
                     }

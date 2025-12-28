@@ -68,7 +68,8 @@ impl SimulatedTransport {
             ClusterMessage::Ack(ack) => {
                 buf.extend_from_slice(&ack.to_be_bytes());
             }
-            ClusterMessage::DeathNotice { node_id } => {
+            ClusterMessage::DeathNotice { node_id }
+            | ClusterMessage::DrainNotification { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
             }
             ClusterMessage::RequestVote(req) => {
@@ -122,6 +123,7 @@ impl SimulatedTransport {
         buf
     }
 
+    #[allow(clippy::too_many_lines)]
     fn deserialize_message(data: &[u8]) -> Option<ClusterMessage> {
         if data.is_empty() {
             return None;
@@ -154,6 +156,14 @@ impl SimulatedTransport {
                 let node_id = u16::from_be_bytes([payload[0], payload[1]]);
                 let node = NodeId::validated(node_id)?;
                 Some(ClusterMessage::DeathNotice { node_id: node })
+            }
+            3 => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let node_id = u16::from_be_bytes([payload[0], payload[1]]);
+                let node = NodeId::validated(node_id)?;
+                Some(ClusterMessage::DrainNotification { node_id: node })
             }
             20 => {
                 let (req, _) = RequestVoteRequest::try_from_be_bytes(payload).ok()?;
