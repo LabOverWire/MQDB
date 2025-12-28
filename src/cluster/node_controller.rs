@@ -1,16 +1,22 @@
 use super::entity;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
+use super::idempotency_store::{IdempotencyCheck, IdempotencyError};
 use super::migration::{MigrationManager, MigrationPhase};
+use super::offset_store::ConsumerOffset;
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupResponse, ForwardedPublish, Operation,
     QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
-use super::raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+use super::raft::{
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+};
 use super::replication::{ReplicaRole, ReplicaState};
 use super::retained_store::RetainedMessage;
-use super::snapshot::{SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
+use super::snapshot::{
+    SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
+};
 use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
@@ -24,10 +30,22 @@ const FORWARD_DEDUP_CAPACITY: usize = 1000;
 
 #[derive(Debug)]
 pub enum RaftMessage {
-    RequestVote { from: NodeId, request: RequestVoteRequest },
-    RequestVoteResponse { from: NodeId, response: RequestVoteResponse },
-    AppendEntries { from: NodeId, request: AppendEntriesRequest },
-    AppendEntriesResponse { from: NodeId, response: AppendEntriesResponse },
+    RequestVote {
+        from: NodeId,
+        request: RequestVoteRequest,
+    },
+    RequestVoteResponse {
+        from: NodeId,
+        response: RequestVoteResponse,
+    },
+    AppendEntries {
+        from: NodeId,
+        request: AppendEntriesRequest,
+    },
+    AppendEntriesResponse {
+        from: NodeId,
+        response: AppendEntriesResponse,
+    },
 }
 
 pub struct NodeController<T: ClusterTransport> {
@@ -242,10 +260,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
             ClusterMessage::RequestVoteResponse(resp) => {
-                self.raft_messages.push_back(RaftMessage::RequestVoteResponse {
-                    from: msg.from,
-                    response: resp,
-                });
+                self.raft_messages
+                    .push_back(RaftMessage::RequestVoteResponse {
+                        from: msg.from,
+                        response: resp,
+                    });
             }
             ClusterMessage::AppendEntries(req) => {
                 self.raft_messages.push_back(RaftMessage::AppendEntries {
@@ -254,10 +273,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
-                self.raft_messages.push_back(RaftMessage::AppendEntriesResponse {
-                    from: msg.from,
-                    response: resp,
-                });
+                self.raft_messages
+                    .push_back(RaftMessage::AppendEntriesResponse {
+                        from: msg.from,
+                        response: resp,
+                    });
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -291,10 +311,15 @@ impl<T: ClusterTransport> NodeController<T> {
                 let _ = self.transport.send(msg.from, response_msg);
             }
             ClusterMessage::QueryResponse(ref response) => {
-                if self.pending_retained_queries.contains_key(&response.query_id) {
+                if self
+                    .pending_retained_queries
+                    .contains_key(&response.query_id)
+                {
                     let results = Self::parse_retained_query_response(response);
                     self.complete_retained_query(response.query_id, results);
-                } else if let Some(result) = self.query_coordinator.receive_response(response.clone()) {
+                } else if let Some(result) =
+                    self.query_coordinator.receive_response(response.clone())
+                {
                     tracing::debug!(
                         query_id = result.query_id,
                         partial = result.partial,
@@ -512,7 +537,8 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         );
 
-        self.write_log.append(partition, sequence, write_msg.clone());
+        self.write_log
+            .append(partition, sequence, write_msg.clone());
         let _ = self.stores.apply_write(&write_msg);
 
         let tracker = QuorumTracker::new(sequence, epoch, replicas, required_acks);
@@ -706,7 +732,8 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         );
 
-        self.write_log.append(partition, sequence, write_msg.clone());
+        self.write_log
+            .append(partition, sequence, write_msg.clone());
         let _ = self.stores.apply_write(&write_msg);
 
         for &replica in replicas {
@@ -746,6 +773,61 @@ impl<T: ClusterTransport> NodeController<T> {
                 "write_or_forward: no primary found for partition"
             );
         }
+    }
+
+    #[must_use]
+    pub fn commit_offset(
+        &mut self,
+        consumer_id: &str,
+        partition: PartitionId,
+        sequence: u64,
+        timestamp: u64,
+    ) -> ConsumerOffset {
+        let (offset, write) =
+            self.stores
+                .commit_offset_replicated(consumer_id, partition, sequence, timestamp);
+        self.write_or_forward(write);
+        offset
+    }
+
+    #[must_use]
+    pub fn get_offset(&self, consumer_id: &str, partition: PartitionId) -> Option<u64> {
+        self.stores.offsets.get_sequence(consumer_id, partition)
+    }
+
+    /// # Errors
+    /// Returns `IdempotencyError::AlreadyProcessing` if a write is already in progress.
+    /// Returns `IdempotencyError::PartitionFull` if partition has too many records.
+    pub fn check_idempotency(
+        &self,
+        idempotency_key: &str,
+        partition: PartitionId,
+        entity: &str,
+        id: &str,
+        timestamp: u64,
+    ) -> Result<IdempotencyCheck, IdempotencyError> {
+        let epoch = self
+            .replicas
+            .get(&partition.get())
+            .map_or(Epoch::ZERO, super::replication::ReplicaState::epoch);
+        self.stores
+            .check_idempotency(idempotency_key, partition, epoch, entity, id, timestamp)
+    }
+
+    pub fn commit_idempotency(
+        &mut self,
+        partition: PartitionId,
+        idempotency_key: &str,
+        response: &[u8],
+    ) {
+        let write = self
+            .stores
+            .commit_idempotency(partition, idempotency_key, response);
+        self.write_or_forward(write);
+    }
+
+    pub fn rollback_idempotency(&self, partition: PartitionId, idempotency_key: &str) {
+        self.stores.rollback_idempotency(partition, idempotency_key);
     }
 
     /// # Errors
@@ -890,16 +972,13 @@ impl<T: ClusterTransport> NodeController<T> {
             "received forwarded publish"
         );
 
-        self.transport.queue_local_publish(
-            fwd.topic.clone(),
-            fwd.payload.clone(),
-            fwd.qos,
-        );
+        self.transport
+            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos);
     }
 
     fn forward_fingerprint(fwd: &ForwardedPublish) -> u64 {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
         fwd.origin_node.hash(&mut hasher);
@@ -935,7 +1014,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if let Some(chunk) = sender.next_chunk() {
             let is_last = chunk.is_last();
-            let _ = self.transport.send(to, ClusterMessage::SnapshotChunk(chunk));
+            let _ = self
+                .transport
+                .send(to, ClusterMessage::SnapshotChunk(chunk));
 
             if is_last {
                 self.outgoing_snapshots.remove(&(to, partition));
@@ -961,17 +1042,25 @@ impl<T: ClusterTransport> NodeController<T> {
         if !builder.add_chunk(chunk) {
             tracing::warn!(?partition, "failed to add snapshot chunk");
             let complete = SnapshotComplete::failed(partition);
-            let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::SnapshotComplete(complete));
             self.pending_snapshots.remove(&partition);
             return;
         }
 
         if builder.is_complete() {
             let sequence = builder.sequence_at_snapshot();
-            let Some(data) = self.pending_snapshots.remove(&partition).and_then(SnapshotBuilder::assemble) else {
+            let Some(data) = self
+                .pending_snapshots
+                .remove(&partition)
+                .and_then(SnapshotBuilder::assemble)
+            else {
                 tracing::error!(?partition, "failed to assemble snapshot");
                 let complete = SnapshotComplete::failed(partition);
-                let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::SnapshotComplete(complete));
                 return;
             };
 
@@ -984,17 +1073,24 @@ impl<T: ClusterTransport> NodeController<T> {
                         "snapshot import complete"
                     );
 
-                    if let Err(e) = self.migration_manager.mark_snapshot_complete(partition, sequence) {
+                    if let Err(e) = self
+                        .migration_manager
+                        .mark_snapshot_complete(partition, sequence)
+                    {
                         tracing::debug!(?partition, ?e, "no active migration for snapshot");
                     }
 
                     let complete = SnapshotComplete::ok(partition, sequence);
-                    let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                    let _ = self
+                        .transport
+                        .send(from, ClusterMessage::SnapshotComplete(complete));
                 }
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
                     let complete = SnapshotComplete::failed(partition);
-                    let _ = self.transport.send(from, ClusterMessage::SnapshotComplete(complete));
+                    let _ = self
+                        .transport
+                        .send(from, ClusterMessage::SnapshotComplete(complete));
                 }
             }
         }
@@ -1019,7 +1115,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if complete.is_ok() {
             if self.migration_manager.is_sending(partition)
-                && let Err(e) = self.migration_manager.advance_phase(partition, MigrationPhase::Overlapping)
+                && let Err(e) = self
+                    .migration_manager
+                    .advance_phase(partition, MigrationPhase::Overlapping)
             {
                 tracing::debug!(?partition, ?e, "could not advance migration phase");
             }
@@ -1029,14 +1127,12 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
-        tracing::info!(
-            ?partition,
-            source = from.get(),
-            "requesting snapshot"
-        );
+        tracing::info!(?partition, source = from.get(), "requesting snapshot");
 
         let request = SnapshotRequest::create(partition, self.node_id);
-        let _ = self.transport.send(from, ClusterMessage::SnapshotRequest(request));
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::SnapshotRequest(request));
     }
 
     pub fn start_partition_migration(
@@ -1128,7 +1224,11 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self.query_coordinator
     }
 
-    pub fn handle_query_request(&self, partition: PartitionId, request: &QueryRequest) -> QueryResponse {
+    pub fn handle_query_request(
+        &self,
+        partition: PartitionId,
+        request: &QueryRequest,
+    ) -> QueryResponse {
         if self.partition_map.primary(partition) != Some(self.node_id) {
             return QueryResponse::error(request.query_id, partition, QueryStatus::NotPrimary);
         }
@@ -1201,19 +1301,12 @@ impl<T: ClusterTransport> NodeController<T> {
             now,
         );
 
-        let requests_with_partitions: Vec<_> = partitions
-            .into_iter()
-            .zip(requests)
-            .collect();
+        let requests_with_partitions: Vec<_> = partitions.into_iter().zip(requests).collect();
 
         (query_id, requests_with_partitions)
     }
 
-    pub fn send_retained_query(
-        &self,
-        partition: PartitionId,
-        request: QueryRequest,
-    ) {
+    pub fn send_retained_query(&self, partition: PartitionId, request: QueryRequest) {
         if let Some(primary) = self.partition_map.primary(partition) {
             if primary == self.node_id {
                 return;
@@ -1311,7 +1404,8 @@ impl<T: ClusterTransport> NodeController<T> {
         if write.operation == Operation::Delete {
             let topic = write.id.clone();
             tracing::debug!(topic, "clearing retained message from local broker");
-            self.transport.queue_local_publish_retained(topic, Vec::new(), 0);
+            self.transport
+                .queue_local_publish_retained(topic, Vec::new(), 0);
             return;
         }
 
@@ -1328,8 +1422,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
 
-            tracing::debug!(topic, qos, payload_len = payload.len(), "syncing retained message to local broker");
-            self.transport.queue_local_publish_retained(topic, payload, qos);
+            tracing::debug!(
+                topic,
+                qos,
+                payload_len = payload.len(),
+                "syncing retained message to local broker"
+            );
+            self.transport
+                .queue_local_publish_retained(topic, payload, qos);
         }
     }
 }
@@ -1708,7 +1808,10 @@ mod tests {
         assert_eq!(seq, 1);
 
         let session = ctrl.stores().sessions.get("test-client");
-        assert!(session.is_some(), "Primary should have session locally after write");
+        assert!(
+            session.is_some(),
+            "Primary should have session locally after write"
+        );
         assert_eq!(session.unwrap().client_id_str(), "test-client");
 
         assert!(
@@ -1746,11 +1849,118 @@ mod tests {
         assert_eq!(seq, 1);
 
         let session = ctrl.stores().sessions.get("async-client");
-        assert!(session.is_some(), "Primary should have session locally after async write");
+        assert!(
+            session.is_some(),
+            "Primary should have session locally after async write"
+        );
 
         assert!(
             ctrl.write_log().can_catchup(partition, 1),
             "Write log should contain the async write for catchup"
+        );
+    }
+
+    #[test]
+    fn commit_offset_stores_locally_and_replicates() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let consumer_id = "test-consumer";
+        let consumer_partition = session_partition(consumer_id);
+        ctrl.become_primary(consumer_partition, Epoch::new(1));
+        ctrl.register_peer(node2);
+
+        let mut map = PartitionMap::new();
+        map.set(
+            consumer_partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![node2],
+                epoch: Epoch::new(1),
+            },
+        );
+        ctrl.update_partition_map(map);
+
+        let data_partition = PartitionId::new(5).unwrap();
+        let offset = ctrl.commit_offset(consumer_id, data_partition, 12345, 1000);
+
+        assert_eq!(offset.sequence, 12345);
+        assert_eq!(offset.timestamp, 1000);
+        assert_eq!(offset.consumer_id_str(), consumer_id);
+
+        let stored = ctrl.get_offset(consumer_id, data_partition);
+        assert_eq!(stored, Some(12345));
+
+        let sent = ctrl.transport.sent_messages();
+        assert!(!sent.is_empty(), "Should have sent replication messages");
+    }
+
+    #[test]
+    fn idempotency_check_and_commit() {
+        use super::super::idempotency_store::IdempotencyCheck;
+
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = PartitionId::new(0).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        let idem_key = "req-123";
+        let entity = "users";
+        let id = "user-1";
+        let timestamp = 1000;
+
+        let check1 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp);
+        assert!(
+            matches!(check1, Ok(IdempotencyCheck::Proceed)),
+            "First check should return Proceed"
+        );
+
+        let check2 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp);
+        assert!(
+            check2.is_err(),
+            "Second check while processing should error"
+        );
+
+        let response = b"success response";
+        ctrl.commit_idempotency(partition, idem_key, response);
+
+        let check3 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp + 100);
+        match check3 {
+            Ok(IdempotencyCheck::ReturnCached(cached)) => {
+                assert_eq!(cached, response.to_vec());
+            }
+            other => panic!("Expected ReturnCached, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn idempotency_rollback() {
+        use super::super::idempotency_store::IdempotencyCheck;
+
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = PartitionId::new(0).unwrap();
+
+        let idem_key = "req-456";
+        let entity = "orders";
+        let id = "order-1";
+        let timestamp = 2000;
+
+        let check1 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp);
+        assert!(matches!(check1, Ok(IdempotencyCheck::Proceed)));
+
+        ctrl.rollback_idempotency(partition, idem_key);
+
+        let check2 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp);
+        assert!(
+            matches!(check2, Ok(IdempotencyCheck::Proceed)),
+            "After rollback, should be able to retry"
         );
     }
 }
