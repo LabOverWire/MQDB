@@ -1,4 +1,5 @@
 mod cursor;
+pub mod db;
 pub mod entity;
 mod epoch;
 #[cfg(feature = "native")]
@@ -37,6 +38,7 @@ mod wildcard_store;
 mod write_log;
 
 pub use cursor::{PartitionCursor, ScatterCursor};
+pub use db::{DbDataStore, DbDataStoreError, DbEntity, data_partition, db_data_key};
 pub use epoch::Epoch;
 #[cfg(feature = "native")]
 pub use event_handler::ClusterEventHandler;

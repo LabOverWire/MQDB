@@ -1,6 +1,11 @@
 use bebytes::BeBytes;
 
 use super::SubscriptionType;
+use super::db::{
+    ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest,
+    FkValidationStore, IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation,
+    UniqueStore, data_partition, index_partition, unique_partition,
+};
 use super::entity;
 use super::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
 use super::inflight_store::{InflightMessage, InflightStore, InflightStoreError};
@@ -29,6 +34,11 @@ pub enum StoreApplyError {
     InflightError,
     OffsetError,
     IdempotencyError,
+    DbDataError,
+    DbSchemaError,
+    DbIndexError,
+    DbUniqueError,
+    DbFkError,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -44,6 +54,11 @@ impl std::fmt::Display for StoreApplyError {
             Self::InflightError => write!(f, "inflight store error"),
             Self::OffsetError => write!(f, "offset store error"),
             Self::IdempotencyError => write!(f, "idempotency store error"),
+            Self::DbDataError => write!(f, "db data store error"),
+            Self::DbSchemaError => write!(f, "db schema store error"),
+            Self::DbIndexError => write!(f, "db index store error"),
+            Self::DbUniqueError => write!(f, "db unique store error"),
+            Self::DbFkError => write!(f, "db fk store error"),
         }
     }
 }
@@ -61,6 +76,11 @@ pub struct StoreManager {
     pub inflight: InflightStore,
     pub offsets: OffsetStore,
     pub idempotency: IdempotencyStore,
+    pub db_data: DbDataStore,
+    pub db_schema: SchemaStore,
+    pub db_index: IndexStore,
+    pub db_unique: UniqueStore,
+    pub db_fk: FkValidationStore,
 }
 
 impl StoreManager {
@@ -77,6 +97,11 @@ impl StoreManager {
             inflight: InflightStore::new(node_id),
             offsets: OffsetStore::new(node_id),
             idempotency: IdempotencyStore::new(node_id),
+            db_data: DbDataStore::new(node_id),
+            db_schema: SchemaStore::new(node_id),
+            db_index: IndexStore::new(node_id),
+            db_unique: UniqueStore::new(node_id),
+            db_fk: FkValidationStore::new(node_id),
         }
     }
 
@@ -93,6 +118,11 @@ impl StoreManager {
             entity::INFLIGHT => self.apply_inflight(write),
             entity::OFFSETS => self.apply_offset(write),
             entity::IDEMPOTENCY => self.apply_idempotency(write),
+            entity::DB_DATA => self.apply_db_data(write),
+            entity::DB_SCHEMA => self.apply_db_schema(write),
+            entity::DB_INDEX => self.apply_db_index(write),
+            entity::DB_UNIQUE => self.apply_db_unique(write),
+            entity::DB_FK => self.apply_db_fk(write),
             _ => Err(StoreApplyError::UnknownEntity),
         }
     }
@@ -149,6 +179,444 @@ impl StoreManager {
         self.idempotency
             .apply_replicated(write.operation, &write.id, &write.data)
             .map_err(|_| StoreApplyError::IdempotencyError)
+    }
+
+    fn apply_db_data(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_data
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbDataError)
+    }
+
+    fn apply_db_schema(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_schema
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbSchemaError)
+    }
+
+    fn apply_db_index(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_index
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbIndexError)
+    }
+
+    fn apply_db_unique(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_unique
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbUniqueError)
+    }
+
+    fn apply_db_fk(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_fk
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbFkError)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::AlreadyExists` if the entity already exists.
+    pub fn db_create_replicated(
+        &self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
+        let db_entity = self.db_data.create(entity_type, id, data, timestamp_ms)?;
+        let partition = data_partition(entity_type, id);
+        let serialized = DbDataStore::serialize(&db_entity);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_DATA.to_string(),
+            db_entity.key(),
+            serialized,
+        );
+        Ok((db_entity, write))
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_update_replicated(
+        &self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
+        let db_entity = self.db_data.update(entity_type, id, data, timestamp_ms)?;
+        let partition = data_partition(entity_type, id);
+        let serialized = DbDataStore::serialize(&db_entity);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Update,
+            Epoch::ZERO,
+            0,
+            entity::DB_DATA.to_string(),
+            db_entity.key(),
+            serialized,
+        );
+        Ok((db_entity, write))
+    }
+
+    #[must_use]
+    pub fn db_upsert_replicated(
+        &self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> (DbEntity, ReplicationWrite) {
+        let db_entity = self.db_data.upsert(entity_type, id, data, timestamp_ms);
+        let partition = data_partition(entity_type, id);
+        let serialized = DbDataStore::serialize(&db_entity);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Update,
+            Epoch::ZERO,
+            0,
+            entity::DB_DATA.to_string(),
+            db_entity.key(),
+            serialized,
+        );
+        (db_entity, write)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_delete_replicated(
+        &self,
+        entity_type: &str,
+        id: &str,
+    ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
+        let db_entity = self.db_data.delete(entity_type, id)?;
+        let partition = data_partition(entity_type, id);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Delete,
+            Epoch::ZERO,
+            0,
+            entity::DB_DATA.to_string(),
+            db_entity.key(),
+            Vec::new(),
+        );
+        Ok((db_entity, write))
+    }
+
+    #[must_use]
+    pub fn db_get(&self, entity_type: &str, id: &str) -> Option<DbEntity> {
+        self.db_data.get(entity_type, id)
+    }
+
+    #[must_use]
+    pub fn db_list(&self, entity_type: &str) -> Vec<DbEntity> {
+        self.db_data.list(entity_type)
+    }
+
+    /// # Errors
+    /// Returns `SchemaStoreError::AlreadyExists` if the schema already exists.
+    pub fn schema_register_replicated(
+        &self,
+        entity: &str,
+        schema_data: &[u8],
+    ) -> Result<(ClusterSchema, Vec<ReplicationWrite>), super::db::SchemaStoreError> {
+        let schema = self.db_schema.register(entity, schema_data)?;
+        let serialized = SchemaStore::serialize(&schema);
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|p| {
+                ReplicationWrite::new(
+                    p,
+                    Operation::Insert,
+                    Epoch::ZERO,
+                    0,
+                    entity::DB_SCHEMA.to_string(),
+                    entity.to_string(),
+                    serialized.clone(),
+                )
+            })
+            .collect();
+        Ok((schema, writes))
+    }
+
+    /// # Errors
+    /// Returns `SchemaStoreError::NotFound` if the schema does not exist.
+    pub fn schema_update_replicated(
+        &self,
+        entity: &str,
+        schema_data: &[u8],
+    ) -> Result<(ClusterSchema, Vec<ReplicationWrite>), super::db::SchemaStoreError> {
+        let schema = self.db_schema.update(entity, schema_data)?;
+        let serialized = SchemaStore::serialize(&schema);
+        let writes: Vec<ReplicationWrite> = PartitionId::all()
+            .map(|p| {
+                ReplicationWrite::new(
+                    p,
+                    Operation::Update,
+                    Epoch::ZERO,
+                    0,
+                    entity::DB_SCHEMA.to_string(),
+                    entity.to_string(),
+                    serialized.clone(),
+                )
+            })
+            .collect();
+        Ok((schema, writes))
+    }
+
+    #[must_use]
+    pub fn schema_get(&self, entity: &str) -> Option<ClusterSchema> {
+        self.db_schema.get(entity)
+    }
+
+    #[must_use]
+    pub fn schema_list(&self) -> Vec<ClusterSchema> {
+        self.db_schema.list()
+    }
+
+    #[must_use]
+    pub fn schema_is_valid_for_write(&self, entity: &str) -> bool {
+        self.db_schema.is_valid_for_write(entity)
+    }
+
+    /// # Errors
+    /// Returns `IndexStoreError::AlreadyExists` if the entry already exists.
+    pub fn index_add_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        data_partition: PartitionId,
+        record_id: &str,
+    ) -> Result<(IndexEntry, ReplicationWrite), super::db::IndexStoreError> {
+        let entry = IndexEntry::create(entity, field, value, data_partition, record_id);
+        self.db_index.add_entry(entry.clone())?;
+
+        let serialized = IndexStore::serialize(&entry);
+        let idx_partition = index_partition(entity, field, value);
+        let key = super::db::index_key(&entry);
+
+        let write = ReplicationWrite::new(
+            idx_partition,
+            Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_INDEX.to_string(),
+            key,
+            serialized,
+        );
+        Ok((entry, write))
+    }
+
+    /// # Errors
+    /// Returns `IndexStoreError::NotFound` if the entry does not exist.
+    pub fn index_remove_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        data_partition: PartitionId,
+        record_id: &str,
+    ) -> Result<(IndexEntry, ReplicationWrite), super::db::IndexStoreError> {
+        let entry = self
+            .db_index
+            .remove_entry(entity, field, value, data_partition, record_id)?;
+
+        let idx_partition = index_partition(entity, field, value);
+        let key = super::db::index_key(&entry);
+
+        let write = ReplicationWrite::new(
+            idx_partition,
+            Operation::Delete,
+            Epoch::ZERO,
+            0,
+            entity::DB_INDEX.to_string(),
+            key,
+            vec![],
+        );
+        Ok((entry, write))
+    }
+
+    #[must_use]
+    pub fn index_lookup(&self, entity: &str, field: &str, value: &[u8]) -> Vec<IndexEntry> {
+        self.db_index.lookup(entity, field, value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn unique_reserve_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        request_id: &str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+        now: u64,
+    ) -> (ReserveResult, Option<ReplicationWrite>) {
+        let result = self.db_unique.reserve(
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            ttl_ms,
+            now,
+        );
+
+        match result {
+            ReserveResult::Reserved => {
+                let reservation = self.db_unique.get(entity, field, value);
+                if let Some(r) = reservation {
+                    let serialized = UniqueStore::serialize(&r);
+                    let partition = unique_partition(entity, field, value);
+                    let key = super::db::unique_key(&r);
+                    let write = ReplicationWrite::new(
+                        partition,
+                        Operation::Insert,
+                        Epoch::ZERO,
+                        0,
+                        entity::DB_UNIQUE.to_string(),
+                        key,
+                        serialized,
+                    );
+                    (ReserveResult::Reserved, Some(write))
+                } else {
+                    (ReserveResult::Reserved, None)
+                }
+            }
+            other => (other, None),
+        }
+    }
+
+    /// # Errors
+    /// Returns `UniqueStoreError` if reservation not found, wrong `request_id`, or already committed.
+    pub fn unique_commit_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        request_id: &str,
+    ) -> Result<(UniqueReservation, ReplicationWrite), super::db::UniqueStoreError> {
+        let committed = self.db_unique.commit(entity, field, value, request_id)?;
+        let serialized = UniqueStore::serialize(&committed);
+        let partition = unique_partition(entity, field, value);
+        let key = super::db::unique_key(&committed);
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Update,
+            Epoch::ZERO,
+            0,
+            entity::DB_UNIQUE.to_string(),
+            key,
+            serialized,
+        );
+        Ok((committed, write))
+    }
+
+    #[must_use]
+    pub fn unique_release_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        request_id: &str,
+    ) -> Option<ReplicationWrite> {
+        fn encode_hex(bytes: &[u8]) -> String {
+            use std::fmt::Write;
+            bytes
+                .iter()
+                .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+                    let _ = write!(acc, "{b:02x}");
+                    acc
+                })
+        }
+
+        if self.db_unique.release(entity, field, value, request_id) {
+            let partition = unique_partition(entity, field, value);
+            let key = format!("_unique/{entity}/{field}/{}", encode_hex(value));
+            Some(ReplicationWrite::new(
+                partition,
+                Operation::Delete,
+                Epoch::ZERO,
+                0,
+                entity::DB_UNIQUE.to_string(),
+                key,
+                vec![],
+            ))
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub fn unique_check(&self, entity: &str, field: &str, value: &[u8], now: u64) -> bool {
+        self.db_unique.check(entity, field, value, now)
+    }
+
+    #[must_use]
+    pub fn unique_get(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+    ) -> Option<UniqueReservation> {
+        self.db_unique.get(entity, field, value)
+    }
+
+    /// # Errors
+    /// Returns `FkStoreError::AlreadyExists` if request with same ID exists.
+    pub fn fk_add_request_replicated(
+        &self,
+        request: FkValidationRequest,
+    ) -> Result<ReplicationWrite, super::db::FkStoreError> {
+        let partition = request.target_partition();
+        let key = request.request_id_str().to_string();
+        let serialized = FkValidationStore::serialize_request(&request);
+        self.db_fk.add_request(request)?;
+        Ok(ReplicationWrite::new(
+            partition,
+            Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_FK.to_string(),
+            key,
+            serialized,
+        ))
+    }
+
+    /// # Errors
+    /// Returns `FkStoreError::NotFound` if request does not exist.
+    pub fn fk_complete_request_replicated(
+        &self,
+        request_id: &str,
+    ) -> Result<(FkValidationRequest, ReplicationWrite), super::db::FkStoreError> {
+        let request = self.db_fk.complete_request(request_id)?;
+        let partition = request.target_partition();
+        let write = ReplicationWrite::new(
+            partition,
+            Operation::Delete,
+            Epoch::ZERO,
+            0,
+            entity::DB_FK.to_string(),
+            request_id.to_string(),
+            vec![],
+        );
+        Ok((request, write))
+    }
+
+    #[must_use]
+    pub fn fk_get_request(&self, request_id: &str) -> Option<FkValidationRequest> {
+        self.db_fk.get_request(request_id)
+    }
+
+    pub fn fk_cleanup_expired(&self, now: u64) -> usize {
+        self.db_fk.cleanup_expired(now)
+    }
+
+    pub fn unique_cleanup_expired(&self, now: u64) -> usize {
+        self.db_unique.cleanup_expired(now)
     }
 
     /// # Errors
@@ -779,8 +1247,35 @@ impl StoreManager {
                 let data = offsets.into_iter().flat_map(|o| o.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
+            entity::DB_DATA => {
+                let entity_type = Self::extract_db_entity_type(filter);
+                let (entities, has_more, next_cursor) =
+                    self.db_data.query(entity_type, filter, limit, cursor);
+                let data = entities
+                    .into_iter()
+                    .flat_map(|e| DbDataStore::serialize(&e))
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
+            _ if entity.starts_with("$DB/") => {
+                let entity_type = entity.strip_prefix("$DB/");
+                let (entities, has_more, next_cursor) =
+                    self.db_data.query(entity_type, filter, limit, cursor);
+                let data = entities
+                    .into_iter()
+                    .flat_map(|e| DbDataStore::serialize(&e))
+                    .collect();
+                Ok((data, has_more, next_cursor))
+            }
             _ => Err(StoreApplyError::UnknownEntity),
         }
+    }
+
+    fn extract_db_entity_type(filter: Option<&str>) -> Option<&str> {
+        filter.and_then(|f| {
+            f.strip_prefix("entity_type=")
+                .map(|v| v.trim().trim_matches('"').trim_matches('\''))
+        })
     }
 
     #[must_use]
@@ -790,6 +1285,16 @@ impl StoreManager {
             entity::RETAINED => self.retained.get(id).map(|m| m.to_be_bytes()),
             entity::SUBSCRIPTIONS => self.subscriptions.get_snapshot(id).map(|s| s.to_be_bytes()),
             entity::TOPIC_INDEX => self.topics.get_entry(id).map(|e| e.to_be_bytes()),
+            entity::DB_DATA => {
+                let parts: Vec<&str> = id.splitn(2, '/').collect();
+                if parts.len() == 2 {
+                    self.db_data
+                        .get(parts[0], parts[1])
+                        .map(|e| DbDataStore::serialize(&e))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -887,6 +1392,11 @@ impl std::fmt::Debug for StoreManager {
             .field("inflight", &self.inflight.count())
             .field("offsets", &self.offsets.count())
             .field("idempotency", &self.idempotency.count())
+            .field("db_data", &self.db_data.count())
+            .field("db_schema", &self.db_schema.count())
+            .field("db_index", &self.db_index.count())
+            .field("db_unique", &self.db_unique.count())
+            .field("db_fk", &self.db_fk.count())
             .finish()
     }
 }

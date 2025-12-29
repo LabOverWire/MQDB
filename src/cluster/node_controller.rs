@@ -882,6 +882,114 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    /// # Errors
+    /// Returns `DbDataStoreError::AlreadyExists` if the entity already exists.
+    pub fn db_create(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self
+            .stores
+            .db_create_replicated(entity_type, id, data, timestamp_ms)?;
+        self.write_or_forward(write);
+        Ok(db_entity)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_update(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self
+            .stores
+            .db_update_replicated(entity_type, id, data, timestamp_ms)?;
+        self.write_or_forward(write);
+        Ok(db_entity)
+    }
+
+    #[must_use]
+    pub fn db_upsert(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> super::db::DbEntity {
+        let (db_entity, write) = self
+            .stores
+            .db_upsert_replicated(entity_type, id, data, timestamp_ms);
+        self.write_or_forward(write);
+        db_entity
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_delete(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.stores.db_delete_replicated(entity_type, id)?;
+        self.write_or_forward(write);
+        Ok(db_entity)
+    }
+
+    #[must_use]
+    pub fn db_get(&self, entity_type: &str, id: &str) -> Option<super::db::DbEntity> {
+        self.stores.db_get(entity_type, id)
+    }
+
+    #[must_use]
+    pub fn db_list(&self, entity_type: &str) -> Vec<super::db::DbEntity> {
+        self.stores.db_list(entity_type)
+    }
+
+    /// # Errors
+    /// Returns `SchemaStoreError::AlreadyExists` if the schema already exists.
+    pub fn schema_register(
+        &mut self,
+        entity: &str,
+        schema_data: &[u8],
+    ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
+        let (schema, writes) = self.stores.schema_register_replicated(entity, schema_data)?;
+        self.broadcast_wildcard_writes(writes);
+        Ok(schema)
+    }
+
+    /// # Errors
+    /// Returns `SchemaStoreError::NotFound` if the schema does not exist.
+    pub fn schema_update(
+        &mut self,
+        entity: &str,
+        schema_data: &[u8],
+    ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
+        let (schema, writes) = self.stores.schema_update_replicated(entity, schema_data)?;
+        self.broadcast_wildcard_writes(writes);
+        Ok(schema)
+    }
+
+    #[must_use]
+    pub fn schema_get(&self, entity: &str) -> Option<super::db::ClusterSchema> {
+        self.stores.schema_get(entity)
+    }
+
+    #[must_use]
+    pub fn schema_list(&self) -> Vec<super::db::ClusterSchema> {
+        self.stores.schema_list()
+    }
+
+    #[must_use]
+    pub fn schema_is_valid_for_write(&self, entity: &str) -> bool {
+        self.stores.schema_is_valid_for_write(entity)
+    }
+
     #[must_use]
     pub fn commit_offset(
         &mut self,
@@ -2071,5 +2179,211 @@ mod tests {
             matches!(check2, Ok(IdempotencyCheck::Proceed)),
             "After rollback, should be able to retry"
         );
+    }
+
+    #[test]
+    fn db_create_stores_entity_and_replicates() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = crate::cluster::db::data_partition("users", "123");
+        ctrl.become_primary(partition, Epoch::new(1));
+        ctrl.register_peer(node2);
+
+        let mut map = PartitionMap::new();
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![node2],
+                epoch: Epoch::new(1),
+            },
+        );
+        ctrl.update_partition_map(map);
+
+        let result = ctrl.db_create("users", "123", b"{\"name\":\"Alice\"}", 1000);
+        assert!(result.is_ok());
+
+        let entity = result.unwrap();
+        assert_eq!(entity.entity_str(), "users");
+        assert_eq!(entity.id_str(), "123");
+        assert_eq!(entity.data, b"{\"name\":\"Alice\"}");
+
+        let fetched = ctrl.db_get("users", "123");
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().id_str(), "123");
+
+        let sent = ctrl.transport.sent_messages();
+        assert!(!sent.is_empty(), "Should replicate to peer");
+    }
+
+    #[test]
+    fn db_create_fails_if_exists() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = crate::cluster::db::data_partition("users", "456");
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        let result1 = ctrl.db_create("users", "456", b"{}", 1000);
+        assert!(result1.is_ok());
+
+        let result2 = ctrl.db_create("users", "456", b"{}", 2000);
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn db_update_modifies_existing_entity() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = crate::cluster::db::data_partition("users", "789");
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        ctrl.db_create("users", "789", b"{\"name\":\"Alice\"}", 1000)
+            .unwrap();
+        let updated = ctrl
+            .db_update("users", "789", b"{\"name\":\"Bob\"}", 2000)
+            .unwrap();
+
+        assert_eq!(updated.data, b"{\"name\":\"Bob\"}");
+        assert_eq!(updated.timestamp_ms, 2000);
+    }
+
+    #[test]
+    fn db_delete_removes_entity() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = crate::cluster::db::data_partition("users", "del1");
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        ctrl.db_create("users", "del1", b"{}", 1000).unwrap();
+        assert!(ctrl.db_get("users", "del1").is_some());
+
+        ctrl.db_delete("users", "del1").unwrap();
+        assert!(ctrl.db_get("users", "del1").is_none());
+    }
+
+    #[test]
+    fn db_upsert_creates_or_updates() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let partition = crate::cluster::db::data_partition("products", "p1");
+        ctrl.become_primary(partition, Epoch::new(1));
+
+        let entity1 = ctrl.db_upsert("products", "p1", b"{\"price\":100}", 1000);
+        assert_eq!(entity1.data, b"{\"price\":100}");
+
+        let entity2 = ctrl.db_upsert("products", "p1", b"{\"price\":200}", 2000);
+        assert_eq!(entity2.data, b"{\"price\":200}");
+        assert_eq!(entity2.timestamp_ms, 2000);
+    }
+
+    #[test]
+    fn db_list_returns_all_entities_of_type() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        for i in 0..3 {
+            let id = format!("item{i}");
+            let partition = crate::cluster::db::data_partition("items", &id);
+            ctrl.become_primary(partition, Epoch::new(1));
+        }
+
+        ctrl.db_create("items", "item0", b"{}", 1000).unwrap();
+        ctrl.db_create("items", "item1", b"{}", 1000).unwrap();
+        ctrl.db_create("items", "item2", b"{}", 1000).unwrap();
+
+        let items = ctrl.db_list("items");
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn schema_register_broadcasts_to_all_partitions() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        let mut map = PartitionMap::default();
+        for p in 0..64 {
+            map.set(
+                PartitionId::new(p).unwrap(),
+                crate::cluster::PartitionAssignment {
+                    primary: Some(node1),
+                    replicas: vec![node2],
+                    epoch: Epoch::new(1),
+                },
+            );
+        }
+        ctrl.update_partition_map(map);
+
+        let schema = ctrl.schema_register("users", b"{\"fields\":[]}").unwrap();
+        assert_eq!(schema.entity_str(), "users");
+
+        let sent = ctrl.transport.sent_messages();
+        assert_eq!(sent.len(), 64);
+    }
+
+    #[test]
+    fn schema_register_duplicate_fails() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        ctrl.schema_register("users", b"{}").unwrap();
+        let result = ctrl.schema_register("users", b"{}");
+
+        assert!(matches!(
+            result,
+            Err(super::super::db::SchemaStoreError::AlreadyExists)
+        ));
+    }
+
+    #[test]
+    fn schema_update_increments_version() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        ctrl.schema_register("users", b"{v1}").unwrap();
+        let updated = ctrl.schema_update("users", b"{v2}").unwrap();
+
+        assert_eq!(updated.schema_version, 2);
+    }
+
+    #[test]
+    fn schema_get_and_list() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        ctrl.schema_register("users", b"{}").unwrap();
+        ctrl.schema_register("orders", b"{}").unwrap();
+
+        assert!(ctrl.schema_get("users").is_some());
+        assert!(ctrl.schema_get("products").is_none());
+        assert_eq!(ctrl.schema_list().len(), 2);
+    }
+
+    #[test]
+    fn schema_is_valid_for_write_checks_active_state() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = MockTransport::new(node1);
+        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+
+        assert!(!ctrl.schema_is_valid_for_write("users"));
+        ctrl.schema_register("users", b"{}").unwrap();
+        assert!(ctrl.schema_is_valid_for_write("users"));
     }
 }

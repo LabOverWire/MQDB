@@ -7,3 +7,9 @@ pub const TOPIC_INDEX: &str = "_topic_index";
 pub const WILDCARDS: &str = "_wildcards";
 pub const OFFSETS: &str = "_offsets";
 pub const IDEMPOTENCY: &str = "_idemp";
+
+pub const DB_DATA: &str = "_db_data";
+pub const DB_SCHEMA: &str = "_db_schema";
+pub const DB_INDEX: &str = "_db_idx";
+pub const DB_UNIQUE: &str = "_db_unique";
+pub const DB_FK: &str = "_db_fk";

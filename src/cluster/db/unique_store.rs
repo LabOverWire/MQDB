@@ -1,0 +1,718 @@
+use super::partition::unique_partition;
+use crate::cluster::protocol::Operation;
+use crate::cluster::{NodeId, PartitionId};
+use bebytes::BeBytes;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+pub struct UniqueReservation {
+    pub version: u8,
+    pub entity_len: u16,
+    #[FromField(entity_len)]
+    pub entity: Vec<u8>,
+    pub field_len: u16,
+    #[FromField(field_len)]
+    pub field: Vec<u8>,
+    pub value_len: u32,
+    #[FromField(value_len)]
+    pub value: Vec<u8>,
+    pub record_id_len: u16,
+    #[FromField(record_id_len)]
+    pub record_id: Vec<u8>,
+    pub request_id_len: u16,
+    #[FromField(request_id_len)]
+    pub request_id: Vec<u8>,
+    pub data_partition: u16,
+    pub expires_at: u64,
+    pub committed: u8,
+}
+
+impl UniqueReservation {
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn create(
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        request_id: &str,
+        data_partition: PartitionId,
+        expires_at: u64,
+    ) -> Self {
+        let entity_bytes = entity.as_bytes().to_vec();
+        let field_bytes = field.as_bytes().to_vec();
+        let record_id_bytes = record_id.as_bytes().to_vec();
+        let request_id_bytes = request_id.as_bytes().to_vec();
+
+        Self {
+            version: 1,
+            entity_len: entity_bytes.len() as u16,
+            entity: entity_bytes,
+            field_len: field_bytes.len() as u16,
+            field: field_bytes,
+            value_len: value.len() as u32,
+            value: value.to_vec(),
+            record_id_len: record_id_bytes.len() as u16,
+            record_id: record_id_bytes,
+            request_id_len: request_id_bytes.len() as u16,
+            request_id: request_id_bytes,
+            data_partition: data_partition.get(),
+            expires_at,
+            committed: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn entity_str(&self) -> &str {
+        std::str::from_utf8(&self.entity).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn field_str(&self) -> &str {
+        std::str::from_utf8(&self.field).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn record_id_str(&self) -> &str {
+        std::str::from_utf8(&self.record_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn request_id_str(&self) -> &str {
+        std::str::from_utf8(&self.request_id).unwrap_or("")
+    }
+
+    /// # Panics
+    /// Never panics: partition 0 is always valid as a fallback.
+    #[must_use]
+    pub fn data_partition(&self) -> PartitionId {
+        PartitionId::new(self.data_partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
+    }
+
+    #[must_use]
+    pub fn unique_partition(&self) -> PartitionId {
+        unique_partition(self.entity_str(), self.field_str(), &self.value)
+    }
+
+    #[must_use]
+    pub fn is_committed(&self) -> bool {
+        self.committed != 0
+    }
+
+    #[must_use]
+    pub fn is_expired(&self, now: u64) -> bool {
+        !self.is_committed() && now > self.expires_at
+    }
+
+    #[must_use]
+    pub fn with_committed(mut self) -> Self {
+        self.committed = 1;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UniqueStoreError {
+    AlreadyReserved,
+    AlreadyCommitted,
+    NotFound,
+    WrongRequestId,
+    SerializationError,
+}
+
+impl std::fmt::Display for UniqueStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyReserved => write!(f, "value already reserved by another request"),
+            Self::AlreadyCommitted => write!(f, "value already committed"),
+            Self::NotFound => write!(f, "reservation not found"),
+            Self::WrongRequestId => write!(f, "request id does not match"),
+            Self::SerializationError => write!(f, "serialization error"),
+        }
+    }
+}
+
+impl std::error::Error for UniqueStoreError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveResult {
+    Reserved,
+    AlreadyReservedBySameRequest,
+    Conflict,
+}
+
+pub struct UniqueStore {
+    node_id: NodeId,
+    reservations: RwLock<HashMap<String, UniqueReservation>>,
+}
+
+impl UniqueStore {
+    #[must_use]
+    pub fn new(node_id: NodeId) -> Self {
+        Self {
+            node_id,
+            reservations: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        request_id: &str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+        now: u64,
+    ) -> ReserveResult {
+        let key = Self::unique_key(entity, field, value);
+        let mut reservations = self.reservations.write().unwrap();
+
+        if let Some(existing) = reservations.get(&key) {
+            if existing.is_committed() {
+                return ReserveResult::Conflict;
+            }
+
+            if existing.request_id_str() == request_id {
+                return ReserveResult::AlreadyReservedBySameRequest;
+            }
+
+            if !existing.is_expired(now) {
+                return ReserveResult::Conflict;
+            }
+        }
+
+        let reservation = UniqueReservation::create(
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            now + ttl_ms,
+        );
+        reservations.insert(key, reservation);
+        ReserveResult::Reserved
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns error if reservation not found, wrong `request_id`, or already committed.
+    pub fn commit(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        request_id: &str,
+    ) -> Result<UniqueReservation, UniqueStoreError> {
+        let key = Self::unique_key(entity, field, value);
+        let mut reservations = self.reservations.write().unwrap();
+
+        let existing = reservations.get(&key).ok_or(UniqueStoreError::NotFound)?;
+
+        if existing.is_committed() {
+            return Err(UniqueStoreError::AlreadyCommitted);
+        }
+
+        if existing.request_id_str() != request_id {
+            return Err(UniqueStoreError::WrongRequestId);
+        }
+
+        let committed = existing.clone().with_committed();
+        reservations.insert(key, committed.clone());
+        Ok(committed)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn release(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {
+        let key = Self::unique_key(entity, field, value);
+        let mut reservations = self.reservations.write().unwrap();
+
+        if let Some(existing) = reservations.get(&key)
+            && !existing.is_committed()
+            && existing.request_id_str() == request_id
+        {
+            reservations.remove(&key);
+            return true;
+        }
+        false
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn check(&self, entity: &str, field: &str, value: &[u8], now: u64) -> bool {
+        let key = Self::unique_key(entity, field, value);
+        let reservations = self.reservations.read().unwrap();
+
+        if let Some(existing) = reservations.get(&key)
+            && (existing.is_committed() || !existing.is_expired(now))
+        {
+            return false;
+        }
+        true
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn get(&self, entity: &str, field: &str, value: &[u8]) -> Option<UniqueReservation> {
+        let key = Self::unique_key(entity, field, value);
+        self.reservations.read().unwrap().get(&key).cloned()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn cleanup_expired(&self, now: u64) -> usize {
+        let mut reservations = self.reservations.write().unwrap();
+        let before = reservations.len();
+
+        reservations.retain(|_, r| r.is_committed() || !r.is_expired(now));
+
+        before - reservations.len()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.reservations.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn serialize(reservation: &UniqueReservation) -> Vec<u8> {
+        reservation.to_be_bytes()
+    }
+
+    #[must_use]
+    pub fn deserialize(bytes: &[u8]) -> Option<UniqueReservation> {
+        UniqueReservation::try_from_be_bytes(bytes)
+            .ok()
+            .map(|(r, _)| r)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if deserialization fails.
+    pub fn apply_replicated(
+        &self,
+        operation: Operation,
+        id: &str,
+        data: &[u8],
+    ) -> Result<(), UniqueStoreError> {
+        match operation {
+            Operation::Insert | Operation::Update => {
+                let reservation =
+                    Self::deserialize(data).ok_or(UniqueStoreError::SerializationError)?;
+                self.reservations
+                    .write()
+                    .unwrap()
+                    .insert(id.to_string(), reservation);
+                Ok(())
+            }
+            Operation::Delete => {
+                self.reservations.write().unwrap().remove(id);
+                Ok(())
+            }
+        }
+    }
+
+    fn unique_key(entity: &str, field: &str, value: &[u8]) -> String {
+        fn encode_hex(bytes: &[u8]) -> String {
+            use std::fmt::Write;
+            bytes
+                .iter()
+                .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+                    let _ = write!(acc, "{b:02x}");
+                    acc
+                })
+        }
+        format!("_unique/{entity}/{field}/{}", encode_hex(value))
+    }
+}
+
+impl std::fmt::Debug for UniqueStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UniqueStore")
+            .field("node_id", &self.node_id)
+            .field("reservation_count", &self.count())
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use]
+pub fn unique_key(reservation: &UniqueReservation) -> String {
+    fn encode_hex(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        bytes
+            .iter()
+            .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+                let _ = write!(acc, "{b:02x}");
+                acc
+            })
+    }
+    format!(
+        "_unique/{}/{}/{}",
+        reservation.entity_str(),
+        reservation.field_str(),
+        encode_hex(&reservation.value)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: u16) -> NodeId {
+        NodeId::validated(id).unwrap()
+    }
+
+    fn partition(id: u16) -> PartitionId {
+        PartitionId::new(id).unwrap()
+    }
+
+    #[test]
+    fn unique_reservation_bebytes_roundtrip() {
+        let reservation = UniqueReservation::create(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            1_702_041_600_000,
+        );
+        let bytes = UniqueStore::serialize(&reservation);
+        let parsed = UniqueStore::deserialize(&bytes).unwrap();
+
+        assert_eq!(reservation.entity, parsed.entity);
+        assert_eq!(reservation.field, parsed.field);
+        assert_eq!(reservation.value, parsed.value);
+        assert_eq!(reservation.record_id, parsed.record_id);
+        assert_eq!(reservation.request_id, parsed.request_id);
+    }
+
+    #[test]
+    fn reserve_new_value_succeeds() {
+        let store = UniqueStore::new(node(1));
+
+        let result = store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        assert_eq!(result, ReserveResult::Reserved);
+    }
+
+    #[test]
+    fn reserve_same_request_id_is_idempotent() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let result = store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user456",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        assert_eq!(result, ReserveResult::AlreadyReservedBySameRequest);
+    }
+
+    #[test]
+    fn reserve_different_request_id_conflicts() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let result = store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user456",
+            "req-xyz",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        assert_eq!(result, ReserveResult::Conflict);
+    }
+
+    #[test]
+    fn reserve_after_commit_conflicts() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+        store
+            .commit("users", "email", b"alice@example.com", "req-abc")
+            .unwrap();
+
+        let result = store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user456",
+            "req-xyz",
+            partition(42),
+            5000,
+            2000,
+        );
+
+        assert_eq!(result, ReserveResult::Conflict);
+    }
+
+    #[test]
+    fn reserve_after_expiry_succeeds() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let result = store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user456",
+            "req-xyz",
+            partition(42),
+            5000,
+            7000,
+        );
+
+        assert_eq!(result, ReserveResult::Reserved);
+    }
+
+    #[test]
+    fn commit_succeeds() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let committed = store
+            .commit("users", "email", b"alice@example.com", "req-abc")
+            .unwrap();
+
+        assert!(committed.is_committed());
+        assert_eq!(committed.record_id_str(), "user123");
+    }
+
+    #[test]
+    fn commit_wrong_request_id_fails() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let result = store.commit("users", "email", b"alice@example.com", "req-wrong");
+
+        assert_eq!(result, Err(UniqueStoreError::WrongRequestId));
+    }
+
+    #[test]
+    fn release_removes_reservation() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let released = store.release("users", "email", b"alice@example.com", "req-abc");
+        assert!(released);
+
+        let available = store.check("users", "email", b"alice@example.com", 1000);
+        assert!(available);
+    }
+
+    #[test]
+    fn release_committed_does_nothing() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+        store
+            .commit("users", "email", b"alice@example.com", "req-abc")
+            .unwrap();
+
+        let released = store.release("users", "email", b"alice@example.com", "req-abc");
+        assert!(!released);
+    }
+
+    #[test]
+    fn check_returns_false_for_reserved() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let available = store.check("users", "email", b"alice@example.com", 1000);
+        assert!(!available);
+    }
+
+    #[test]
+    fn check_returns_true_for_expired() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+
+        let available = store.check("users", "email", b"alice@example.com", 7000);
+        assert!(available);
+    }
+
+    #[test]
+    fn cleanup_expired_removes_old_reservations() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user1",
+            "req-1",
+            partition(42),
+            1000,
+            1000,
+        );
+
+        store.reserve(
+            "users",
+            "email",
+            b"bob@example.com",
+            "user2",
+            "req-2",
+            partition(42),
+            10000,
+            1000,
+        );
+
+        let removed = store.cleanup_expired(3000);
+        assert_eq!(removed, 1);
+        assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn apply_replicated_insert() {
+        let store = UniqueStore::new(node(1));
+        let reservation = UniqueReservation::create(
+            "users",
+            "email",
+            b"test@example.com",
+            "user456",
+            "req-test",
+            partition(5),
+            1_702_041_600_000,
+        );
+        let data = UniqueStore::serialize(&reservation);
+
+        store
+            .apply_replicated(Operation::Insert, "_unique/users/email/abc", &data)
+            .unwrap();
+
+        assert_eq!(store.count(), 1);
+    }
+}
