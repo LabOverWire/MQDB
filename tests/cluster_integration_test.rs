@@ -93,6 +93,23 @@ impl TestCluster {
         self.runtime.clock().advance_ms(ms);
     }
 
+    fn setup_all_primaries(&mut self) {
+        for i in 0..64 {
+            let partition = PartitionId::new(i).unwrap();
+            self.nodes[0].controller.become_primary(partition, Epoch::new(1));
+            for node in self.nodes.iter_mut().skip(1) {
+                node.controller.become_replica(partition, Epoch::new(1), 0);
+            }
+        }
+        for node in &mut self.nodes {
+            node.controller.tick(0);
+        }
+        self.advance_ms(5);
+        for node in &mut self.nodes {
+            node.controller.process_messages();
+        }
+    }
+
     fn partition_node(&self, node_id: NodeId) {
         let others: Vec<u16> = self
             .nodes
@@ -2338,4 +2355,689 @@ fn raft_log_persisted_and_recovered() {
         assert_eq!(log[0].index, 1);
         assert_eq!(log[0].term, 1);
     }
+}
+
+#[test]
+fn db_crud_replication_to_replicas() {
+    use mqdb::cluster::db::data_partition;
+
+    let mut cluster = TestCluster::new(3);
+    let (n2, n3) = (cluster.nodes[1].id, cluster.nodes[2].id);
+
+    let entity_type = "users";
+    let entity_id = "user-123";
+    let partition = data_partition(entity_type, entity_id);
+
+    cluster.nodes[0].controller.become_primary(partition, Epoch::new(1));
+    cluster.nodes[1].controller.become_replica(partition, Epoch::new(1), 0);
+    cluster.nodes[2].controller.become_replica(partition, Epoch::new(1), 0);
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let (entity, create_write) = cluster.nodes[0].controller.stores()
+        .db_create_replicated(entity_type, entity_id, b"initial data", 1000)
+        .expect("create should succeed");
+    assert_eq!(entity.entity_str(), entity_type);
+    assert_eq!(entity.id_str(), entity_id);
+
+    cluster.nodes[0].controller.replicate_write(create_write, &[n2, n3], 2).ok();
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let primary_entity = cluster.nodes[0].controller.db_get(entity_type, entity_id);
+    assert!(primary_entity.is_some(), "Primary should have the entity");
+    assert_eq!(primary_entity.unwrap().data, b"initial data");
+
+    let replica1_entity = cluster.nodes[1].controller.db_get(entity_type, entity_id);
+    assert!(replica1_entity.is_some(), "Replica 1 should have the entity after replication");
+    assert_eq!(replica1_entity.unwrap().data, b"initial data");
+
+    let replica2_entity = cluster.nodes[2].controller.db_get(entity_type, entity_id);
+    assert!(replica2_entity.is_some(), "Replica 2 should have the entity after replication");
+    assert_eq!(replica2_entity.unwrap().data, b"initial data");
+
+    let (updated, update_write) = cluster.nodes[0].controller.stores()
+        .db_update_replicated(entity_type, entity_id, b"updated data", 2000)
+        .expect("update should succeed");
+    assert_eq!(updated.data, b"updated data");
+
+    cluster.nodes[0].controller.replicate_write(update_write, &[n2, n3], 2).ok();
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let primary_updated = cluster.nodes[0].controller.db_get(entity_type, entity_id);
+    assert_eq!(primary_updated.unwrap().data, b"updated data");
+
+    let replica1_updated = cluster.nodes[1].controller.db_get(entity_type, entity_id);
+    assert_eq!(replica1_updated.unwrap().data, b"updated data", "Replica 1 should have updated data");
+
+    let replica2_updated = cluster.nodes[2].controller.db_get(entity_type, entity_id);
+    assert_eq!(replica2_updated.unwrap().data, b"updated data", "Replica 2 should have updated data");
+
+    let (deleted, delete_write) = cluster.nodes[0].controller.stores()
+        .db_delete_replicated(entity_type, entity_id)
+        .expect("delete should succeed");
+    assert_eq!(deleted.id_str(), entity_id);
+
+    cluster.nodes[0].controller.replicate_write(delete_write, &[n2, n3], 2).ok();
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let primary_deleted = cluster.nodes[0].controller.db_get(entity_type, entity_id);
+    assert!(primary_deleted.is_none(), "Entity should be deleted on primary");
+
+    let replica1_deleted = cluster.nodes[1].controller.db_get(entity_type, entity_id);
+    assert!(replica1_deleted.is_none(), "Entity should be deleted on replica 1");
+
+    let replica2_deleted = cluster.nodes[2].controller.db_get(entity_type, entity_id);
+    assert!(replica2_deleted.is_none(), "Entity should be deleted on replica 2");
+}
+
+#[test]
+fn db_list_returns_entities_by_type() {
+    let mut cluster = TestCluster::new(3);
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let user_ids = ["alice", "bob", "charlie"];
+    for user_id in &user_ids {
+        cluster.nodes[0]
+            .controller
+            .db_create("users", user_id, format!("data-{user_id}").as_bytes(), 1000)
+            .expect("create should succeed");
+    }
+
+    cluster.nodes[0]
+        .controller
+        .db_create("orders", "order-1", b"order data", 1000)
+        .expect("create order should succeed");
+
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let users = cluster.nodes[0].controller.db_list("users");
+    assert_eq!(users.len(), 3, "Should have 3 users");
+
+    let orders = cluster.nodes[0].controller.db_list("orders");
+    assert_eq!(orders.len(), 1, "Should have 1 order");
+}
+
+#[test]
+fn schema_broadcast_to_all_nodes() {
+    let mut cluster = TestCluster::new(3);
+
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let schema_data = br#"{"fields": ["id", "name", "email"]}"#;
+    let (schema, writes) = cluster.nodes[0]
+        .controller
+        .stores()
+        .schema_register_replicated("users", schema_data)
+        .expect("schema register should succeed");
+
+    assert_eq!(schema.entity_str(), "users");
+    assert_eq!(schema.schema_version, 1);
+    assert_eq!(writes.len(), 64, "Should broadcast to all 64 partitions");
+
+    for write in writes {
+        cluster.nodes[0]
+            .controller
+            .replicate_write(write, &[n2, n3], 2)
+            .expect("schema replication should succeed");
+    }
+
+    cluster.advance_ms(50);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let primary_schema = cluster.nodes[0].controller.schema_get("users");
+    assert!(primary_schema.is_some(), "Primary should have schema");
+    assert_eq!(primary_schema.unwrap().schema_version, 1);
+
+    let replica1_schema = cluster.nodes[1].controller.schema_get("users");
+    assert!(replica1_schema.is_some(), "Replica 1 should have schema after replication");
+    assert_eq!(replica1_schema.unwrap().schema_version, 1);
+
+    let replica2_schema = cluster.nodes[2].controller.schema_get("users");
+    assert!(replica2_schema.is_some(), "Replica 2 should have schema after replication");
+    assert_eq!(replica2_schema.unwrap().schema_version, 1);
+
+    assert!(
+        cluster.nodes[0].controller.schema_is_valid_for_write("users"),
+        "Schema should be valid for writes on primary"
+    );
+    assert!(
+        cluster.nodes[1].controller.schema_is_valid_for_write("users"),
+        "Schema should be valid for writes on replica 1"
+    );
+    assert!(
+        cluster.nodes[2].controller.schema_is_valid_for_write("users"),
+        "Schema should be valid for writes on replica 2"
+    );
+
+    let schemas = cluster.nodes[0].controller.schema_list();
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].entity_str(), "users");
+}
+
+#[test]
+fn schema_update_increments_version() {
+    let mut cluster = TestCluster::new(3);
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let (schema_v1, writes_v1) = cluster.nodes[0]
+        .controller
+        .stores()
+        .schema_register_replicated("products", b"v1 schema")
+        .expect("register should succeed");
+    assert_eq!(schema_v1.schema_version, 1);
+
+    for write in writes_v1 {
+        cluster.nodes[0]
+            .controller
+            .replicate_write(write, &[n2, n3], 2)
+            .ok();
+    }
+
+    cluster.advance_ms(20);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let (schema_v2, writes_v2) = cluster.nodes[0]
+        .controller
+        .stores()
+        .schema_update_replicated("products", b"v2 schema with new fields")
+        .expect("update should succeed");
+    assert_eq!(schema_v2.schema_version, 2);
+
+    for write in writes_v2 {
+        cluster.nodes[0]
+            .controller
+            .replicate_write(write, &[n2, n3], 2)
+            .ok();
+    }
+
+    cluster.advance_ms(20);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let current_schema = cluster.nodes[0].controller.schema_get("products");
+    assert_eq!(current_schema.unwrap().schema_version, 2);
+}
+
+#[test]
+fn index_add_and_lookup() {
+    let mut cluster = TestCluster::new(3);
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let entity = "users";
+    let field = "email";
+    let value = b"alice@example.com";
+    let record_id = "user-alice";
+    let data_partition = PartitionId::new(5).unwrap();
+
+    let (entry, write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .index_add_replicated(entity, field, value, data_partition, record_id)
+        .expect("index add should succeed");
+
+    assert_eq!(entry.entity_str(), entity);
+    assert_eq!(entry.field_str(), field);
+    assert_eq!(entry.value, value.to_vec());
+    assert_eq!(entry.record_id_str(), record_id);
+
+    cluster.nodes[0]
+        .controller
+        .replicate_write(write, &[n2, n3], 2)
+        .expect("replication should succeed");
+
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let results = cluster.nodes[0]
+        .controller
+        .stores()
+        .index_lookup(entity, field, value);
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].record_id_str(), record_id);
+    assert_eq!(results[0].data_partition, data_partition.get());
+}
+
+#[test]
+fn index_multiple_records_same_value() {
+    let mut cluster = TestCluster::new(3);
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let entity = "orders";
+    let field = "status";
+    let value = b"pending";
+
+    let records = [
+        ("order-1", PartitionId::new(1).unwrap()),
+        ("order-2", PartitionId::new(2).unwrap()),
+        ("order-3", PartitionId::new(3).unwrap()),
+    ];
+
+    for (record_id, data_partition) in &records {
+        let (_, write) = cluster.nodes[0]
+            .controller
+            .stores()
+            .index_add_replicated(entity, field, value, *data_partition, record_id)
+            .expect("index add should succeed");
+
+        cluster.nodes[0]
+            .controller
+            .replicate_write(write, &[n2, n3], 2)
+            .ok();
+    }
+
+    cluster.advance_ms(20);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let results = cluster.nodes[0]
+        .controller
+        .stores()
+        .index_lookup(entity, field, value);
+
+    assert_eq!(results.len(), 3, "Should find all 3 pending orders");
+}
+
+#[test]
+fn unique_constraint_reserve_commit_release() {
+    use mqdb::cluster::db::ReserveResult;
+
+    let mut cluster = TestCluster::new(3);
+    let (n2, n3) = (cluster.nodes[1].id, cluster.nodes[2].id);
+    cluster.setup_all_primaries();
+
+    let (entity, field, value) = ("users", "email", b"unique@example.com".as_slice());
+    let (record_id, request_id) = ("user-unique", "req-001");
+    let data_partition = PartitionId::new(10).unwrap();
+    let (ttl_ms, now) = (5000, 1000);
+
+    let (result, write_opt) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
+        entity, field, value, record_id, request_id, data_partition, ttl_ms, now,
+    );
+    assert_eq!(result, ReserveResult::Reserved);
+    assert!(write_opt.is_some(), "Should have replication write");
+
+    if let Some(write) = write_opt {
+        cluster.nodes[0].controller.replicate_write(write, &[n2, n3], 2).ok();
+    }
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let (conflict_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
+        entity, field, value, "other-record", "req-002", data_partition, ttl_ms, now + 100,
+    );
+    assert_eq!(conflict_result, ReserveResult::Conflict);
+
+    let (idempotent_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
+        entity, field, value, record_id, request_id, data_partition, ttl_ms, now + 100,
+    );
+    assert_eq!(idempotent_result, ReserveResult::AlreadyReservedBySameRequest);
+
+    let (committed, commit_write) = cluster.nodes[0].controller.stores()
+        .unique_commit_replicated(entity, field, value, request_id)
+        .expect("commit should succeed");
+    assert!(committed.is_committed());
+
+    cluster.nodes[0].controller.replicate_write(commit_write, &[n2, n3], 2).ok();
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let (post_commit_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
+        entity, field, value, "third-record", "req-003", data_partition, ttl_ms, now + 200,
+    );
+    assert_eq!(post_commit_result, ReserveResult::Conflict, "Committed value should conflict");
+}
+
+#[test]
+fn unique_constraint_expires_after_ttl() {
+    use mqdb::cluster::db::ReserveResult;
+
+    let mut cluster = TestCluster::new(3);
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+    }
+
+    let entity = "users";
+    let field = "username";
+    let value = b"expired_user";
+    let data_partition = PartitionId::new(5).unwrap();
+    let ttl_ms = 1000;
+    let now = 1000;
+
+    let (result, _) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            "record-1",
+            "req-expired",
+            data_partition,
+            ttl_ms,
+            now,
+        );
+    assert_eq!(result, ReserveResult::Reserved);
+
+    let after_expiry = now + ttl_ms + 100;
+    let (new_result, _) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            "record-2",
+            "req-new",
+            data_partition,
+            ttl_ms,
+            after_expiry,
+        );
+
+    assert_eq!(new_result, ReserveResult::Reserved, "Should succeed after TTL expires");
+}
+
+#[test]
+fn fk_validation_request_lifecycle() {
+    use mqdb::cluster::db::FkValidationRequest;
+
+    let mut cluster = TestCluster::new(3);
+    let n2 = cluster.nodes[1].id;
+    let n3 = cluster.nodes[2].id;
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0);
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let request = FkValidationRequest::create(
+        "users",
+        "user-123",
+        "fk-req-001",
+        5000,
+        1000,
+    );
+
+    let write = cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_add_request_replicated(request.clone())
+        .expect("add request should succeed");
+
+    cluster.nodes[0]
+        .controller
+        .replicate_write(write, &[n2, n3], 2)
+        .ok();
+
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let retrieved = cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(retrieved.is_some(), "Primary should have FK request");
+    assert_eq!(retrieved.unwrap().entity_str(), "users");
+
+    let replica1_request = cluster.nodes[1]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(replica1_request.is_some(), "Replica 1 should have FK request after replication");
+
+    let replica2_request = cluster.nodes[2]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(replica2_request.is_some(), "Replica 2 should have FK request after replication");
+
+    let (completed, complete_write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_complete_request_replicated("fk-req-001")
+        .expect("complete should succeed");
+
+    assert_eq!(completed.request_id_str(), "fk-req-001");
+
+    cluster.nodes[0]
+        .controller
+        .replicate_write(complete_write, &[n2, n3], 2)
+        .ok();
+
+    cluster.advance_ms(10);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages();
+    }
+
+    let after_complete = cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(after_complete.is_none(), "Request should be removed on primary after completion");
+
+    let replica1_after = cluster.nodes[1]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(replica1_after.is_none(), "Request should be removed on replica 1 after completion");
+
+    let replica2_after = cluster.nodes[2]
+        .controller
+        .stores()
+        .fk_get_request("fk-req-001");
+    assert!(replica2_after.is_none(), "Request should be removed on replica 2 after completion");
+}
+
+#[test]
+fn fk_validation_cleanup_expired() {
+    use mqdb::cluster::db::FkValidationRequest;
+
+    let mut cluster = TestCluster::new(3);
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+    }
+
+    let short_timeout_request = FkValidationRequest::create(
+        "users",
+        "user-1",
+        "fk-short",
+        1000,
+        1000,
+    );
+
+    let long_timeout_request = FkValidationRequest::create(
+        "users",
+        "user-2",
+        "fk-long",
+        10000,
+        1000,
+    );
+
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_add_request_replicated(short_timeout_request)
+        .ok();
+
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_add_request_replicated(long_timeout_request)
+        .ok();
+
+    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-short").is_some());
+    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-long").is_some());
+
+    let cleaned = cluster.nodes[0]
+        .controller
+        .stores()
+        .fk_cleanup_expired(3000);
+
+    assert_eq!(cleaned, 1, "Should clean up 1 expired request");
+    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-short").is_none());
+    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-long").is_some());
 }
