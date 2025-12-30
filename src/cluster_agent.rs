@@ -141,7 +141,8 @@ impl ClusteredAgent {
                 let mut config = BridgeConfig::new(&bridge_name, &peer.address)
                     .add_topic("_mqdb/cluster/#", BridgeDirection::Both, QoS::AtLeastOnce)
                     .add_topic("_mqdb/forward/#", BridgeDirection::Both, QoS::AtLeastOnce)
-                    .add_topic("_mqdb/repl/#", BridgeDirection::Both, QoS::AtLeastOnce);
+                    .add_topic("_mqdb/repl/#", BridgeDirection::Both, QoS::AtLeastOnce)
+                    .add_topic("$DB/#", BridgeDirection::Both, QoS::ExactlyOnce);
                 config.client_id = format!("{}-to-node-{}", self.node_name, peer.node_id);
                 config.clean_start = false;
                 config.try_private = true;

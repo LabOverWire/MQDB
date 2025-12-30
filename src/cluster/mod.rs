@@ -1,5 +1,8 @@
 mod cursor;
 pub mod db;
+mod db_handler;
+mod db_protocol;
+mod db_topic;
 pub mod entity;
 mod epoch;
 #[cfg(feature = "native")]
@@ -39,6 +42,13 @@ mod write_log;
 
 pub use cursor::{PartitionCursor, ScatterCursor};
 pub use db::{DbDataStore, DbDataStoreError, DbEntity, data_partition, db_data_key};
+pub use db_handler::{DbPublishResponse, DbRequestHandler};
+pub use db_protocol::{
+    DbReadRequest, DbResponse, DbStatus, DbWriteRequest, FkValidateRequest, FkValidateResponse,
+    FkValidateStatus, IndexUpdateRequest, UniqueCommitRequest, UniqueReleaseRequest,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+};
+pub use db_topic::{DbTopicOperation, ParsedDbTopic};
 pub use epoch::Epoch;
 #[cfg(feature = "native")]
 pub use event_handler::ClusterEventHandler;

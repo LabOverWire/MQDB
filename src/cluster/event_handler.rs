@@ -1,3 +1,4 @@
+use crate::cluster::db_handler::DbRequestHandler;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
     ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
@@ -19,6 +20,7 @@ pub struct ClusterEventHandler {
     node_id: NodeId,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
     synced_retained_topics: Arc<RwLock<HashSet<String>>>,
+    db_handler: DbRequestHandler,
 }
 
 impl ClusterEventHandler {
@@ -27,6 +29,7 @@ impl ClusterEventHandler {
             node_id,
             controller,
             synced_retained_topics: Arc::new(RwLock::new(HashSet::new())),
+            db_handler: DbRequestHandler::new(node_id),
         }
     }
 
@@ -444,6 +447,7 @@ impl BrokerEventHandler for ClusterEventHandler {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_client_publish<'a>(
         &'a self,
         event: ClientPublishEvent,
@@ -465,6 +469,25 @@ impl BrokerEventHandler for ClusterEventHandler {
 
             if event.topic.starts_with("_mqdb/") {
                 trace!("skipping internal cluster topic");
+                return;
+            }
+
+            if event.topic.starts_with("$DB/") {
+                debug!(topic = %event.topic, "handling $DB/ request");
+                let mut ctrl = self.controller.write().await;
+                if let Some(response) = self.db_handler.handle_publish(
+                    &mut ctrl,
+                    event.topic.as_ref(),
+                    &event.payload,
+                    event.response_topic.as_deref(),
+                    event.correlation_data.as_deref(),
+                ) {
+                    ctrl.transport().queue_local_publish(
+                        response.topic,
+                        response.payload,
+                        qos_to_u8(event.qos),
+                    );
+                }
                 return;
             }
 

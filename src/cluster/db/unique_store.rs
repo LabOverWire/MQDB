@@ -271,6 +271,18 @@ impl UniqueStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn get_by_request_id(&self, request_id: &str) -> Option<UniqueReservation> {
+        self.reservations
+            .read()
+            .unwrap()
+            .values()
+            .find(|r| r.request_id_str() == request_id)
+            .cloned()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     pub fn cleanup_expired(&self, now: u64) -> usize {
         let mut reservations = self.reservations.write().unwrap();
         let before = reservations.len();
