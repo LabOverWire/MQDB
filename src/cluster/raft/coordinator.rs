@@ -170,9 +170,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Err(CoordinatorError::NotLeader(self.leader_id()));
         }
 
-        self.node
-            .propose(command)
-            .ok_or(CoordinatorError::ProposeFailed)
+        let (index, outputs) = self.node.propose(command);
+        self.process_outputs(outputs);
+        index.ok_or(CoordinatorError::ProposeFailed)
     }
 
     pub fn handle_request_vote(

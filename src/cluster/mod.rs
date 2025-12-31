@@ -1,7 +1,7 @@
 mod cursor;
 pub mod db;
 mod db_handler;
-mod db_protocol;
+pub mod db_protocol;
 mod db_topic;
 pub mod entity;
 mod epoch;

@@ -756,3 +756,310 @@ rm -rf ./data/quicktest
    ```bash
    mqdb constraint list <entity>
    ```
+
+---
+
+## 11. Cluster Mode
+
+Cluster mode runs a distributed MQDB with Raft consensus for partition management.
+
+### Starting a Single-Node Cluster
+
+```bash
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 --no-quic
+```
+
+**Expected output:**
+```
+cluster node started node_id=1 node_name=node-1 bind=127.0.0.1:1883 peers=[]
+became Raft leader node=1
+Raft leader initializing partition assignments
+```
+
+The node should:
+- Become Raft leader immediately (single-node quorum)
+- Assign all 64 partitions to itself
+
+### Starting a Multi-Node Cluster
+
+**Terminal 1 (Node 1):**
+```bash
+mqdb cluster start \
+  --node-id 1 \
+  --bind 127.0.0.1:1883 \
+  --db /tmp/mqdb-node1 \
+  --peers 2=127.0.0.1:1884,3=127.0.0.1:1885 \
+  --no-quic
+```
+
+**Terminal 2 (Node 2):**
+```bash
+mqdb cluster start \
+  --node-id 2 \
+  --bind 127.0.0.1:1884 \
+  --db /tmp/mqdb-node2 \
+  --peers 1=127.0.0.1:1883,3=127.0.0.1:1885 \
+  --no-quic
+```
+
+**Terminal 3 (Node 3):**
+```bash
+mqdb cluster start \
+  --node-id 3 \
+  --bind 127.0.0.1:1885 \
+  --db /tmp/mqdb-node3 \
+  --peers 1=127.0.0.1:1883,2=127.0.0.1:1884 \
+  --no-quic
+```
+
+**Expected behavior:**
+- One node wins Raft election and becomes leader
+- Leader assigns partitions across all nodes
+- Bridges establish connections between nodes
+
+### Cluster with QUIC Transport
+
+First, generate TLS certificates:
+```bash
+./scripts/generate_test_certs.sh
+```
+
+Then start nodes with QUIC:
+```bash
+mqdb cluster start \
+  --node-id 1 \
+  --bind 127.0.0.1:1883 \
+  --db /tmp/mqdb-node1 \
+  --peers 2=127.0.0.1:1884 \
+  --quic-cert certs/server.crt \
+  --quic-key certs/server.key
+```
+
+### Check Cluster Status
+
+```bash
+mqdb cluster status --broker 127.0.0.1:1883
+```
+
+**Expected output:**
+```json
+{
+  "leader": 1,
+  "nodes": [
+    {"id": 1, "name": "node-1", "status": "alive"},
+    {"id": 2, "name": "node-2", "status": "alive"},
+    {"id": 3, "name": "node-3", "status": "alive"}
+  ],
+  "partitions": 64
+}
+```
+
+### Trigger Rebalance
+
+```bash
+mqdb cluster rebalance --broker 127.0.0.1:1883
+```
+
+---
+
+## 12. Cluster DB Debug Commands
+
+The `mqdb db` command provides low-level access to cluster-mode database operations using the binary BeBytes protocol.
+
+### Create Entity
+
+```bash
+mqdb db create -p <partition> -e <entity> -d '<json-data>'
+```
+
+**Example:**
+```bash
+mqdb db create -p 0 -e users -d '{"name": "Alice", "email": "alice@example.com"}'
+```
+
+**Expected output:**
+```
+Created: users a1b2c3d4e5f6-0001 {"name": "Alice", "email": "alice@example.com"}
+```
+
+The ID is auto-generated based on the partition.
+
+### Read Entity
+
+```bash
+mqdb db read -p <partition> -e <entity> -i <id>
+```
+
+**Example:**
+```bash
+mqdb db read -p 0 -e users -i a1b2c3d4e5f6-0001
+```
+
+**Expected output:**
+```
+users a1b2c3d4e5f6-0001 {"name": "Alice", "email": "alice@example.com"}
+```
+
+### Update Entity
+
+```bash
+mqdb db update -p <partition> -e <entity> -i <id> -d '<json-data>'
+```
+
+**Example:**
+```bash
+mqdb db update -p 0 -e users -i a1b2c3d4e5f6-0001 -d '{"name": "Alice Updated", "email": "alice@example.com"}'
+```
+
+**Expected output:**
+```
+Updated: users a1b2c3d4e5f6-0001 {"name": "Alice Updated", "email": "alice@example.com"}
+```
+
+### Delete Entity
+
+```bash
+mqdb db delete -p <partition> -e <entity> -i <id>
+```
+
+**Example:**
+```bash
+mqdb db delete -p 0 -e users -i a1b2c3d4e5f6-0001
+```
+
+**Expected output:**
+```
+Deleted: users/a1b2c3d4e5f6-0001
+```
+
+### Error Cases
+
+**Not found:**
+```bash
+mqdb db read -p 0 -e users -i nonexistent
+```
+**Output:** `Not found`
+
+**Already exists (create duplicate):**
+```bash
+mqdb db create -p 0 -e users -d '{"name": "Test"}'
+# Note the ID from output, then try to create same partition again
+# IDs are unique per create, so duplicates are rare
+```
+
+**Invalid partition:**
+```bash
+mqdb db read -p 99 -e users -i test-id
+```
+**Output:** `Error: InvalidPartition`
+
+### Full CRUD Workflow Test
+
+```bash
+# Start a single-node cluster
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test --no-quic &
+sleep 3
+
+# Create
+mqdb db create -p 0 -e products -d '{"name": "Widget", "price": 99}'
+# Note the ID from output (e.g., abc123-0001)
+
+# Read
+mqdb db read -p 0 -e products -i abc123-0001
+
+# Update
+mqdb db update -p 0 -e products -i abc123-0001 -d '{"name": "Widget Pro", "price": 149}'
+
+# Verify update
+mqdb db read -p 0 -e products -i abc123-0001
+
+# Delete
+mqdb db delete -p 0 -e products -i abc123-0001
+
+# Verify deletion
+mqdb db read -p 0 -e products -i abc123-0001
+# Should output: Not found
+
+# Cleanup
+pkill -f "mqdb cluster"
+rm -rf /tmp/mqdb-test
+```
+
+### Testing Across Partitions
+
+Create entities on different partitions:
+
+```bash
+mqdb db create -p 0 -e users -d '{"name": "User P0"}'
+mqdb db create -p 1 -e users -d '{"name": "User P1"}'
+mqdb db create -p 31 -e users -d '{"name": "User P31"}'
+mqdb db create -p 63 -e users -d '{"name": "User P63"}'
+```
+
+Each partition can be independently queried.
+
+---
+
+## 13. Multi-Node Cluster Testing
+
+### Setup 3-Node Cluster
+
+```bash
+# Clean up any previous data
+rm -rf /tmp/mqdb-node{1,2,3}
+
+# Terminal 1
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
+  --peers 2=127.0.0.1:1884,3=127.0.0.1:1885 --no-quic
+
+# Terminal 2
+mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 --db /tmp/mqdb-node2 \
+  --peers 1=127.0.0.1:1883,3=127.0.0.1:1885 --no-quic
+
+# Terminal 3
+mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-node3 \
+  --peers 1=127.0.0.1:1883,2=127.0.0.1:1884 --no-quic
+```
+
+### Verify Cluster Formation
+
+Wait for Raft election and partition assignment:
+```bash
+# Check cluster status from any node
+mqdb cluster status --broker 127.0.0.1:1883
+mqdb cluster status --broker 127.0.0.1:1884
+mqdb cluster status --broker 127.0.0.1:1885
+```
+
+### Test Data Routing
+
+Create data via different nodes:
+```bash
+# Via node 1
+mqdb db create -p 0 -e items -d '{"via": "node1"}' --broker 127.0.0.1:1883
+
+# Via node 2
+mqdb db create -p 0 -e items -d '{"via": "node2"}' --broker 127.0.0.1:1884
+
+# Via node 3
+mqdb db create -p 0 -e items -d '{"via": "node3"}' --broker 127.0.0.1:1885
+```
+
+### Leader Failover Test
+
+1. Identify the current Raft leader from cluster status
+2. Kill the leader node (Ctrl+C)
+3. Observe remaining nodes elect new leader
+4. Verify operations continue on surviving nodes
+
+```bash
+# After killing leader, check new status
+mqdb cluster status --broker 127.0.0.1:1884
+```
+
+### Cleanup
+
+```bash
+pkill -f "mqdb cluster"
+rm -rf /tmp/mqdb-node{1,2,3}
+```

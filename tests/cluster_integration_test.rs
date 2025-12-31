@@ -513,8 +513,8 @@ fn raft_log_replication_commit() {
     let partition = PartitionId::new(5).unwrap();
     let cmd =
         mqdb::cluster::raft::RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
-    let idx = cluster.nodes[0].raft.propose(cmd).unwrap();
-    assert_eq!(idx, 1);
+    let (idx, _) = cluster.nodes[0].raft.propose(cmd);
+    assert_eq!(idx, Some(1));
 
     let heartbeat_outputs = cluster.nodes[0].raft.tick(1100);
     let mut append_requests = Vec::new();
@@ -1643,7 +1643,7 @@ fn raft_logs_converge_after_divergence() {
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Leader);
 
     let cmd1 = RaftCommand::Noop;
-    cluster.nodes[0].raft.propose(cmd1);
+    let _ = cluster.nodes[0].raft.propose(cmd1);
 
     let outputs = cluster.nodes[0].raft.tick(1100);
     for output in &outputs {
@@ -2112,8 +2112,8 @@ fn raft_command_application_updates_partition_map() {
 
     let partition = PartitionId::new(10).unwrap();
     let cmd = RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
-    let idx = cluster.nodes[0].raft.propose(cmd).unwrap();
-    assert_eq!(idx, 1);
+    let (idx, _) = cluster.nodes[0].raft.propose(cmd);
+    assert_eq!(idx, Some(1));
 
     let heartbeat_outputs = cluster.nodes[0].raft.tick(1100);
     let mut append_requests = Vec::new();
@@ -2338,7 +2338,7 @@ fn raft_log_persisted_and_recovered() {
 
         let partition = PartitionId::new(5).unwrap();
         let cmd = RaftCommand::update_partition(partition, node_id, &[peer_id], Epoch::new(1));
-        let idx = node.propose(cmd);
+        let (idx, _) = node.propose(cmd);
         assert_eq!(idx, Some(1));
 
         let storage = RaftStorage::new(backend.clone());

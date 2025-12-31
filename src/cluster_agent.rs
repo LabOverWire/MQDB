@@ -6,8 +6,9 @@ use crate::cluster::{
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
 use mqtt5::QoS;
-use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection};
-use mqtt5::broker::config::{StorageBackend, StorageConfig};
+use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
+use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
+use mqtt5::transport::StreamStrategy;
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
 use std::net::SocketAddr;
@@ -38,6 +39,10 @@ pub struct ClusterConfig {
     pub peers: Vec<PeerConfig>,
     pub password_file: Option<PathBuf>,
     pub acl_file: Option<PathBuf>,
+    pub use_quic: bool,
+    pub quic_insecure: bool,
+    pub quic_cert_file: Option<PathBuf>,
+    pub quic_key_file: Option<PathBuf>,
 }
 
 impl ClusterConfig {
@@ -53,6 +58,10 @@ impl ClusterConfig {
             peers,
             password_file: None,
             acl_file: None,
+            use_quic: true,
+            quic_insecure: true,
+            quic_cert_file: None,
+            quic_key_file: None,
         }
     }
 
@@ -79,6 +88,25 @@ impl ClusterConfig {
         self.acl_file = Some(path);
         self
     }
+
+    #[must_use]
+    pub fn with_quic(mut self, enabled: bool) -> Self {
+        self.use_quic = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quic_insecure(mut self, insecure: bool) -> Self {
+        self.quic_insecure = insecure;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quic_certs(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
+        self.quic_cert_file = Some(cert_file);
+        self.quic_key_file = Some(key_file);
+        self
+    }
 }
 
 pub struct ClusteredAgent {
@@ -91,6 +119,10 @@ pub struct ClusteredAgent {
     peers: Vec<PeerConfig>,
     password_file: Option<PathBuf>,
     acl_file: Option<PathBuf>,
+    use_quic: bool,
+    quic_insecure: bool,
+    quic_cert_file: Option<PathBuf>,
+    quic_key_file: Option<PathBuf>,
 }
 
 impl ClusteredAgent {
@@ -130,6 +162,10 @@ impl ClusteredAgent {
             peers: config.peers,
             password_file: config.password_file,
             acl_file: config.acl_file,
+            use_quic: config.use_quic,
+            quic_insecure: config.quic_insecure,
+            quic_cert_file: config.quic_cert_file,
+            quic_key_file: config.quic_key_file,
         })
     }
 
@@ -146,6 +182,19 @@ impl ClusteredAgent {
                 config.client_id = format!("{}-to-node-{}", self.node_name, peer.node_id);
                 config.clean_start = false;
                 config.try_private = true;
+
+                if self.use_quic {
+                    config.protocol = BridgeProtocol::Quic;
+                    config.quic_stream_strategy = Some(StreamStrategy::DataPerTopic);
+                    config.quic_flow_headers = Some(true);
+                    config.quic_datagrams = Some(true);
+                    config.quic_max_streams = Some(256);
+                    config.fallback_tcp = true;
+                    if self.quic_insecure {
+                        config.insecure = Some(true);
+                    }
+                }
+
                 config
             })
             .collect()
@@ -194,6 +243,19 @@ impl ClusteredAgent {
         }
         if let Some(ref path) = self.acl_file {
             broker_config.auth_config.acl_file = Some(path.clone());
+        }
+
+        if self.use_quic {
+            if let (Some(cert_file), Some(key_file)) =
+                (&self.quic_cert_file, &self.quic_key_file)
+            {
+                let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
+                    .with_bind_address(self.bind_address);
+                broker_config = broker_config.with_quic(quic_config);
+                info!(quic_bind = %self.bind_address, "QUIC listener configured (same port as TCP)");
+            } else {
+                info!("QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener");
+            }
         }
 
         let mut broker = MqttBroker::with_config(broker_config).await?;

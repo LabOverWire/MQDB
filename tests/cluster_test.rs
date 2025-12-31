@@ -364,8 +364,8 @@ fn raft_partition_map_updates() {
 
     let partition = PartitionId::new(5).unwrap();
     let cmd = RaftCommand::update_partition(partition, node2, &[node3], Epoch::new(1));
-    let idx = leader.propose(cmd).unwrap();
-    assert_eq!(idx, 1);
+    let (idx, _) = leader.propose(cmd);
+    assert_eq!(idx, Some(1));
 
     let mut partition_map = PartitionMap::new();
     partition_map.set(

@@ -186,6 +186,13 @@ impl RaftNode {
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
 
+        if self.state.has_quorum() {
+            self.state.become_leader();
+            let mut outputs = vec![RaftOutput::BecameLeader];
+            outputs.extend(self.send_heartbeats());
+            return outputs;
+        }
+
         let request = RequestVoteRequest::create(
             self.state.current_term(),
             self.state.node_id().get(),
@@ -403,12 +410,16 @@ impl RaftNode {
         outputs
     }
 
-    pub fn propose(&mut self, command: RaftCommand) -> Option<u64> {
-        let index = self.state.propose(command)?;
+    pub fn propose(&mut self, command: RaftCommand) -> (Option<u64>, Vec<RaftOutput>) {
+        let Some(index) = self.state.propose(command) else {
+            return (None, vec![]);
+        };
         if let Some(entry) = self.state.last_log_entry() {
             self.persist_log_entry(entry);
         }
-        Some(index)
+        self.state.try_advance_commit_index();
+        let outputs = self.apply_committed();
+        (Some(index), outputs)
     }
 }
 

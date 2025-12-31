@@ -280,6 +280,11 @@ impl RaftState {
         if !self.votes_received.contains(&from) {
             self.votes_received.push(from);
         }
+        self.has_quorum()
+    }
+
+    #[must_use]
+    pub fn has_quorum(&self) -> bool {
         self.votes_received.len() >= self.quorum_size()
     }
 
