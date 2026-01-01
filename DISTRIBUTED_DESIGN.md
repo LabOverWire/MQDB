@@ -1075,13 +1075,13 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 ### 11.1 Raft Leader Flapping (Single-Node)
 
-**Status**: Needs Investigation
+**Status**: FIXED (Commit 8d554d6)
 
-**Symptom**: Single-node Raft keeps cycling between leader and follower every ~500ms.
+**Symptom**: Single-node Raft kept cycling between candidate and follower every ~500ms.
 
-**Cause**: Unknown - possibly election timeout too aggressive for single-node case.
+**Root Cause**: When starting an election, single-node clusters would send `RequestVote` to peers (none) and wait for responses. With no peers to respond, the node would timeout and start another election, never becoming leader.
 
-**Note**: This is distinct from the multi-node "term storm" which was fixed (see 11.2).
+**Fix Applied**: Added immediate quorum check in `start_election()` (`node.rs`). Single-node clusters now check `has_quorum()` right after voting for themselves and immediately become leader if quorum is satisfied (1 vote for 1-node cluster).
 
 ### 11.2 Partition Map Not Syncing to Joining Nodes
 
