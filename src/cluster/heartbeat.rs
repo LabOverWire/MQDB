@@ -57,6 +57,15 @@ impl HeartbeatManager {
     }
 
     #[must_use]
+    pub fn partition_map(&self) -> &PartitionMap {
+        &self.partition_map
+    }
+
+    pub fn partition_map_mut(&mut self) -> &mut PartitionMap {
+        &mut self.partition_map
+    }
+
+    #[must_use]
     pub fn should_send(&self, now: u64) -> bool {
         match self.last_sent {
             None => true,
@@ -107,14 +116,23 @@ impl HeartbeatManager {
             let sender_claims_replica = heartbeat.is_replica(partition);
 
             if sender_claims_primary || sender_claims_replica {
+                let current_primary = self.partition_map.primary(partition);
                 let our_role = self.partition_map.role_for(partition, from);
-                let expected_primary =
-                    sender_claims_primary && matches!(our_role, super::PartitionRole::Primary);
-                let expected_replica =
-                    sender_claims_replica && matches!(our_role, super::PartitionRole::Replica);
 
-                if (sender_claims_primary && !expected_primary)
-                    || (sender_claims_replica && !expected_replica)
+                if sender_claims_primary && current_primary.is_none() {
+                    let assignment = super::PartitionAssignment::new(
+                        from,
+                        Vec::new(),
+                        super::Epoch::new(1),
+                    );
+                    self.partition_map.set(partition, assignment);
+                    tracing::info!(
+                        ?partition,
+                        ?from,
+                        "learned partition primary from heartbeat"
+                    );
+                } else if sender_claims_primary
+                    && !matches!(our_role, super::PartitionRole::Primary)
                 {
                     tracing::debug!(
                         ?partition,
@@ -135,7 +153,7 @@ impl HeartbeatManager {
         let suspect_threshold = timeout / 2;
 
         for (&node_id, state) in &mut self.nodes {
-            if state.status == NodeStatus::Dead {
+            if state.status == NodeStatus::Dead || state.status == NodeStatus::Unknown {
                 continue;
             }
 

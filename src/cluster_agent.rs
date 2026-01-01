@@ -329,12 +329,17 @@ impl ClusteredAgent {
                     ctrl.process_messages();
 
                     let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
+                    let partition_updates: Vec<_> = ctrl.drain_partition_updates().collect();
                     let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes().collect();
                     let draining_nodes: Vec<NodeId> = ctrl.drain_draining_nodes().collect();
                     let alive_nodes: Vec<NodeId> = ctrl.alive_nodes();
                     drop(ctrl);
 
                     let mut raft = self.raft.write().await;
+
+                    for update in &partition_updates {
+                        raft.apply_external_update(update);
+                    }
 
                     for alive_node in alive_nodes {
                         let rebalance_proposals = raft.handle_node_alive(alive_node);

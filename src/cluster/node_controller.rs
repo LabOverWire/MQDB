@@ -61,6 +61,7 @@ pub struct NodeController<T: ClusterTransport> {
     forward_dedup: HashSet<u64>,
     forward_dedup_order: VecDeque<u64>,
     raft_messages: VecDeque<RaftMessage>,
+    partition_updates: VecDeque<super::raft::PartitionUpdate>,
     dead_nodes: VecDeque<NodeId>,
     draining_nodes: VecDeque<NodeId>,
     migration_manager: MigrationManager,
@@ -95,6 +96,7 @@ impl<T: ClusterTransport> NodeController<T> {
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
             raft_messages: VecDeque::new(),
+            partition_updates: VecDeque::new(),
             dead_nodes: VecDeque::new(),
             draining_nodes: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
@@ -136,6 +138,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     #[must_use]
     pub fn is_local_partition(&self, partition: PartitionId) -> bool {
+        if self.partition_map.primary(partition) == Some(self.node_id) {
+            return true;
+        }
         self.replicas
             .get(&partition.get())
             .is_some_and(|s| s.role() == ReplicaRole::Primary)
@@ -270,6 +275,12 @@ impl<T: ClusterTransport> NodeController<T> {
         self.raft_messages.drain(..)
     }
 
+    pub fn drain_partition_updates(
+        &mut self,
+    ) -> impl Iterator<Item = super::raft::PartitionUpdate> + '_ {
+        self.partition_updates.drain(..)
+    }
+
     pub fn drain_dead_nodes(&mut self) -> impl Iterator<Item = NodeId> + '_ {
         self.dead_nodes.drain(..)
     }
@@ -385,6 +396,31 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::WildcardBroadcast(ref broadcast) => {
                 self.handle_wildcard_broadcast(msg.from, broadcast);
             }
+            ClusterMessage::PartitionUpdate(ref update) => {
+                if let (Some(partition), Some(primary)) = (
+                    PartitionId::new(u16::from(update.partition)),
+                    NodeId::validated(update.primary),
+                ) {
+                    let epoch = Epoch::new(u64::from(update.epoch));
+
+                    if primary == self.node_id {
+                        self.become_primary(partition, epoch);
+                    } else if NodeId::validated(update.replica1) == Some(self.node_id)
+                        || NodeId::validated(update.replica2) == Some(self.node_id)
+                    {
+                        self.become_replica(partition, epoch, 0);
+                    }
+                }
+
+                self.partition_map.apply_update(update);
+                self.heartbeat.partition_map_mut().apply_update(update);
+                self.partition_updates.push_back(*update);
+                tracing::info!(
+                    partition = update.partition,
+                    primary = update.primary,
+                    "received partition update from cluster"
+                );
+            }
         }
     }
 
@@ -494,24 +530,37 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
+        let is_broadcast =
+            write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
 
         tracing::debug!(
             ?partition,
             from = from.get(),
             entity = ?write.entity,
+            is_broadcast,
             "received write request"
         );
 
+        if is_broadcast
+            && let Err(e) = self.stores.apply_write(&write)
+        {
+            tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
+        }
+
         if !self.is_local_partition(partition) {
-            tracing::warn!(
-                ?partition,
-                from = from.get(),
-                "received write request but not primary"
-            );
+            if !is_broadcast {
+                tracing::warn!(
+                    ?partition,
+                    from = from.get(),
+                    "received write request but not primary"
+                );
+            }
             return;
         }
 
-        if let Err(e) = self.stores.apply_write(&write) {
+        if !is_broadcast
+            && let Err(e) = self.stores.apply_write(&write)
+        {
             tracing::error!(?partition, ?e, "failed to apply write request to stores");
             return;
         }
@@ -855,6 +904,12 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn write_or_forward(&mut self, write: ReplicationWrite) {
         let partition = write.partition;
 
+        let is_broadcast_entity =
+            write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
+        if is_broadcast_entity {
+            let _ = self.stores.apply_write(&write);
+        }
+
         if self.is_local_partition(partition) {
             tracing::debug!(
                 ?partition,
@@ -863,7 +918,11 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
             let _ = self.replicate_write_async(write, &replicas);
-        } else if let Some(primary) = self.partition_map.primary(partition) {
+        } else if let Some(primary) = self
+            .partition_map
+            .primary(partition)
+            .or_else(|| self.heartbeat.partition_map().primary(partition))
+        {
             tracing::debug!(
                 ?partition,
                 primary = primary.get(),

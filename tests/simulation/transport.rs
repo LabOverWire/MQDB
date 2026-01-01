@@ -1,5 +1,6 @@
 use mqdb::cluster::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
+    RequestVoteResponse,
 };
 use mqdb::cluster::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
@@ -118,6 +119,9 @@ impl SimulatedTransport {
             ClusterMessage::WildcardBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
             }
+            ClusterMessage::PartitionUpdate(update) => {
+                buf.extend_from_slice(&update.to_be_bytes());
+            }
         }
 
         buf
@@ -229,6 +233,10 @@ impl SimulatedTransport {
             60 => {
                 let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::WildcardBroadcast(broadcast))
+            }
+            70 => {
+                let (update, _) = PartitionUpdate::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::PartitionUpdate(update))
             }
             _ => None,
         }

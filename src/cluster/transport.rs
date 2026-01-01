@@ -3,7 +3,8 @@ use super::protocol::{
     Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, WildcardBroadcast,
 };
 use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
+    RequestVoteResponse,
 };
 use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::{NodeId, PartitionId};
@@ -39,6 +40,7 @@ pub enum ClusterMessage {
     BatchReadRequest(BatchReadRequest),
     BatchReadResponse(BatchReadResponse),
     WildcardBroadcast(WildcardBroadcast),
+    PartitionUpdate(PartitionUpdate),
 }
 
 impl ClusterMessage {
@@ -66,6 +68,7 @@ impl ClusterMessage {
             Self::BatchReadRequest(_) => 52,
             Self::BatchReadResponse(_) => 53,
             Self::WildcardBroadcast(_) => 60,
+            Self::PartitionUpdate(_) => 70,
         }
     }
 }

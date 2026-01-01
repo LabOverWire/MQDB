@@ -3,7 +3,8 @@ use super::protocol::{
     Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, WildcardBroadcast,
 };
 use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
+    RequestVoteResponse,
 };
 use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
@@ -289,6 +290,10 @@ impl MqttTransport {
                 let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
                 ClusterMessage::WildcardBroadcast(broadcast)
             }
+            70 => {
+                let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
+                ClusterMessage::PartitionUpdate(update)
+            }
             _ => return None,
         };
 
@@ -374,6 +379,9 @@ impl MqttTransport {
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
+            ClusterMessage::PartitionUpdate(update) => {
+                buf.extend_from_slice(&update.to_be_bytes());
             }
         }
 
@@ -677,6 +685,9 @@ mod tests {
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
+            ClusterMessage::PartitionUpdate(update) => {
+                buf.extend_from_slice(&update.to_be_bytes());
             }
         }
 

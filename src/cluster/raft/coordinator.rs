@@ -2,7 +2,7 @@ use super::node::{RaftConfig, RaftNode, RaftOutput};
 use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
-use super::state::RaftCommand;
+use super::state::{PartitionUpdate, RaftCommand};
 use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments, compute_removal_assignments};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
@@ -86,6 +86,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub fn partition_map(&self) -> &PartitionMap {
         &self.partition_map
+    }
+
+    pub fn apply_external_update(&mut self, update: &PartitionUpdate) {
+        self.partition_map.apply_update(update);
     }
 
     pub fn add_peer(&mut self, peer: NodeId) {
@@ -274,6 +278,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         match command {
             RaftCommand::UpdatePartition(update) => {
                 self.partition_map.apply_update(&update);
+                let _ = self
+                    .transport
+                    .broadcast(ClusterMessage::PartitionUpdate(update));
             }
             RaftCommand::AddNode { node_id } => {
                 if let Some(node) = NodeId::validated(node_id)
@@ -332,6 +339,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let is_new_member = !self.cluster_members.contains(&node);
         if is_new_member {
             self.cluster_members.push(node);
+            self.node.add_peer(node);
+            tracing::info!(?node, "added new node as Raft peer");
         }
 
         if !self.is_leader() {

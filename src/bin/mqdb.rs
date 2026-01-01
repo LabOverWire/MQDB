@@ -380,9 +380,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quic_key,
                 no_quic,
             } => {
-                Box::pin(cmd_cluster_start(
-                    node_id, node_name, bind, db, peers, passwd, acl, quic_cert, quic_key, no_quic,
-                ))
+                Box::pin(cmd_cluster_start(ClusterStartArgs {
+                    node_id,
+                    node_name,
+                    bind,
+                    db_path: db,
+                    peers,
+                    passwd,
+                    acl,
+                    quic_cert,
+                    quic_key,
+                    no_quic,
+                }))
                 .await?;
             }
             ClusterAction::Rebalance { conn } => {
@@ -596,7 +605,7 @@ async fn cmd_agent_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-async fn cmd_cluster_start(
+struct ClusterStartArgs {
     node_id: u16,
     node_name: Option<String>,
     bind: SocketAddr,
@@ -607,25 +616,27 @@ async fn cmd_cluster_start(
     quic_cert: Option<PathBuf>,
     quic_key: Option<PathBuf>,
     no_quic: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let peer_configs = parse_peer_configs(&peers)?;
+}
 
-    let mut config = ClusterConfig::new(node_id, db_path, peer_configs);
-    config = config.with_bind_address(bind);
+async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let peer_configs = parse_peer_configs(&args.peers)?;
 
-    if let Some(name) = node_name {
+    let mut config = ClusterConfig::new(args.node_id, args.db_path, peer_configs);
+    config = config.with_bind_address(args.bind);
+
+    if let Some(name) = args.node_name {
         config = config.with_node_name(name);
     }
-    if let Some(passwd_file) = passwd {
+    if let Some(passwd_file) = args.passwd {
         config = config.with_password_file(passwd_file);
     }
-    if let Some(acl_file) = acl {
+    if let Some(acl_file) = args.acl {
         config = config.with_acl_file(acl_file);
     }
-    if let (Some(cert), Some(key)) = (quic_cert, quic_key) {
+    if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         config = config.with_quic_certs(cert, key);
     }
-    if no_quic {
+    if args.no_quic {
         config = config.with_quic(false);
     }
 
