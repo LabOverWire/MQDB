@@ -188,7 +188,6 @@ impl ClusteredAgent {
                     config.quic_stream_strategy = Some(StreamStrategy::DataPerTopic);
                     config.quic_flow_headers = Some(true);
                     config.quic_datagrams = Some(true);
-                    config.quic_max_streams = Some(256);
                     config.fallback_tcp = true;
                     if self.quic_insecure {
                         config.insecure = Some(true);
