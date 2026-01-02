@@ -1095,13 +1095,13 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 ### 11.3 First Heartbeat Before Partition Init
 
-**Status**: Documented (Minor)
+**Status**: FIXED
 
-**Symptom**: First heartbeat has empty primary_bitmap.
+**Symptom**: First heartbeat had empty primary_bitmap.
 
-**Cause**: Heartbeat sent before Raft applies partition assignments.
+**Root Cause**: Heartbeat was sent before Raft applied partition assignments.
 
-**Impact**: Minor - subsequent heartbeats have correct data.
+**Fix Applied**: Added `has_any_assignment()` check in `HeartbeatManager::should_send()` (`heartbeat.rs`). Heartbeats are now only sent after the partition map has at least one partition assigned to the local node.
 
 ### 11.4 Immediate Node Death Detection
 

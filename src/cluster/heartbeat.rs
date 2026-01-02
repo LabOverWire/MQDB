@@ -67,6 +67,10 @@ impl HeartbeatManager {
 
     #[must_use]
     pub fn should_send(&self, now: u64) -> bool {
+        if !self.partition_map.has_any_assignment(self.local_node) {
+            return false;
+        }
+
         match self.last_sent {
             None => true,
             Some(last) => now >= last + self.config.heartbeat_interval_ms,
@@ -269,8 +273,19 @@ mod tests {
 
     #[test]
     fn should_send_respects_interval() {
+        use crate::cluster::{Epoch, PartitionAssignment, PartitionId};
+
         let local = NodeId::validated(1).unwrap();
         let mut mgr = HeartbeatManager::new(local, config());
+
+        assert!(!mgr.should_send(0));
+
+        let mut map = PartitionMap::new();
+        map.set(
+            PartitionId::new(0).unwrap(),
+            PartitionAssignment::new(local, vec![], Epoch::new(1)),
+        );
+        mgr.update_partition_map(map);
 
         assert!(mgr.should_send(0));
 

@@ -86,6 +86,26 @@ impl TestCluster {
             });
         }
 
+        let mut partition_map = PartitionMap::new();
+        for i in 0..64 {
+            let partition = PartitionId::new(i).unwrap();
+            let primary_idx = i as usize % node_count;
+            let replica_idx = (i as usize + 1) % node_count;
+            let replicas = if node_count > 1 {
+                vec![node_ids[replica_idx]]
+            } else {
+                vec![]
+            };
+            partition_map.set(
+                partition,
+                PartitionAssignment::new(node_ids[primary_idx], replicas, Epoch::new(1)),
+            );
+        }
+
+        for node in &mut nodes {
+            node.controller.update_partition_map(partition_map.clone());
+        }
+
         Self { runtime, nodes }
     }
 
@@ -193,6 +213,25 @@ impl TestCluster {
         for &peer_id in &peer_ids {
             raft.add_peer(peer_id);
         }
+
+        let node_count = self.nodes.len();
+        let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
+        let mut partition_map = PartitionMap::new();
+        for i in 0..64 {
+            let partition = PartitionId::new(i).unwrap();
+            let primary_idx = i as usize % node_count;
+            let replica_idx = (i as usize + 1) % node_count;
+            let replicas = if node_count > 1 {
+                vec![all_node_ids[replica_idx]]
+            } else {
+                vec![]
+            };
+            partition_map.set(
+                partition,
+                PartitionAssignment::new(all_node_ids[primary_idx], replicas, Epoch::new(1)),
+            );
+        }
+        controller.update_partition_map(partition_map);
 
         self.nodes[node_idx] = TestNode {
             id: node_id,

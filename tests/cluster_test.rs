@@ -220,6 +220,19 @@ fn heartbeat_detection() {
     ctrl1.register_peer(node2_id);
     ctrl2.register_peer(node1_id);
 
+    let mut partition_map = PartitionMap::new();
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        let primary = if i % 2 == 0 { node1_id } else { node2_id };
+        let replica = if i % 2 == 0 { node2_id } else { node1_id };
+        partition_map.set(
+            partition,
+            PartitionAssignment::new(primary, vec![replica], Epoch::new(1)),
+        );
+    }
+    ctrl1.update_partition_map(partition_map.clone());
+    ctrl2.update_partition_map(partition_map);
+
     ctrl1.tick(0);
     clock.advance_ms(5);
     ctrl2.process_messages();

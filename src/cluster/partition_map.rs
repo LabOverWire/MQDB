@@ -139,6 +139,11 @@ impl PartitionMap {
             .count()
     }
 
+    #[must_use]
+    pub fn has_any_assignment(&self, node: NodeId) -> bool {
+        PartitionId::all().any(|p| self.role_for(p, node) != PartitionRole::None)
+    }
+
     pub fn apply_update(&mut self, update: &super::raft::PartitionUpdate) -> bool {
         let Some(partition) = PartitionId::new(u16::from(update.partition)) else {
             return false;
