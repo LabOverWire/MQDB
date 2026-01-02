@@ -116,7 +116,9 @@ impl TestCluster {
     fn setup_all_primaries(&mut self) {
         for i in 0..64 {
             let partition = PartitionId::new(i).unwrap();
-            self.nodes[0].controller.become_primary(partition, Epoch::new(1));
+            self.nodes[0]
+                .controller
+                .become_primary(partition, Epoch::new(1));
             for node in self.nodes.iter_mut().skip(1) {
                 node.controller.become_replica(partition, Epoch::new(1), 0);
             }
@@ -1971,21 +1973,13 @@ fn snapshot_transfer_on_partition_migration() {
         .retained
         .set(topic, 1, b"snapshot-payload", 0);
 
-    let retained_before = cluster.nodes[0]
-        .controller
-        .stores()
-        .retained
-        .get(topic);
+    let retained_before = cluster.nodes[0].controller.stores().retained.get(topic);
     assert!(
         retained_before.is_some(),
         "Retained message should exist on node 1"
     );
 
-    let retained_on_n2_before = cluster.nodes[1]
-        .controller
-        .stores()
-        .retained
-        .get(topic);
+    let retained_on_n2_before = cluster.nodes[1].controller.stores().retained.get(topic);
     assert!(
         retained_on_n2_before.is_none(),
         "Node 2 should NOT have retained message before migration"
@@ -2003,11 +1997,7 @@ fn snapshot_transfer_on_partition_migration() {
         }
     }
 
-    let retained_on_n2_after = cluster.nodes[1]
-        .controller
-        .stores()
-        .retained
-        .get(topic);
+    let retained_on_n2_after = cluster.nodes[1].controller.stores().retained.get(topic);
     assert!(
         retained_on_n2_after.is_some(),
         "Node 2 should have retained message after snapshot transfer"
@@ -2121,8 +2111,8 @@ fn graceful_shutdown_drain() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn raft_command_application_updates_partition_map() {
-    use mqdb::cluster::raft::RaftCommand;
     use mqdb::cluster::PartitionMap;
+    use mqdb::cluster::raft::RaftCommand;
 
     let mut cluster = TestCluster::new(3);
 
@@ -2143,7 +2133,9 @@ fn raft_command_application_updates_partition_map() {
     for (to, req) in &vote_requests {
         if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
             let (resp, _) = follower.raft.handle_request_vote(n1, *req, 1000);
-            cluster.nodes[0].raft.handle_request_vote_response(*to, resp);
+            cluster.nodes[0]
+                .raft
+                .handle_request_vote_response(*to, resp);
         }
     }
 
@@ -2161,14 +2153,25 @@ fn raft_command_application_updates_partition_map() {
             append_requests.push((to, request));
         }
     }
-    assert!(!append_requests.is_empty(), "Leader should send AppendEntries");
+    assert!(
+        !append_requests.is_empty(),
+        "Leader should send AppendEntries"
+    );
 
     for (to, request) in &append_requests {
         if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (response, _outputs) = follower.raft.handle_append_entries(n1, request.clone(), 1100);
-            assert!(response.is_success(), "Follower should accept AppendEntries");
+            let (response, _outputs) =
+                follower
+                    .raft
+                    .handle_append_entries(n1, request.clone(), 1100);
+            assert!(
+                response.is_success(),
+                "Follower should accept AppendEntries"
+            );
 
-            let leader_outputs = cluster.nodes[0].raft.handle_append_entries_response(*to, response);
+            let leader_outputs = cluster.nodes[0]
+                .raft
+                .handle_append_entries_response(*to, response);
 
             for output in &leader_outputs {
                 if let RaftOutput::ApplyCommand(RaftCommand::UpdatePartition(update)) = output {
@@ -2192,7 +2195,10 @@ fn raft_command_application_updates_partition_map() {
     let mut applied_count = 0;
     for (to, request) in &commit_requests {
         if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (response, outputs) = follower.raft.handle_append_entries(n1, request.clone(), 1200);
+            let (response, outputs) =
+                follower
+                    .raft
+                    .handle_append_entries(n1, request.clone(), 1200);
             assert!(response.is_success());
 
             for output in outputs {
@@ -2207,12 +2213,15 @@ fn raft_command_application_updates_partition_map() {
         }
     }
 
-    assert!(applied_count >= 1, "At least one follower should have applied the command");
+    assert!(
+        applied_count >= 1,
+        "At least one follower should have applied the command"
+    );
 }
 
 #[test]
 fn wildcard_broadcast_replication() {
-    use mqdb::cluster::{ClusterMessage, ClusterTransport, WildcardBroadcast, SubscriptionType};
+    use mqdb::cluster::{ClusterMessage, ClusterTransport, SubscriptionType, WildcardBroadcast};
 
     let mut cluster = TestCluster::new(2);
 
@@ -2294,10 +2303,7 @@ fn drain_notification_triggers_partition_reassignment() {
         node.controller.process_messages();
     }
 
-    let draining_nodes: Vec<_> = cluster.nodes[0]
-        .controller
-        .drain_draining_nodes()
-        .collect();
+    let draining_nodes: Vec<_> = cluster.nodes[0].controller.drain_draining_nodes().collect();
 
     assert!(
         draining_nodes.contains(&draining_node_id),
@@ -2316,12 +2322,8 @@ fn raft_state_persisted_and_recovered() {
     let peer_id = NodeId::validated(2).unwrap();
 
     {
-        let mut node = RaftNode::create_with_storage(
-            node_id,
-            RaftConfig::default(),
-            backend.clone(),
-        )
-        .unwrap();
+        let mut node =
+            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
 
         node.add_peer(peer_id);
 
@@ -2336,12 +2338,8 @@ fn raft_state_persisted_and_recovered() {
     }
 
     {
-        let node = RaftNode::create_with_storage(
-            node_id,
-            RaftConfig::default(),
-            backend.clone(),
-        )
-        .unwrap();
+        let node =
+            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
 
         assert_eq!(node.current_term(), 1);
         assert_eq!(node.role(), RaftRole::Follower);
@@ -2359,12 +2357,8 @@ fn raft_log_persisted_and_recovered() {
     let peer_id = NodeId::validated(2).unwrap();
 
     {
-        let mut node = RaftNode::create_with_storage(
-            node_id,
-            RaftConfig::default(),
-            backend.clone(),
-        )
-        .unwrap();
+        let mut node =
+            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
 
         node.add_peer(peer_id);
 
@@ -2372,7 +2366,11 @@ fn raft_log_persisted_and_recovered() {
 
         let vote_response = mqdb::cluster::raft::RequestVoteResponse::granted(1);
         let outputs = node.handle_request_vote_response(peer_id, vote_response);
-        assert!(outputs.iter().any(|o| matches!(o, RaftOutput::BecameLeader)));
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::BecameLeader))
+        );
         assert_eq!(node.role(), RaftRole::Leader);
 
         let partition = PartitionId::new(5).unwrap();
@@ -2407,9 +2405,15 @@ fn db_crud_replication_to_replicas() {
     let entity_id = "user-123";
     let partition = data_partition(entity_type, entity_id);
 
-    cluster.nodes[0].controller.become_primary(partition, Epoch::new(1));
-    cluster.nodes[1].controller.become_replica(partition, Epoch::new(1), 0);
-    cluster.nodes[2].controller.become_replica(partition, Epoch::new(1), 0);
+    cluster.nodes[0]
+        .controller
+        .become_primary(partition, Epoch::new(1));
+    cluster.nodes[1]
+        .controller
+        .become_replica(partition, Epoch::new(1), 0);
+    cluster.nodes[2]
+        .controller
+        .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
         node.controller.tick(0);
@@ -2419,13 +2423,18 @@ fn db_crud_replication_to_replicas() {
         node.controller.process_messages();
     }
 
-    let (entity, create_write) = cluster.nodes[0].controller.stores()
+    let (entity, create_write) = cluster.nodes[0]
+        .controller
+        .stores()
         .db_create_replicated(entity_type, entity_id, b"initial data", 1000)
         .expect("create should succeed");
     assert_eq!(entity.entity_str(), entity_type);
     assert_eq!(entity.id_str(), entity_id);
 
-    cluster.nodes[0].controller.replicate_write(create_write, &[n2, n3], 2).ok();
+    cluster.nodes[0]
+        .controller
+        .replicate_write(create_write, &[n2, n3], 2)
+        .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages();
@@ -2436,19 +2445,30 @@ fn db_crud_replication_to_replicas() {
     assert_eq!(primary_entity.unwrap().data, b"initial data");
 
     let replica1_entity = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(replica1_entity.is_some(), "Replica 1 should have the entity after replication");
+    assert!(
+        replica1_entity.is_some(),
+        "Replica 1 should have the entity after replication"
+    );
     assert_eq!(replica1_entity.unwrap().data, b"initial data");
 
     let replica2_entity = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(replica2_entity.is_some(), "Replica 2 should have the entity after replication");
+    assert!(
+        replica2_entity.is_some(),
+        "Replica 2 should have the entity after replication"
+    );
     assert_eq!(replica2_entity.unwrap().data, b"initial data");
 
-    let (updated, update_write) = cluster.nodes[0].controller.stores()
+    let (updated, update_write) = cluster.nodes[0]
+        .controller
+        .stores()
         .db_update_replicated(entity_type, entity_id, b"updated data", 2000)
         .expect("update should succeed");
     assert_eq!(updated.data, b"updated data");
 
-    cluster.nodes[0].controller.replicate_write(update_write, &[n2, n3], 2).ok();
+    cluster.nodes[0]
+        .controller
+        .replicate_write(update_write, &[n2, n3], 2)
+        .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages();
@@ -2458,30 +2478,52 @@ fn db_crud_replication_to_replicas() {
     assert_eq!(primary_updated.unwrap().data, b"updated data");
 
     let replica1_updated = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert_eq!(replica1_updated.unwrap().data, b"updated data", "Replica 1 should have updated data");
+    assert_eq!(
+        replica1_updated.unwrap().data,
+        b"updated data",
+        "Replica 1 should have updated data"
+    );
 
     let replica2_updated = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert_eq!(replica2_updated.unwrap().data, b"updated data", "Replica 2 should have updated data");
+    assert_eq!(
+        replica2_updated.unwrap().data,
+        b"updated data",
+        "Replica 2 should have updated data"
+    );
 
-    let (deleted, delete_write) = cluster.nodes[0].controller.stores()
+    let (deleted, delete_write) = cluster.nodes[0]
+        .controller
+        .stores()
         .db_delete_replicated(entity_type, entity_id)
         .expect("delete should succeed");
     assert_eq!(deleted.id_str(), entity_id);
 
-    cluster.nodes[0].controller.replicate_write(delete_write, &[n2, n3], 2).ok();
+    cluster.nodes[0]
+        .controller
+        .replicate_write(delete_write, &[n2, n3], 2)
+        .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages();
     }
 
     let primary_deleted = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert!(primary_deleted.is_none(), "Entity should be deleted on primary");
+    assert!(
+        primary_deleted.is_none(),
+        "Entity should be deleted on primary"
+    );
 
     let replica1_deleted = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(replica1_deleted.is_none(), "Entity should be deleted on replica 1");
+    assert!(
+        replica1_deleted.is_none(),
+        "Entity should be deleted on replica 1"
+    );
 
     let replica2_deleted = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(replica2_deleted.is_none(), "Entity should be deleted on replica 2");
+    assert!(
+        replica2_deleted.is_none(),
+        "Entity should be deleted on replica 2"
+    );
 }
 
 #[test]
@@ -2590,23 +2632,35 @@ fn schema_broadcast_to_all_nodes() {
     assert_eq!(primary_schema.unwrap().schema_version, 1);
 
     let replica1_schema = cluster.nodes[1].controller.schema_get("users");
-    assert!(replica1_schema.is_some(), "Replica 1 should have schema after replication");
+    assert!(
+        replica1_schema.is_some(),
+        "Replica 1 should have schema after replication"
+    );
     assert_eq!(replica1_schema.unwrap().schema_version, 1);
 
     let replica2_schema = cluster.nodes[2].controller.schema_get("users");
-    assert!(replica2_schema.is_some(), "Replica 2 should have schema after replication");
+    assert!(
+        replica2_schema.is_some(),
+        "Replica 2 should have schema after replication"
+    );
     assert_eq!(replica2_schema.unwrap().schema_version, 1);
 
     assert!(
-        cluster.nodes[0].controller.schema_is_valid_for_write("users"),
+        cluster.nodes[0]
+            .controller
+            .schema_is_valid_for_write("users"),
         "Schema should be valid for writes on primary"
     );
     assert!(
-        cluster.nodes[1].controller.schema_is_valid_for_write("users"),
+        cluster.nodes[1]
+            .controller
+            .schema_is_valid_for_write("users"),
         "Schema should be valid for writes on replica 1"
     );
     assert!(
-        cluster.nodes[2].controller.schema_is_valid_for_write("users"),
+        cluster.nodes[2]
+            .controller
+            .schema_is_valid_for_write("users"),
         "Schema should be valid for writes on replica 2"
     );
 
@@ -2824,45 +2878,100 @@ fn unique_constraint_reserve_commit_release() {
     let data_partition = PartitionId::new(10).unwrap();
     let (ttl_ms, now) = (5000, 1000);
 
-    let (result, write_opt) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
-        entity, field, value, record_id, request_id, data_partition, ttl_ms, now,
-    );
+    let (result, write_opt) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            ttl_ms,
+            now,
+        );
     assert_eq!(result, ReserveResult::Reserved);
     assert!(write_opt.is_some(), "Should have replication write");
 
     if let Some(write) = write_opt {
-        cluster.nodes[0].controller.replicate_write(write, &[n2, n3], 2).ok();
+        cluster.nodes[0]
+            .controller
+            .replicate_write(write, &[n2, n3], 2)
+            .ok();
     }
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages();
     }
 
-    let (conflict_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
-        entity, field, value, "other-record", "req-002", data_partition, ttl_ms, now + 100,
-    );
+    let (conflict_result, _) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            "other-record",
+            "req-002",
+            data_partition,
+            ttl_ms,
+            now + 100,
+        );
     assert_eq!(conflict_result, ReserveResult::Conflict);
 
-    let (idempotent_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
-        entity, field, value, record_id, request_id, data_partition, ttl_ms, now + 100,
+    let (idempotent_result, _) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            ttl_ms,
+            now + 100,
+        );
+    assert_eq!(
+        idempotent_result,
+        ReserveResult::AlreadyReservedBySameRequest
     );
-    assert_eq!(idempotent_result, ReserveResult::AlreadyReservedBySameRequest);
 
-    let (committed, commit_write) = cluster.nodes[0].controller.stores()
+    let (committed, commit_write) = cluster.nodes[0]
+        .controller
+        .stores()
         .unique_commit_replicated(entity, field, value, request_id)
         .expect("commit should succeed");
     assert!(committed.is_committed());
 
-    cluster.nodes[0].controller.replicate_write(commit_write, &[n2, n3], 2).ok();
+    cluster.nodes[0]
+        .controller
+        .replicate_write(commit_write, &[n2, n3], 2)
+        .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages();
     }
 
-    let (post_commit_result, _) = cluster.nodes[0].controller.stores().unique_reserve_replicated(
-        entity, field, value, "third-record", "req-003", data_partition, ttl_ms, now + 200,
+    let (post_commit_result, _) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(
+            entity,
+            field,
+            value,
+            "third-record",
+            "req-003",
+            data_partition,
+            ttl_ms,
+            now + 200,
+        );
+    assert_eq!(
+        post_commit_result,
+        ReserveResult::Conflict,
+        "Committed value should conflict"
     );
-    assert_eq!(post_commit_result, ReserveResult::Conflict, "Committed value should conflict");
 }
 
 #[test]
@@ -2915,7 +3024,11 @@ fn unique_constraint_expires_after_ttl() {
             after_expiry,
         );
 
-    assert_eq!(new_result, ReserveResult::Reserved, "Should succeed after TTL expires");
+    assert_eq!(
+        new_result,
+        ReserveResult::Reserved,
+        "Should succeed after TTL expires"
+    );
 }
 
 #[test]
@@ -2947,13 +3060,7 @@ fn fk_validation_request_lifecycle() {
         node.controller.process_messages();
     }
 
-    let request = FkValidationRequest::create(
-        "users",
-        "user-123",
-        "fk-req-001",
-        5000,
-        1000,
-    );
+    let request = FkValidationRequest::create("users", "user-123", "fk-req-001", 5000, 1000);
 
     let write = cluster.nodes[0]
         .controller
@@ -2982,13 +3089,19 @@ fn fk_validation_request_lifecycle() {
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(replica1_request.is_some(), "Replica 1 should have FK request after replication");
+    assert!(
+        replica1_request.is_some(),
+        "Replica 1 should have FK request after replication"
+    );
 
     let replica2_request = cluster.nodes[2]
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(replica2_request.is_some(), "Replica 2 should have FK request after replication");
+    assert!(
+        replica2_request.is_some(),
+        "Replica 2 should have FK request after replication"
+    );
 
     let (completed, complete_write) = cluster.nodes[0]
         .controller
@@ -3012,19 +3125,28 @@ fn fk_validation_request_lifecycle() {
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(after_complete.is_none(), "Request should be removed on primary after completion");
+    assert!(
+        after_complete.is_none(),
+        "Request should be removed on primary after completion"
+    );
 
     let replica1_after = cluster.nodes[1]
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(replica1_after.is_none(), "Request should be removed on replica 1 after completion");
+    assert!(
+        replica1_after.is_none(),
+        "Request should be removed on replica 1 after completion"
+    );
 
     let replica2_after = cluster.nodes[2]
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(replica2_after.is_none(), "Request should be removed on replica 2 after completion");
+    assert!(
+        replica2_after.is_none(),
+        "Request should be removed on replica 2 after completion"
+    );
 }
 
 #[test]
@@ -3040,21 +3162,11 @@ fn fk_validation_cleanup_expired() {
             .become_primary(partition, Epoch::new(1));
     }
 
-    let short_timeout_request = FkValidationRequest::create(
-        "users",
-        "user-1",
-        "fk-short",
-        1000,
-        1000,
-    );
+    let short_timeout_request =
+        FkValidationRequest::create("users", "user-1", "fk-short", 1000, 1000);
 
-    let long_timeout_request = FkValidationRequest::create(
-        "users",
-        "user-2",
-        "fk-long",
-        10000,
-        1000,
-    );
+    let long_timeout_request =
+        FkValidationRequest::create("users", "user-2", "fk-long", 10000, 1000);
 
     cluster.nodes[0]
         .controller
@@ -3068,8 +3180,20 @@ fn fk_validation_cleanup_expired() {
         .fk_add_request_replicated(long_timeout_request)
         .ok();
 
-    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-short").is_some());
-    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-long").is_some());
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .fk_get_request("fk-short")
+            .is_some()
+    );
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .fk_get_request("fk-long")
+            .is_some()
+    );
 
     let cleaned = cluster.nodes[0]
         .controller
@@ -3077,6 +3201,18 @@ fn fk_validation_cleanup_expired() {
         .fk_cleanup_expired(3000);
 
     assert_eq!(cleaned, 1, "Should clean up 1 expired request");
-    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-short").is_none());
-    assert!(cluster.nodes[0].controller.stores().fk_get_request("fk-long").is_some());
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .fk_get_request("fk-short")
+            .is_none()
+    );
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .fk_get_request("fk-long")
+            .is_some()
+    );
 }

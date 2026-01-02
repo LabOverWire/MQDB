@@ -317,8 +317,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                             let _ = ctrl.transport().broadcast(msg);
                             debug!(
                                 topic,
-                                client_id,
-                                "broadcast wildcard subscription to cluster"
+                                client_id, "broadcast wildcard subscription to cluster"
                             );
                         }
                     } else {
@@ -429,8 +428,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         let _ = ctrl.transport().broadcast(msg);
                         debug!(
                             topic,
-                            client_id,
-                            "broadcast wildcard unsubscription to cluster"
+                            client_id, "broadcast wildcard unsubscription to cluster"
                         );
                     }
                 } else {

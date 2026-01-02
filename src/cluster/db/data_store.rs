@@ -395,7 +395,10 @@ impl DbDataStore {
             offset += data_len;
 
             if let Some(entity) = Self::deserialize(entity_data) {
-                self.entities.write().unwrap().insert(key.to_string(), entity);
+                self.entities
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), entity);
                 imported += 1;
             }
         }
@@ -444,7 +447,9 @@ mod tests {
     fn create_and_get() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "123", b"{\"name\":\"Alice\"}", 1000).unwrap();
+        store
+            .create("users", "123", b"{\"name\":\"Alice\"}", 1000)
+            .unwrap();
         let entity = store.get("users", "123").unwrap();
 
         assert_eq!(entity.entity_str(), "users");
@@ -466,8 +471,12 @@ mod tests {
     fn update_existing() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "123", b"{\"name\":\"Alice\"}", 1000).unwrap();
-        store.update("users", "123", b"{\"name\":\"Bob\"}", 2000).unwrap();
+        store
+            .create("users", "123", b"{\"name\":\"Alice\"}", 1000)
+            .unwrap();
+        store
+            .update("users", "123", b"{\"name\":\"Bob\"}", 2000)
+            .unwrap();
 
         let entity = store.get("users", "123").unwrap();
         assert_eq!(entity.data, b"{\"name\":\"Bob\"}");
@@ -520,8 +529,12 @@ mod tests {
         let store1 = DbDataStore::new(node(1));
         let store2 = DbDataStore::new(node(2));
 
-        store1.create("users", "1", b"{\"name\":\"Alice\"}", 1000).unwrap();
-        store1.create("users", "2", b"{\"name\":\"Bob\"}", 2000).unwrap();
+        store1
+            .create("users", "1", b"{\"name\":\"Alice\"}", 1000)
+            .unwrap();
+        store1
+            .create("users", "2", b"{\"name\":\"Bob\"}", 2000)
+            .unwrap();
 
         let entity1 = store1.get("users", "1").unwrap();
         let partition = entity1.partition();

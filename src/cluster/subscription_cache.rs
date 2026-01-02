@@ -746,8 +746,12 @@ mod tests {
         let topic_index = TopicIndex::new(node(1));
         let wildcard_store = WildcardStore::new(node(1));
 
-        cache.add_subscription("client1", "sensors/+/temp", 1).unwrap();
-        cache.add_subscription("client1", "stale/+/pattern", 1).unwrap();
+        cache
+            .add_subscription("client1", "sensors/+/temp", 1)
+            .unwrap();
+        cache
+            .add_subscription("client1", "stale/+/pattern", 1)
+            .unwrap();
 
         wildcard_store
             .subscribe_mqtt("sensors/+/temp", "client1", 1)

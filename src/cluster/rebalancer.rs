@@ -124,7 +124,8 @@ pub fn compute_incremental_assignments(
                 .copied()
                 .collect();
 
-            if !new_replicas.contains(overloaded_node) && new_replicas.len() < rf.saturating_sub(1) {
+            if !new_replicas.contains(overloaded_node) && new_replicas.len() < rf.saturating_sub(1)
+            {
                 new_replicas.push(*overloaded_node);
             }
 

@@ -2,9 +2,9 @@ use bebytes::BeBytes;
 
 use super::SubscriptionType;
 use super::db::{
-    ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest,
-    FkValidationStore, IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation,
-    UniqueStore, data_partition, index_partition, unique_partition,
+    ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest, FkValidationStore,
+    IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation, UniqueStore,
+    data_partition, index_partition, unique_partition,
 };
 use super::entity;
 use super::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
@@ -556,12 +556,7 @@ impl StoreManager {
     }
 
     #[must_use]
-    pub fn unique_get(
-        &self,
-        entity: &str,
-        field: &str,
-        value: &[u8],
-    ) -> Option<UniqueReservation> {
+    pub fn unique_get(&self, entity: &str, field: &str, value: &[u8]) -> Option<UniqueReservation> {
         self.db_unique.get(entity, field, value)
     }
 

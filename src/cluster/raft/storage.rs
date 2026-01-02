@@ -72,6 +72,22 @@ impl RaftStorage {
     }
 
     /// # Errors
+    /// Returns an error if persistence fails.
+    pub fn append_log_entries_batch(&self, entries: &[LogEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut batch = self.backend.batch();
+        for entry in entries {
+            let key = log_entry_key(entry.index);
+            let bytes = entry.to_be_bytes();
+            batch.insert(key, bytes);
+        }
+        batch.commit()?;
+        self.backend.flush()
+    }
+
+    /// # Errors
     /// Returns an error if loading fails or data is corrupted.
     pub fn load_log(&self) -> Result<Vec<LogEntry>> {
         let entries_raw = self.backend.prefix_scan(RAFT_LOG_PREFIX)?;
@@ -120,9 +136,9 @@ impl std::fmt::Debug for RaftStorage {
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::RaftCommand;
     use super::*;
     use crate::storage::MemoryBackend;
-    use super::super::state::RaftCommand;
 
     fn storage() -> RaftStorage {
         RaftStorage::new(Arc::new(MemoryBackend::new()))

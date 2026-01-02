@@ -67,7 +67,10 @@ impl HeartbeatManager {
 
     #[must_use]
     pub fn should_send(&self, now: u64) -> bool {
-        if !self.partition_map.has_any_assignment(self.local_node) {
+        let has_partitions = self.partition_map.has_any_assignment(self.local_node);
+        let has_peers = !self.nodes.is_empty();
+
+        if !has_partitions && !has_peers {
             return false;
         }
 
@@ -79,6 +82,7 @@ impl HeartbeatManager {
 
     pub fn create_heartbeat(&mut self, now: u64) -> ClusterMessage {
         self.last_sent = Some(now);
+        tracing::trace!(local_node = ?self.local_node, now, "creating heartbeat");
 
         let mut hb = Heartbeat::create(self.local_node, now);
 
@@ -97,10 +101,15 @@ impl HeartbeatManager {
         let node_id = from.get();
 
         if let Some(state) = self.nodes.get_mut(&node_id) {
+            let was_alive = state.status == NodeStatus::Alive;
             state.last_heartbeat = received_at;
             state.status = NodeStatus::Alive;
             state.missed_count = 0;
+            if !was_alive {
+                tracing::debug!(node_id, received_at, "node revived by heartbeat");
+            }
         } else {
+            tracing::debug!(node_id, received_at, "first heartbeat from new node");
             self.nodes.insert(
                 node_id,
                 NodeState {
@@ -124,11 +133,8 @@ impl HeartbeatManager {
                 let our_role = self.partition_map.role_for(partition, from);
 
                 if sender_claims_primary && current_primary.is_none() {
-                    let assignment = super::PartitionAssignment::new(
-                        from,
-                        Vec::new(),
-                        super::Epoch::new(1),
-                    );
+                    let assignment =
+                        super::PartitionAssignment::new(from, Vec::new(), super::Epoch::new(1));
                     self.partition_map.set(partition, assignment);
                     tracing::info!(
                         ?partition,
@@ -164,6 +170,13 @@ impl HeartbeatManager {
             let elapsed = now.saturating_sub(state.last_heartbeat);
 
             if elapsed > timeout {
+                tracing::debug!(
+                    node_id,
+                    elapsed,
+                    timeout,
+                    last_heartbeat = state.last_heartbeat,
+                    "marking node as dead"
+                );
                 state.status = NodeStatus::Dead;
                 if let Some(id) = NodeId::validated(node_id) {
                     dead_nodes.push(id);

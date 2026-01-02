@@ -332,7 +332,9 @@ impl DbRequestHandler {
                 .to_be_bytes();
         }
 
-        let exists = controller.db_get(request.entity_str(), request.id_str()).is_some();
+        let exists = controller
+            .db_get(request.entity_str(), request.id_str())
+            .is_some();
 
         let status = if exists {
             FkValidateStatus::Valid
@@ -343,7 +345,12 @@ impl DbRequestHandler {
         FkValidateResponse::create(status, request.request_id_str()).to_be_bytes()
     }
 
-    fn generate_id_for_partition(&self, entity: &str, partition: PartitionId, data: &[u8]) -> String {
+    fn generate_id_for_partition(
+        &self,
+        entity: &str,
+        partition: PartitionId,
+        data: &[u8],
+    ) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -513,13 +520,8 @@ mod tests {
 
         let topic = format!("$DB/p{}/{}/{}", partition.get(), entity, id);
 
-        let response = handler.handle_publish(
-            &mut ctrl,
-            &topic,
-            &payload,
-            Some("$DB/_resp/client1"),
-            None,
-        );
+        let response =
+            handler.handle_publish(&mut ctrl, &topic, &payload, Some("$DB/_resp/client1"), None);
 
         assert!(response.is_some());
         let resp = response.unwrap();
@@ -541,13 +543,8 @@ mod tests {
 
         let topic = "$DB/p63/users/create";
 
-        let response = handler.handle_publish(
-            &mut ctrl,
-            topic,
-            &payload,
-            Some("$DB/_resp/client1"),
-            None,
-        );
+        let response =
+            handler.handle_publish(&mut ctrl, topic, &payload, Some("$DB/_resp/client1"), None);
 
         assert!(response.is_some());
         let resp = response.unwrap();

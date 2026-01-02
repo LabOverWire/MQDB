@@ -530,8 +530,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
-        let is_broadcast =
-            write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
+        let is_broadcast = write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
 
         tracing::debug!(
             ?partition,
@@ -541,9 +540,7 @@ impl<T: ClusterTransport> NodeController<T> {
             "received write request"
         );
 
-        if is_broadcast
-            && let Err(e) = self.stores.apply_write(&write)
-        {
+        if is_broadcast && let Err(e) = self.stores.apply_write(&write) {
             tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
         }
 
@@ -558,9 +555,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
-        if !is_broadcast
-            && let Err(e) = self.stores.apply_write(&write)
-        {
+        if !is_broadcast && let Err(e) = self.stores.apply_write(&write) {
             tracing::error!(?partition, ?e, "failed to apply write request to stores");
             return;
         }
@@ -950,9 +945,9 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) = self
-            .stores
-            .db_create_replicated(entity_type, id, data, timestamp_ms)?;
+        let (db_entity, write) =
+            self.stores
+                .db_create_replicated(entity_type, id, data, timestamp_ms)?;
         self.write_or_forward(write);
         Ok(db_entity)
     }
@@ -966,9 +961,9 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) = self
-            .stores
-            .db_update_replicated(entity_type, id, data, timestamp_ms)?;
+        let (db_entity, write) =
+            self.stores
+                .db_update_replicated(entity_type, id, data, timestamp_ms)?;
         self.write_or_forward(write);
         Ok(db_entity)
     }
@@ -981,9 +976,9 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> super::db::DbEntity {
-        let (db_entity, write) = self
-            .stores
-            .db_upsert_replicated(entity_type, id, data, timestamp_ms);
+        let (db_entity, write) =
+            self.stores
+                .db_upsert_replicated(entity_type, id, data, timestamp_ms);
         self.write_or_forward(write);
         db_entity
     }
@@ -1017,7 +1012,9 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
-        let (schema, writes) = self.stores.schema_register_replicated(entity, schema_data)?;
+        let (schema, writes) = self
+            .stores
+            .schema_register_replicated(entity, schema_data)?;
         self.broadcast_wildcard_writes(writes);
         Ok(schema)
     }
@@ -1459,7 +1456,9 @@ impl<T: ClusterTransport> NodeController<T> {
         self.draining = draining;
         if draining {
             tracing::info!(node_id = self.node_id.get(), "node entering draining mode");
-            let msg = ClusterMessage::DrainNotification { node_id: self.node_id };
+            let msg = ClusterMessage::DrainNotification {
+                node_id: self.node_id,
+            };
             let _ = self.transport.broadcast(msg);
         } else {
             tracing::info!(node_id = self.node_id.get(), "node exiting draining mode");

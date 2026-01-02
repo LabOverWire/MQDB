@@ -213,12 +213,8 @@ impl SchemaStore {
     ) -> Result<(), SchemaStoreError> {
         match operation {
             Operation::Insert | Operation::Update => {
-                let schema =
-                    Self::deserialize(data).ok_or(SchemaStoreError::SerializationError)?;
-                self.schemas
-                    .write()
-                    .unwrap()
-                    .insert(id.to_string(), schema);
+                let schema = Self::deserialize(data).ok_or(SchemaStoreError::SerializationError)?;
+                self.schemas.write().unwrap().insert(id.to_string(), schema);
                 Ok(())
             }
             Operation::Delete => {

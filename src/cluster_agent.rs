@@ -8,9 +8,9 @@ use crate::storage::FjallBackend;
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
 use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
-use mqtt5::transport::StreamStrategy;
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
+use mqtt5::transport::StreamStrategy;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -138,8 +138,12 @@ impl ClusteredAgent {
 
         let raft_path = config.db_path.join("raft");
         let raft_backend = Arc::new(
-            FjallBackend::open(&raft_path, DurabilityMode::Immediate)
-                .map_err(|e| format!("failed to open raft storage at {}: {e}", raft_path.display()))?,
+            FjallBackend::open(&raft_path, DurabilityMode::Immediate).map_err(|e| {
+                format!(
+                    "failed to open raft storage at {}: {e}",
+                    raft_path.display()
+                )
+            })?,
         );
 
         let raft = RaftCoordinator::new_with_storage(
@@ -245,15 +249,15 @@ impl ClusteredAgent {
         }
 
         if self.use_quic {
-            if let (Some(cert_file), Some(key_file)) =
-                (&self.quic_cert_file, &self.quic_key_file)
-            {
+            if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
                 let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
                     .with_bind_address(self.bind_address);
                 broker_config = broker_config.with_quic(quic_config);
                 info!(quic_bind = %self.bind_address, "QUIC listener configured (same port as TCP)");
             } else {
-                info!("QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener");
+                info!(
+                    "QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener"
+                );
             }
         }
 

@@ -223,7 +223,9 @@ impl MqttTransport {
                 }
                 let drain_id = u16::from_be_bytes([data[0], data[1]]);
                 let drain_node = NodeId::validated(drain_id)?;
-                ClusterMessage::DrainNotification { node_id: drain_node }
+                ClusterMessage::DrainNotification {
+                    node_id: drain_node,
+                }
             }
             20 => {
                 let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;

@@ -101,8 +101,9 @@ pub use snapshot::{
 };
 pub use store_manager::{StoreApplyError, StoreManager};
 pub use subscription_cache::{
-    MqttSubscriptionSnapshot, MqttTopicEntry, ReconciliationResult, SubscriptionCache,
-    SubscriptionCacheError, SUBSCRIPTION_RECONCILIATION_INTERVAL_MS, mqtt_subscription_key,
+    MqttSubscriptionSnapshot, MqttTopicEntry, ReconciliationResult,
+    SUBSCRIPTION_RECONCILIATION_INTERVAL_MS, SubscriptionCache, SubscriptionCacheError,
+    mqtt_subscription_key,
 };
 pub use topic_index::{
     SubscriberLocation, TopicIndex, TopicIndexEntry, TopicIndexError, topic_index_key,
@@ -115,7 +116,7 @@ pub use transport::{
     ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError,
 };
 pub use wildcard_pending::{
-    PendingWildcard, WildcardPendingStore, WILDCARD_RECONCILIATION_INTERVAL_MS,
+    PendingWildcard, WILDCARD_RECONCILIATION_INTERVAL_MS, WildcardPendingStore,
 };
 pub use wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError, wildcard_key};
 pub use write_log::PartitionWriteLog;

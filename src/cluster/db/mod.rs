@@ -7,8 +7,7 @@ mod unique_store;
 
 pub use data_store::{DbDataStore, DbDataStoreError, DbEntity, db_data_key};
 pub use fk_store::{
-    FkStoreError, FkValidationRequest, FkValidationResponse, FkValidationResult,
-    FkValidationStore,
+    FkStoreError, FkValidationRequest, FkValidationResponse, FkValidationResult, FkValidationStore,
 };
 pub use index_store::{IndexEntry, IndexStore, IndexStoreError, index_key};
 pub use partition::{data_partition, index_partition, schema_partition, unique_partition};

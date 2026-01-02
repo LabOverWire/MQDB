@@ -502,7 +502,8 @@ mod tests {
 
     #[test]
     fn index_update_request_roundtrip() {
-        let request = IndexUpdateRequest::create("users", "email", b"test@example.com", 17, "user-123");
+        let request =
+            IndexUpdateRequest::create("users", "email", b"test@example.com", 17, "user-123");
         let bytes = request.to_be_bytes();
         let (parsed, _) = IndexUpdateRequest::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(request, parsed);

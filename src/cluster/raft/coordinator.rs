@@ -3,7 +3,9 @@ use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 use super::state::{PartitionUpdate, RaftCommand};
-use crate::cluster::rebalancer::{RebalanceConfig, compute_incremental_assignments, compute_removal_assignments};
+use crate::cluster::rebalancer::{
+    RebalanceConfig, compute_incremental_assignments, compute_removal_assignments,
+};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
 use crate::storage::StorageBackend;
@@ -431,11 +433,18 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             .collect();
 
         let config = RebalanceConfig::default();
-        let reassignments =
-            compute_removal_assignments(&self.partition_map, &remaining_nodes, draining_node, &config);
+        let reassignments = compute_removal_assignments(
+            &self.partition_map,
+            &remaining_nodes,
+            draining_node,
+            &config,
+        );
 
         if reassignments.is_empty() {
-            tracing::debug!(?draining_node, "no partition reassignments needed for drain");
+            tracing::debug!(
+                ?draining_node,
+                "no partition reassignments needed for drain"
+            );
             return Vec::new();
         }
 

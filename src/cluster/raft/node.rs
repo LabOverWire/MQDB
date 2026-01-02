@@ -158,6 +158,12 @@ impl RaftNode {
         }
     }
 
+    fn persist_log_entries(&self, entries: &[LogEntry]) {
+        if let Some(ref storage) = self.storage {
+            let _ = storage.append_log_entries_batch(entries);
+        }
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         let mut outputs = Vec::new();
 
@@ -351,9 +357,7 @@ impl RaftNode {
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
 
-        for entry in &request.entries {
-            self.persist_log_entry(entry);
-        }
+        self.persist_log_entries(&request.entries);
 
         let success = self.state.append_entries(
             request.prev_log_index,

@@ -1113,6 +1113,27 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Fix Applied**: Skip `Unknown` status nodes in timeout check (`heartbeat.rs`).
 
+### 11.5 Multi-Node Raft Election Flapping (Batch Flush)
+
+**Status**: FIXED (Session 47)
+
+**Symptom**: 2-node and 3-node clusters experienced repeated death/revival cycles. Nodes marked each other as dead every 15-30 seconds despite being healthy.
+
+**Root Cause**: Synchronous disk I/O in Raft storage. When a follower received `AppendEntries` with 64 partition updates, each log entry was persisted with a separate `flush()` call. 64 flushes took 20+ seconds, blocking the async event loop and causing heartbeat timeouts.
+
+**Code path**:
+1. `RaftNode::handle_append_entries()` loops over entries calling `persist_log_entry()`
+2. `persist_log_entry()` calls `RaftStorage::append_log_entry()`
+3. `append_log_entry()` does `backend.insert()` + `backend.flush()` per entry
+4. 64 entries × 1 flush each = event loop blocked for 20+ seconds
+
+**Fix Applied**:
+1. Added `RaftStorage::append_log_entries_batch()` that uses batch writes with single flush (`storage.rs:76-88`)
+2. Added `RaftNode::persist_log_entries()` helper (`node.rs:161-165`)
+3. Changed `handle_append_entries()` to call batch method instead of loop (`node.rs:360`)
+
+**Result**: Partition updates now process in <1ms instead of 20+ seconds. Both 2-node and 3-node clusters stable with zero death events.
+
 ---
 
 ## Part 12: Session Management

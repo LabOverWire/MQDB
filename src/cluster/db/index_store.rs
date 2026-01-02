@@ -25,10 +25,12 @@ pub struct IndexEntry {
 
 fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
-        let _ = write!(acc, "{b:02x}");
-        acc
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut acc, b| {
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -226,8 +228,7 @@ impl IndexStore {
     ) -> Result<(), IndexStoreError> {
         match operation {
             Operation::Insert => {
-                let entry =
-                    Self::deserialize(data).ok_or(IndexStoreError::SerializationError)?;
+                let entry = Self::deserialize(data).ok_or(IndexStoreError::SerializationError)?;
                 self.add_entry(entry).or(Ok(()))
             }
             Operation::Delete => {
@@ -242,7 +243,10 @@ impl IndexStore {
                         let data_partition_str = rest[rest.len() - 2];
                         let record_id = rest[rest.len() - 1];
 
-                        if let Ok(dp) = data_partition_str.strip_prefix('p').unwrap_or(data_partition_str).parse::<u16>()
+                        if let Ok(dp) = data_partition_str
+                            .strip_prefix('p')
+                            .unwrap_or(data_partition_str)
+                            .parse::<u16>()
                             && let Some(p) = PartitionId::new(dp)
                         {
                             let value = decode_hex(value_hex).unwrap_or_default();
@@ -253,8 +257,7 @@ impl IndexStore {
                 Ok(())
             }
             Operation::Update => {
-                let entry =
-                    Self::deserialize(data).ok_or(IndexStoreError::SerializationError)?;
+                let entry = Self::deserialize(data).ok_or(IndexStoreError::SerializationError)?;
                 let _ = self.remove_entry(
                     entry.entity_str(),
                     entry.field_str(),
@@ -377,7 +380,13 @@ mod tests {
         store.add_entry(entry).unwrap();
 
         let removed = store
-            .remove_entry("users", "email", b"alice@example.com", partition(42), "user123")
+            .remove_entry(
+                "users",
+                "email",
+                b"alice@example.com",
+                partition(42),
+                "user123",
+            )
             .unwrap();
         assert_eq!(removed.record_id_str(), "user123");
 

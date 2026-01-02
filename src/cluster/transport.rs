@@ -146,7 +146,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             heartbeat_interval_ms: 1000,
-            heartbeat_timeout_ms: 5000,
+            heartbeat_timeout_ms: 15000,
             ack_timeout_ms: 500,
         }
     }
