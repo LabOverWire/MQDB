@@ -164,6 +164,15 @@ impl RaftNode {
         }
     }
 
+    fn propose_leader_noop(&mut self) {
+        if let Some(_index) = self.state.propose(RaftCommand::Noop)
+            && let Some(entry) = self.state.last_log_entry()
+        {
+            self.persist_log_entry(entry);
+            self.state.try_advance_commit_index();
+        }
+    }
+
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         let mut outputs = Vec::new();
 
@@ -194,6 +203,7 @@ impl RaftNode {
 
         if self.state.has_quorum() {
             self.state.become_leader();
+            self.propose_leader_noop();
             let mut outputs = vec![RaftOutput::BecameLeader];
             outputs.extend(self.send_heartbeats());
             return outputs;
@@ -317,6 +327,7 @@ impl RaftNode {
 
         if response.is_granted() && self.state.record_vote(from) {
             self.state.become_leader();
+            self.propose_leader_noop();
             outputs.push(RaftOutput::BecameLeader);
             outputs.extend(self.send_heartbeats());
         }
@@ -407,8 +418,10 @@ impl RaftNode {
             self.state.update_match_index(from, response.match_index);
             self.state.try_advance_commit_index();
             outputs.extend(self.apply_committed());
+        } else if response.match_index > 0 {
+            self.state.update_next_index(from, response.match_index + 1);
         } else {
-            self.state.decrement_next_index(from);
+            self.state.update_next_index(from, 1);
         }
 
         outputs

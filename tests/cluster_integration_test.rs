@@ -555,7 +555,7 @@ fn raft_log_replication_commit() {
     let cmd =
         mqdb::cluster::raft::RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
     let (idx, _) = cluster.nodes[0].raft.propose(cmd);
-    assert_eq!(idx, Some(1));
+    assert_eq!(idx, Some(2));
 
     let heartbeat_outputs = cluster.nodes[0].raft.tick(1100);
     let mut append_requests = Vec::new();
@@ -2144,7 +2144,7 @@ fn raft_command_application_updates_partition_map() {
     let partition = PartitionId::new(10).unwrap();
     let cmd = RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
     let (idx, _) = cluster.nodes[0].raft.propose(cmd);
-    assert_eq!(idx, Some(1));
+    assert_eq!(idx, Some(2));
 
     let heartbeat_outputs = cluster.nodes[0].raft.tick(1100);
     let mut append_requests = Vec::new();
@@ -2376,19 +2376,21 @@ fn raft_log_persisted_and_recovered() {
         let partition = PartitionId::new(5).unwrap();
         let cmd = RaftCommand::update_partition(partition, node_id, &[peer_id], Epoch::new(1));
         let (idx, _) = node.propose(cmd);
-        assert_eq!(idx, Some(1));
+        assert_eq!(idx, Some(2));
 
         let storage = RaftStorage::new(backend.clone());
         let log = storage.load_log().unwrap();
-        assert_eq!(log.len(), 1);
+        assert_eq!(log.len(), 2);
         assert_eq!(log[0].index, 1);
         assert_eq!(log[0].term, 1);
+        assert_eq!(log[1].index, 2);
+        assert_eq!(log[1].term, 1);
     }
 
     {
         let storage = RaftStorage::new(backend.clone());
         let log = storage.load_log().unwrap();
-        assert_eq!(log.len(), 1, "Log should survive restart");
+        assert_eq!(log.len(), 2, "Log should survive restart");
         assert_eq!(log[0].index, 1);
         assert_eq!(log[0].term, 1);
     }

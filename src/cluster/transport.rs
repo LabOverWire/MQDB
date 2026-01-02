@@ -71,6 +71,34 @@ impl ClusterMessage {
             Self::PartitionUpdate(_) => 70,
         }
     }
+
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Heartbeat(_) => "Heartbeat",
+            Self::Write(_) => "Write",
+            Self::WriteRequest(_) => "WriteRequest",
+            Self::Ack(_) => "Ack",
+            Self::DeathNotice { .. } => "DeathNotice",
+            Self::DrainNotification { .. } => "DrainNotification",
+            Self::RequestVote(_) => "RequestVote",
+            Self::RequestVoteResponse(_) => "RequestVoteResponse",
+            Self::AppendEntries(_) => "AppendEntries",
+            Self::AppendEntriesResponse(_) => "AppendEntriesResponse",
+            Self::CatchupRequest(_) => "CatchupRequest",
+            Self::CatchupResponse(_) => "CatchupResponse",
+            Self::ForwardedPublish(_) => "ForwardedPublish",
+            Self::SnapshotRequest(_) => "SnapshotRequest",
+            Self::SnapshotChunk(_) => "SnapshotChunk",
+            Self::SnapshotComplete(_) => "SnapshotComplete",
+            Self::QueryRequest { .. } => "QueryRequest",
+            Self::QueryResponse(_) => "QueryResponse",
+            Self::BatchReadRequest(_) => "BatchReadRequest",
+            Self::BatchReadResponse(_) => "BatchReadResponse",
+            Self::WildcardBroadcast(_) => "WildcardBroadcast",
+            Self::PartitionUpdate(_) => "PartitionUpdate",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

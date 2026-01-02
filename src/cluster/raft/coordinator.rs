@@ -214,10 +214,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         request: AppendEntriesRequest,
         now_ms: u64,
     ) -> AppendEntriesResponse {
-        tracing::trace!(
+        tracing::debug!(
             from = from.get(),
             term = request.term,
             entries = request.entries.len(),
+            prev_log_index = request.prev_log_index,
+            leader_commit = request.leader_commit,
             "received AppendEntries"
         );
         let (response, outputs) = self.node.handle_append_entries(from, request, now_ms);
@@ -230,9 +232,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         from: NodeId,
         response: AppendEntriesResponse,
     ) {
-        tracing::trace!(
+        tracing::debug!(
             from = from.get(),
             success = response.is_success(),
+            match_index = response.match_index,
             "received AppendEntriesResponse"
         );
         let outputs = self.node.handle_append_entries_response(from, response);
@@ -254,7 +257,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                     .send(to, ClusterMessage::RequestVote(request));
             }
             RaftOutput::SendAppendEntries { to, request } => {
-                tracing::trace!(to = to.get(), term = request.term, "sending AppendEntries");
+                tracing::debug!(to = to.get(), term = request.term, entries = request.entries.len(), "sending AppendEntries");
                 let _ = self
                     .transport
                     .send(to, ClusterMessage::AppendEntries(request));
@@ -717,7 +720,7 @@ mod tests {
         let cmd = RaftCommand::update_partition(partition, node1, &[node2], Epoch::new(1));
 
         let idx = coord1.propose_partition_update(cmd).unwrap();
-        assert_eq!(idx, 1);
+        assert_eq!(idx, 2);
 
         coord1.transport.clear();
         coord1.tick(1100);

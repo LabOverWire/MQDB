@@ -399,13 +399,42 @@ impl MqttTransport {
     ) -> Result<(), TransportError> {
         let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
+        let msg_type = message.type_name();
 
-        self.client
+        tracing::debug!(
+            from = self.node_id.get(),
+            to = to.get(),
+            topic = %topic,
+            msg_type = %msg_type,
+            payload_len = payload.len(),
+            "transport send_async"
+        );
+
+        match self
+            .client
             .publish_qos(&topic, payload, QoS::AtLeastOnce)
             .await
-            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
-
-        Ok(())
+        {
+            Ok(_) => {
+                tracing::debug!(
+                    from = self.node_id.get(),
+                    to = to.get(),
+                    msg_type = %msg_type,
+                    "transport send_async succeeded"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    from = self.node_id.get(),
+                    to = to.get(),
+                    msg_type = %msg_type,
+                    error = %e,
+                    "transport send_async failed"
+                );
+                Err(TransportError::SendFailed(e.to_string()))
+            }
+        }
     }
 
     /// # Errors

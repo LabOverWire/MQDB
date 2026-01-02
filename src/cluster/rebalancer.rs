@@ -63,6 +63,19 @@ pub fn compute_incremental_assignments(
 
     let node_count = all_nodes.len();
     let rf = config.replication_factor.min(node_count);
+
+    let mut reassignments = redistribute_primaries(current, all_nodes, rf);
+    add_missing_replicas(current, all_nodes, rf, &mut reassignments);
+
+    reassignments
+}
+
+fn redistribute_primaries(
+    current: &PartitionMap,
+    all_nodes: &[NodeId],
+    rf: usize,
+) -> Vec<PartitionReassignment> {
+    let node_count = all_nodes.len();
     let ideal_per_node = NUM_PARTITIONS as usize / node_count;
     let remainder = NUM_PARTITIONS as usize % node_count;
 
@@ -82,7 +95,6 @@ pub fn compute_incremental_assignments(
     }
 
     let mut reassignments = Vec::new();
-
     let overloaded: Vec<(NodeId, usize)> = primary_counts
         .iter()
         .filter(|(_, count)| *count > ideal_per_node + usize::from(remainder > 0))
@@ -155,6 +167,54 @@ pub fn compute_incremental_assignments(
     }
 
     reassignments
+}
+
+fn add_missing_replicas(
+    current: &PartitionMap,
+    all_nodes: &[NodeId],
+    rf: usize,
+    reassignments: &mut Vec<PartitionReassignment>,
+) {
+    let reassigned: std::collections::HashSet<u16> =
+        reassignments.iter().map(|r| r.partition.get()).collect();
+
+    for partition in PartitionId::all() {
+        if reassigned.contains(&partition.get()) {
+            continue;
+        }
+
+        let assignment = current.get(partition);
+        let Some(primary) = assignment.primary else {
+            continue;
+        };
+
+        let desired_replica_count = rf.saturating_sub(1);
+        if assignment.replicas.len() >= desired_replica_count {
+            continue;
+        }
+
+        let mut new_replicas = assignment.replicas.clone();
+        for node in all_nodes {
+            if *node == primary || new_replicas.contains(node) {
+                continue;
+            }
+            new_replicas.push(*node);
+            if new_replicas.len() >= desired_replica_count {
+                break;
+            }
+        }
+
+        if new_replicas.len() > assignment.replicas.len() {
+            reassignments.push(PartitionReassignment {
+                partition,
+                old_primary: Some(primary),
+                new_primary: primary,
+                old_replicas: assignment.replicas.clone(),
+                new_replicas,
+                new_epoch: Epoch::new(assignment.epoch.get() + 1),
+            });
+        }
+    }
 }
 
 #[must_use]
@@ -367,5 +427,47 @@ mod tests {
             }
         }
         assert!(new_node3_count >= 20);
+    }
+
+    #[test]
+    fn new_node_added_as_replica_for_unmoved_partitions() {
+        let config = RebalanceConfig::default();
+        let mut map = PartitionMap::new();
+
+        for partition_num in 0..NUM_PARTITIONS {
+            let partition = PartitionId::new(partition_num).unwrap();
+            map.set(
+                partition,
+                PartitionAssignment::new(node(1), vec![], Epoch::new(1)),
+            );
+        }
+
+        assert_eq!(map.primary_count(node(1)), 64);
+        assert_eq!(map.replica_count(node(1)), 0);
+
+        let all_nodes = vec![node(1), node(2)];
+        let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
+
+        assert!(!reassignments.is_empty());
+        assert_eq!(reassignments.len(), 64);
+
+        let primary_moves: Vec<_> = reassignments
+            .iter()
+            .filter(|r| r.new_primary != r.old_primary.unwrap())
+            .collect();
+        assert_eq!(primary_moves.len(), 32);
+
+        let replica_adds: Vec<_> = reassignments
+            .iter()
+            .filter(|r| {
+                r.new_primary == r.old_primary.unwrap() && r.new_replicas.contains(&node(2))
+            })
+            .collect();
+        assert_eq!(replica_adds.len(), 32);
+
+        for r in &reassignments {
+            let has_node2 = r.new_primary == node(2) || r.new_replicas.contains(&node(2));
+            assert!(has_node2, "partition {} should have node 2", r.partition.get());
+        }
     }
 }

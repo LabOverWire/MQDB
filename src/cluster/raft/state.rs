@@ -231,6 +231,11 @@ impl RaftState {
     pub fn add_peer(&mut self, peer: NodeId) {
         if peer != self.node_id && !self.peers.contains(&peer) {
             self.peers.push(peer);
+            if self.role == RaftRole::Leader {
+                let next = self.last_log_index() + 1;
+                self.next_index.push((peer, next));
+                self.match_index.push((peer, 0));
+            }
         }
     }
 
