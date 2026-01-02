@@ -741,7 +741,7 @@ impl Database {
                 .entry(group.clone())
                 .or_insert_with(|| ConsumerGroup::new(group.clone(), num_partitions));
 
-            let partitions = consumer_group.add_member(consumer_id);
+            let partitions = consumer_group.add_member(&consumer_id);
 
             if mode == SubscriptionMode::Ordered {
                 Some(partitions)

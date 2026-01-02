@@ -45,20 +45,19 @@ impl IndexManager {
     ) {
         if let Some(fields) = self.get_indexed_fields(&entity.name) {
             if let Some(old) = old_entity {
-                self.remove_index_entries(batch, old, fields);
+                Self::remove_index_entries(batch, old, fields);
             }
-            self.add_index_entries(batch, entity, fields);
+            Self::add_index_entries(batch, entity, fields);
         }
     }
 
     pub fn remove_indexes(&self, batch: &mut BatchWriter, entity: &Entity) {
         if let Some(fields) = self.get_indexed_fields(&entity.name) {
-            self.remove_index_entries(batch, entity, fields);
+            Self::remove_index_entries(batch, entity, fields);
         }
     }
 
-    #[allow(clippy::unused_self)]
-    fn add_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
+    fn add_index_entries(batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
         for (field, value) in index_values {
@@ -67,8 +66,7 @@ impl IndexManager {
         }
     }
 
-    #[allow(clippy::unused_self)]
-    fn remove_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
+    fn remove_index_entries(batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
         for (field, value) in index_values {
