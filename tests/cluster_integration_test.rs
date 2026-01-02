@@ -2397,6 +2397,7 @@ fn raft_log_persisted_and_recovered() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn db_crud_replication_to_replicas() {
     use mqdb::cluster::db::data_partition;
 
