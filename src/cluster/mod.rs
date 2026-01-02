@@ -1,3 +1,4 @@
+mod client_location;
 mod cursor;
 pub mod db;
 mod db_handler;
@@ -40,6 +41,9 @@ mod wildcard_pending;
 mod wildcard_store;
 mod write_log;
 
+pub use client_location::{
+    ClientLocationEntry, ClientLocationError, ClientLocationStore, client_location_key,
+};
 pub use cursor::{PartitionCursor, ScatterCursor};
 pub use db::{DbDataStore, DbDataStoreError, DbEntity, data_partition, db_data_key};
 pub use db_handler::{DbPublishResponse, DbRequestHandler};

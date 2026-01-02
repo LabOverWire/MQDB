@@ -1,6 +1,7 @@
 use bebytes::BeBytes;
 
 use super::SubscriptionType;
+use super::client_location::ClientLocationStore;
 use super::db::{
     ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest, FkValidationStore,
     IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation, UniqueStore,
@@ -39,6 +40,7 @@ pub enum StoreApplyError {
     DbIndexError,
     DbUniqueError,
     DbFkError,
+    ClientLocationError,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -59,6 +61,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::DbIndexError => write!(f, "db index store error"),
             Self::DbUniqueError => write!(f, "db unique store error"),
             Self::DbFkError => write!(f, "db fk store error"),
+            Self::ClientLocationError => write!(f, "client location store error"),
         }
     }
 }
@@ -81,6 +84,7 @@ pub struct StoreManager {
     pub db_index: IndexStore,
     pub db_unique: UniqueStore,
     pub db_fk: FkValidationStore,
+    pub client_locations: ClientLocationStore,
 }
 
 impl StoreManager {
@@ -102,6 +106,7 @@ impl StoreManager {
             db_index: IndexStore::new(node_id),
             db_unique: UniqueStore::new(node_id),
             db_fk: FkValidationStore::new(node_id),
+            client_locations: ClientLocationStore::new(),
         }
     }
 
@@ -123,8 +128,15 @@ impl StoreManager {
             entity::DB_INDEX => self.apply_db_index(write),
             entity::DB_UNIQUE => self.apply_db_unique(write),
             entity::DB_FK => self.apply_db_fk(write),
+            entity::CLIENT_LOCATIONS => self.apply_client_location(write),
             _ => Err(StoreApplyError::UnknownEntity),
         }
+    }
+
+    fn apply_client_location(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.client_locations
+            .apply_replicated(write.operation, &write.data)
+            .map_err(|_| StoreApplyError::ClientLocationError)
     }
 
     fn apply_session(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
@@ -1392,6 +1404,7 @@ impl std::fmt::Debug for StoreManager {
             .field("db_index", &self.db_index.count())
             .field("db_unique", &self.db_unique.count())
             .field("db_fk", &self.db_fk.count())
+            .field("client_locations", &self.client_locations.count())
             .finish()
     }
 }

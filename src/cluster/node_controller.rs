@@ -530,7 +530,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
-        let is_broadcast = write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
+        let is_broadcast = write.entity == entity::TOPIC_INDEX
+            || write.entity == entity::WILDCARDS
+            || write.entity == entity::CLIENT_LOCATIONS;
 
         tracing::debug!(
             ?partition,
@@ -899,10 +901,19 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn write_or_forward(&mut self, write: ReplicationWrite) {
         let partition = write.partition;
 
-        let is_broadcast_entity =
-            write.entity == entity::TOPIC_INDEX || write.entity == entity::WILDCARDS;
+        let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
+            || write.entity == entity::WILDCARDS
+            || write.entity == entity::CLIENT_LOCATIONS;
         if is_broadcast_entity {
             let _ = self.stores.apply_write(&write);
+            for node in self.heartbeat.alive_nodes() {
+                if node != self.node_id {
+                    let _ = self
+                        .transport
+                        .send(node, ClusterMessage::WriteRequest(write.clone()));
+                }
+            }
+            return;
         }
 
         if self.is_local_partition(partition) {

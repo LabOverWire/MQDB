@@ -1,4 +1,10 @@
+use bebytes::BeBytes;
+use crate::cluster::client_location::{ClientLocationEntry, client_location_key};
 use crate::cluster::db_handler::DbRequestHandler;
+use crate::cluster::entity;
+use crate::cluster::protocol::{Operation, ReplicationWrite};
+use crate::cluster::Epoch;
+use crate::cluster::session::session_partition;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
     ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
@@ -85,6 +91,18 @@ impl BrokerEventHandler for ClusterEventHandler {
                 ctrl.write_or_forward(write);
             }
 
+            let location_entry = ClientLocationEntry::create(client_id, self.node_id);
+            let location_write = ReplicationWrite::new(
+                session_partition(client_id),
+                Operation::Insert,
+                Epoch::new(0),
+                0,
+                entity::CLIENT_LOCATIONS.to_string(),
+                client_location_key(client_id),
+                location_entry.to_be_bytes(),
+            );
+            ctrl.write_or_forward(location_write);
+
             if let Some(ref topic) = event.will_topic {
                 let will_qos = qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce));
                 let will_retain = event.will_retain.unwrap_or(false);
@@ -148,6 +166,18 @@ impl BrokerEventHandler for ClusterEventHandler {
                 ctrl.write_or_forward(write);
             }
 
+            let location_entry = ClientLocationEntry::create(client_id, node_id);
+            let location_delete = ReplicationWrite::new(
+                session_partition(client_id),
+                Operation::Delete,
+                Epoch::new(0),
+                0,
+                entity::CLIENT_LOCATIONS.to_string(),
+                client_location_key(client_id),
+                location_entry.to_be_bytes(),
+            );
+            ctrl.write_or_forward(location_delete);
+
             if event.unexpected {
                 let session = ctrl.stores().sessions.get(client_id);
                 debug!(
@@ -171,11 +201,17 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                     let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
                     for target in route.targets {
-                        let target_session = ctrl.stores().sessions.get(&target.client_id);
-                        let connected_node = target_session
-                            .as_ref()
-                            .filter(|s| s.connected == 1)
-                            .and_then(|s| NodeId::validated(s.connected_node));
+                        let connected_node = ctrl
+                            .stores()
+                            .client_locations
+                            .get(&target.client_id)
+                            .or_else(|| {
+                                ctrl.stores()
+                                    .sessions
+                                    .get(&target.client_id)
+                                    .filter(|s| s.connected == 1)
+                                    .and_then(|s| NodeId::validated(s.connected_node))
+                            });
 
                         if let Some(target_node) = connected_node
                             && target_node != node_id
@@ -505,11 +541,17 @@ impl BrokerEventHandler for ClusterEventHandler {
 
             let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
             for target in route.targets {
-                let session = ctrl.stores().sessions.get(&target.client_id);
-                let connected_node = session
-                    .as_ref()
-                    .filter(|s| s.connected == 1)
-                    .and_then(|s| NodeId::validated(s.connected_node));
+                let connected_node = ctrl
+                    .stores()
+                    .client_locations
+                    .get(&target.client_id)
+                    .or_else(|| {
+                        ctrl.stores()
+                            .sessions
+                            .get(&target.client_id)
+                            .filter(|s| s.connected == 1)
+                            .and_then(|s| NodeId::validated(s.connected_node))
+                    });
 
                 let is_local = connected_node == Some(node_id);
 
