@@ -47,6 +47,7 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 **Broadcast Entities** must exist completely on every node:
 - TopicIndex (`_topic_index`) → maps topics to subscribers
 - WildcardStore (`_wildcards`) → holds wildcard subscription patterns
+- ClientLocationStore (`_client_loc`) → maps client_id to connected node
 
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
 
@@ -326,6 +327,24 @@ MQDB uses MQTT as the cluster communication substrate rather than custom RPC:
 - **Debuggability**: Standard MQTT tools work on cluster traffic
 - **No new dependencies**: No Zookeeper, etcd, or custom discovery
 
+### A6.1.1 Async Transport (RPITIT)
+
+The `ClusterTransport` trait uses native Rust async traits (RPITIT - Return Position Impl Trait in Trait):
+
+```rust
+pub trait ClusterTransport: Send + Sync + Debug {
+    fn send(&self, to: NodeId, message: ClusterMessage)
+        -> impl Future<Output = Result<(), TransportError>> + Send + '_;
+
+    fn broadcast(&self, message: ClusterMessage)
+        -> impl Future<Output = Result<(), TransportError>> + Send + '_;
+
+    fn recv(&self) -> Option<InboundMessage>;  // Sync polling
+}
+```
+
+All callers properly `await` transport operations. No fire-and-forget spawning—this was critical for fixing packet corruption issues (see 11.7).
+
 ### A6.2 Topic Namespaces
 
 Five topic namespaces structure MQDB communication:
@@ -417,6 +436,32 @@ Each node creates N-1 outbound bridges (one per peer). Messages flow bidirection
 **QUIC stream caching** (`quic_stream_manager.rs`): With `DataPerTopic` strategy, streams are cached per topic for reuse. When cache reaches 100 streams (hardcoded default), LRU eviction closes the oldest stream. This is a **performance optimization**, not a limit—unlimited topics are supported, they just share cached streams via eviction.
 
 **Key Files**: `transport.rs:83-113`, `mqtt_transport.rs:19-21`, `cluster_agent.rs:172-201`
+
+### A6.5 Admin Request Handlers
+
+The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/cluster/#`:
+
+| Topic | Handler | Response |
+|-------|---------|----------|
+| `$SYS/mqdb/cluster/status` | `build_status_response()` | Node info, Raft state, partition assignments |
+| `$SYS/mqdb/cluster/rebalance` | `handle_rebalance_request()` | Triggers partition rebalancing (leader only) |
+
+**Request/Response Pattern**:
+1. CLI publishes to admin topic with `response_topic` in message properties
+2. Cluster agent extracts `response_topic` from `msg.properties.response_topic`
+3. Handler builds JSON response
+4. Agent publishes response to the specified `response_topic`
+
+**Status Response** includes:
+- `node_id`, `node_name`, `is_raft_leader`, `raft_term`
+- `alive_nodes` - list of other alive node IDs
+- `partitions` - all 64 partitions with primary, replicas, epoch
+
+**CLI Commands**:
+```bash
+mqdb cluster status --broker 127.0.0.1:1883
+mqdb cluster rebalance --broker 127.0.0.1:1883
+```
 
 ---
 
@@ -518,6 +563,7 @@ All cluster-managed data types (`src/cluster/entity.rs`):
 | `RETAINED` | `"_mqtt_retained"` | Retained messages |
 | `TOPIC_INDEX` | `"_topic_index"` | Topic → subscriber mapping (BROADCAST) |
 | `WILDCARDS` | `"_wildcards"` | Wildcard subscription trie (BROADCAST) |
+| `CLIENT_LOCATIONS` | `"_client_loc"` | Client → connected node mapping (BROADCAST) |
 | `OFFSETS` | `"_offsets"` | Consumer offsets |
 | `IDEMPOTENCY` | `"_idemp"` | Idempotency tokens |
 | `DB_DATA` | `"_db_data"` | Database records |
@@ -526,7 +572,7 @@ All cluster-managed data types (`src/cluster/entity.rs`):
 | `DB_UNIQUE` | `"_db_unique"` | Database unique constraints |
 | `DB_FK` | `"_db_fk"` | Database foreign keys |
 
-**BROADCAST entities** (`TOPIC_INDEX`, `WILDCARDS`) must exist on ALL nodes for publish routing.
+**BROADCAST entities** (`TOPIC_INDEX`, `WILDCARDS`, `CLIENT_LOCATIONS`) must exist on ALL nodes for publish routing.
 
 ### 1.3 Timing Constants
 
@@ -868,6 +914,7 @@ Special entities that must exist on ALL nodes (not just partition owners):
 |--------|---------|
 | `_topic_index` | Maps topics to subscriber client IDs |
 | `_wildcards` | Wildcard subscription trie |
+| `_client_loc` | Maps client_id to connected node |
 
 **Broadcast Write Flow**:
 1. Apply locally FIRST (regardless of partition ownership)
@@ -881,7 +928,9 @@ pub fn write_or_forward(&mut self, write: ReplicationWrite) {
     let partition = write.partition;
 
     // Broadcast entities - apply locally first
-    let is_broadcast = write.entity == "_topic_index" || write.entity == "_wildcards";
+    let is_broadcast = write.entity == "_topic_index"
+        || write.entity == "_wildcards"
+        || write.entity == "_client_loc";
     if is_broadcast {
         self.stores.apply_write(&write);
     }
@@ -915,6 +964,7 @@ Must exist completely on every node:
 |--------|-----|---------|
 | `_topic_index` | topic string | Topic → subscribers mapping |
 | `_wildcards` | pattern | Wildcard subscription trie |
+| `_client_loc` | client_id | Client → connected node mapping |
 
 ### 6.2 Partitioned Entities
 
@@ -1135,6 +1185,46 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 3. Changed `handle_append_entries()` to call batch method instead of loop (`node.rs:360`)
 
 **Result**: Partition updates now process in <1ms instead of 20+ seconds. Both 2-node and 3-node clusters stable with zero death events.
+
+### 11.6 Pub/Sub from Follower Nodes Unreliable
+
+**Status**: FIXED (Session 46)
+
+**Symptom**: Publishing from follower nodes to subscribers on other nodes was unreliable.
+
+**Root Cause**: New nodes joining the cluster weren't added as Raft peers, so they never received partition map updates.
+
+**Fix Applied**: Added `self.node.add_peer(node)` in `raft/coordinator.rs:handle_node_alive()`.
+
+### 11.7 Full Mesh Topology with Multiple Peers
+
+**Status**: FIXED (Session 48)
+
+**Symptom**: When starting a node with multiple `--peers` (e.g., `--peers "1@...,2@..."`), connections failed with "Invalid packet type: 0" errors.
+
+**Root Cause**: Fire-and-forget `tokio::spawn()` in transport overwhelmed the MQTT client when establishing multiple peer connections concurrently, causing packet boundary corruption.
+
+**Fix Applied**: Full async refactor of ClusterTransport using RPITIT (Return Position Impl Trait in Trait). All transport operations now properly await instead of spawning fire-and-forget tasks.
+
+### 11.8 3-Node Cross-Node Pub/Sub Routing Failures
+
+**Status**: FIXED
+
+**Symptom**: Messages published on Node 1 weren't reaching subscribers on Node 3 (indirect routing).
+
+**Root Cause**: TopicIndex only stored partition, not the actual node where client is connected.
+
+**Fix Applied**: Added ClientLocationStore (`_client_loc` entity) as a broadcast entity that tracks client_id → connected_node mapping.
+
+### 11.9 Pub/Sub Tests Fail on Run 2+
+
+**Status**: FIXED
+
+**Symptom**: Cross-node pub/sub worked on first run but failed on subsequent runs with same client IDs.
+
+**Root Cause**: ForwardedPublish deduplication used (origin, topic, payload) fingerprint, causing legitimate repeated messages to be dropped.
+
+**Fix Applied**: Added `timestamp_ms` field to ForwardedPublish (VERSION 2) for proper deduplication.
 
 ---
 
@@ -1699,6 +1789,7 @@ The following sections need further investigation:
 | `src/cluster/topic_index.rs` | Topic → subscriber mapping |
 | `src/cluster/topic_trie.rs` | Wildcard subscription trie |
 | `src/cluster/wildcard_store.rs` | Wildcard store wrapper |
+| `src/cluster/client_location.rs` | Client → connected node mapping |
 | `src/cluster/event_handler.rs` | MQTT event hooks for cluster |
 | `src/cluster/session.rs` | SessionData structure and store |
 | `src/cluster/store_manager.rs` | All entity stores coordination |
