@@ -301,32 +301,35 @@ enum AgentAction {
 
 #[derive(Subcommand)]
 enum ClusterAction {
+    #[command(about = "Start a cluster node")]
     Start {
-        #[arg(long)]
+        #[arg(long, help = "Unique node ID (1-65535)")]
         node_id: u16,
-        #[arg(long)]
+        #[arg(long, help = "Human-readable node name")]
         node_name: Option<String>,
-        #[arg(long, default_value = "0.0.0.0:1883")]
+        #[arg(long, default_value = "0.0.0.0:1883", help = "Address to bind MQTT listener")]
         bind: SocketAddr,
-        #[arg(long)]
+        #[arg(long, help = "Path to database directory")]
         db: PathBuf,
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long, value_delimiter = ',', help = "Peer nodes: id@host:port,...")]
         peers: Vec<String>,
-        #[arg(long)]
+        #[arg(long, help = "Path to password file")]
         passwd: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Path to ACL file")]
         acl: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Path to QUIC TLS certificate")]
         quic_cert: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Path to QUIC TLS private key")]
         quic_key: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, help = "Disable QUIC transport")]
         no_quic: bool,
     },
+    #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
         #[command(flatten)]
         conn: ConnectionArgs,
     },
+    #[command(about = "Show cluster status and partition assignments")]
     Status {
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -744,14 +747,16 @@ async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Box<dyn std::
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        if let Some(data) = response.get("data") {
-            if let Some(id) = data.get("rebalance_id").and_then(serde_json::Value::as_str) {
-                println!("Rebalance initiated: {id}");
-            } else {
-                println!("Rebalance initiated");
-            }
+        let proposed = response
+            .get("data")
+            .and_then(|d| d.get("proposed_changes"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+
+        if proposed > 0 {
+            println!("Rebalance initiated: {proposed} partition changes proposed");
         } else {
-            println!("Rebalance initiated");
+            println!("Cluster already balanced, no changes needed");
         }
     } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
@@ -764,19 +769,100 @@ async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::err
     let topic = "$SYS/mqdb/cluster/status";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
 
-    if response
+    if !response
         .get("ok")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        if let Some(data) = response.get("data") {
-            println!("{}", serde_json::to_string_pretty(data)?);
+        if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+            eprintln!("Error: {error}");
+        } else {
+            output_response(&response, &OutputFormat::Json);
         }
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
-        eprintln!("Error: {error}");
-    } else {
-        output_response(&response, &OutputFormat::Json);
+        return Ok(());
     }
+
+    let Some(data) = response.get("data") else {
+        return Ok(());
+    };
+
+    let node_id = data
+        .get("node_id")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let node_name = data
+        .get("node_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let is_leader = data
+        .get("is_raft_leader")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let raft_term = data
+        .get("raft_term")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+
+    println!("┌─────────────────────────────────────────┐");
+    println!("│             CLUSTER STATUS              │");
+    println!("├─────────────────────────────────────────┤");
+    println!(
+        "│ Node:     {:<29} │",
+        format!("{node_name} (id={node_id})")
+    );
+    println!(
+        "│ Role:     {:<29} │",
+        if is_leader { "Leader" } else { "Follower" }
+    );
+    println!("│ Term:     {raft_term:<29} │");
+    println!("├─────────────────────────────────────────┤");
+
+    if let Some(alive) = data.get("alive_nodes").and_then(serde_json::Value::as_array) {
+        let nodes: Vec<String> = alive
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|n| n.to_string())
+            .collect();
+        let node_count = nodes.len() + 1;
+        println!(
+            "│ Nodes:    {:<29} │",
+            format!("{node_count} total ({node_id} + [{}])", nodes.join(", "))
+        );
+    } else {
+        println!("│ Nodes:    1 (this node only)            │");
+    }
+
+    if let Some(partitions) = data.get("partitions").and_then(serde_json::Value::as_array) {
+        let mut primary_counts: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        let mut with_replicas = 0;
+
+        for p in partitions {
+            if let Some(primary) = p.get("primary").and_then(serde_json::Value::as_u64) {
+                *primary_counts.entry(primary).or_insert(0) += 1;
+            }
+            if let Some(replicas) = p.get("replicas").and_then(serde_json::Value::as_array)
+                && !replicas.is_empty()
+            {
+                with_replicas += 1;
+            }
+        }
+
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Partitions: {:<27} │", format!("{} total", partitions.len()));
+
+        let mut dist: Vec<_> = primary_counts.iter().collect();
+        dist.sort_by_key(|(k, _)| *k);
+        for (node, count) in dist {
+            println!("│   Node {}: {:<30} │", node, format!("{count} primary"));
+        }
+        println!(
+            "│   Replicated: {:<25} │",
+            format!("{with_replicas}/{}", partitions.len())
+        );
+    }
+
+    println!("└─────────────────────────────────────────┘");
 
     Ok(())
 }
