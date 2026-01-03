@@ -69,7 +69,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let outputs = self.node.tick(0);
         for output in outputs {
             if let RaftOutput::ApplyCommand(cmd) = output {
-                self.apply_command(cmd);
+                self.apply_command_local(&cmd);
             }
         }
     }
@@ -101,9 +101,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    pub fn tick(&mut self, now_ms: u64) -> Vec<u64> {
+    pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
         let outputs = self.node.tick(now_ms);
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
 
         let is_leader = self.is_leader();
         let just_became_leader = is_leader && !self.was_leader;
@@ -111,21 +111,21 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if just_became_leader {
             tracing::info!("became Raft leader, processing pending nodes");
-            let mut indices = self.process_pending_dead_nodes();
-            indices.extend(self.process_pending_draining_nodes());
+            let mut indices = self.process_pending_dead_nodes().await;
+            indices.extend(self.process_pending_draining_nodes().await);
             return indices;
         }
 
         Vec::new()
     }
 
-    fn process_pending_draining_nodes(&mut self) -> Vec<u64> {
+    async fn process_pending_draining_nodes(&mut self) -> Vec<u64> {
         let mut proposed_indices = Vec::new();
         let pending: Vec<NodeId> = self.pending_draining_nodes.drain().collect();
 
         for draining_node in pending {
             if self.processed_draining_nodes.insert(draining_node) {
-                let indices = self.trigger_drain_rebalance(draining_node);
+                let indices = self.trigger_drain_rebalance(draining_node).await;
                 proposed_indices.extend(indices);
             }
         }
@@ -133,23 +133,23 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         proposed_indices
     }
 
-    fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
+    async fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
         let mut proposed_indices = Vec::new();
         let pending: Vec<NodeId> = self.pending_dead_nodes.drain().collect();
 
         for dead_node in pending {
             if self.processed_dead_nodes.insert(dead_node) {
-                let indices = self.reassign_partitions_for_dead_node(dead_node);
+                let indices = self.reassign_partitions_for_dead_node(dead_node).await;
                 proposed_indices.extend(indices);
             }
         }
 
-        self.scan_partition_map_for_dead_primaries(&mut proposed_indices);
+        self.scan_partition_map_for_dead_primaries(&mut proposed_indices).await;
 
         proposed_indices
     }
 
-    fn scan_partition_map_for_dead_primaries(&mut self, proposed_indices: &mut Vec<u64>) {
+    async fn scan_partition_map_for_dead_primaries(&mut self, proposed_indices: &mut Vec<u64>) {
         let alive_nodes: Vec<NodeId> = self.cluster_members.clone();
 
         for partition in PartitionId::all() {
@@ -160,7 +160,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             {
                 tracing::warn!(?partition, ?primary, "found stale primary in partition map");
                 self.processed_dead_nodes.insert(primary);
-                let indices = self.reassign_partitions_for_dead_node(primary);
+                let indices = self.reassign_partitions_for_dead_node(primary).await;
                 proposed_indices.extend(indices);
             }
         }
@@ -168,7 +168,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     /// # Errors
     /// Returns `NotLeader` if not the leader, `ProposeFailed` if proposal fails.
-    pub fn propose_partition_update(
+    pub async fn propose_partition_update(
         &mut self,
         command: RaftCommand,
     ) -> Result<u64, CoordinatorError> {
@@ -177,11 +177,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
 
         let (index, outputs) = self.node.propose(command);
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
         index.ok_or(CoordinatorError::ProposeFailed)
     }
 
-    pub fn handle_request_vote(
+    pub async fn handle_request_vote(
         &mut self,
         from: NodeId,
         request: RequestVoteRequest,
@@ -194,21 +194,21 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         );
         let (response, outputs) = self.node.handle_request_vote(from, request, now_ms);
         tracing::debug!(granted = response.is_granted(), "responding to RequestVote");
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
         response
     }
 
-    pub fn handle_request_vote_response(&mut self, from: NodeId, response: RequestVoteResponse) {
+    pub async fn handle_request_vote_response(&mut self, from: NodeId, response: RequestVoteResponse) {
         tracing::debug!(
             from = from.get(),
             granted = response.is_granted(),
             "received RequestVoteResponse"
         );
         let outputs = self.node.handle_request_vote_response(from, response);
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
     }
 
-    pub fn handle_append_entries(
+    pub async fn handle_append_entries(
         &mut self,
         from: NodeId,
         request: AppendEntriesRequest,
@@ -223,11 +223,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "received AppendEntries"
         );
         let (response, outputs) = self.node.handle_append_entries(from, request, now_ms);
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
         response
     }
 
-    pub fn handle_append_entries_response(
+    pub async fn handle_append_entries_response(
         &mut self,
         from: NodeId,
         response: AppendEntriesResponse,
@@ -239,32 +239,34 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "received AppendEntriesResponse"
         );
         let outputs = self.node.handle_append_entries_response(from, response);
-        self.process_outputs(outputs);
+        self.process_outputs(outputs).await;
     }
 
-    fn process_outputs(&mut self, outputs: Vec<RaftOutput>) {
+    async fn process_outputs(&mut self, outputs: Vec<RaftOutput>) {
         for output in outputs {
-            self.process_output(output);
+            self.process_output(output).await;
         }
     }
 
-    fn process_output(&mut self, output: RaftOutput) {
+    async fn process_output(&mut self, output: RaftOutput) {
         match output {
             RaftOutput::SendRequestVote { to, request } => {
                 tracing::debug!(to = to.get(), term = request.term, "sending RequestVote");
                 let _ = self
                     .transport
-                    .send(to, ClusterMessage::RequestVote(request));
+                    .send(to, ClusterMessage::RequestVote(request))
+                    .await;
             }
             RaftOutput::SendAppendEntries { to, request } => {
                 tracing::debug!(to = to.get(), term = request.term, entries = request.entries.len(), "sending AppendEntries");
                 let _ = self
                     .transport
-                    .send(to, ClusterMessage::AppendEntries(request));
+                    .send(to, ClusterMessage::AppendEntries(request))
+                    .await;
             }
             RaftOutput::ApplyCommand(cmd) => {
                 tracing::info!(?cmd, "applying Raft command");
-                self.apply_command(cmd);
+                self.apply_command(cmd).await;
             }
             RaftOutput::BecameLeader => {
                 tracing::info!(node = self.node.node_id().get(), "became Raft leader");
@@ -279,27 +281,34 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    fn apply_command(&mut self, command: RaftCommand) {
+    fn apply_command_local(&mut self, command: &RaftCommand) {
         match command {
             RaftCommand::UpdatePartition(update) => {
-                self.partition_map.apply_update(&update);
-                let _ = self
-                    .transport
-                    .broadcast(ClusterMessage::PartitionUpdate(update));
+                self.partition_map.apply_update(update);
             }
             RaftCommand::AddNode { node_id } => {
-                if let Some(node) = NodeId::validated(node_id)
+                if let Some(node) = NodeId::validated(*node_id)
                     && !self.cluster_members.contains(&node)
                 {
                     self.cluster_members.push(node);
                 }
             }
             RaftCommand::RemoveNode { node_id } => {
-                if let Some(node) = NodeId::validated(node_id) {
+                if let Some(node) = NodeId::validated(*node_id) {
                     self.cluster_members.retain(|&n| n != node);
                 }
             }
             RaftCommand::Noop => {}
+        }
+    }
+
+    async fn apply_command(&mut self, command: RaftCommand) {
+        self.apply_command_local(&command);
+        if let RaftCommand::UpdatePartition(update) = command {
+            let _ = self
+                .transport
+                .broadcast(ClusterMessage::PartitionUpdate(update))
+                .await;
         }
     }
 
@@ -308,12 +317,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     /// # Errors
-    /// Returns a transport error if sending fails.
-    pub fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
-        self.transport.send(to, message)
+    /// Returns `TransportError` if the message cannot be sent.
+    pub async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+        self.transport.send(to, message).await
     }
 
-    pub fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
+    pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
         self.cluster_members.retain(|&n| n != dead_node);
 
         if !self.is_leader() {
@@ -330,10 +339,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Vec::new();
         }
 
-        self.reassign_partitions_for_dead_node(dead_node)
+        self.reassign_partitions_for_dead_node(dead_node).await
     }
 
-    pub fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
+    pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
         if self.pending_dead_nodes.remove(&node) {
             tracing::debug!(?node, "removed node from pending dead nodes (now alive)");
         }
@@ -357,13 +366,13 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if is_new_member && !node_has_partitions && partitions_initialized {
             tracing::info!(?node, "new node joined, triggering rebalance");
-            return self.trigger_rebalance_for_new_node();
+            return self.trigger_rebalance_for_new_node().await;
         }
 
         Vec::new()
     }
 
-    pub fn handle_drain_notification(&mut self, draining_node: NodeId) -> Vec<u64> {
+    pub async fn handle_drain_notification(&mut self, draining_node: NodeId) -> Vec<u64> {
         if !self.is_leader() {
             tracing::info!(
                 ?draining_node,
@@ -378,7 +387,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Vec::new();
         }
 
-        self.trigger_drain_rebalance(draining_node)
+        self.trigger_drain_rebalance(draining_node).await
     }
 
     fn node_has_partitions(&self, node: NodeId) -> bool {
@@ -395,7 +404,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         PartitionId::all().any(|p| self.partition_map.primary(p).is_some())
     }
 
-    fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
+    async fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
         let config = RebalanceConfig::default();
         let reassignments =
             compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config);
@@ -419,7 +428,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 reassignment.new_epoch,
             );
 
-            if let Ok(idx) = self.propose_partition_update(cmd) {
+            if let Ok(idx) = self.propose_partition_update(cmd).await {
                 proposed_indices.push(idx);
             }
         }
@@ -427,7 +436,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         proposed_indices
     }
 
-    fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
+    async fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
         let remaining_nodes: Vec<NodeId> = self
             .cluster_members
             .iter()
@@ -466,7 +475,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 reassignment.new_epoch,
             );
 
-            if let Ok(idx) = self.propose_partition_update(cmd) {
+            if let Ok(idx) = self.propose_partition_update(cmd).await {
                 proposed_indices.push(idx);
             }
         }
@@ -474,7 +483,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         proposed_indices
     }
 
-    fn reassign_partitions_for_dead_node(&mut self, dead_node: NodeId) -> Vec<u64> {
+    async fn reassign_partitions_for_dead_node(&mut self, dead_node: NodeId) -> Vec<u64> {
         let mut proposed_indices = Vec::new();
         let alive_nodes: Vec<NodeId> = self
             .cluster_members
@@ -511,7 +520,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                             epoch,
                         );
 
-                        if let Ok(idx) = self.propose_partition_update(cmd) {
+                        if let Ok(idx) = self.propose_partition_update(cmd).await {
                             proposed_indices.push(idx);
                         }
                     } else {
@@ -541,7 +550,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                             epoch,
                         );
 
-                        if let Ok(idx) = self.propose_partition_update(cmd) {
+                        if let Ok(idx) = self.propose_partition_update(cmd).await {
                             proposed_indices.push(idx);
                         }
                     }
@@ -626,17 +635,17 @@ mod tests {
             self.node_id
         }
 
-        fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+        async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
             self.outbox.lock().unwrap().push((to, message));
             Ok(())
         }
 
-        fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
+        async fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
             self.outbox.lock().unwrap().push((self.node_id, message));
             Ok(())
         }
 
-        fn send_to_partition_primary(
+        async fn send_to_partition_primary(
             &self,
             _partition: PartitionId,
             _message: ClusterMessage,
@@ -651,6 +660,10 @@ mod tests {
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             None
         }
+
+        async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+
+        async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
     }
 
     #[test]
@@ -663,8 +676,8 @@ mod tests {
         assert!(coord.leader_id().is_none());
     }
 
-    #[test]
-    fn coordinator_election_and_propose() {
+    #[tokio::test]
+    async fn coordinator_election_and_propose() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -677,7 +690,7 @@ mod tests {
         coord1.add_peer(node2);
         coord2.add_peer(node1);
 
-        coord1.tick(1000);
+        coord1.tick(1000).await;
         let sent = coord1.transport.sent_messages();
         assert_eq!(sent.len(), 1);
 
@@ -686,15 +699,15 @@ mod tests {
             _ => panic!("expected RequestVote"),
         };
 
-        let response = coord2.handle_request_vote(node1, request, 1000);
+        let response = coord2.handle_request_vote(node1, request, 1000).await;
         assert!(response.is_granted());
 
-        coord1.handle_request_vote_response(node2, response);
+        coord1.handle_request_vote_response(node2, response).await;
         assert!(coord1.is_leader());
     }
 
-    #[test]
-    fn coordinator_applies_partition_update() {
+    #[tokio::test]
+    async fn coordinator_applies_partition_update() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -707,23 +720,23 @@ mod tests {
         coord1.add_peer(node2);
         coord2.add_peer(node1);
 
-        coord1.tick(1000);
+        coord1.tick(1000).await;
         let request = match &coord1.transport.sent_messages()[0].1 {
             ClusterMessage::RequestVote(req) => *req,
             _ => panic!("expected RequestVote"),
         };
-        let response = coord2.handle_request_vote(node1, request, 1000);
-        coord1.handle_request_vote_response(node2, response);
+        let response = coord2.handle_request_vote(node1, request, 1000).await;
+        coord1.handle_request_vote_response(node2, response).await;
         assert!(coord1.is_leader());
 
         let partition = PartitionId::new(5).unwrap();
         let cmd = RaftCommand::update_partition(partition, node1, &[node2], Epoch::new(1));
 
-        let idx = coord1.propose_partition_update(cmd).unwrap();
+        let idx = coord1.propose_partition_update(cmd).await.unwrap();
         assert_eq!(idx, 2);
 
         coord1.transport.clear();
-        coord1.tick(1100);
+        coord1.tick(1100).await;
 
         let append_req = coord1
             .transport
@@ -735,13 +748,13 @@ mod tests {
             })
             .unwrap();
 
-        let response = coord2.handle_append_entries(node1, append_req.clone(), 1100);
+        let response = coord2.handle_append_entries(node1, append_req.clone(), 1100).await;
         assert!(response.is_success());
 
-        coord1.handle_append_entries_response(node2, response);
+        coord1.handle_append_entries_response(node2, response).await;
 
         coord1.transport.clear();
-        coord1.tick(1200);
+        coord1.tick(1200).await;
 
         let commit_req = coord1
             .transport
@@ -753,14 +766,14 @@ mod tests {
             })
             .unwrap();
 
-        coord2.handle_append_entries(node1, commit_req, 1200);
+        coord2.handle_append_entries(node1, commit_req, 1200).await;
 
         assert_eq!(coord2.partition_map().primary(partition), Some(node1));
         assert_eq!(coord2.partition_map().replicas(partition), &[node2]);
     }
 
-    #[test]
-    fn coordinator_rejects_propose_when_not_leader() {
+    #[tokio::test]
+    async fn coordinator_rejects_propose_when_not_leader() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut coord = RaftCoordinator::new(node1, transport, RaftConfig::default());
@@ -768,12 +781,12 @@ mod tests {
         let partition = PartitionId::new(0).unwrap();
         let cmd = RaftCommand::update_partition(partition, node1, &[], Epoch::new(1));
 
-        let result = coord.propose_partition_update(cmd);
+        let result = coord.propose_partition_update(cmd).await;
         assert!(matches!(result, Err(CoordinatorError::NotLeader(None))));
     }
 
-    #[test]
-    fn handle_node_death_reassigns_partitions() {
+    #[tokio::test]
+    async fn handle_node_death_reassigns_partitions() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let node3 = NodeId::validated(3).unwrap();
@@ -789,21 +802,21 @@ mod tests {
         coord2.add_peer(node1);
         coord2.add_peer(node3);
 
-        coord1.tick(1000);
+        coord1.tick(1000).await;
         let request = match &coord1.transport.sent_messages()[0].1 {
             ClusterMessage::RequestVote(req) => *req,
             _ => panic!("expected RequestVote"),
         };
-        let response = coord2.handle_request_vote(node1, request, 1000);
-        coord1.handle_request_vote_response(node2, response);
+        let response = coord2.handle_request_vote(node1, request, 1000).await;
+        coord1.handle_request_vote_response(node2, response).await;
         assert!(coord1.is_leader());
 
         let partition = PartitionId::new(0).unwrap();
         let cmd = RaftCommand::update_partition(partition, node2, &[node3], Epoch::new(1));
-        coord1.propose_partition_update(cmd).unwrap();
+        coord1.propose_partition_update(cmd).await.unwrap();
 
         coord1.transport.clear();
-        coord1.tick(1100);
+        coord1.tick(1100).await;
 
         let append_req = coord1
             .transport
@@ -815,21 +828,21 @@ mod tests {
             })
             .unwrap();
 
-        let response = coord2.handle_append_entries(node1, append_req, 1100);
-        coord1.handle_append_entries_response(node2, response);
+        let response = coord2.handle_append_entries(node1, append_req, 1100).await;
+        coord1.handle_append_entries_response(node2, response).await;
 
         coord1.transport.clear();
-        coord1.tick(1200);
+        coord1.tick(1200).await;
 
         assert_eq!(coord1.partition_map().primary(partition), Some(node2));
         assert_eq!(coord1.partition_map().replicas(partition), &[node3]);
 
-        let indices = coord1.handle_node_death(node2);
+        let indices = coord1.handle_node_death(node2).await;
         assert!(!indices.is_empty());
     }
 
-    #[test]
-    fn handle_node_death_does_nothing_when_not_leader() {
+    #[tokio::test]
+    async fn handle_node_death_does_nothing_when_not_leader() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -837,7 +850,7 @@ mod tests {
         let mut coord = RaftCoordinator::new(node1, transport, RaftConfig::default());
         coord.add_peer(node2);
 
-        let indices = coord.handle_node_death(node2);
+        let indices = coord.handle_node_death(node2).await;
         assert!(indices.is_empty());
     }
 }

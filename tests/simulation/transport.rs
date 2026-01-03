@@ -248,7 +248,7 @@ impl ClusterTransport for SimulatedTransport {
         self.node_id
     }
 
-    fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+    async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
         let data = Self::serialize_message(&message);
         if self.network.send(self.node_id.get(), to.get(), data) {
             Ok(())
@@ -257,7 +257,7 @@ impl ClusterTransport for SimulatedTransport {
         }
     }
 
-    fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
+    async fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
         let data = Self::serialize_message(&message);
         let nodes = self.state.lock().unwrap().registered_nodes.clone();
 
@@ -270,7 +270,7 @@ impl ClusterTransport for SimulatedTransport {
         Ok(())
     }
 
-    fn send_to_partition_primary(
+    async fn send_to_partition_primary(
         &self,
         partition: PartitionId,
         message: ClusterMessage,
@@ -283,7 +283,12 @@ impl ClusterTransport for SimulatedTransport {
         match primary {
             Some(id) => {
                 if let Some(node) = NodeId::validated(id) {
-                    self.send(node, message)
+                    let data = Self::serialize_message(&message);
+                    if self.network.send(self.node_id.get(), node.get(), data) {
+                        Ok(())
+                    } else {
+                        Err(TransportError::NetworkPartitioned)
+                    }
                 } else {
                     Err(TransportError::PartitionNotFound(partition))
                 }
@@ -307,6 +312,10 @@ impl ClusterTransport for SimulatedTransport {
     fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
         self.recv()
     }
+
+    async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+
+    async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
 }
 
 #[cfg(test)]
@@ -316,8 +325,8 @@ mod tests {
     use mqdb::cluster::Operation;
     use std::time::Duration;
 
-    #[test]
-    fn send_and_receive_heartbeat() {
+    #[tokio::test]
+    async fn send_and_receive_heartbeat() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -330,7 +339,7 @@ mod tests {
         t1.register_peer(node2);
 
         let hb = Heartbeat::create(node1, 1000);
-        t1.send(node2, ClusterMessage::Heartbeat(hb)).unwrap();
+        t1.send(node2, ClusterMessage::Heartbeat(hb)).await.unwrap();
 
         assert!(t2.recv().is_none());
 
@@ -344,8 +353,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_and_receive_write() {
+    #[tokio::test]
+    async fn send_and_receive_write() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -367,7 +376,7 @@ mod tests {
             b"test data".to_vec(),
         );
 
-        t1.send(node2, ClusterMessage::Write(write)).unwrap();
+        t1.send(node2, ClusterMessage::Write(write)).await.unwrap();
         clock.advance(Duration::from_millis(1));
 
         let msg = t2.recv().unwrap();
@@ -382,8 +391,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn broadcast_sends_to_all_peers() {
+    #[tokio::test]
+    async fn broadcast_sends_to_all_peers() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -399,7 +408,7 @@ mod tests {
         t1.register_peer(node3);
 
         let hb = Heartbeat::create(node1, 1000);
-        t1.broadcast(ClusterMessage::Heartbeat(hb)).unwrap();
+        t1.broadcast(ClusterMessage::Heartbeat(hb)).await.unwrap();
 
         clock.advance(Duration::from_millis(1));
 
@@ -408,8 +417,8 @@ mod tests {
         assert!(t1.recv().is_none());
     }
 
-    #[test]
-    fn send_and_receive_query_request() {
+    #[tokio::test]
+    async fn send_and_receive_query_request() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -432,6 +441,7 @@ mod tests {
         );
 
         t1.send(node2, ClusterMessage::QueryRequest { partition, request })
+            .await
             .unwrap();
         clock.advance(Duration::from_millis(1));
 
@@ -454,8 +464,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_and_receive_query_response() {
+    #[tokio::test]
+    async fn send_and_receive_query_response() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -477,6 +487,7 @@ mod tests {
         );
 
         t1.send(node2, ClusterMessage::QueryResponse(response))
+            .await
             .unwrap();
         clock.advance(Duration::from_millis(1));
 
@@ -494,8 +505,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_and_receive_batch_read_request() {
+    #[tokio::test]
+    async fn send_and_receive_batch_read_request() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -516,6 +527,7 @@ mod tests {
         );
 
         t1.send(node2, ClusterMessage::BatchReadRequest(request))
+            .await
             .unwrap();
         clock.advance(Duration::from_millis(1));
 
@@ -531,8 +543,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn send_and_receive_batch_read_response() {
+    #[tokio::test]
+    async fn send_and_receive_batch_read_response() {
         let clock = VirtualClock::new();
         let network = VirtualNetwork::new(clock.clone());
 
@@ -552,6 +564,7 @@ mod tests {
         let response = BatchReadResponse::new(777, partition, results);
 
         t1.send(node2, ClusterMessage::BatchReadResponse(response))
+            .await
             .unwrap();
         clock.advance(Duration::from_millis(1));
 

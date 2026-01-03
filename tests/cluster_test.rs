@@ -5,8 +5,8 @@ use mqdb::cluster::{
     PartitionRole, ReplicationWrite, TransportConfig,
 };
 
-#[test]
-fn partition_assignment_determinism() {
+#[tokio::test]
+async fn partition_assignment_determinism() {
     let p1 = PartitionId::from_entity_id("users", "123");
     let p2 = PartitionId::from_entity_id("users", "123");
     assert_eq!(p1, p2);
@@ -15,15 +15,15 @@ fn partition_assignment_determinism() {
     assert_eq!(PartitionId::from_entity_id("users", "456"), p3);
 }
 
-#[test]
-fn different_keys_may_hash_differently() {
+#[tokio::test]
+async fn different_keys_may_hash_differently() {
     let p1 = PartitionId::from_entity_id("users", "123");
     let p2 = PartitionId::from_entity_id("orders", "789");
     let _ = (p1, p2);
 }
 
-#[test]
-fn partition_id_always_in_valid_range() {
+#[tokio::test]
+async fn partition_id_always_in_valid_range() {
     for i in 0..1000 {
         let entity = format!("entity_{i}");
         let id = format!("id_{}", i * 7);
@@ -32,24 +32,24 @@ fn partition_id_always_in_valid_range() {
     }
 }
 
-#[test]
-fn epoch_ordering() {
+#[tokio::test]
+async fn epoch_ordering() {
     let e1 = Epoch::new(1);
     let e2 = Epoch::new(2);
     assert!(e1 < e2);
     assert_eq!(e1.next(), e2);
 }
 
-#[test]
-fn node_id_validation() {
+#[tokio::test]
+async fn node_id_validation() {
     let node = NodeId::validated(1).unwrap();
     assert_eq!(node.get(), 1);
     assert!(node.is_valid());
     assert!(NodeId::validated(0).is_none());
 }
 
-#[test]
-fn partition_map_assignment() {
+#[tokio::test]
+async fn partition_map_assignment() {
     let mut map = PartitionMap::new();
 
     let p0 = PartitionId::new(0).unwrap();
@@ -66,8 +66,8 @@ fn partition_map_assignment() {
     assert_eq!(map.role_for(p0, n2), PartitionRole::Replica);
 }
 
-#[test]
-fn simulation_framework_three_nodes() {
+#[tokio::test]
+async fn simulation_framework_three_nodes() {
     use simulation::framework::runtime::SimulatedRuntime;
 
     let rt = SimulatedRuntime::new();
@@ -93,8 +93,8 @@ fn simulation_framework_three_nodes() {
     assert_eq!(msg_to_1.from, 3);
 }
 
-#[test]
-fn simulation_network_partition() {
+#[tokio::test]
+async fn simulation_network_partition() {
     use simulation::framework::runtime::SimulatedRuntime;
 
     let rt = SimulatedRuntime::new();
@@ -114,8 +114,8 @@ fn simulation_network_partition() {
     assert!(net.receive(3).is_some());
 }
 
-#[test]
-fn simulation_scheduled_tasks() {
+#[tokio::test]
+async fn simulation_scheduled_tasks() {
     use simulation::framework::runtime::SimulatedRuntime;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -139,8 +139,8 @@ fn simulation_scheduled_tasks() {
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 }
 
-#[test]
-fn two_node_replication() {
+#[tokio::test]
+async fn two_node_replication() {
     use simulation::framework::VirtualClock;
     use simulation::framework::VirtualNetwork;
     use simulation::transport::SimulatedTransport;
@@ -176,21 +176,21 @@ fn two_node_replication() {
         b"test data".to_vec(),
     );
 
-    let seq = ctrl1.replicate_write(write, &[node2_id], 1).unwrap();
+    let seq = ctrl1.replicate_write(write, &[node2_id], 1).await.unwrap();
     assert_eq!(seq, 1);
 
     clock.advance_ms(5);
 
-    ctrl2.process_messages();
+    ctrl2.process_messages().await;
     assert_eq!(ctrl2.sequence(partition), Some(1));
 
     clock.advance_ms(5);
 
-    ctrl1.process_messages();
+    ctrl1.process_messages().await;
 }
 
-#[test]
-fn heartbeat_detection() {
+#[tokio::test]
+async fn heartbeat_detection() {
     use mqdb::cluster::NodeStatus;
     use simulation::framework::VirtualClock;
     use simulation::framework::VirtualNetwork;
@@ -233,18 +233,18 @@ fn heartbeat_detection() {
     ctrl1.update_partition_map(partition_map.clone());
     ctrl2.update_partition_map(partition_map);
 
-    ctrl1.tick(0);
+    ctrl1.tick(0).await;
     clock.advance_ms(5);
-    ctrl2.process_messages();
+    ctrl2.process_messages().await;
 
     assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Alive);
 
-    ctrl2.tick(600);
+    ctrl2.tick(600).await;
     assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Dead);
 }
 
-#[test]
-fn raft_leader_election_three_nodes() {
+#[tokio::test]
+async fn raft_leader_election_three_nodes() {
     use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -298,8 +298,8 @@ fn raft_leader_election_three_nodes() {
     assert_eq!(n3.role(), RaftRole::Follower);
 }
 
-#[test]
-fn raft_step_down_on_higher_term() {
+#[tokio::test]
+async fn raft_step_down_on_higher_term() {
     use mqdb::cluster::raft::{AppendEntriesRequest, RaftConfig, RaftNode, RaftOutput, RaftRole};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -333,8 +333,8 @@ fn raft_step_down_on_higher_term() {
     assert_eq!(n1.current_term(), 5);
 }
 
-#[test]
-fn raft_partition_map_updates() {
+#[tokio::test]
+async fn raft_partition_map_updates() {
     use mqdb::cluster::raft::{RaftCommand, RaftConfig, RaftNode, RaftOutput, RaftRole};
     use mqdb::cluster::{PartitionAssignment, PartitionMap};
 
@@ -396,8 +396,8 @@ fn raft_partition_map_updates() {
     assert!(partition_map.replicas(partition).is_empty());
 }
 
-#[test]
-fn session_store_basic_operations() {
+#[tokio::test]
+async fn session_store_basic_operations() {
     use mqdb::cluster::{SessionStore, session_partition};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -435,8 +435,8 @@ fn session_store_basic_operations() {
     assert!(store.get("client1").is_none());
 }
 
-#[test]
-fn topic_index_subscribe_and_routing() {
+#[tokio::test]
+async fn topic_index_subscribe_and_routing() {
     use mqdb::cluster::{
         PublishRouter, SubscriptionCache, TopicIndex, session_partition, topic_partition,
     };
@@ -479,8 +479,8 @@ fn topic_index_subscribe_and_routing() {
     assert_eq!(result.targets[0].client_id, "client2");
 }
 
-#[test]
-fn retained_message_lifecycle() {
+#[tokio::test]
+async fn retained_message_lifecycle() {
     use mqdb::cluster::{RetainedStore, topic_partition};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -513,8 +513,8 @@ fn retained_message_lifecycle() {
     }
 }
 
-#[test]
-fn end_to_end_subscribe_publish_flow() {
+#[tokio::test]
+async fn end_to_end_subscribe_publish_flow() {
     use mqdb::cluster::{
         PublishRouter, RetainedStore, SubscriptionCache, TopicIndex, effective_qos,
         session_partition,
@@ -560,8 +560,8 @@ fn end_to_end_subscribe_publish_flow() {
     }
 }
 
-#[test]
-fn wildcard_store_routing_integration() {
+#[tokio::test]
+async fn wildcard_store_routing_integration() {
     use mqdb::cluster::{PublishRouter, TopicIndex, WildcardStore, session_partition};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -618,8 +618,8 @@ fn wildcard_store_routing_integration() {
     assert!(client_ids.contains(&"multi-client"));
 }
 
-#[test]
-fn wildcard_deduplication_max_qos() {
+#[tokio::test]
+async fn wildcard_deduplication_max_qos() {
     use mqdb::cluster::{PublishRouter, TopicIndex, WildcardStore, session_partition};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -647,8 +647,8 @@ fn wildcard_deduplication_max_qos() {
     assert_eq!(result.targets[0].qos, 2);
 }
 
-#[test]
-fn wildcard_sys_topic_protection() {
+#[tokio::test]
+async fn wildcard_sys_topic_protection() {
     use mqdb::cluster::WildcardStore;
 
     let node1 = NodeId::validated(1).unwrap();
@@ -663,8 +663,8 @@ fn wildcard_sys_topic_protection() {
     assert_eq!(matches.len(), 1);
 }
 
-#[test]
-fn lwt_idempotency_lifecycle() {
+#[tokio::test]
+async fn lwt_idempotency_lifecycle() {
     use mqdb::cluster::{LwtAction, LwtPublisher, SessionStore, determine_lwt_action};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -699,8 +699,8 @@ fn lwt_idempotency_lifecycle() {
     assert_eq!(determine_lwt_action(&session), LwtAction::AlreadyPublished);
 }
 
-#[test]
-fn qos2_state_lifecycle() {
+#[tokio::test]
+async fn qos2_state_lifecycle() {
     use mqdb::cluster::{Qos2Phase, Qos2Store};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -724,8 +724,8 @@ fn qos2_state_lifecycle() {
     assert!(state.is_none());
 }
 
-#[test]
-fn inflight_retry_tracking() {
+#[tokio::test]
+async fn inflight_retry_tracking() {
     use mqdb::cluster::InflightStore;
 
     let node1 = NodeId::validated(1).unwrap();
@@ -751,8 +751,8 @@ fn inflight_retry_tracking() {
     assert!(store.get("client1", 1).is_none());
 }
 
-#[test]
-fn offset_store_tracking() {
+#[tokio::test]
+async fn offset_store_tracking() {
     use mqdb::cluster::{OffsetStore, PartitionId};
 
     let node1 = NodeId::validated(1).unwrap();
@@ -770,8 +770,8 @@ fn offset_store_tracking() {
     assert_eq!(offset.sequence, 150);
 }
 
-#[test]
-fn rebalancer_node_failure() {
+#[tokio::test]
+async fn rebalancer_node_failure() {
     use mqdb::cluster::{
         Epoch, PartitionId, RebalanceConfig, compute_balanced_assignments,
         compute_removal_assignments,

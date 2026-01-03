@@ -27,7 +27,7 @@ impl DbRequestHandler {
         Self { node_id }
     }
 
-    pub fn handle_publish<T: ClusterTransport>(
+    pub async fn handle_publish<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         topic: &str,
@@ -40,15 +40,18 @@ impl DbRequestHandler {
         let response_payload = match parsed.operation {
             DbTopicOperation::Create { entity } => {
                 self.handle_create(controller, parsed.partition?, &entity, payload)
+                    .await
             }
             DbTopicOperation::Read { entity, id } => {
                 self.handle_read(controller, parsed.partition?, &entity, &id, payload)
             }
             DbTopicOperation::Update { entity, id } => {
                 self.handle_update(controller, parsed.partition?, &entity, &id, payload)
+                    .await
             }
             DbTopicOperation::Delete { entity, id } => {
                 self.handle_delete(controller, parsed.partition?, &entity, &id)
+                    .await
             }
             DbTopicOperation::IndexUpdate => {
                 self.handle_index_update(controller, parsed.partition?, payload)
@@ -79,7 +82,7 @@ impl DbRequestHandler {
         })
     }
 
-    fn handle_create<T: ClusterTransport>(
+    async fn handle_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         partition: PartitionId,
@@ -96,7 +99,7 @@ impl DbRequestHandler {
 
         let id = self.generate_id_for_partition(entity, partition, &request.data);
 
-        match controller.db_create(entity, &id, &request.data, request.timestamp_ms) {
+        match controller.db_create(entity, &id, &request.data, request.timestamp_ms).await {
             Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
             Err(super::db::DbDataStoreError::AlreadyExists) => {
                 DbResponse::error(DbStatus::AlreadyExists).to_be_bytes()
@@ -132,7 +135,7 @@ impl DbRequestHandler {
         }
     }
 
-    fn handle_update<T: ClusterTransport>(
+    async fn handle_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         partition: PartitionId,
@@ -153,7 +156,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        match controller.db_update(entity, id, &request.data, request.timestamp_ms) {
+        match controller.db_update(entity, id, &request.data, request.timestamp_ms).await {
             Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
             Err(super::db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()
@@ -162,7 +165,7 @@ impl DbRequestHandler {
         }
     }
 
-    fn handle_delete<T: ClusterTransport>(
+    async fn handle_delete<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         partition: PartitionId,
@@ -178,7 +181,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        match controller.db_delete(entity, id) {
+        match controller.db_delete(entity, id).await {
             Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
             Err(super::db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()
@@ -414,7 +417,7 @@ mod tests {
             self.node_id
         }
 
-        fn send(
+        async fn send(
             &self,
             to: NodeId,
             message: ClusterMessage,
@@ -423,7 +426,7 @@ mod tests {
             Ok(())
         }
 
-        fn broadcast(
+        async fn broadcast(
             &self,
             message: ClusterMessage,
         ) -> Result<(), super::super::transport::TransportError> {
@@ -434,7 +437,7 @@ mod tests {
             Ok(())
         }
 
-        fn send_to_partition_primary(
+        async fn send_to_partition_primary(
             &self,
             _partition: PartitionId,
             _message: ClusterMessage,
@@ -449,6 +452,10 @@ mod tests {
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             self.inbox.lock().unwrap().pop_front()
         }
+
+        async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+
+        async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
     }
 
     fn setup_controller_with_partition(partition: PartitionId) -> NodeController<MockTransport> {
@@ -471,8 +478,8 @@ mod tests {
         ctrl
     }
 
-    #[test]
-    fn handle_create_success() {
+    #[tokio::test]
+    async fn handle_create_success() {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
@@ -487,13 +494,15 @@ mod tests {
 
         let topic = format!("$DB/p{}/{}/create", partition.get(), entity);
 
-        let response = handler.handle_publish(
-            &mut ctrl,
-            &topic,
-            &payload,
-            Some("$DB/_resp/client1"),
-            Some(b"corr-123"),
-        );
+        let response = handler
+            .handle_publish(
+                &mut ctrl,
+                &topic,
+                &payload,
+                Some("$DB/_resp/client1"),
+                Some(b"corr-123"),
+            )
+            .await;
 
         assert!(response.is_some());
         let resp = response.unwrap();
@@ -504,8 +513,8 @@ mod tests {
         assert_eq!(db_response.status(), DbStatus::Ok);
     }
 
-    #[test]
-    fn handle_read_not_found() {
+    #[tokio::test]
+    async fn handle_read_not_found() {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
@@ -520,8 +529,9 @@ mod tests {
 
         let topic = format!("$DB/p{}/{}/{}", partition.get(), entity, id);
 
-        let response =
-            handler.handle_publish(&mut ctrl, &topic, &payload, Some("$DB/_resp/client1"), None);
+        let response = handler
+            .handle_publish(&mut ctrl, &topic, &payload, Some("$DB/_resp/client1"), None)
+            .await;
 
         assert!(response.is_some());
         let resp = response.unwrap();
@@ -530,8 +540,8 @@ mod tests {
         assert_eq!(db_response.status(), DbStatus::NotFound);
     }
 
-    #[test]
-    fn handle_invalid_partition_returns_error() {
+    #[tokio::test]
+    async fn handle_invalid_partition_returns_error() {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
@@ -543,8 +553,9 @@ mod tests {
 
         let topic = "$DB/p63/users/create";
 
-        let response =
-            handler.handle_publish(&mut ctrl, topic, &payload, Some("$DB/_resp/client1"), None);
+        let response = handler
+            .handle_publish(&mut ctrl, topic, &payload, Some("$DB/_resp/client1"), None)
+            .await;
 
         assert!(response.is_some());
         let resp = response.unwrap();
@@ -553,8 +564,8 @@ mod tests {
         assert_eq!(db_response.status(), DbStatus::InvalidPartition);
     }
 
-    #[test]
-    fn no_response_without_response_topic() {
+    #[tokio::test]
+    async fn no_response_without_response_topic() {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
@@ -566,26 +577,30 @@ mod tests {
 
         let topic = "$DB/p0/users/create";
 
-        let response = handler.handle_publish(&mut ctrl, topic, &payload, None, None);
+        let response = handler
+            .handle_publish(&mut ctrl, topic, &payload, None, None)
+            .await;
 
         assert!(response.is_none());
     }
 
-    #[test]
-    fn parse_invalid_topic_returns_none() {
+    #[tokio::test]
+    async fn parse_invalid_topic_returns_none() {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
         let partition = PartitionId::new(0).unwrap();
         let mut ctrl = setup_controller_with_partition(partition);
 
-        let response = handler.handle_publish(
-            &mut ctrl,
-            "not/a/db/topic",
-            &[],
-            Some("$DB/_resp/client1"),
-            None,
-        );
+        let response = handler
+            .handle_publish(
+                &mut ctrl,
+                "not/a/db/topic",
+                &[],
+                Some("$DB/_resp/client1"),
+                None,
+            )
+            .await;
 
         assert!(response.is_none());
     }

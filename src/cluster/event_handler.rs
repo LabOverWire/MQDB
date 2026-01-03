@@ -70,7 +70,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 let existing = ctrl.stores().sessions.get(client_id);
                 if existing.is_some() {
                     debug!(client_id, "clean_start=true, clearing old session state");
-                    clear_client_subscriptions(&mut ctrl, client_id);
+                    clear_client_subscriptions(&mut ctrl, client_id).await;
                     let _ = ctrl.stores_mut().remove_session_replicated(client_id);
                 }
             }
@@ -87,7 +87,7 @@ impl BrokerEventHandler for ClusterEventHandler {
             });
             let clean_session_write = match result {
                 Ok((_session, write)) => {
-                    ctrl.write_or_forward(write.clone());
+                    ctrl.write_or_forward(write.clone()).await;
                     Some(write)
                 }
                 Err(e) => {
@@ -106,7 +106,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 client_location_key(client_id),
                 location_entry.to_be_bytes(),
             );
-            ctrl.write_or_forward(location_write);
+            ctrl.write_or_forward(location_write).await;
 
             if let Some(ref topic) = event.will_topic {
                 let will_qos = qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce));
@@ -127,17 +127,17 @@ impl BrokerEventHandler for ClusterEventHandler {
                             has_will = session.has_will,
                             "will stored in session"
                         );
-                        ctrl.write_or_forward(will_write);
+                        ctrl.write_or_forward(will_write).await;
                     }
                     Err(e) => {
                         warn!(client_id, error = ?e, "failed to store will in session");
                         if clean_session_write.is_none() {
-                            ctrl.write_or_forward(create_write);
+                            ctrl.write_or_forward(create_write).await;
                         }
                     }
                 }
             } else if clean_session_write.is_none() {
-                ctrl.write_or_forward(create_write);
+                ctrl.write_or_forward(create_write).await;
             }
         })
     }
@@ -170,7 +170,7 @@ impl BrokerEventHandler for ClusterEventHandler {
             });
 
             if let Ok((_session, write)) = result {
-                ctrl.write_or_forward(write);
+                ctrl.write_or_forward(write).await;
             }
 
             let location_entry = ClientLocationEntry::create(client_id, node_id);
@@ -183,7 +183,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 client_location_key(client_id),
                 location_entry.to_be_bytes(),
             );
-            ctrl.write_or_forward(location_delete);
+            ctrl.write_or_forward(location_delete).await;
 
             if event.unexpected {
                 let session = ctrl.stores().sessions.get(client_id);
@@ -245,7 +245,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 targets,
                             );
                             let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
-                            if let Err(e) = transport.send_async(target_node, fwd_msg).await {
+                            if let Err(e) = transport.send(target_node, fwd_msg).await {
                                 warn!(target = target_node.get(), error = %e, "failed to forward LWT");
                             } else {
                                 debug!(target = target_node.get(), %topic, "forwarded LWT to node");
@@ -258,7 +258,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 client_id,
                                 "clean_session disconnect - clearing subscriptions"
                             );
-                            clear_client_subscriptions(&mut ctrl, client_id);
+                            clear_client_subscriptions(&mut ctrl, client_id).await;
                             let _ = ctrl.stores_mut().remove_session_replicated(client_id);
                         }
                         return;
@@ -273,7 +273,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         client_id,
                         "clean_session disconnect - clearing subscriptions"
                     );
-                    clear_client_subscriptions(&mut ctrl, client_id);
+                    clear_client_subscriptions(&mut ctrl, client_id).await;
                     let _ = ctrl.stores_mut().remove_session_replicated(client_id);
                 } else {
                     debug!(
@@ -336,7 +336,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         );
                     } else if ctrl.query_local_retained_exact(topic).is_some() {
                         trace!(topic, "local retained exists - broker handles delivery");
-                    } else if let Some(rx) = ctrl.start_async_retained_query(topic) {
+                    } else if let Some(rx) = ctrl.start_async_retained_query(topic).await {
                         debug!(topic, "started remote retained query");
                         pending_queries.push((topic.to_string(), rx));
                     }
@@ -345,7 +345,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .stores_mut()
                         .add_subscription_replicated(client_id, topic, qos);
 
-                    ctrl.write_or_forward(write);
+                    ctrl.write_or_forward(write).await;
 
                     if is_wildcard {
                         let client_partition = crate::cluster::session_partition(client_id);
@@ -365,7 +365,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 SubscriptionType::Mqtt as u8,
                             );
                             let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                            let _ = ctrl.transport().broadcast(msg);
+                            let _ = ctrl.transport().broadcast(msg).await;
                             debug!(
                                 topic,
                                 client_id, "broadcast wildcard subscription to cluster"
@@ -388,7 +388,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                             qos,
                         );
                         for write in writes {
-                            ctrl.write_or_forward(write);
+                            ctrl.write_or_forward(write).await;
                         }
                     }
                 }
@@ -428,7 +428,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         payload_len = msg.payload.len(),
                         "delivering retained message to subscriber"
                     );
-                    transport.queue_local_publish_retained(topic, msg.payload.clone(), msg.qos);
+                    transport.queue_local_publish_retained(topic, msg.payload.clone(), msg.qos).await;
                 }
             }
         })
@@ -465,7 +465,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                     .remove_subscription_replicated(client_id, topic);
 
                 if let Ok((_snapshot, write)) = result {
-                    ctrl.write_or_forward(write);
+                    ctrl.write_or_forward(write).await;
                 }
 
                 let is_wildcard = topic.contains('+') || topic.contains('#');
@@ -476,7 +476,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                     if result.is_ok() {
                         let broadcast = WildcardBroadcast::unsubscribe(topic, client_id);
                         let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                        let _ = ctrl.transport().broadcast(msg);
+                        let _ = ctrl.transport().broadcast(msg).await;
                         debug!(
                             topic,
                             client_id, "broadcast wildcard unsubscription to cluster"
@@ -488,7 +488,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .unsubscribe_topic_replicated(topic, client_id);
                     if let Ok((_entry, writes)) = result {
                         for write in writes {
-                            ctrl.write_or_forward(write);
+                            ctrl.write_or_forward(write).await;
                         }
                     }
                 }
@@ -524,18 +524,22 @@ impl BrokerEventHandler for ClusterEventHandler {
             if event.topic.starts_with("$DB/") {
                 debug!(topic = %event.topic, "handling $DB/ request");
                 let mut ctrl = self.controller.write().await;
-                if let Some(response) = self.db_handler.handle_publish(
-                    &mut ctrl,
-                    event.topic.as_ref(),
-                    &event.payload,
-                    event.response_topic.as_deref(),
-                    event.correlation_data.as_deref(),
-                ) {
+                if let Some(response) = self
+                    .db_handler
+                    .handle_publish(
+                        &mut ctrl,
+                        event.topic.as_ref(),
+                        &event.payload,
+                        event.response_topic.as_deref(),
+                        event.correlation_data.as_deref(),
+                    )
+                    .await
+                {
                     ctrl.transport().queue_local_publish(
                         response.topic,
                         response.payload,
                         qos_to_u8(event.qos),
-                    );
+                    ).await;
                 }
                 return;
             }
@@ -609,7 +613,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         targets,
                     );
                     let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
-                    if let Err(e) = transport.send_async(target_node, fwd_msg).await {
+                    if let Err(e) = transport.send(target_node, fwd_msg).await {
                         warn!(target = target_node.get(), error = %e, "failed to forward publish");
                     } else {
                         debug!(target = target_node.get(), topic = %fwd_topic, "forwarded publish to node");
@@ -631,7 +635,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 );
 
                 if let Ok((_state, write)) = result {
-                    ctrl.write_or_forward(write);
+                    ctrl.write_or_forward(write).await;
                 }
             }
         })
@@ -674,7 +678,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                 .stores_mut()
                 .set_retained_replicated(topic, qos, &payload, timestamp);
 
-            ctrl.write_or_forward(write);
+            ctrl.write_or_forward(write).await;
         })
     }
 
@@ -705,7 +709,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .acknowledge_inflight_replicated(client_id, event.packet_id);
 
                     if let Ok((_msg, write)) = result {
-                        ctrl.write_or_forward(write);
+                        ctrl.write_or_forward(write).await;
                     }
                 }
                 QoS::ExactlyOnce => {
@@ -714,7 +718,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .complete_qos2_replicated(client_id, event.packet_id);
 
                     if let Ok((_state, write)) = result {
-                        ctrl.write_or_forward(write);
+                        ctrl.write_or_forward(write).await;
                     }
                 }
                 QoS::AtMostOnce => {}
@@ -752,7 +756,7 @@ impl SubAckReasonCodeExt for mqtt5::broker::events::SubAckReasonCode {
     }
 }
 
-fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_id: &str) {
+async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_id: &str) {
     let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);
     if let Some(snapshot) = snapshot {
         for entry in &snapshot.topics {
@@ -769,7 +773,7 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
                 if result.is_ok() {
                     let broadcast = WildcardBroadcast::unsubscribe(topic, client_id);
                     let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                    let _ = ctrl.transport().broadcast(msg);
+                    let _ = ctrl.transport().broadcast(msg).await;
                 }
             } else {
                 let result = ctrl
@@ -777,7 +781,7 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
                     .unsubscribe_topic_replicated(topic, client_id);
                 if let Ok((_entry, writes)) = result {
                     for write in writes {
-                        ctrl.write_or_forward(write);
+                        ctrl.write_or_forward(write).await;
                     }
                 }
             }
@@ -786,7 +790,7 @@ fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_i
                 .stores_mut()
                 .remove_subscription_replicated(client_id, topic);
             if let Ok((_snapshot, write)) = result {
-                ctrl.write_or_forward(write);
+                ctrl.write_or_forward(write).await;
             }
         }
     }

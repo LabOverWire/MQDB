@@ -391,53 +391,6 @@ impl MqttTransport {
     }
 
     /// # Errors
-    /// Returns `SendFailed` if sending the message fails.
-    pub async fn send_async(
-        &self,
-        to: NodeId,
-        message: ClusterMessage,
-    ) -> Result<(), TransportError> {
-        let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
-        let payload = self.serialize_message(&message);
-        let msg_type = message.type_name();
-
-        tracing::debug!(
-            from = self.node_id.get(),
-            to = to.get(),
-            topic = %topic,
-            msg_type = %msg_type,
-            payload_len = payload.len(),
-            "transport send_async"
-        );
-
-        match self
-            .client
-            .publish_qos(&topic, payload, QoS::AtLeastOnce)
-            .await
-        {
-            Ok(_) => {
-                tracing::debug!(
-                    from = self.node_id.get(),
-                    to = to.get(),
-                    msg_type = %msg_type,
-                    "transport send_async succeeded"
-                );
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(
-                    from = self.node_id.get(),
-                    to = to.get(),
-                    msg_type = %msg_type,
-                    error = %e,
-                    "transport send_async failed"
-                );
-                Err(TransportError::SendFailed(e.to_string()))
-            }
-        }
-    }
-
-    /// # Errors
     /// Returns `SendFailed` if publishing the replication write fails.
     pub async fn publish_replication_write(
         &self,
@@ -473,26 +426,6 @@ impl MqttTransport {
         let payload = self.serialize_message(&msg);
 
         self.forward_client
-            .publish_qos(&topic, payload, QoS::AtLeastOnce)
-            .await
-            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// # Errors
-    /// Returns `SendFailed` if broadcasting the message fails.
-    pub async fn broadcast_async(&self, message: ClusterMessage) -> Result<(), TransportError> {
-        let topic = match &message {
-            ClusterMessage::Heartbeat(_) => {
-                format!("{}/heartbeat/{}", CLUSTER_TOPIC_PREFIX, self.node_id.get())
-            }
-            _ => format!("{CLUSTER_TOPIC_PREFIX}/broadcast"),
-        };
-
-        let payload = self.serialize_message(&message);
-
-        self.client
             .publish_qos(&topic, payload, QoS::AtLeastOnce)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
@@ -549,38 +482,42 @@ impl ClusterTransport for MqttTransport {
         self.node_id
     }
 
-    fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
-        let state = self.state.lock().unwrap();
-        if !state.connected {
-            return Err(TransportError::NotConnected);
+    async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+        {
+            let state = self.state.lock().unwrap();
+            if !state.connected {
+                return Err(TransportError::NotConnected);
+            }
         }
-        drop(state);
 
         let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
+        let msg_type = message.type_name();
 
-        tracing::trace!(
+        tracing::debug!(
+            from = self.node_id.get(),
             to = to.get(),
-            msg_type = message.message_type(),
-            %topic,
+            topic = %topic,
+            msg_type = %msg_type,
             payload_len = payload.len(),
-            "sending cluster message"
+            "transport send"
         );
 
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let _ = client.publish_qos(&topic, payload, QoS::AtLeastOnce).await;
-        });
+        self.client
+            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
         Ok(())
     }
 
-    fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
-        let state = self.state.lock().unwrap();
-        if !state.connected {
-            return Err(TransportError::NotConnected);
+    async fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
+        {
+            let state = self.state.lock().unwrap();
+            if !state.connected {
+                return Err(TransportError::NotConnected);
+            }
         }
-        drop(state);
 
         let topic = match &message {
             ClusterMessage::Heartbeat(_) => {
@@ -591,15 +528,15 @@ impl ClusterTransport for MqttTransport {
 
         let payload = self.serialize_message(&message);
 
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let _ = client.publish_qos(&topic, payload, QoS::AtLeastOnce).await;
-        });
+        self.client
+            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
         Ok(())
     }
 
-    fn send_to_partition_primary(
+    async fn send_to_partition_primary(
         &self,
         partition: PartitionId,
         _message: ClusterMessage,
@@ -616,35 +553,27 @@ impl ClusterTransport for MqttTransport {
         self.recv()
     }
 
-    fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+    async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
         let mqtt_qos = match qos {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             _ => QoS::ExactlyOnce,
         };
-
-        let client = self.forward_client.clone();
-        tokio::spawn(async move {
-            let _ = client.publish_qos(&topic, payload, mqtt_qos).await;
-        });
+        let _ = self.forward_client.publish_qos(&topic, payload, mqtt_qos).await;
     }
 
-    fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
+    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         let mqtt_qos = match qos {
             0 => QoS::AtMostOnce,
             1 => QoS::AtLeastOnce,
             _ => QoS::ExactlyOnce,
         };
-
-        let client = self.forward_client.clone();
-        tokio::spawn(async move {
-            let options = mqtt5::PublishOptions {
-                qos: mqtt_qos,
-                retain: true,
-                ..Default::default()
-            };
-            let _ = client.publish_with_options(&topic, payload, options).await;
-        });
+        let options = mqtt5::PublishOptions {
+            qos: mqtt_qos,
+            retain: true,
+            ..Default::default()
+        };
+        let _ = self.forward_client.publish_with_options(&topic, payload, options).await;
     }
 }
 

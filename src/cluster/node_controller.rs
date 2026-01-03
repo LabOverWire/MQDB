@@ -188,12 +188,12 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
-    pub fn tick(&mut self, now: u64) {
+    pub async fn tick(&mut self, now: u64) {
         self.current_time = now;
 
         if self.heartbeat.should_send(now) {
             let hb = self.heartbeat.create_heartbeat(now);
-            let _ = self.transport.broadcast(hb);
+            let _ = self.transport.broadcast(hb).await;
         }
 
         let dead = self.heartbeat.check_timeouts(now);
@@ -201,10 +201,10 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_node_death(node);
         }
 
-        self.initiate_catchup_requests(now);
+        self.initiate_catchup_requests(now).await;
     }
 
-    fn initiate_catchup_requests(&mut self, now: u64) {
+    async fn initiate_catchup_requests(&mut self, now: u64) {
         for (&partition_id, state) in &mut self.replicas {
             if !state.needs_catchup_request(now) {
                 continue;
@@ -234,7 +234,8 @@ impl<T: ClusterTransport> NodeController<T> {
             let req = CatchupRequest::create(partition, from_seq, to_seq, self.node_id);
             let _ = self
                 .transport
-                .send(primary, ClusterMessage::CatchupRequest(req));
+                .send(primary, ClusterMessage::CatchupRequest(req))
+                .await;
 
             state.mark_catchup_requested(now);
         }
@@ -265,9 +266,9 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub fn process_messages(&mut self) {
+    pub async fn process_messages(&mut self) {
         while let Some(msg) = self.transport.recv() {
-            self.handle_message(msg);
+            self.handle_message(msg).await;
         }
     }
 
@@ -290,20 +291,20 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn handle_message(&mut self, msg: InboundMessage) {
+    async fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
                 self.heartbeat
                     .receive_heartbeat(msg.from, &hb, msg.received_at);
             }
             ClusterMessage::Write(ref write) => {
-                self.handle_write(msg.from, write);
+                self.handle_write(msg.from, write).await;
             }
             ClusterMessage::WriteRequest(write) => {
-                self.handle_write_request(msg.from, write);
+                self.handle_write_request(msg.from, write).await;
             }
             ClusterMessage::Ack(ack) => {
-                self.handle_ack(ack);
+                self.handle_ack(ack).await;
             }
             ClusterMessage::DeathNotice { node_id } => {
                 self.heartbeat.handle_death_notice(node_id);
@@ -345,19 +346,20 @@ impl<T: ClusterTransport> NodeController<T> {
                     req.partition(),
                     req.from_sequence(),
                     req.to_sequence(),
-                );
+                )
+                .await;
             }
             ClusterMessage::CatchupResponse(resp) => {
-                self.handle_catchup_response(resp);
+                self.handle_catchup_response(resp).await;
             }
             ClusterMessage::ForwardedPublish(ref fwd) => {
-                self.handle_forwarded_publish(msg.from, fwd);
+                self.handle_forwarded_publish(msg.from, fwd).await;
             }
             ClusterMessage::SnapshotRequest(ref req) => {
-                self.handle_snapshot_request(msg.from, req);
+                self.handle_snapshot_request(msg.from, req).await;
             }
             ClusterMessage::SnapshotChunk(ref chunk) => {
-                self.handle_snapshot_chunk(msg.from, chunk);
+                self.handle_snapshot_chunk(msg.from, chunk).await;
             }
             ClusterMessage::SnapshotComplete(ref complete) => {
                 self.handle_snapshot_complete(msg.from, complete);
@@ -368,7 +370,7 @@ impl<T: ClusterTransport> NodeController<T> {
             } => {
                 let response = self.handle_query_request(partition, request);
                 let response_msg = ClusterMessage::QueryResponse(response);
-                let _ = self.transport.send(msg.from, response_msg);
+                let _ = self.transport.send(msg.from, response_msg).await;
             }
             ClusterMessage::QueryResponse(ref response) => {
                 if self
@@ -390,7 +392,7 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::BatchReadRequest(ref request) => {
                 let response = self.handle_batch_read_request(request);
                 let response_msg = ClusterMessage::BatchReadResponse(response);
-                let _ = self.transport.send(msg.from, response_msg);
+                let _ = self.transport.send(msg.from, response_msg).await;
             }
             ClusterMessage::BatchReadResponse(_) => {}
             ClusterMessage::WildcardBroadcast(ref broadcast) => {
@@ -479,7 +481,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
+    async fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
         let partition = write.partition;
 
         tracing::debug!(
@@ -510,7 +512,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         id = ?write.id,
                         "applied write to stores"
                     );
-                    self.sync_retained_to_broker(write);
+                    self.sync_retained_to_broker(write).await;
                 }
                 self.write_log
                     .append(partition, write.sequence, write.clone());
@@ -525,10 +527,10 @@ impl<T: ClusterTransport> NodeController<T> {
             ReplicationAck::not_replica(partition, self.node_id)
         };
 
-        let _ = self.transport.send(from, ClusterMessage::Ack(ack));
+        let _ = self.transport.send(from, ClusterMessage::Ack(ack)).await;
     }
 
-    fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
+    async fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
         let is_broadcast = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
@@ -568,19 +570,19 @@ impl<T: ClusterTransport> NodeController<T> {
             id = ?write.id,
             "applied write request to stores"
         );
-        self.sync_retained_to_broker(&write);
+        self.sync_retained_to_broker(&write).await;
 
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-        if let Err(e) = self.replicate_write_async(write, &replicas) {
+        if let Err(e) = self.replicate_write_async(write, &replicas).await {
             tracing::warn!(?partition, ?e, "failed to replicate write request");
         }
     }
 
-    fn handle_ack(&mut self, ack: ReplicationAck) {
+    async fn handle_ack(&mut self, ack: ReplicationAck) {
         self.pending.record_ack(&ack);
 
         if ack.status() == Some(super::protocol::AckStatus::SequenceGap) {
-            self.handle_sequence_gap_ack(&ack);
+            self.handle_sequence_gap_ack(&ack).await;
         }
 
         for (seq, result) in self.pending.drain_completed() {
@@ -588,7 +590,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_sequence_gap_ack(&self, ack: &ReplicationAck) {
+    async fn handle_sequence_gap_ack(&self, ack: &ReplicationAck) {
         let partition = ack.partition();
         let from_seq = ack.sequence();
         let replica_id = ack.node_id();
@@ -632,7 +634,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let resp = CatchupResponse::create(partition, self.node_id, writes);
         let _ = self
             .transport
-            .send(replica_node, ClusterMessage::CatchupResponse(resp));
+            .send(replica_node, ClusterMessage::CatchupResponse(resp))
+            .await;
     }
 
     fn on_write_complete(&mut self, partition: PartitionId, seq: u64, result: QuorumResult) {
@@ -659,7 +662,7 @@ impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
     /// Returns `TooManyPending` if the pending writes limit is reached.
-    pub fn replicate_write(
+    pub async fn replicate_write(
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
@@ -703,7 +706,8 @@ impl<T: ClusterTransport> NodeController<T> {
         for &replica in replicas {
             let _ = self
                 .transport
-                .send(replica, ClusterMessage::Write(write_msg.clone()));
+                .send(replica, ClusterMessage::Write(write_msg.clone()))
+                .await;
         }
 
         Ok(sequence)
@@ -748,7 +752,7 @@ impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
     /// Returns `TooManyPending` if the pending writes limit is reached.
-    pub fn create_session_replicated(
+    pub async fn create_session_replicated(
         &mut self,
         client_id: &str,
     ) -> Result<super::SessionData, ReplicationError> {
@@ -772,7 +776,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let required_acks = replicas.len();
 
         if !replicas.is_empty() {
-            self.replicate_write(write, &replicas, required_acks)?;
+            self.replicate_write(write, &replicas, required_acks).await?;
         }
 
         Ok(session)
@@ -788,7 +792,7 @@ impl<T: ClusterTransport> NodeController<T> {
     /// Returns `NotPrimary` if this node is not the primary for the partition.
     /// Returns `TooManyPending` if the pending writes limit is reached.
     #[cfg(feature = "native")]
-    pub fn create_session_quorum(
+    pub async fn create_session_quorum(
         &mut self,
         client_id: &str,
     ) -> Result<
@@ -849,7 +853,8 @@ impl<T: ClusterTransport> NodeController<T> {
         for &replica in &replicas {
             let _ = self
                 .transport
-                .send(replica, ClusterMessage::Write(write_msg.clone()));
+                .send(replica, ClusterMessage::Write(write_msg.clone()))
+                .await;
         }
 
         Ok((session, rx))
@@ -857,7 +862,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
-    pub fn replicate_write_async(
+    pub async fn replicate_write_async(
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
@@ -892,13 +897,14 @@ impl<T: ClusterTransport> NodeController<T> {
         for &replica in replicas {
             let _ = self
                 .transport
-                .send(replica, ClusterMessage::Write(write_msg.clone()));
+                .send(replica, ClusterMessage::Write(write_msg.clone()))
+                .await;
         }
 
         Ok(sequence)
     }
 
-    pub fn write_or_forward(&mut self, write: ReplicationWrite) {
+    pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
         let partition = write.partition;
 
         let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
@@ -919,7 +925,8 @@ impl<T: ClusterTransport> NodeController<T> {
             for node in targets {
                 let _ = self
                     .transport
-                    .send(*node, ClusterMessage::WriteRequest(write.clone()));
+                    .send(*node, ClusterMessage::WriteRequest(write.clone()))
+                    .await;
             }
             return;
         }
@@ -931,7 +938,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 "write_or_forward: local partition, replicating"
             );
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-            let _ = self.replicate_write_async(write, &replicas);
+            let _ = self.replicate_write_async(write, &replicas).await;
         } else if let Some(primary) = self
             .partition_map
             .primary(partition)
@@ -945,7 +952,8 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             let _ = self
                 .transport
-                .send(primary, ClusterMessage::WriteRequest(write));
+                .send(primary, ClusterMessage::WriteRequest(write))
+                .await;
         } else {
             tracing::warn!(
                 ?partition,
@@ -957,7 +965,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if the entity already exists.
-    pub fn db_create(
+    pub async fn db_create(
         &mut self,
         entity_type: &str,
         id: &str,
@@ -967,13 +975,13 @@ impl<T: ClusterTransport> NodeController<T> {
         let (db_entity, write) =
             self.stores
                 .db_create_replicated(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
         Ok(db_entity)
     }
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
-    pub fn db_update(
+    pub async fn db_update(
         &mut self,
         entity_type: &str,
         id: &str,
@@ -983,12 +991,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let (db_entity, write) =
             self.stores
                 .db_update_replicated(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
         Ok(db_entity)
     }
 
-    #[must_use]
-    pub fn db_upsert(
+    pub async fn db_upsert(
         &mut self,
         entity_type: &str,
         id: &str,
@@ -998,19 +1005,19 @@ impl<T: ClusterTransport> NodeController<T> {
         let (db_entity, write) =
             self.stores
                 .db_upsert_replicated(entity_type, id, data, timestamp_ms);
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
         db_entity
     }
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
-    pub fn db_delete(
+    pub async fn db_delete(
         &mut self,
         entity_type: &str,
         id: &str,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.stores.db_delete_replicated(entity_type, id)?;
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
         Ok(db_entity)
     }
 
@@ -1026,7 +1033,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `SchemaStoreError::AlreadyExists` if the schema already exists.
-    pub fn schema_register(
+    pub async fn schema_register(
         &mut self,
         entity: &str,
         schema_data: &[u8],
@@ -1034,19 +1041,19 @@ impl<T: ClusterTransport> NodeController<T> {
         let (schema, writes) = self
             .stores
             .schema_register_replicated(entity, schema_data)?;
-        self.broadcast_wildcard_writes(writes);
+        self.broadcast_wildcard_writes(writes).await;
         Ok(schema)
     }
 
     /// # Errors
     /// Returns `SchemaStoreError::NotFound` if the schema does not exist.
-    pub fn schema_update(
+    pub async fn schema_update(
         &mut self,
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
         let (schema, writes) = self.stores.schema_update_replicated(entity, schema_data)?;
-        self.broadcast_wildcard_writes(writes);
+        self.broadcast_wildcard_writes(writes).await;
         Ok(schema)
     }
 
@@ -1065,8 +1072,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stores.schema_is_valid_for_write(entity)
     }
 
-    #[must_use]
-    pub fn commit_offset(
+    pub async fn commit_offset(
         &mut self,
         consumer_id: &str,
         partition: PartitionId,
@@ -1076,7 +1082,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let (offset, write) =
             self.stores
                 .commit_offset_replicated(consumer_id, partition, sequence, timestamp);
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
         offset
     }
 
@@ -1104,7 +1110,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .check_idempotency(idempotency_key, partition, epoch, entity, id, timestamp)
     }
 
-    pub fn commit_idempotency(
+    pub async fn commit_idempotency(
         &mut self,
         partition: PartitionId,
         idempotency_key: &str,
@@ -1113,7 +1119,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let write = self
             .stores
             .commit_idempotency(partition, idempotency_key, response);
-        self.write_or_forward(write);
+        self.write_or_forward(write).await;
     }
 
     pub fn rollback_idempotency(&self, partition: PartitionId, idempotency_key: &str) {
@@ -1154,7 +1160,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(writes)
     }
 
-    pub fn broadcast_wildcard_writes(&mut self, writes: Vec<ReplicationWrite>) {
+    pub async fn broadcast_wildcard_writes(&mut self, writes: Vec<ReplicationWrite>) {
         for write in writes {
             let partition = write.partition;
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
@@ -1162,12 +1168,13 @@ impl<T: ClusterTransport> NodeController<T> {
             for &replica in &replicas {
                 let _ = self
                     .transport
-                    .send(replica, ClusterMessage::Write(write.clone()));
+                    .send(replica, ClusterMessage::Write(write.clone()))
+                    .await;
             }
         }
     }
 
-    fn handle_catchup_request(
+    async fn handle_catchup_request(
         &self,
         from: NodeId,
         partition: PartitionId,
@@ -1190,10 +1197,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let resp = CatchupResponse::create(partition, self.node_id, writes);
         let _ = self
             .transport
-            .send(from, ClusterMessage::CatchupResponse(resp));
+            .send(from, ClusterMessage::CatchupResponse(resp))
+            .await;
     }
 
-    fn handle_catchup_response(&mut self, resp: CatchupResponse) {
+    async fn handle_catchup_response(&mut self, resp: CatchupResponse) {
         let partition = resp.partition;
         tracing::debug!(
             ?partition,
@@ -1215,7 +1223,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     if let Err(e) = self.stores.apply_write(write) {
                         tracing::error!(?partition, ?e, "failed to apply catchup write to stores");
                     } else {
-                        self.sync_retained_to_broker(write);
+                        self.sync_retained_to_broker(write).await;
                     }
                     self.write_log
                         .append(partition, write.sequence, write.clone());
@@ -1230,7 +1238,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
+    async fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
         let fingerprint = Self::forward_fingerprint(fwd);
 
         if self.forward_dedup.contains(&fingerprint) {
@@ -1263,7 +1271,8 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         self.transport
-            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos);
+            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .await;
     }
 
     fn forward_fingerprint(fwd: &ForwardedPublish) -> u64 {
@@ -1278,7 +1287,7 @@ impl<T: ClusterTransport> NodeController<T> {
         hasher.finish()
     }
 
-    fn handle_snapshot_request(&mut self, from: NodeId, req: &SnapshotRequest) {
+    async fn handle_snapshot_request(&mut self, from: NodeId, req: &SnapshotRequest) {
         let Some(partition) = req.partition() else {
             tracing::warn!(?from, "received snapshot request with invalid partition");
             return;
@@ -1295,10 +1304,10 @@ impl<T: ClusterTransport> NodeController<T> {
         let sender = SnapshotSender::new(partition, data, sequence);
 
         self.outgoing_snapshots.insert((from, partition), sender);
-        self.send_next_snapshot_chunk(from, partition);
+        self.send_next_snapshot_chunk(from, partition).await;
     }
 
-    fn send_next_snapshot_chunk(&mut self, to: NodeId, partition: PartitionId) {
+    async fn send_next_snapshot_chunk(&mut self, to: NodeId, partition: PartitionId) {
         let Some(sender) = self.outgoing_snapshots.get_mut(&(to, partition)) else {
             return;
         };
@@ -1307,7 +1316,8 @@ impl<T: ClusterTransport> NodeController<T> {
             let is_last = chunk.is_last();
             let _ = self
                 .transport
-                .send(to, ClusterMessage::SnapshotChunk(chunk));
+                .send(to, ClusterMessage::SnapshotChunk(chunk))
+                .await;
 
             if is_last {
                 self.outgoing_snapshots.remove(&(to, partition));
@@ -1315,7 +1325,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn handle_snapshot_chunk(&mut self, from: NodeId, chunk: &SnapshotChunk) {
+    async fn handle_snapshot_chunk(&mut self, from: NodeId, chunk: &SnapshotChunk) {
         let partition = chunk.partition;
 
         tracing::debug!(
@@ -1335,7 +1345,8 @@ impl<T: ClusterTransport> NodeController<T> {
             let complete = SnapshotComplete::failed(partition);
             let _ = self
                 .transport
-                .send(from, ClusterMessage::SnapshotComplete(complete));
+                .send(from, ClusterMessage::SnapshotComplete(complete))
+                .await;
             self.pending_snapshots.remove(&partition);
             return;
         }
@@ -1351,7 +1362,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 let complete = SnapshotComplete::failed(partition);
                 let _ = self
                     .transport
-                    .send(from, ClusterMessage::SnapshotComplete(complete));
+                    .send(from, ClusterMessage::SnapshotComplete(complete))
+                    .await;
                 return;
             };
 
@@ -1374,14 +1386,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     let complete = SnapshotComplete::ok(partition, sequence);
                     let _ = self
                         .transport
-                        .send(from, ClusterMessage::SnapshotComplete(complete));
+                        .send(from, ClusterMessage::SnapshotComplete(complete))
+                        .await;
                 }
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
                     let complete = SnapshotComplete::failed(partition);
                     let _ = self
                         .transport
-                        .send(from, ClusterMessage::SnapshotComplete(complete));
+                        .send(from, ClusterMessage::SnapshotComplete(complete))
+                        .await;
                 }
             }
         }
@@ -1417,16 +1431,17 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
+    pub async fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
         tracing::info!(?partition, source = from.get(), "requesting snapshot");
 
         let request = SnapshotRequest::create(partition, self.node_id);
         let _ = self
             .transport
-            .send(from, ClusterMessage::SnapshotRequest(request));
+            .send(from, ClusterMessage::SnapshotRequest(request))
+            .await;
     }
 
-    pub fn start_partition_migration(
+    pub async fn start_partition_migration(
         &mut self,
         partition: PartitionId,
         old_primary: NodeId,
@@ -1442,7 +1457,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         if new_primary == self.node_id {
-            self.request_snapshot(partition, old_primary);
+            self.request_snapshot(partition, old_primary).await;
         }
     }
 
@@ -1472,14 +1487,14 @@ impl<T: ClusterTransport> NodeController<T> {
         &self.migration_manager
     }
 
-    pub fn set_draining(&mut self, draining: bool) {
+    pub async fn set_draining(&mut self, draining: bool) {
         self.draining = draining;
         if draining {
             tracing::info!(node_id = self.node_id.get(), "node entering draining mode");
             let msg = ClusterMessage::DrainNotification {
                 node_id: self.node_id,
             };
-            let _ = self.transport.broadcast(msg);
+            let _ = self.transport.broadcast(msg).await;
         } else {
             tracing::info!(node_id = self.node_id.get(), "node exiting draining mode");
         }
@@ -1601,13 +1616,13 @@ impl<T: ClusterTransport> NodeController<T> {
         (query_id, requests_with_partitions)
     }
 
-    pub fn send_retained_query(&self, partition: PartitionId, request: QueryRequest) {
+    pub async fn send_retained_query(&self, partition: PartitionId, request: QueryRequest) {
         if let Some(primary) = self.partition_map.primary(partition) {
             if primary == self.node_id {
                 return;
             }
             let msg = ClusterMessage::QueryRequest { partition, request };
-            let _ = self.transport.send(primary, msg);
+            let _ = self.transport.send(primary, msg).await;
         }
     }
 
@@ -1625,7 +1640,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.query_coordinator.check_timeouts(now)
     }
 
-    pub fn start_async_retained_query(
+    pub async fn start_async_retained_query(
         &mut self,
         topic: &str,
     ) -> Option<oneshot::Receiver<Vec<RetainedMessage>>> {
@@ -1650,7 +1665,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.pending_retained_queries.insert(query_id, tx);
 
         let msg = ClusterMessage::QueryRequest { partition, request };
-        if self.transport.send(primary, msg).is_err() {
+        if self.transport.send(primary, msg).await.is_err() {
             self.pending_retained_queries.remove(&query_id);
             return None;
         }
@@ -1691,7 +1706,7 @@ impl<T: ClusterTransport> NodeController<T> {
         messages
     }
 
-    pub fn sync_retained_to_broker(&self, write: &ReplicationWrite) {
+    pub async fn sync_retained_to_broker(&self, write: &ReplicationWrite) {
         if write.entity != entity::RETAINED {
             return;
         }
@@ -1700,7 +1715,8 @@ impl<T: ClusterTransport> NodeController<T> {
             let topic = write.id.clone();
             tracing::debug!(topic, "clearing retained message from local broker");
             self.transport
-                .queue_local_publish_retained(topic, Vec::new(), 0);
+                .queue_local_publish_retained(topic, Vec::new(), 0)
+                .await;
             return;
         }
 
@@ -1724,7 +1740,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 "syncing retained message to local broker"
             );
             self.transport
-                .queue_local_publish_retained(topic, payload, qos);
+                .queue_local_publish_retained(topic, payload, qos)
+                .await;
         }
     }
 }
@@ -1791,7 +1808,7 @@ mod tests {
             self.node_id
         }
 
-        fn send(
+        async fn send(
             &self,
             to: NodeId,
             message: ClusterMessage,
@@ -1800,7 +1817,7 @@ mod tests {
             Ok(())
         }
 
-        fn broadcast(
+        async fn broadcast(
             &self,
             message: ClusterMessage,
         ) -> Result<(), super::super::transport::TransportError> {
@@ -1811,7 +1828,7 @@ mod tests {
             Ok(())
         }
 
-        fn send_to_partition_primary(
+        async fn send_to_partition_primary(
             &self,
             _partition: PartitionId,
             _message: ClusterMessage,
@@ -1826,6 +1843,10 @@ mod tests {
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             self.inbox.lock().unwrap().pop_front()
         }
+
+        async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+
+        async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
     }
 
     #[test]
@@ -1841,8 +1862,8 @@ mod tests {
         assert_eq!(ctrl.sequence(partition), Some(0));
     }
 
-    #[test]
-    fn replicate_write_sends_to_replicas() {
+    #[tokio::test]
+    async fn replicate_write_sends_to_replicas() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let node3 = NodeId::validated(3).unwrap();
@@ -1863,15 +1884,15 @@ mod tests {
             vec![1, 2, 3],
         );
 
-        let seq = ctrl.replicate_write(write, &[node2, node3], 1).unwrap();
+        let seq = ctrl.replicate_write(write, &[node2, node3], 1).await.unwrap();
         assert_eq!(seq, 1);
 
         let sent = ctrl.transport.sent_messages();
         assert_eq!(sent.len(), 2);
     }
 
-    #[test]
-    fn receive_heartbeat_marks_alive() {
+    #[tokio::test]
+    async fn receive_heartbeat_marks_alive() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -1884,13 +1905,13 @@ mod tests {
         let hb = Heartbeat::create(node2, 1000);
         ctrl.transport
             .inject_message(node2, ClusterMessage::Heartbeat(hb));
-        ctrl.process_messages();
+        ctrl.process_messages().await;
 
         assert_eq!(ctrl.node_status(node2), NodeStatus::Alive);
     }
 
-    #[test]
-    fn handle_write_as_replica() {
+    #[tokio::test]
+    async fn handle_write_as_replica() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -1912,7 +1933,7 @@ mod tests {
 
         ctrl.transport
             .inject_message(node2, ClusterMessage::Write(write));
-        ctrl.process_messages();
+        ctrl.process_messages().await;
 
         assert_eq!(ctrl.sequence(partition), Some(1));
 
@@ -1924,18 +1945,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn create_session_quorum_requires_primary() {
+    #[tokio::test]
+    async fn create_session_quorum_requires_primary() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        let result = ctrl.create_session_quorum("client1");
+        let result = ctrl.create_session_quorum("client1").await;
         assert!(matches!(result, Err(ReplicationError::NotPrimary)));
     }
 
-    #[test]
-    fn create_session_quorum_succeeds_as_primary() {
+    #[tokio::test]
+    async fn create_session_quorum_succeeds_as_primary() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -1943,13 +1964,13 @@ mod tests {
         let partition = session_partition("client1");
         ctrl.become_primary(partition, Epoch::new(1));
 
-        let (session, _rx) = ctrl.create_session_quorum("client1").unwrap();
+        let (session, _rx) = ctrl.create_session_quorum("client1").await.unwrap();
         assert_eq!(session.client_id_str(), "client1");
         assert!(ctrl.stores().sessions.get("client1").is_some());
     }
 
-    #[test]
-    fn replicate_write_async_sends_without_tracking() {
+    #[tokio::test]
+    async fn replicate_write_async_sends_without_tracking() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let node3 = NodeId::validated(3).unwrap();
@@ -1970,7 +1991,7 @@ mod tests {
             vec![1, 2, 3],
         );
 
-        let seq = ctrl.replicate_write_async(write, &[node2, node3]).unwrap();
+        let seq = ctrl.replicate_write_async(write, &[node2, node3]).await.unwrap();
         assert_eq!(seq, 1);
 
         let sent = ctrl.transport.sent_messages();
@@ -1996,8 +2017,8 @@ mod tests {
         assert_eq!(partitions_covered, expected);
     }
 
-    #[test]
-    fn broadcast_wildcard_writes_sends_to_replicas() {
+    #[tokio::test]
+    async fn broadcast_wildcard_writes_sends_to_replicas() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -2026,15 +2047,15 @@ mod tests {
             vec![],
         )];
 
-        ctrl.broadcast_wildcard_writes(writes);
+        ctrl.broadcast_wildcard_writes(writes).await;
 
         let sent = ctrl.transport.sent_messages();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, node2);
     }
 
-    #[test]
-    fn create_session_quorum_signals_completion_on_acks() {
+    #[tokio::test]
+    async fn create_session_quorum_signals_completion_on_acks() {
         use crate::cluster::protocol::ReplicationAck;
         use crate::cluster::transport::InboundMessage;
 
@@ -2058,7 +2079,7 @@ mod tests {
         );
         ctrl.update_partition_map(map);
 
-        let (session, mut rx) = ctrl.create_session_quorum("quorum-test-client").unwrap();
+        let (session, mut rx) = ctrl.create_session_quorum("quorum-test-client").await.unwrap();
         assert_eq!(session.client_id_str(), "quorum-test-client");
 
         assert!(rx.try_recv().is_err());
@@ -2068,14 +2089,15 @@ mod tests {
             from: node2,
             message: ClusterMessage::Ack(ack),
             received_at: 0,
-        });
+        })
+        .await;
 
         let result = rx.try_recv().unwrap();
         assert_eq!(result, QuorumResult::Success);
     }
 
-    #[test]
-    fn primary_has_local_data_after_replicate_write() {
+    #[tokio::test]
+    async fn primary_has_local_data_after_replicate_write() {
         use crate::cluster::entity::SESSIONS;
         use bebytes::BeBytes;
 
@@ -2099,7 +2121,7 @@ mod tests {
             session_data.to_be_bytes(),
         );
 
-        let seq = ctrl.replicate_write(write, &[node2], 1).unwrap();
+        let seq = ctrl.replicate_write(write, &[node2], 1).await.unwrap();
         assert_eq!(seq, 1);
 
         let session = ctrl.stores().sessions.get("test-client");
@@ -2115,8 +2137,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn primary_has_local_data_after_replicate_write_async() {
+    #[tokio::test]
+    async fn primary_has_local_data_after_replicate_write_async() {
         use crate::cluster::entity::SESSIONS;
         use bebytes::BeBytes;
 
@@ -2140,7 +2162,7 @@ mod tests {
             session_data.to_be_bytes(),
         );
 
-        let seq = ctrl.replicate_write_async(write, &[node2]).unwrap();
+        let seq = ctrl.replicate_write_async(write, &[node2]).await.unwrap();
         assert_eq!(seq, 1);
 
         let session = ctrl.stores().sessions.get("async-client");
@@ -2155,8 +2177,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commit_offset_stores_locally_and_replicates() {
+    #[tokio::test]
+    async fn commit_offset_stores_locally_and_replicates() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let transport = MockTransport::new(node1);
@@ -2179,7 +2201,7 @@ mod tests {
         ctrl.update_partition_map(map);
 
         let data_partition = PartitionId::new(5).unwrap();
-        let offset = ctrl.commit_offset(consumer_id, data_partition, 12345, 1000);
+        let offset = ctrl.commit_offset(consumer_id, data_partition, 12345, 1000).await;
 
         assert_eq!(offset.sequence, 12345);
         assert_eq!(offset.timestamp, 1000);
@@ -2192,8 +2214,8 @@ mod tests {
         assert!(!sent.is_empty(), "Should have sent replication messages");
     }
 
-    #[test]
-    fn idempotency_check_and_commit() {
+    #[tokio::test]
+    async fn idempotency_check_and_commit() {
         use super::super::idempotency_store::IdempotencyCheck;
 
         let node1 = NodeId::validated(1).unwrap();
@@ -2221,7 +2243,7 @@ mod tests {
         );
 
         let response = b"success response";
-        ctrl.commit_idempotency(partition, idem_key, response);
+        ctrl.commit_idempotency(partition, idem_key, response).await;
 
         let check3 = ctrl.check_idempotency(idem_key, partition, entity, id, timestamp + 100);
         match check3 {
@@ -2259,8 +2281,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn db_create_stores_entity_and_replicates() {
+    #[tokio::test]
+    async fn db_create_stores_entity_and_replicates() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let transport = MockTransport::new(node1);
@@ -2281,7 +2303,7 @@ mod tests {
         );
         ctrl.update_partition_map(map);
 
-        let result = ctrl.db_create("users", "123", b"{\"name\":\"Alice\"}", 1000);
+        let result = ctrl.db_create("users", "123", b"{\"name\":\"Alice\"}", 1000).await;
         assert!(result.is_ok());
 
         let entity = result.unwrap();
@@ -2297,8 +2319,8 @@ mod tests {
         assert!(!sent.is_empty(), "Should replicate to peer");
     }
 
-    #[test]
-    fn db_create_fails_if_exists() {
+    #[tokio::test]
+    async fn db_create_fails_if_exists() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -2306,15 +2328,15 @@ mod tests {
         let partition = crate::cluster::db::data_partition("users", "456");
         ctrl.become_primary(partition, Epoch::new(1));
 
-        let result1 = ctrl.db_create("users", "456", b"{}", 1000);
+        let result1 = ctrl.db_create("users", "456", b"{}", 1000).await;
         assert!(result1.is_ok());
 
-        let result2 = ctrl.db_create("users", "456", b"{}", 2000);
+        let result2 = ctrl.db_create("users", "456", b"{}", 2000).await;
         assert!(result2.is_err());
     }
 
-    #[test]
-    fn db_update_modifies_existing_entity() {
+    #[tokio::test]
+    async fn db_update_modifies_existing_entity() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -2323,17 +2345,19 @@ mod tests {
         ctrl.become_primary(partition, Epoch::new(1));
 
         ctrl.db_create("users", "789", b"{\"name\":\"Alice\"}", 1000)
+            .await
             .unwrap();
         let updated = ctrl
             .db_update("users", "789", b"{\"name\":\"Bob\"}", 2000)
+            .await
             .unwrap();
 
         assert_eq!(updated.data, b"{\"name\":\"Bob\"}");
         assert_eq!(updated.timestamp_ms, 2000);
     }
 
-    #[test]
-    fn db_delete_removes_entity() {
+    #[tokio::test]
+    async fn db_delete_removes_entity() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -2341,15 +2365,15 @@ mod tests {
         let partition = crate::cluster::db::data_partition("users", "del1");
         ctrl.become_primary(partition, Epoch::new(1));
 
-        ctrl.db_create("users", "del1", b"{}", 1000).unwrap();
+        ctrl.db_create("users", "del1", b"{}", 1000).await.unwrap();
         assert!(ctrl.db_get("users", "del1").is_some());
 
-        ctrl.db_delete("users", "del1").unwrap();
+        ctrl.db_delete("users", "del1").await.unwrap();
         assert!(ctrl.db_get("users", "del1").is_none());
     }
 
-    #[test]
-    fn db_upsert_creates_or_updates() {
+    #[tokio::test]
+    async fn db_upsert_creates_or_updates() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -2357,16 +2381,16 @@ mod tests {
         let partition = crate::cluster::db::data_partition("products", "p1");
         ctrl.become_primary(partition, Epoch::new(1));
 
-        let entity1 = ctrl.db_upsert("products", "p1", b"{\"price\":100}", 1000);
+        let entity1 = ctrl.db_upsert("products", "p1", b"{\"price\":100}", 1000).await;
         assert_eq!(entity1.data, b"{\"price\":100}");
 
-        let entity2 = ctrl.db_upsert("products", "p1", b"{\"price\":200}", 2000);
+        let entity2 = ctrl.db_upsert("products", "p1", b"{\"price\":200}", 2000).await;
         assert_eq!(entity2.data, b"{\"price\":200}");
         assert_eq!(entity2.timestamp_ms, 2000);
     }
 
-    #[test]
-    fn db_list_returns_all_entities_of_type() {
+    #[tokio::test]
+    async fn db_list_returns_all_entities_of_type() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
@@ -2377,16 +2401,16 @@ mod tests {
             ctrl.become_primary(partition, Epoch::new(1));
         }
 
-        ctrl.db_create("items", "item0", b"{}", 1000).unwrap();
-        ctrl.db_create("items", "item1", b"{}", 1000).unwrap();
-        ctrl.db_create("items", "item2", b"{}", 1000).unwrap();
+        ctrl.db_create("items", "item0", b"{}", 1000).await.unwrap();
+        ctrl.db_create("items", "item1", b"{}", 1000).await.unwrap();
+        ctrl.db_create("items", "item2", b"{}", 1000).await.unwrap();
 
         let items = ctrl.db_list("items");
         assert_eq!(items.len(), 3);
     }
 
-    #[test]
-    fn schema_register_broadcasts_to_all_partitions() {
+    #[tokio::test]
+    async fn schema_register_broadcasts_to_all_partitions() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
 
@@ -2406,21 +2430,21 @@ mod tests {
         }
         ctrl.update_partition_map(map);
 
-        let schema = ctrl.schema_register("users", b"{\"fields\":[]}").unwrap();
+        let schema = ctrl.schema_register("users", b"{\"fields\":[]}").await.unwrap();
         assert_eq!(schema.entity_str(), "users");
 
         let sent = ctrl.transport.sent_messages();
         assert_eq!(sent.len(), 64);
     }
 
-    #[test]
-    fn schema_register_duplicate_fails() {
+    #[tokio::test]
+    async fn schema_register_duplicate_fails() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        ctrl.schema_register("users", b"{}").unwrap();
-        let result = ctrl.schema_register("users", b"{}");
+        ctrl.schema_register("users", b"{}").await.unwrap();
+        let result = ctrl.schema_register("users", b"{}").await;
 
         assert!(matches!(
             result,
@@ -2428,40 +2452,40 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn schema_update_increments_version() {
+    #[tokio::test]
+    async fn schema_update_increments_version() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        ctrl.schema_register("users", b"{v1}").unwrap();
-        let updated = ctrl.schema_update("users", b"{v2}").unwrap();
+        ctrl.schema_register("users", b"{v1}").await.unwrap();
+        let updated = ctrl.schema_update("users", b"{v2}").await.unwrap();
 
         assert_eq!(updated.schema_version, 2);
     }
 
-    #[test]
-    fn schema_get_and_list() {
+    #[tokio::test]
+    async fn schema_get_and_list() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        ctrl.schema_register("users", b"{}").unwrap();
-        ctrl.schema_register("orders", b"{}").unwrap();
+        ctrl.schema_register("users", b"{}").await.unwrap();
+        ctrl.schema_register("orders", b"{}").await.unwrap();
 
         assert!(ctrl.schema_get("users").is_some());
         assert!(ctrl.schema_get("products").is_none());
         assert_eq!(ctrl.schema_list().len(), 2);
     }
 
-    #[test]
-    fn schema_is_valid_for_write_checks_active_state() {
+    #[tokio::test]
+    async fn schema_is_valid_for_write_checks_active_state() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
         assert!(!ctrl.schema_is_valid_for_write("users"));
-        ctrl.schema_register("users", b"{}").unwrap();
+        ctrl.schema_register("users", b"{}").await.unwrap();
         assert!(ctrl.schema_is_valid_for_write("users"));
     }
 }

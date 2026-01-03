@@ -292,6 +292,7 @@ impl ClusteredAgent {
             .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
 
+
         {
             let mut ctrl = self.controller.write().await;
             let mut raft = self.raft.write().await;
@@ -328,8 +329,8 @@ impl ClusteredAgent {
                 _ = tick_interval.tick() => {
                     let now = current_time_ms();
                     let mut ctrl = self.controller.write().await;
-                    ctrl.tick(now);
-                    ctrl.process_messages();
+                    ctrl.tick(now).await;
+                    ctrl.process_messages().await;
 
                     let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
                     let partition_updates: Vec<_> = ctrl.drain_partition_updates().collect();
@@ -345,7 +346,7 @@ impl ClusteredAgent {
                     }
 
                     for alive_node in alive_nodes {
-                        let rebalance_proposals = raft.handle_node_alive(alive_node);
+                        let rebalance_proposals = raft.handle_node_alive(alive_node).await;
                         if !rebalance_proposals.is_empty() {
                             info!(
                                 ?alive_node,
@@ -358,24 +359,24 @@ impl ClusteredAgent {
                     for msg in raft_msgs {
                         match msg {
                             RaftMessage::RequestVote { from, request } => {
-                                let response = raft.handle_request_vote(from, request, now);
-                                let _ = raft.send(from, crate::cluster::ClusterMessage::RequestVoteResponse(response));
+                                let response = raft.handle_request_vote(from, request, now).await;
+                                let _ = raft.send(from, crate::cluster::ClusterMessage::RequestVoteResponse(response)).await;
                             }
                             RaftMessage::RequestVoteResponse { from, response } => {
-                                raft.handle_request_vote_response(from, response);
+                                raft.handle_request_vote_response(from, response).await;
                             }
                             RaftMessage::AppendEntries { from, request } => {
-                                let response = raft.handle_append_entries(from, request, now);
-                                let _ = raft.send(from, crate::cluster::ClusterMessage::AppendEntriesResponse(response));
+                                let response = raft.handle_append_entries(from, request, now).await;
+                                let _ = raft.send(from, crate::cluster::ClusterMessage::AppendEntriesResponse(response)).await;
                             }
                             RaftMessage::AppendEntriesResponse { from, response } => {
-                                raft.handle_append_entries_response(from, response);
+                                raft.handle_append_entries_response(from, response).await;
                             }
                         }
                     }
 
                     for dead_node in dead_nodes {
-                        let proposed = raft.handle_node_death(dead_node);
+                        let proposed = raft.handle_node_death(dead_node).await;
                         if !proposed.is_empty() {
                             info!(
                                 ?dead_node,
@@ -386,7 +387,7 @@ impl ClusteredAgent {
                     }
 
                     for draining_node in draining_nodes {
-                        let proposed = raft.handle_drain_notification(draining_node);
+                        let proposed = raft.handle_drain_notification(draining_node).await;
                         if !proposed.is_empty() {
                             info!(
                                 ?draining_node,
@@ -418,12 +419,12 @@ impl ClusteredAgent {
                                 &replicas,
                                 Epoch::new(1),
                             );
-                            let _ = raft.propose_partition_update(cmd);
+                            let _ = raft.propose_partition_update(cmd).await;
                         }
                         partitions_initialized = true;
                     }
 
-                    let leader_proposals = raft.tick(now);
+                    let leader_proposals = raft.tick(now).await;
                     if !leader_proposals.is_empty() {
                         info!(
                             proposals = leader_proposals.len(),
@@ -485,7 +486,7 @@ impl ClusteredAgent {
                             for p in &pending {
                                 let broadcast = p.to_broadcast();
                                 let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                                let _ = ctrl.transport().broadcast(msg);
+                                let _ = ctrl.transport().broadcast(msg).await;
                                 pending_store.mark_retried(&p.pattern, &p.client_id);
                             }
                             info!(

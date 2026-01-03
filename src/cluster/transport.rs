@@ -111,33 +111,40 @@ pub struct InboundMessage {
 pub trait ClusterTransport: Send + Sync + Debug {
     fn local_node(&self) -> NodeId;
 
-    /// # Errors
-    /// Returns a transport error if sending fails.
-    fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError>;
+    fn send(
+        &self,
+        to: NodeId,
+        message: ClusterMessage,
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
-    /// # Errors
-    /// Returns a transport error if broadcasting fails.
-    fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError>;
+    fn broadcast(
+        &self,
+        message: ClusterMessage,
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
-    /// # Errors
-    /// Returns a transport error if sending fails or partition is not found.
     fn send_to_partition_primary(
         &self,
         partition: PartitionId,
         message: ClusterMessage,
-    ) -> Result<(), TransportError>;
+    ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
     fn recv(&self) -> Option<InboundMessage>;
 
     fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage>;
 
-    fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = (topic, payload, qos);
-    }
+    fn queue_local_publish(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+    ) -> impl std::future::Future<Output = ()> + Send;
 
-    fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = (topic, payload, qos);
-    }
+    fn queue_local_publish_retained(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
