@@ -8,6 +8,7 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -144,6 +145,10 @@ enum Commands {
         #[command(subcommand)]
         action: DbAction,
     },
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -203,6 +208,57 @@ enum BackupAction {
     List {
         #[command(flatten)]
         conn: ConnectionArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevAction {
+    Ps,
+    Kill {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        node: Option<u16>,
+        #[arg(long)]
+        agent: bool,
+    },
+    Clean {
+        #[arg(long, default_value = "/tmp/mqdb-test")]
+        db_prefix: String,
+    },
+    Logs {
+        #[arg(long)]
+        node: Option<u16>,
+        #[arg(long)]
+        pattern: Option<String>,
+        #[arg(long, short = 'f')]
+        follow: bool,
+        #[arg(long, default_value = "50")]
+        last: usize,
+        #[arg(long, default_value = "/tmp/mqdb-test")]
+        db_prefix: String,
+    },
+    Test {
+        #[arg(long)]
+        pubsub: bool,
+        #[arg(long)]
+        db: bool,
+        #[arg(long, default_value = "3")]
+        nodes: u8,
+    },
+    StartCluster {
+        #[arg(long, default_value = "3")]
+        nodes: u8,
+        #[arg(long)]
+        clean: bool,
+        #[arg(long, default_value = "test_certs/server.pem")]
+        quic_cert: PathBuf,
+        #[arg(long, default_value = "test_certs/server.key")]
+        quic_key: PathBuf,
+        #[arg(long)]
+        no_quic: bool,
+        #[arg(long, default_value = "/tmp/mqdb-test")]
+        db_prefix: String,
     },
 }
 
@@ -564,6 +620,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 conn,
             } => {
                 Box::pin(cmd_db_delete(partition, entity, id, conn)).await?;
+            }
+        },
+        Commands::Dev { action } => match action {
+            DevAction::Ps => {
+                cmd_dev_ps()?;
+            }
+            DevAction::Kill { all, node, agent } => {
+                cmd_dev_kill(all, node, agent);
+            }
+            DevAction::Clean { db_prefix } => {
+                cmd_dev_clean(&db_prefix)?;
+            }
+            DevAction::Logs {
+                node,
+                pattern,
+                follow,
+                last,
+                db_prefix,
+            } => {
+                cmd_dev_logs(node, pattern.as_deref(), follow, last, &db_prefix)?;
+            }
+            DevAction::Test { pubsub, db, nodes } => {
+                cmd_dev_test(pubsub, db, nodes);
+            }
+            DevAction::StartCluster {
+                nodes,
+                clean,
+                quic_cert,
+                quic_key,
+                no_quic,
+                db_prefix,
+            } => {
+                cmd_dev_start_cluster(nodes, clean, &quic_cert, &quic_key, no_quic, &db_prefix)?;
             }
         },
     }
@@ -1519,6 +1608,364 @@ async fn cmd_db_delete(
         DbStatus::NotFound => eprintln!("Not found"),
         status => eprintln!("Error: {status:?}"),
     }
+
+    Ok(())
+}
+
+fn cmd_dev_ps() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("pgrep").args(["-fl", "mqdb"]).output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.is_empty() {
+        println!("No MQDB processes running");
+        return Ok(());
+    }
+
+    println!("{:<8} {:<10} DETAILS", "PID", "TYPE");
+    println!("{}", "-".repeat(60));
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let pid = parts[0];
+        let cmd = parts[1];
+
+        let proc_type = if cmd.contains("cluster start") {
+            "cluster"
+        } else if cmd.contains("agent start") {
+            "agent"
+        } else {
+            "other"
+        };
+
+        let details = if let Some(node_pos) = cmd.find("--node-id") {
+            let rest = &cmd[node_pos + 10..];
+            let node_id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Some(bind_pos) = cmd.find("--bind") {
+                let bind_rest = &cmd[bind_pos + 7..];
+                let bind: String = bind_rest
+                    .chars()
+                    .take_while(|c| !c.is_whitespace())
+                    .collect();
+                format!("node={node_id} bind={bind}")
+            } else {
+                format!("node={node_id}")
+            }
+        } else if let Some(bind_pos) = cmd.find("--bind") {
+            let bind_rest = &cmd[bind_pos + 7..];
+            let bind: String = bind_rest
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            format!("bind={bind}")
+        } else {
+            String::new()
+        };
+
+        println!("{pid:<8} {proc_type:<10} {details}");
+    }
+
+    Ok(())
+}
+
+fn cmd_dev_kill(all: bool, node: Option<u16>, agent: bool) {
+    if agent {
+        println!("Killing MQDB agent...");
+        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
+        println!("Done");
+        return;
+    }
+
+    if let Some(node_id) = node {
+        println!("Killing MQDB cluster node {node_id}...");
+        let pattern = format!("mqdb cluster.*--node-id {node_id}");
+        let _ = Command::new("pkill").args(["-f", &pattern]).status();
+        println!("Done");
+        return;
+    }
+
+    if all {
+        println!("Killing all MQDB processes...");
+        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
+        println!("Done");
+        return;
+    }
+
+    println!("Killing all MQDB cluster nodes...");
+    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+    println!("Done");
+}
+
+fn cmd_dev_clean(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let pattern = format!("{db_prefix}-*");
+    let entries: Vec<_> = glob::glob(&pattern)?.filter_map(Result::ok).collect();
+
+    if entries.is_empty() {
+        println!("No databases matching {pattern}");
+        return Ok(());
+    }
+
+    println!("Cleaning {} database(s):", entries.len());
+    for entry in &entries {
+        println!("  Removing: {}", entry.display());
+        if entry.is_dir() {
+            std::fs::remove_dir_all(entry)?;
+        } else {
+            std::fs::remove_file(entry)?;
+        }
+    }
+    println!("Done");
+    Ok(())
+}
+
+fn cmd_dev_logs(
+    node: Option<u16>,
+    pattern: Option<&str>,
+    follow: bool,
+    last: usize,
+    db_prefix: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let log_files: Vec<PathBuf> = if let Some(node_id) = node {
+        let log_path = PathBuf::from(format!("{db_prefix}-{node_id}/mqdb.log"));
+        if log_path.exists() {
+            vec![log_path]
+        } else {
+            eprintln!("Log file not found: {}", log_path.display());
+            return Ok(());
+        }
+    } else {
+        glob::glob(&format!("{db_prefix}-*/mqdb.log"))?
+            .filter_map(Result::ok)
+            .collect()
+    };
+
+    if log_files.is_empty() {
+        println!("No log files found matching {db_prefix}-*/mqdb.log");
+        return Ok(());
+    }
+
+    for log_file in &log_files {
+        let node_id = log_file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .and_then(|s| s.strip_prefix(&format!("{}-", db_prefix.rsplit('/').next().unwrap_or("mqdb-test"))))
+            .unwrap_or("?");
+
+        println!("=== Node {node_id} ({}) ===", log_file.display());
+
+        if follow {
+            let mut cmd = Command::new("tail");
+            cmd.args(["-f", "-n", &last.to_string()]);
+            cmd.arg(log_file);
+            if let Some(pat) = pattern {
+                let child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
+                Command::new("grep")
+                    .args(["--line-buffered", pat])
+                    .stdin(child.stdout.unwrap())
+                    .status()?;
+            } else {
+                cmd.status()?;
+            }
+        } else {
+            let content = std::fs::read_to_string(log_file)?;
+            let lines: Vec<&str> = content.lines().collect();
+            let start = lines.len().saturating_sub(last);
+
+            for line in &lines[start..] {
+                if let Some(pat) = pattern {
+                    if line.contains(pat) {
+                        println!("{line}");
+                    }
+                } else {
+                    println!("{line}");
+                }
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
+    use std::time::{Duration, Instant};
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    println!("Waiting for cluster to be ready ({nodes} nodes)...");
+
+    while start.elapsed() < timeout {
+        let mut all_ready = true;
+
+        for i in 0..nodes {
+            let port = 1883 + u16::from(i);
+            let output = Command::new("timeout")
+                .args(["1", "mosquitto_pub", "-h", "127.0.0.1", "-p", &port.to_string(), "-t", "ping", "-m", "pong"])
+                .output();
+
+            if output.is_err() || !output.unwrap().status.success() {
+                all_ready = false;
+                break;
+            }
+        }
+
+        if all_ready {
+            std::thread::sleep(Duration::from_secs(2));
+            println!("Cluster ready!");
+            return true;
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    println!("Warning: cluster readiness check timed out");
+    false
+}
+
+fn cmd_dev_test(pubsub: bool, db: bool, nodes: u8) {
+    let run_all = !pubsub && !db;
+
+    wait_for_cluster_ready(nodes, 10);
+
+    if pubsub || run_all {
+        println!("=== Cross-Node Pub/Sub Matrix Test ({nodes} nodes) ===\n");
+        let ports: Vec<u16> = (0..nodes).map(|i| 1883 + u16::from(i)).collect();
+
+        let mut passed = 0;
+        let mut failed = 0;
+
+        for (src_idx, &src_port) in ports.iter().enumerate() {
+            for (dst_idx, &dst_port) in ports.iter().enumerate() {
+                if src_idx == dst_idx {
+                    continue;
+                }
+
+                let src_node = src_idx + 1;
+                let dst_node = dst_idx + 1;
+                let topic = format!("test/n{src_node}to{dst_node}");
+                let msg = format!("msg_{src_node}_{dst_node}");
+
+                let result = run_pubsub_test(src_port, dst_port, &topic, &msg);
+
+                if result {
+                    println!("  Node {src_node} → Node {dst_node}: ✓");
+                    passed += 1;
+                } else {
+                    println!("  Node {src_node} → Node {dst_node}: ✗");
+                    failed += 1;
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+
+        println!("\nResults: {passed} passed, {failed} failed");
+    }
+
+    if db || run_all {
+        println!("\n=== DB CRUD Test ===\n");
+        println!("(Not yet implemented)");
+    }
+}
+
+fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let sub_client_id = format!("sub-{sub_port}-{ts}");
+    let pub_client_id = format!("pub-{pub_port}-{ts}");
+    let output = Command::new("timeout")
+        .args([
+            "5",
+            "sh",
+            "-c",
+            &format!(
+                "mosquitto_sub -i '{sub_client_id}' -h 127.0.0.1 -p {sub_port} -t '{topic}' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_client_id}' -h 127.0.0.1 -p {pub_port} -t '{topic}' -m '{msg}'; wait"
+            ),
+        ])
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.trim() == msg
+        }
+        Err(_) => false,
+    }
+}
+
+fn cmd_dev_start_cluster(
+    nodes: u8,
+    clean: bool,
+    quic_cert: &std::path::Path,
+    quic_key: &std::path::Path,
+    no_quic: bool,
+    db_prefix: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if clean {
+        println!("Cleaning existing databases...");
+        let _ = cmd_dev_clean(db_prefix);
+    }
+
+    let exe = std::env::current_exe()?;
+
+    for node_id in 1..=nodes {
+        let port = 1882 + u16::from(node_id);
+        let db_path = format!("{db_prefix}-{node_id}");
+
+        let mut cmd = Command::new(&exe);
+        cmd.args([
+            "cluster",
+            "start",
+            "--node-id",
+            &node_id.to_string(),
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--db",
+            &db_path,
+        ]);
+
+        if node_id > 1 {
+            cmd.args(["--peers", "1@127.0.0.1:1883"]);
+        }
+
+        if !no_quic && quic_cert.exists() && quic_key.exists() {
+            cmd.args([
+                "--quic-cert",
+                quic_cert.to_str().unwrap_or(""),
+                "--quic-key",
+                quic_key.to_str().unwrap_or(""),
+            ]);
+        }
+
+        let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+        cmd.env("RUST_LOG", &rust_log);
+
+        std::fs::create_dir_all(&db_path)?;
+        let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
+        cmd.stdout(log_file.try_clone()?);
+        cmd.stderr(log_file);
+
+        println!(
+            "Starting node {node_id} on port {port}{}...",
+            if no_quic { " (TCP)" } else { " (QUIC)" }
+        );
+
+        cmd.spawn()?;
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    println!("\nCluster started with {nodes} nodes");
+    println!("Use 'mqdb dev ps' to check status");
+    println!("Use 'mqdb dev kill' to stop");
 
     Ok(())
 }
