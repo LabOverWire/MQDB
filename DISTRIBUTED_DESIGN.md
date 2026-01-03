@@ -659,6 +659,7 @@ struct ForwardedPublish {
     retain: bool,
     payload: Vec<u8>,
     targets: Vec<ForwardTarget>, // Clients on destination node
+    timestamp_ms: u64,           // For deduplication (avoids dropping repeated messages)
 }
 
 struct ForwardTarget {
@@ -667,10 +668,11 @@ struct ForwardTarget {
 }
 ```
 
-Wire format:
+Wire format (VERSION 2):
 ```
-version: u8
+version: u8 (= 2)
 origin_node: u16 BE
+timestamp_ms: u64 BE
 topic_len: u16 BE
 topic: [topic_len bytes UTF-8]
 qos: u8
