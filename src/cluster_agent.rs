@@ -11,12 +11,14 @@ use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
+use mqtt5::types::Message;
+use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::interval;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
@@ -107,6 +109,12 @@ impl ClusterConfig {
         self.quic_key_file = Some(key_file);
         self
     }
+}
+
+#[derive(Debug)]
+struct AdminRequest {
+    topic: String,
+    response_topic: Option<String>,
 }
 
 pub struct ClusteredAgent {
@@ -292,6 +300,22 @@ impl ClusteredAgent {
             .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
 
+        let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(32);
+        let admin_client = transport.client().clone();
+        admin_client
+            .subscribe("$SYS/mqdb/cluster/#", {
+                let tx = admin_tx.clone();
+                move |msg: Message| {
+                    let req = AdminRequest {
+                        topic: msg.topic.clone(),
+                        response_topic: msg.properties.response_topic.clone(),
+                    };
+                    let _ = tx.try_send(req);
+                }
+            })
+            .await
+            .map_err(|e| format!("failed to subscribe to admin topics: {e}"))?;
+        info!("subscribed to admin topics");
 
         {
             let mut ctrl = self.controller.write().await;
@@ -522,6 +546,9 @@ impl ClusteredAgent {
                         stores.subscriptions.mark_reconciliation(now);
                     }
                 }
+                Some(req) = admin_rx.recv() => {
+                    self.handle_admin_request(&admin_client, req).await;
+                }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
                     break;
@@ -531,6 +558,89 @@ impl ClusteredAgent {
 
         broker_handle.abort();
         Ok(())
+    }
+
+    async fn handle_admin_request(&self, client: &mqtt5::client::MqttClient, req: AdminRequest) {
+        let Some(response_topic) = req.response_topic else {
+            warn!(topic = %req.topic, "admin request without response topic");
+            return;
+        };
+
+        let response = if req.topic.ends_with("/status") {
+            self.build_status_response().await
+        } else if req.topic.ends_with("/rebalance") {
+            self.handle_rebalance_request().await
+        } else {
+            json!({
+                "ok": false,
+                "error": format!("unknown admin command: {}", req.topic)
+            })
+        };
+
+        let payload = serde_json::to_vec(&response).unwrap_or_default();
+        if let Err(e) = client.publish(&response_topic, payload).await {
+            warn!(error = %e, "failed to send admin response");
+        }
+    }
+
+    async fn build_status_response(&self) -> serde_json::Value {
+        let ctrl = self.controller.read().await;
+        let raft = self.raft.read().await;
+
+        let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
+
+        let mut partitions = Vec::new();
+        for partition in PartitionId::all() {
+            let assignment = ctrl.partition_map().get(partition);
+            let replicas: Vec<_> = assignment.replicas.iter().copied().map(NodeId::get).collect();
+            partitions.push(json!({
+                "id": partition.get(),
+                "primary": assignment.primary.map(NodeId::get),
+                "replicas": replicas,
+                "epoch": assignment.epoch.get()
+            }));
+        }
+
+        json!({
+            "ok": true,
+            "data": {
+                "node_id": self.node_id.get(),
+                "node_name": self.node_name,
+                "is_raft_leader": raft.is_leader(),
+                "raft_term": raft.current_term(),
+                "alive_nodes": alive_nodes,
+                "partition_count": 64,
+                "partitions": partitions
+            }
+        })
+    }
+
+    async fn handle_rebalance_request(&self) -> serde_json::Value {
+        let mut raft = self.raft.write().await;
+
+        if !raft.is_leader() {
+            return json!({
+                "ok": false,
+                "error": "not the Raft leader"
+            });
+        }
+
+        let ctrl = self.controller.read().await;
+        let alive_nodes = ctrl.alive_nodes();
+        drop(ctrl);
+
+        let mut proposed = 0;
+        for node in alive_nodes {
+            let proposals = raft.handle_node_alive(node).await;
+            proposed += proposals.len();
+        }
+
+        json!({
+            "ok": true,
+            "data": {
+                "proposed_changes": proposed
+            }
+        })
     }
 
     pub fn shutdown(&self) {

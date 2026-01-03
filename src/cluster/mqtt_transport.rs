@@ -78,6 +78,11 @@ impl MqttTransport {
         }
     }
 
+    #[must_use]
+    pub fn client(&self) -> &MqttClient {
+        &self.client
+    }
+
     /// # Errors
     /// Returns `SendFailed` if connection fails.
     ///

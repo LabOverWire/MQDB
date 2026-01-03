@@ -82,6 +82,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.node.is_leader()
     }
 
+    pub fn current_term(&self) -> u64 {
+        self.node.current_term()
+    }
+
     pub fn leader_id(&self) -> Option<NodeId> {
         self.node.leader_id()
     }
