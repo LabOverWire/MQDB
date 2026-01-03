@@ -906,12 +906,20 @@ impl<T: ClusterTransport> NodeController<T> {
             || write.entity == entity::CLIENT_LOCATIONS;
         if is_broadcast_entity {
             let _ = self.stores.apply_write(&write);
-            for node in self.heartbeat.alive_nodes() {
-                if node != self.node_id {
-                    let _ = self
-                        .transport
-                        .send(node, ClusterMessage::WriteRequest(write.clone()));
-                }
+            let alive = self.heartbeat.alive_nodes();
+            let targets: Vec<_> = alive.iter().filter(|&n| *n != self.node_id).collect();
+            tracing::debug!(
+                entity = write.entity,
+                id = write.id,
+                alive_count = alive.len(),
+                target_count = targets.len(),
+                targets = ?targets.iter().map(|n| n.get()).collect::<Vec<_>>(),
+                "write_or_forward: broadcasting to alive nodes"
+            );
+            for node in targets {
+                let _ = self
+                    .transport
+                    .send(*node, ClusterMessage::WriteRequest(write.clone()));
             }
             return;
         }
@@ -1264,6 +1272,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let mut hasher = DefaultHasher::new();
         fwd.origin_node.hash(&mut hasher);
+        fwd.timestamp_ms.hash(&mut hasher);
         fwd.topic.hash(&mut hasher);
         fwd.payload.hash(&mut hasher);
         hasher.finish()

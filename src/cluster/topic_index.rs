@@ -159,11 +159,13 @@ impl TopicIndex {
         client_partition: PartitionId,
         qos: u8,
     ) -> Result<(), TopicIndexError> {
+        tracing::debug!(topic, client_id, "subscribe: local subscribe");
         let mut entries = self.entries.write().unwrap();
         let entry = entries
             .entry(topic.to_string())
             .or_insert_with(|| TopicIndexEntry::create(topic));
         entry.add_subscriber(client_id, client_partition, qos);
+        tracing::debug!(topic, count = entry.subscribers.len(), "subscribe: after add");
         Ok(())
     }
 
@@ -173,10 +175,12 @@ impl TopicIndex {
     /// # Errors
     /// Returns `NotFound` if the topic does not exist.
     pub fn unsubscribe(&self, topic: &str, client_id: &str) -> Result<(), TopicIndexError> {
+        tracing::debug!(topic, client_id, "unsubscribe called");
         let mut entries = self.entries.write().unwrap();
         if let Some(entry) = entries.get_mut(topic) {
             let _ = entry.remove_subscriber(client_id);
             if entry.subscribers.is_empty() {
+                tracing::debug!(topic, "unsubscribe: removing empty entry");
                 entries.remove(topic);
             }
             Ok(())
@@ -189,12 +193,19 @@ impl TopicIndex {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get_subscribers(&self, topic: &str) -> Vec<SubscriberLocation> {
-        self.entries
-            .read()
-            .unwrap()
+        let entries = self.entries.read().unwrap();
+        let result = entries
             .get(topic)
             .map(|e| e.subscribers.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        tracing::debug!(
+            topic,
+            entry_exists = entries.contains_key(topic),
+            subscriber_count = result.len(),
+            total_topics = entries.len(),
+            "get_subscribers lookup"
+        );
+        result
     }
 
     /// # Panics
@@ -319,14 +330,31 @@ impl TopicIndex {
             Operation::Insert | Operation::Update => {
                 let incoming =
                     Self::deserialize(data).ok_or(TopicIndexError::SerializationError)?;
+                tracing::debug!(
+                    id,
+                    incoming_subscribers = incoming.subscribers.len(),
+                    "apply_replicated: deserialized entry"
+                );
                 let mut entries = self.entries.write().unwrap();
-                let entry = entries
-                    .entry(id.to_string())
-                    .or_insert_with(|| TopicIndexEntry::create(id));
-                for sub in &incoming.subscribers {
-                    if let Some(partition) = sub.partition() {
-                        entry.add_subscriber(sub.client_id_str(), partition, sub.qos);
-                    }
+                let existed_before = entries.contains_key(id);
+                let before_count = entries.get(id).map_or(0, |e| e.subscribers.len());
+                if incoming.subscribers.is_empty() {
+                    entries.remove(id);
+                    tracing::debug!(
+                        id,
+                        existed_before,
+                        before_count,
+                        "apply_replicated: entry removed (no subscribers)"
+                    );
+                } else {
+                    entries.insert(id.to_string(), incoming);
+                    tracing::debug!(
+                        id,
+                        existed_before,
+                        before_count,
+                        final_count = entries.get(id).map_or(0, |e| e.subscribers.len()),
+                        "apply_replicated: entry replaced"
+                    );
                 }
                 Ok(())
             }
@@ -411,6 +439,11 @@ impl TopicIndex {
             offset += data_len;
 
             if let Some(entry) = Self::deserialize(entry_data) {
+                tracing::debug!(
+                    topic,
+                    subscribers = entry.subscribers.len(),
+                    "import_entries: replacing entry"
+                );
                 self.entries
                     .write()
                     .unwrap()
@@ -425,10 +458,15 @@ impl TopicIndex {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        tracing::debug!(partition = partition.get(), "clear_partition called");
         let mut entries = self.entries.write().unwrap();
         let before = entries.len();
         entries.retain(|topic, _| topic_partition(topic) != partition);
-        before - entries.len()
+        let removed = before - entries.len();
+        if removed > 0 {
+            tracing::debug!(partition = partition.get(), removed, "clear_partition: removed entries");
+        }
+        removed
     }
 
     /// # Panics

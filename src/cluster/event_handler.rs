@@ -85,11 +85,16 @@ impl BrokerEventHandler for ClusterEventHandler {
             let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
                 s.set_clean_session(event.clean_start);
             });
-            if let Err(e) = result {
-                warn!(client_id, error = ?e, "failed to set clean_session flag");
-            } else if let Ok((_session, write)) = result {
-                ctrl.write_or_forward(write);
-            }
+            let clean_session_write = match result {
+                Ok((_session, write)) => {
+                    ctrl.write_or_forward(write.clone());
+                    Some(write)
+                }
+                Err(e) => {
+                    warn!(client_id, error = ?e, "failed to set clean_session flag");
+                    None
+                }
+            };
 
             let location_entry = ClientLocationEntry::create(client_id, self.node_id);
             let location_write = ReplicationWrite::new(
@@ -126,10 +131,12 @@ impl BrokerEventHandler for ClusterEventHandler {
                     }
                     Err(e) => {
                         warn!(client_id, error = ?e, "failed to store will in session");
-                        ctrl.write_or_forward(create_write);
+                        if clean_session_write.is_none() {
+                            ctrl.write_or_forward(create_write);
+                        }
                     }
                 }
-            } else {
+            } else if clean_session_write.is_none() {
                 ctrl.write_or_forward(create_write);
             }
         })
@@ -260,15 +267,23 @@ impl BrokerEventHandler for ClusterEventHandler {
             }
 
             let session = ctrl.stores().sessions.get(client_id);
-            if let Some(session) = session
-                && session.is_clean_session()
-            {
-                debug!(
-                    client_id,
-                    "clean_session disconnect - clearing subscriptions"
-                );
-                clear_client_subscriptions(&mut ctrl, client_id);
-                let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+            if let Some(session) = session {
+                if session.is_clean_session() {
+                    debug!(
+                        client_id,
+                        "clean_session disconnect - clearing subscriptions"
+                    );
+                    clear_client_subscriptions(&mut ctrl, client_id);
+                    let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+                } else {
+                    debug!(
+                        client_id,
+                        clean_session = session.clean_session,
+                        "session is NOT clean_session, skipping subscription cleanup"
+                    );
+                }
+            } else {
+                debug!(client_id, "session not found for disconnect");
             }
         })
     }
