@@ -2279,6 +2279,76 @@ async fn wildcard_broadcast_replication() {
 }
 
 #[tokio::test]
+async fn cross_node_wildcard_publish_routing() {
+    use mqdb::cluster::{ClusterMessage, ClusterTransport, SubscriptionType, WildcardBroadcast};
+
+    let mut cluster = TestCluster::new(2);
+    let client_partition = session_partition("wildcard-subscriber");
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0).await;
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages().await;
+    }
+
+    cluster.nodes[0]
+        .sessions
+        .create_session("wildcard-subscriber")
+        .unwrap();
+
+    let broadcast = WildcardBroadcast::subscribe(
+        "sensors/+/temp",
+        "wildcard-subscriber",
+        client_partition,
+        1,
+        SubscriptionType::Mqtt as u8,
+    );
+    let msg = ClusterMessage::WildcardBroadcast(broadcast);
+    cluster.nodes[0]
+        .controller
+        .transport()
+        .broadcast(msg)
+        .await
+        .ok();
+
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages().await;
+    }
+
+    let router = PublishRouter::new(&cluster.nodes[1].topics);
+    let wildcard_matches = cluster.nodes[1]
+        .controller
+        .stores()
+        .wildcards
+        .match_topic("sensors/room1/temp");
+
+    assert_eq!(
+        wildcard_matches.len(),
+        1,
+        "Node 2 should find wildcard match for sensors/room1/temp"
+    );
+
+    let result = router.route_with_wildcards("sensors/room1/temp", &wildcard_matches);
+
+    assert_eq!(
+        result.targets.len(),
+        1,
+        "Should route to one subscriber"
+    );
+    assert_eq!(
+        result.targets[0].client_id, "wildcard-subscriber",
+        "Should route to wildcard-subscriber"
+    );
+    assert_eq!(
+        result.targets[0].client_partition, client_partition,
+        "Should have correct client partition for forwarding"
+    );
+}
+
+#[tokio::test]
 async fn drain_notification_triggers_partition_reassignment() {
     use mqdb::cluster::{ClusterMessage, ClusterTransport};
 

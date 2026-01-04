@@ -13,7 +13,7 @@
 | M4 | Raft Consensus | Done |
 | M5 | DB Integration | Done |
 | M6 | Topic Index & Subscription Routing | Done |
-| M7 | Wildcard Subscriptions | Not Started |
+| M7 | Wildcard Subscriptions | Done |
 | M8 | QoS State Replication | Not Started |
 | M9 | Last Will & Testament | Not Started |
 | M10 | Session Migration & Cleanup | Not Started |
@@ -150,15 +150,52 @@ Without `add_peer()`, the Raft leader never sent `AppendEntries` to new nodes, s
 
 ---
 
-## M7: Wildcard Subscriptions (NOT STARTED)
+## M7: Wildcard Subscriptions (DONE)
 
 ### Goal
 Support wildcard patterns (+, #) across cluster.
 
 ### Requirements
-1. Wildcards store must be broadcast entity
-2. Publish routing must check both exact and wildcard matches
-3. TopicTrie must be consistent across all nodes
+1. Wildcards store must be broadcast entity ✅
+2. Publish routing must check both exact and wildcard matches ✅
+3. TopicTrie must be consistent across all nodes ✅
+
+### Implementation
+
+#### 7.1 TopicTrie Data Structure (DONE)
+- [x] Efficient trie for pattern matching (`+` single-level, `#` multi-level)
+- [x] Pattern validation (# at end, no mixed wildcards)
+- [x] System topic protection ($SYS/* blocked)
+- [x] File: `src/cluster/topic_trie.rs`
+
+#### 7.2 WildcardStore Broadcast (DONE)
+- [x] WildcardStore wraps TopicTrie with serialization
+- [x] WildcardBroadcast message for cluster propagation
+- [x] Subscribe/unsubscribe broadcast to all nodes
+- [x] Files: `src/cluster/wildcard_store.rs`, `src/cluster/protocol.rs`
+
+#### 7.3 Publish Routing Integration (DONE)
+- [x] PublishRouter.route_with_wildcards() combines exact + wildcard matches
+- [x] Deduplication by client_id with max QoS
+- [x] Cross-node forwarding based on client partition
+- [x] File: `src/cluster/publish_router.rs`
+
+#### 7.4 Event Handler Integration (DONE)
+- [x] on_client_subscribe() broadcasts wildcard subscriptions
+- [x] on_client_publish() queries both TopicIndex and WildcardStore
+- [x] File: `src/cluster/event_handler.rs`
+
+### Tests
+- `pubsub_wildcard_routing` - single-node routing logic
+- `wildcard_deduplication_max_qos` - same client on multiple patterns
+- `wildcard_broadcast_replication` - 2-node broadcast propagation
+- `cross_node_wildcard_publish_routing` - end-to-end cross-node routing
+- `test_wildcard_plus_subscription` - MQTT protocol + wildcard
+- `test_wildcard_hash_subscription` - MQTT protocol # wildcard
+
+### Known Limitations
+- Retained messages for wildcard subscriptions handled locally only (no cross-node query)
+- Failed wildcard broadcasts tracked but not automatically retried
 
 ---
 
