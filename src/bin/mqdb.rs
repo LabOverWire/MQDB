@@ -276,7 +276,11 @@ enum BenchAction {
         subscribers: usize,
         #[arg(long, default_value = "10000", help = "Total messages to send")]
         messages: u64,
-        #[arg(long, default_value = "0", help = "Messages per second (0 = unlimited)")]
+        #[arg(
+            long,
+            default_value = "0",
+            help = "Messages per second (0 = unlimited)"
+        )]
         rate: u64,
         #[arg(long, default_value = "64", help = "Payload size in bytes")]
         size: usize,
@@ -297,13 +301,21 @@ enum BenchAction {
         operations: u64,
         #[arg(long, default_value = "bench_entity", help = "Entity name to use")]
         entity: String,
-        #[arg(long, default_value = "mixed", help = "Operation type: insert, get, update, delete, list, mixed")]
+        #[arg(
+            long,
+            default_value = "mixed",
+            help = "Operation type: insert, get, update, delete, list, mixed"
+        )]
         op: String,
         #[arg(long, default_value = "1", help = "Number of concurrent clients")]
         concurrency: usize,
         #[arg(long, default_value = "5", help = "Number of fields per record")]
         fields: usize,
-        #[arg(long, default_value = "100", help = "Approximate size of field values in bytes")]
+        #[arg(
+            long,
+            default_value = "100",
+            help = "Approximate size of field values in bytes"
+        )]
         field_size: usize,
         #[arg(long, help = "Warmup operations before measuring")]
         warmup: Option<u64>,
@@ -361,7 +373,11 @@ enum ClusterAction {
         node_id: u16,
         #[arg(long, help = "Human-readable node name")]
         node_name: Option<String>,
-        #[arg(long, default_value = "0.0.0.0:1883", help = "Address to bind MQTT listener")]
+        #[arg(
+            long,
+            default_value = "0.0.0.0:1883",
+            help = "Address to bind MQTT listener"
+        )]
         bind: SocketAddr,
         #[arg(long, help = "Path to database directory")]
         db: PathBuf,
@@ -925,7 +941,10 @@ async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::err
     println!("│ Term:     {raft_term:<29} │");
     println!("├─────────────────────────────────────────┤");
 
-    if let Some(alive) = data.get("alive_nodes").and_then(serde_json::Value::as_array) {
+    if let Some(alive) = data
+        .get("alive_nodes")
+        .and_then(serde_json::Value::as_array)
+    {
         let nodes: Vec<String> = alive
             .iter()
             .filter_map(serde_json::Value::as_u64)
@@ -957,7 +976,10 @@ async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::err
         }
 
         println!("├─────────────────────────────────────────┤");
-        println!("│ Partitions: {:<27} │", format!("{} total", partitions.len()));
+        println!(
+            "│ Partitions: {:<27} │",
+            format!("{} total", partitions.len())
+        );
 
         let mut dist: Vec<_> = primary_counts.iter().collect();
         dist.sort_by_key(|(k, _)| *k);
@@ -1946,7 +1968,12 @@ fn cmd_dev_logs(
             .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .and_then(|s| s.strip_prefix(&format!("{}-", db_prefix.rsplit('/').next().unwrap_or("mqdb-test"))))
+            .and_then(|s| {
+                s.strip_prefix(&format!(
+                    "{}-",
+                    db_prefix.rsplit('/').next().unwrap_or("mqdb-test")
+                ))
+            })
             .unwrap_or("?");
 
         println!("=== Node {node_id} ({}) ===", log_file.display());
@@ -1999,7 +2026,18 @@ fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
         for i in 0..nodes {
             let port = 1883 + u16::from(i);
             let output = Command::new("timeout")
-                .args(["1", "mosquitto_pub", "-h", "127.0.0.1", "-p", &port.to_string(), "-t", "ping", "-m", "pong"])
+                .args([
+                    "1",
+                    "mosquitto_pub",
+                    "-h",
+                    "127.0.0.1",
+                    "-p",
+                    &port.to_string(),
+                    "-t",
+                    "ping",
+                    "-m",
+                    "pong",
+                ])
                 .output();
 
             if output.is_err() || !output.unwrap().status.success() {
@@ -2164,7 +2202,10 @@ fn cmd_dev_start_cluster(
     Ok(())
 }
 
-async fn wait_for_broker_ready(conn: &ConnectionArgs, timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn wait_for_broker_ready(
+    conn: &ConnectionArgs,
+    timeout_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -2182,9 +2223,10 @@ async fn wait_for_broker_ready(conn: &ConnectionArgs, timeout_secs: u64) -> Resu
         let client_id = format!("bench-ready-{}", uuid::Uuid::new_v4());
         let client = MqttClient::new(&client_id);
         let connected = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-            let opts = ConnectOptions::new(&client_id)
-                .with_credentials(user.clone(), pass.clone());
-            Box::pin(client.connect_with_options(&conn.broker, opts)).await.is_ok()
+            let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+            Box::pin(client.connect_with_options(&conn.broker, opts))
+                .await
+                .is_ok()
         } else {
             client.connect(&conn.broker).await.is_ok()
         };
@@ -2209,15 +2251,15 @@ async fn wait_for_broker_ready(conn: &ConnectionArgs, timeout_secs: u64) -> Resu
                     ..Default::default()
                 };
 
-                let _ = client.publish_with_options(
-                    "$DB/_health",
-                    b"{}".to_vec(),
-                    opts,
-                ).await;
+                let _ = client
+                    .publish_with_options("$DB/_health", b"{}".to_vec(), opts)
+                    .await;
 
-                if let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), payload_rx.recv()).await
+                if let Ok(Some(payload)) =
+                    tokio::time::timeout(Duration::from_secs(2), payload_rx.recv()).await
                     && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&payload)
-                    && json.get("data")
+                    && json
+                        .get("data")
                         .and_then(|d| d.get("ready"))
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false)
@@ -2266,7 +2308,11 @@ impl BenchMetrics {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     fn calculate_percentile(&self, p: f64) -> u64 {
         if let Ok(mut latencies) = self.latencies_ns.lock() {
             if latencies.is_empty() {
@@ -2281,7 +2327,11 @@ impl BenchMetrics {
     }
 }
 
-#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
 async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -2310,7 +2360,8 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
             let client = MqttClient::new(&client_id);
 
             if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+                let opts =
+                    ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
                 if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                     eprintln!("Subscriber {sub_id} connect failed: {e}");
                     return;
@@ -2336,8 +2387,12 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                             metrics_clone.record_latency(recv_time - sent_ns);
                         }
                     }
-                    metrics_clone.messages_received.fetch_add(1, Ordering::Relaxed);
-                    metrics_clone.bytes_received.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    metrics_clone
+                        .messages_received
+                        .fetch_add(1, Ordering::Relaxed);
+                    metrics_clone
+                        .bytes_received
+                        .fetch_add(payload.len() as u64, Ordering::Relaxed);
                 })
                 .await
             {
@@ -2379,7 +2434,8 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
             let client = MqttClient::new(&client_id);
 
             if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+                let opts =
+                    ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
                 if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                     eprintln!("Publisher {pub_id} connect failed: {e}");
                     return;
@@ -2408,7 +2464,9 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                     metrics.errors.fetch_add(1, Ordering::Relaxed);
                 } else if i >= warmup {
                     metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
-                    metrics.bytes_sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    metrics
+                        .bytes_sent
+                        .fetch_add(payload.len() as u64, Ordering::Relaxed);
                 }
 
                 if let Some(interval) = interval {
@@ -2548,7 +2606,11 @@ impl DbBenchMetrics {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
     fn calculate_percentile(&self, p: f64) -> u64 {
         if let Ok(mut latencies) = self.latencies_ns.lock() {
             if latencies.is_empty() {
@@ -2576,12 +2638,19 @@ fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
     let mut record = serde_json::Map::new();
     let value_template: String = (0..field_size).map(|_| 'x').collect();
     for i in 0..fields {
-        record.insert(format!("field_{i}"), json!(format!("{value_template}_{id}")));
+        record.insert(
+            format!("field_{i}"),
+            json!(format!("{value_template}_{id}")),
+        );
     }
     Value::Object(record)
 }
 
-#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
 async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
@@ -2602,7 +2671,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
     );
 
     let metrics = Arc::new(DbBenchMetrics::default());
-    let inserted_ids: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inserted_ids: Arc<std::sync::Mutex<Vec<String>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
     let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let ops_per_client = args.operations / args.concurrency.max(1) as u64;
@@ -2625,8 +2695,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
             let client = MqttClient::new(client_name.clone());
 
             if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts = ConnectOptions::new(client_name)
-                    .with_credentials(user.clone(), pass.clone());
+                let opts =
+                    ConnectOptions::new(client_name).with_credentials(user.clone(), pass.clone());
                 if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                     eprintln!("Client {client_id} connect failed: {e}");
                     return;
@@ -2656,7 +2726,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         let id = id_counter.fetch_add(1, Ordering::Relaxed);
                         let record = generate_record(fields, field_size, id);
                         let topic = format!("$DB/{entity}/create");
-                        let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+                        let response_topic =
+                            format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
                         let (tx, mut rx) = mpsc::channel::<bool>(1);
                         let tx_clone = tx.clone();
@@ -2678,20 +2749,23 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 ..Default::default()
                             };
                             if client
-                                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                                .publish_with_options(
+                                    &topic,
+                                    serde_json::to_vec(&record).unwrap(),
+                                    opts,
+                                )
                                 .await
                                 .is_err()
                             {
                                 false
                             } else {
-                                let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(false);
-                                if result
-                                    && let Ok(mut ids) = inserted_ids.lock()
-                                {
+                                let result =
+                                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(false);
+                                if result && let Ok(mut ids) = inserted_ids.lock() {
                                     ids.push(format!("{id}"));
                                 }
                                 let _ = client.unsubscribe(&response_topic).await;
@@ -2712,7 +2786,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         };
                         if let Some(id) = id {
                             let topic = format!("$DB/{entity}/{id}");
-                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+                            let response_topic =
+                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
                             let (tx, mut rx) = mpsc::channel::<bool>(1);
                             let tx_clone = tx.clone();
@@ -2739,11 +2814,12 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 {
                                     false
                                 } else {
-                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(false);
+                                    let result =
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -2766,7 +2842,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         if let Some(id) = id {
                             let record = generate_record(fields, field_size, i);
                             let topic = format!("$DB/{entity}/{id}/update");
-                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+                            let response_topic =
+                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
                             let (tx, mut rx) = mpsc::channel::<bool>(1);
                             let tx_clone = tx.clone();
@@ -2787,17 +2864,22 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                     ..Default::default()
                                 };
                                 if client
-                                    .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                                    .publish_with_options(
+                                        &topic,
+                                        serde_json::to_vec(&record).unwrap(),
+                                        opts,
+                                    )
                                     .await
                                     .is_err()
                                 {
                                     false
                                 } else {
-                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(false);
+                                    let result =
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -2813,7 +2895,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         };
                         if let Some(id) = id {
                             let topic = format!("$DB/{entity}/{id}/delete");
-                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+                            let response_topic =
+                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
                             let (tx, mut rx) = mpsc::channel::<bool>(1);
                             let tx_clone = tx.clone();
@@ -2840,11 +2923,12 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 {
                                     false
                                 } else {
-                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(false);
+                                    let result =
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                            .await
+                                            .ok()
+                                            .flatten()
+                                            .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -2855,7 +2939,8 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                     }
                     DbOp::List => {
                         let topic = format!("$DB/{entity}/list");
-                        let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+                        let response_topic =
+                            format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
                         let (tx, mut rx) = mpsc::channel::<bool>(1);
                         let tx_clone = tx.clone();
@@ -2877,17 +2962,22 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             };
                             let payload = json!({"limit": 10});
                             if client
-                                .publish_with_options(&topic, serde_json::to_vec(&payload).unwrap(), opts)
+                                .publish_with_options(
+                                    &topic,
+                                    serde_json::to_vec(&payload).unwrap(),
+                                    opts,
+                                )
                                 .await
                                 .is_err()
                             {
                                 false
                             } else {
-                                let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or(false);
+                                let result =
+                                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(false);
                                 let _ = client.unsubscribe(&response_topic).await;
                                 result
                             }

@@ -12,7 +12,9 @@ async fn start_agent_background(port: u16) -> (TempDir, tokio::task::JoinHandle<
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let agent = MqdbAgent::new(db).with_bind_address(addr).with_anonymous(true);
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(addr)
+        .with_anonymous(true);
 
     let handle = tokio::spawn(async move {
         let _ = agent.run().await;
@@ -53,7 +55,10 @@ async fn test_cli_create_and_read() {
     ])
     .await;
 
-    assert!(success, "create should succeed: stderr={stderr}, stdout={stdout}");
+    assert!(
+        success,
+        "create should succeed: stderr={stderr}, stdout={stdout}"
+    );
 
     let created: Value = serde_json::from_str(&stdout).expect("should parse JSON output");
     let id = created
@@ -77,10 +82,7 @@ async fn test_cli_create_and_read() {
 
     let read: Value = serde_json::from_str(&stdout).expect("should parse JSON output");
     let data = read.get("data").expect("should have data");
-    assert_eq!(
-        data.get("name").and_then(|v| v.as_str()),
-        Some("Alice")
-    );
+    assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("Alice"));
 
     handle.abort();
 }
@@ -143,7 +145,11 @@ async fn test_cli_update_and_delete() {
     assert!(success, "create should succeed");
 
     let created: Value = serde_json::from_str(&stdout).expect("should parse JSON");
-    let id = created.get("data").and_then(|d| d.get("id")).and_then(|v| v.as_str()).unwrap();
+    let id = created
+        .get("data")
+        .and_then(|d| d.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap();
 
     let (success, stdout, _stderr) = run_mqdb(&[
         "update",
@@ -161,10 +167,7 @@ async fn test_cli_update_and_delete() {
 
     let updated: Value = serde_json::from_str(&stdout).expect("should parse JSON");
     let data = updated.get("data").expect("should have data");
-    assert_eq!(
-        data.get("name").and_then(|v| v.as_str()),
-        Some("Bob Smith")
-    );
+    assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("Bob Smith"));
 
     let (success, _, _) = run_mqdb(&[
         "delete",

@@ -269,6 +269,20 @@ impl InflightStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
+    pub fn clear_client_with_data(&self, client_id: &str) -> Vec<(u16, Vec<u8>)> {
+        let mut messages = self.messages.write().unwrap();
+        let removed: Vec<_> = messages
+            .iter()
+            .filter(|((cid, _), _)| cid == client_id)
+            .map(|((_, packet_id), msg)| (*packet_id, Self::serialize(msg)))
+            .collect();
+        messages.retain(|(cid, _), _| cid != client_id);
+        removed
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
     pub fn messages_on_partition(&self, partition: PartitionId) -> Vec<InflightMessage> {
         self.messages
             .read()

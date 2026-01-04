@@ -1,15 +1,15 @@
-use bebytes::BeBytes;
+use crate::cluster::Epoch;
 use crate::cluster::client_location::{ClientLocationEntry, client_location_key};
 use crate::cluster::db_handler::DbRequestHandler;
 use crate::cluster::entity;
 use crate::cluster::protocol::{Operation, ReplicationWrite};
-use crate::cluster::Epoch;
 use crate::cluster::session::session_partition;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
     ForwardTarget, ForwardedPublish, LwtPublisher, MqttTransport, NodeController, NodeId,
     PublishRouter, SubscriptionType, WildcardBroadcast,
 };
+use bebytes::BeBytes;
 use mqtt5::QoS;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
@@ -191,7 +191,7 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                 debug!(
                     client_id,
-                    has_lwt = prepared.as_ref().map_or(false, |p| p.is_some()),
+                    has_lwt = prepared.as_ref().is_ok_and(Option::is_some),
                     "checking LWT conditions"
                 );
 
@@ -228,7 +228,7 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                     let transport = ctrl.transport().clone();
                     let session = ctrl.stores().sessions.get(client_id);
-                    let is_clean_session = session.map_or(false, |s| s.is_clean_session());
+                    let is_clean_session = session.is_some_and(|s| s.is_clean_session());
                     drop(ctrl);
 
                     for (target_node, targets) in remote_nodes {
@@ -430,7 +430,9 @@ impl BrokerEventHandler for ClusterEventHandler {
                         payload_len = msg.payload.len(),
                         "delivering retained message to subscriber"
                     );
-                    transport.queue_local_publish_retained(topic, msg.payload.clone(), msg.qos).await;
+                    transport
+                        .queue_local_publish_retained(topic, msg.payload.clone(), msg.qos)
+                        .await;
                 }
             }
         })
@@ -537,11 +539,9 @@ impl BrokerEventHandler for ClusterEventHandler {
                     )
                     .await
                 {
-                    ctrl.transport().queue_local_publish(
-                        response.topic,
-                        response.payload,
-                        qos_to_u8(event.qos),
-                    ).await;
+                    ctrl.transport()
+                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                        .await;
                 }
                 return;
             }
@@ -797,6 +797,13 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
         }
     }
 
-    let _ = ctrl.stores().qos2.clear_client(client_id);
-    let _ = ctrl.stores().inflight.clear_client(client_id);
+    for write in ctrl.stores_mut().clear_qos2_client_replicated(client_id) {
+        ctrl.write_or_forward(write).await;
+    }
+    for write in ctrl
+        .stores_mut()
+        .clear_inflight_client_replicated(client_id)
+    {
+        ctrl.write_or_forward(write).await;
+    }
 }

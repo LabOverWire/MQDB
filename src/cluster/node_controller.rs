@@ -776,7 +776,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let required_acks = replicas.len();
 
         if !replicas.is_empty() {
-            self.replicate_write(write, &replicas, required_acks).await?;
+            self.replicate_write(write, &replicas, required_acks)
+                .await?;
         }
 
         Ok(session)
@@ -1884,7 +1885,10 @@ mod tests {
             vec![1, 2, 3],
         );
 
-        let seq = ctrl.replicate_write(write, &[node2, node3], 1).await.unwrap();
+        let seq = ctrl
+            .replicate_write(write, &[node2, node3], 1)
+            .await
+            .unwrap();
         assert_eq!(seq, 1);
 
         let sent = ctrl.transport.sent_messages();
@@ -1991,7 +1995,10 @@ mod tests {
             vec![1, 2, 3],
         );
 
-        let seq = ctrl.replicate_write_async(write, &[node2, node3]).await.unwrap();
+        let seq = ctrl
+            .replicate_write_async(write, &[node2, node3])
+            .await
+            .unwrap();
         assert_eq!(seq, 1);
 
         let sent = ctrl.transport.sent_messages();
@@ -2079,7 +2086,10 @@ mod tests {
         );
         ctrl.update_partition_map(map);
 
-        let (session, mut rx) = ctrl.create_session_quorum("quorum-test-client").await.unwrap();
+        let (session, mut rx) = ctrl
+            .create_session_quorum("quorum-test-client")
+            .await
+            .unwrap();
         assert_eq!(session.client_id_str(), "quorum-test-client");
 
         assert!(rx.try_recv().is_err());
@@ -2201,7 +2211,9 @@ mod tests {
         ctrl.update_partition_map(map);
 
         let data_partition = PartitionId::new(5).unwrap();
-        let offset = ctrl.commit_offset(consumer_id, data_partition, 12345, 1000).await;
+        let offset = ctrl
+            .commit_offset(consumer_id, data_partition, 12345, 1000)
+            .await;
 
         assert_eq!(offset.sequence, 12345);
         assert_eq!(offset.timestamp, 1000);
@@ -2303,7 +2315,9 @@ mod tests {
         );
         ctrl.update_partition_map(map);
 
-        let result = ctrl.db_create("users", "123", b"{\"name\":\"Alice\"}", 1000).await;
+        let result = ctrl
+            .db_create("users", "123", b"{\"name\":\"Alice\"}", 1000)
+            .await;
         assert!(result.is_ok());
 
         let entity = result.unwrap();
@@ -2381,10 +2395,14 @@ mod tests {
         let partition = crate::cluster::db::data_partition("products", "p1");
         ctrl.become_primary(partition, Epoch::new(1));
 
-        let entity1 = ctrl.db_upsert("products", "p1", b"{\"price\":100}", 1000).await;
+        let entity1 = ctrl
+            .db_upsert("products", "p1", b"{\"price\":100}", 1000)
+            .await;
         assert_eq!(entity1.data, b"{\"price\":100}");
 
-        let entity2 = ctrl.db_upsert("products", "p1", b"{\"price\":200}", 2000).await;
+        let entity2 = ctrl
+            .db_upsert("products", "p1", b"{\"price\":200}", 2000)
+            .await;
         assert_eq!(entity2.data, b"{\"price\":200}");
         assert_eq!(entity2.timestamp_ms, 2000);
     }
@@ -2430,7 +2448,10 @@ mod tests {
         }
         ctrl.update_partition_map(map);
 
-        let schema = ctrl.schema_register("users", b"{\"fields\":[]}").await.unwrap();
+        let schema = ctrl
+            .schema_register("users", b"{\"fields\":[]}")
+            .await
+            .unwrap();
         assert_eq!(schema.entity_str(), "users");
 
         let sent = ctrl.transport.sent_messages();

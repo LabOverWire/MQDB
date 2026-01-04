@@ -323,6 +323,20 @@ impl Qos2Store {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
+    pub fn clear_client_with_data(&self, client_id: &str) -> Vec<(u16, Vec<u8>)> {
+        let mut states = self.states.write().unwrap();
+        let removed: Vec<_> = states
+            .iter()
+            .filter(|((cid, _), _)| cid == client_id)
+            .map(|((_, packet_id), state)| (*packet_id, Self::serialize(state)))
+            .collect();
+        states.retain(|(cid, _), _| cid != client_id);
+        removed
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
     pub fn states_on_partition(&self, partition: PartitionId) -> Vec<Qos2State> {
         self.states
             .read()

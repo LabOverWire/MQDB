@@ -148,7 +148,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
         }
 
-        self.scan_partition_map_for_dead_primaries(&mut proposed_indices).await;
+        self.scan_partition_map_for_dead_primaries(&mut proposed_indices)
+            .await;
 
         proposed_indices
     }
@@ -202,7 +203,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         response
     }
 
-    pub async fn handle_request_vote_response(&mut self, from: NodeId, response: RequestVoteResponse) {
+    pub async fn handle_request_vote_response(
+        &mut self,
+        from: NodeId,
+        response: RequestVoteResponse,
+    ) {
         tracing::debug!(
             from = from.get(),
             granted = response.is_granted(),
@@ -262,7 +267,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                     .await;
             }
             RaftOutput::SendAppendEntries { to, request } => {
-                tracing::debug!(to = to.get(), term = request.term, entries = request.entries.len(), "sending AppendEntries");
+                tracing::debug!(
+                    to = to.get(),
+                    term = request.term,
+                    entries = request.entries.len(),
+                    "sending AppendEntries"
+                );
                 let _ = self
                     .transport
                     .send(to, ClusterMessage::AppendEntries(request))
@@ -752,7 +762,9 @@ mod tests {
             })
             .unwrap();
 
-        let response = coord2.handle_append_entries(node1, append_req.clone(), 1100).await;
+        let response = coord2
+            .handle_append_entries(node1, append_req.clone(), 1100)
+            .await;
         assert!(response.is_success());
 
         coord1.handle_append_entries_response(node2, response).await;

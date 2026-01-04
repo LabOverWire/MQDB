@@ -1,5 +1,5 @@
-use super::protocol::Operation;
 use super::NodeId;
+use super::protocol::Operation;
 use bebytes::BeBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;

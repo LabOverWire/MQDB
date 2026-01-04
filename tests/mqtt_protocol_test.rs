@@ -1,12 +1,40 @@
 mod common;
 
-use common::{next_test_port, start_test_broker};
-use mqtt5::client::MqttClient;
+use common::next_test_port;
 use mqtt5::QoS;
-use std::sync::atomic::{AtomicU32, Ordering};
+use mqtt5::broker::MqttBroker;
+use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
+use mqtt5::client::MqttClient;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
+
+async fn start_test_broker(port: u16) -> TempDir {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let storage_config = StorageConfig {
+        backend: StorageBackend::Memory,
+        enable_persistence: true,
+        ..Default::default()
+    };
+    let config = BrokerConfig::default()
+        .with_bind_address(addr)
+        .with_max_clients(100)
+        .with_storage(storage_config);
+
+    let mut broker = MqttBroker::with_config(config).await.unwrap();
+    let mut ready_rx = broker.ready_receiver();
+
+    tokio::spawn(async move {
+        let _ = broker.run().await;
+    });
+
+    let _ = ready_rx.changed().await;
+
+    TempDir::new().unwrap()
+}
 
 #[tokio::test]
 async fn test_subscribe_unsubscribe_flow() {
@@ -189,7 +217,11 @@ async fn test_wildcard_plus_subscription() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert_eq!(counter.load(Ordering::SeqCst), 2, "should match 2 temperature topics");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "should match 2 temperature topics"
+    );
 
     client.disconnect().await.unwrap();
 }
@@ -225,10 +257,7 @@ async fn test_wildcard_hash_subscription() {
         .publish("home/bedroom/fan", b"off".to_vec())
         .await
         .unwrap();
-    client
-        .publish("home/status", b"ok".to_vec())
-        .await
-        .unwrap();
+    client.publish("home/status", b"ok".to_vec()).await.unwrap();
     client
         .publish("office/printer", b"idle".to_vec())
         .await
@@ -236,7 +265,11 @@ async fn test_wildcard_hash_subscription() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert_eq!(counter.load(Ordering::SeqCst), 3, "should match 3 home/# topics");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "should match 3 home/# topics"
+    );
 
     client.disconnect().await.unwrap();
 }
@@ -288,8 +321,16 @@ async fn test_multiple_subscribers_same_topic() {
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    assert_eq!(counter1.load(Ordering::SeqCst), 1, "sub1 should receive message");
-    assert_eq!(counter2.load(Ordering::SeqCst), 1, "sub2 should receive message");
+    assert_eq!(
+        counter1.load(Ordering::SeqCst),
+        1,
+        "sub1 should receive message"
+    );
+    assert_eq!(
+        counter2.load(Ordering::SeqCst),
+        1,
+        "sub2 should receive message"
+    );
 
     sub1.disconnect().await.unwrap();
     sub2.disconnect().await.unwrap();

@@ -49,9 +49,7 @@ async fn mqtt_transport_heartbeat_roundtrip() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let hb = Heartbeat::create(node1, 1000);
-    t1.broadcast(ClusterMessage::Heartbeat(hb))
-        .await
-        .unwrap();
+    t1.broadcast(ClusterMessage::Heartbeat(hb)).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -97,9 +95,7 @@ async fn mqtt_transport_replication_write() {
         b"test data".to_vec(),
     );
 
-    t1.send(node2, ClusterMessage::Write(write))
-        .await
-        .unwrap();
+    t1.send(node2, ClusterMessage::Write(write)).await.unwrap();
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 

@@ -99,7 +99,10 @@ impl DbRequestHandler {
 
         let id = self.generate_id_for_partition(entity, partition, &request.data);
 
-        match controller.db_create(entity, &id, &request.data, request.timestamp_ms).await {
+        match controller
+            .db_create(entity, &id, &request.data, request.timestamp_ms)
+            .await
+        {
             Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
             Err(super::db::DbDataStoreError::AlreadyExists) => {
                 DbResponse::error(DbStatus::AlreadyExists).to_be_bytes()
@@ -156,7 +159,10 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        match controller.db_update(entity, id, &request.data, request.timestamp_ms).await {
+        match controller
+            .db_update(entity, id, &request.data, request.timestamp_ms)
+            .await
+        {
             Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
             Err(super::db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()

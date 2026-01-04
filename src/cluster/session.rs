@@ -328,6 +328,19 @@ impl SessionStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
+    pub fn sessions_on_node(&self, node_id: NodeId) -> Vec<SessionData> {
+        self.sessions
+            .read()
+            .unwrap()
+            .values()
+            .filter(|s| s.connected_node == node_id.get())
+            .cloned()
+            .collect()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
     pub fn sessions_with_pending_lwt(&self) -> Vec<SessionData> {
         self.sessions
             .read()

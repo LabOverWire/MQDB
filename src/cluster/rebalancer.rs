@@ -467,7 +467,11 @@ mod tests {
 
         for r in &reassignments {
             let has_node2 = r.new_primary == node(2) || r.new_replicas.contains(&node(2));
-            assert!(has_node2, "partition {} should have node 2", r.partition.get());
+            assert!(
+                has_node2,
+                "partition {} should have node 2",
+                r.partition.get()
+            );
         }
     }
 }

@@ -1,18 +1,71 @@
 mod common;
 
-use common::{assert_response_ok, get_response_data, mqtt_request_response, next_test_port};
+use common::next_test_port;
 use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
-use serde_json::json;
+use mqtt5::types::{PublishOptions, PublishProperties};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
+
+async fn mqtt_request_response(
+    client: &MqttClient,
+    topic: &str,
+    payload: &[u8],
+    timeout_ms: u64,
+) -> Option<Value> {
+    let response_topic = format!("test-response/{}", uuid::Uuid::new_v4());
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+
+    client
+        .subscribe(&response_topic, move |msg| {
+            let _ = tx.try_send(msg.payload.clone());
+        })
+        .await
+        .ok()?;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let opts = PublishOptions {
+        properties: PublishProperties {
+            response_topic: Some(response_topic),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    client
+        .publish_with_options(topic, payload.to_vec(), opts)
+        .await
+        .ok()?;
+
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await {
+        Ok(Some(data)) => serde_json::from_slice(&data).ok(),
+        _ => None,
+    }
+}
+
+fn assert_response_ok(response: &Value) {
+    assert_eq!(
+        response.get("status").and_then(Value::as_str),
+        Some("ok"),
+        "expected ok response, got: {response}"
+    );
+}
+
+fn get_response_data(response: &Value) -> Option<&Value> {
+    response.get("data")
+}
 
 async fn start_agent(port: u16) -> (TempDir, MqdbAgent) {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let agent = MqdbAgent::new(db).with_bind_address(addr).with_anonymous(true);
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(addr)
+        .with_anonymous(true);
     (tmp, agent)
 }
 
@@ -49,7 +102,10 @@ async fn test_health_endpoint_agent_mode() {
         .await
         .unwrap();
 
-    assert!(wait_for_ready(&client, 10).await, "agent should become ready");
+    assert!(
+        wait_for_ready(&client, 10).await,
+        "agent should become ready"
+    );
 
     let response = mqtt_request_response(&client, "$DB/_health", b"{}", 2000)
         .await
@@ -59,11 +115,11 @@ async fn test_health_endpoint_agent_mode() {
 
     let data = get_response_data(&response).expect("should have data field");
     assert_eq!(data.get("mode").and_then(|v| v.as_str()), Some("agent"));
-    assert_eq!(data.get("ready").and_then(serde_json::Value::as_bool), Some(true));
     assert_eq!(
-        data.get("status").and_then(|v| v.as_str()),
-        Some("healthy")
+        data.get("ready").and_then(serde_json::Value::as_bool),
+        Some(true)
     );
+    assert_eq!(data.get("status").and_then(|v| v.as_str()), Some("healthy"));
 
     client.disconnect().await.unwrap();
     agent_handle.abort();
@@ -86,7 +142,10 @@ async fn test_admin_schema_set_and_get() {
         .await
         .unwrap();
 
-    assert!(wait_for_ready(&client, 10).await, "agent should become ready");
+    assert!(
+        wait_for_ready(&client, 10).await,
+        "agent should become ready"
+    );
 
     let schema = json!({
         "entity": "test_entity",
@@ -107,14 +166,10 @@ async fn test_admin_schema_set_and_get() {
 
     assert_response_ok(&set_response);
 
-    let get_response = mqtt_request_response(
-        &client,
-        "$DB/_admin/schema/test_entity/get",
-        b"{}",
-        2000,
-    )
-    .await
-    .expect("should receive schema get response");
+    let get_response =
+        mqtt_request_response(&client, "$DB/_admin/schema/test_entity/get", b"{}", 2000)
+            .await
+            .expect("should receive schema get response");
 
     assert_response_ok(&get_response);
     let data = get_response_data(&get_response).expect("should have data");
@@ -141,7 +196,10 @@ async fn test_admin_constraint_add_and_list() {
         .await
         .unwrap();
 
-    assert!(wait_for_ready(&client, 10).await, "agent should become ready");
+    assert!(
+        wait_for_ready(&client, 10).await,
+        "agent should become ready"
+    );
 
     let constraint = json!({
         "type": "unique",
@@ -159,14 +217,10 @@ async fn test_admin_constraint_add_and_list() {
 
     assert_response_ok(&add_response);
 
-    let list_response = mqtt_request_response(
-        &client,
-        "$DB/_admin/constraint/users/list",
-        b"{}",
-        2000,
-    )
-    .await
-    .expect("should receive constraint list response");
+    let list_response =
+        mqtt_request_response(&client, "$DB/_admin/constraint/users/list", b"{}", 2000)
+            .await
+            .expect("should receive constraint list response");
 
     assert_response_ok(&list_response);
 
@@ -191,7 +245,10 @@ async fn test_crud_via_mqtt() {
         .await
         .unwrap();
 
-    assert!(wait_for_ready(&client, 10).await, "agent should become ready");
+    assert!(
+        wait_for_ready(&client, 10).await,
+        "agent should become ready"
+    );
 
     let user = json!({
         "name": "Alice",
@@ -209,20 +266,21 @@ async fn test_crud_via_mqtt() {
 
     assert_response_ok(&create_response);
     let created = get_response_data(&create_response).expect("should have data");
-    let id = created.get("id").and_then(|v| v.as_str()).expect("should have id");
+    let id = created
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("should have id");
 
-    let read_response = mqtt_request_response(
-        &client,
-        &format!("$DB/users/{id}"),
-        b"{}",
-        2000,
-    )
-    .await
-    .expect("should receive read response");
+    let read_response = mqtt_request_response(&client, &format!("$DB/users/{id}"), b"{}", 2000)
+        .await
+        .expect("should receive read response");
 
     assert_response_ok(&read_response);
     let read_data = get_response_data(&read_response).expect("should have data");
-    assert_eq!(read_data.get("name").and_then(|v| v.as_str()), Some("Alice"));
+    assert_eq!(
+        read_data.get("name").and_then(|v| v.as_str()),
+        Some("Alice")
+    );
 
     let update = json!({"name": "Alice Smith"});
     let update_response = mqtt_request_response(
@@ -236,14 +294,10 @@ async fn test_crud_via_mqtt() {
 
     assert_response_ok(&update_response);
 
-    let delete_response = mqtt_request_response(
-        &client,
-        &format!("$DB/users/{id}/delete"),
-        b"{}",
-        2000,
-    )
-    .await
-    .expect("should receive delete response");
+    let delete_response =
+        mqtt_request_response(&client, &format!("$DB/users/{id}/delete"), b"{}", 2000)
+            .await
+            .expect("should receive delete response");
 
     assert_response_ok(&delete_response);
 

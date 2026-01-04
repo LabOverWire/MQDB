@@ -1,12 +1,12 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
     ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, ForwardTarget, ForwardedPublish,
-    LwtPublisher, MqttTransport, NodeController, NodeId, PartitionId, PublishRouter, RaftMessage,
-    TransportConfig, NUM_PARTITIONS,
+    LwtPublisher, MqttTransport, NUM_PARTITIONS, NodeController, NodeId, PartitionId,
+    PublishRouter, RaftMessage, TransportConfig, WildcardBroadcast,
 };
 use crate::config::DurabilityMode;
-use crate::transport::{ErrorCode, Response};
 use crate::storage::FjallBackend;
+use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
 use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
@@ -419,8 +419,8 @@ impl ClusteredAgent {
                         }
                     }
 
-                    for dead_node in dead_nodes {
-                        let proposed = raft.handle_node_death(dead_node).await;
+                    for dead_node in &dead_nodes {
+                        let proposed = raft.handle_node_death(*dead_node).await;
                         if !proposed.is_empty() {
                             info!(
                                 ?dead_node,
@@ -481,6 +481,7 @@ impl ClusteredAgent {
 
                     let mut ctrl = self.controller.write().await;
                     let current_map = ctrl.partition_map().clone();
+                    let mut became_primary = false;
                     if current_map != raft_partition_map {
                         for partition in PartitionId::all() {
                             let new_assignment = raft_partition_map.get(partition);
@@ -489,9 +490,13 @@ impl ClusteredAgent {
                             if new_assignment != old_assignment {
                                 let is_primary = new_assignment.primary == Some(self.node_id);
                                 let is_replica = new_assignment.replicas.contains(&self.node_id);
+                                let was_primary = old_assignment.primary == Some(self.node_id);
 
                                 if is_primary {
                                     ctrl.become_primary(partition, new_assignment.epoch);
+                                    if !was_primary {
+                                        became_primary = true;
+                                    }
                                 } else if is_replica {
                                     ctrl.become_replica(partition, new_assignment.epoch, 0);
                                 }
@@ -499,21 +504,64 @@ impl ClusteredAgent {
                         }
                         ctrl.update_partition_map(raft_partition_map);
                     }
+                    if became_primary {
+                        let stores = ctrl.stores();
+                        let result = stores.subscriptions.reconcile(
+                            &stores.topics,
+                            &stores.wildcards,
+                        );
+                        if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+                            info!(
+                                clients = result.clients_checked,
+                                added = result.subscriptions_added,
+                                removed = result.subscriptions_removed,
+                                "reconciled subscriptions after partition takeover"
+                            );
+                        }
+                    }
+                    for dead_node in &dead_nodes {
+                        let affected_sessions = ctrl.stores().sessions.sessions_on_node(*dead_node);
+                        if !affected_sessions.is_empty() {
+                            info!(
+                                node = dead_node.get(),
+                                sessions = affected_sessions.len(),
+                                "marking sessions disconnected due to node death"
+                            );
+                            let now = current_time_ms();
+                            for session in affected_sessions {
+                                let client_id = session.client_id_str();
+                                let result = ctrl.stores_mut().update_session_replicated(
+                                    client_id,
+                                    |s| s.set_connected(false, *dead_node, now),
+                                );
+                                if let Ok((_session, write)) = result {
+                                    ctrl.write_or_forward(write).await;
+                                }
+                            }
+                        }
+                    }
                 }
                 _ = cleanup_interval.tick() => {
                     let now = current_time_ms();
-                    let ctrl = self.controller.read().await;
-                    let expired_idempotency = ctrl.stores().idempotency.cleanup_expired(now);
-                    if expired_idempotency > 0 {
-                        info!(expired_idempotency, "cleaned up expired idempotency records");
-                    }
-                    let expired_sessions = ctrl.stores().cleanup_expired_sessions(now);
+                    let expired_sessions = {
+                        let ctrl = self.controller.read().await;
+                        let expired_idempotency = ctrl.stores().idempotency.cleanup_expired(now);
+                        if expired_idempotency > 0 {
+                            info!(expired_idempotency, "cleaned up expired idempotency records");
+                        }
+                        let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
+                        if stale_offsets > 0 {
+                            info!(stale_offsets, "cleaned up stale consumer offsets");
+                        }
+                        ctrl.stores().cleanup_expired_sessions(now)
+                    };
                     if !expired_sessions.is_empty() {
-                        info!(count = expired_sessions.len(), "cleaned up expired sessions");
-                    }
-                    let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
-                    if stale_offsets > 0 {
-                        info!(stale_offsets, "cleaned up stale consumer offsets");
+                        info!(count = expired_sessions.len(), "cleaning up expired sessions and subscriptions");
+                        let mut ctrl = self.controller.write().await;
+                        for session in &expired_sessions {
+                            let client_id = session.client_id_str();
+                            clear_expired_session_subscriptions(&mut ctrl, client_id).await;
+                        }
                     }
                 }
                 _ = wildcard_reconciliation_interval.tick() => {
@@ -593,7 +641,10 @@ impl ClusteredAgent {
         } else if req.topic.ends_with("/rebalance") {
             self.handle_rebalance_request().await
         } else {
-            Response::error(ErrorCode::BadRequest, format!("unknown admin command: {}", req.topic))
+            Response::error(
+                ErrorCode::BadRequest,
+                format!("unknown admin command: {}", req.topic),
+            )
         };
 
         let payload = serde_json::to_vec(&response).unwrap_or_default();
@@ -611,7 +662,12 @@ impl ClusteredAgent {
         let mut partitions = Vec::new();
         for partition in PartitionId::all() {
             let assignment = ctrl.partition_map().get(partition);
-            let replicas: Vec<_> = assignment.replicas.iter().copied().map(NodeId::get).collect();
+            let replicas: Vec<_> = assignment
+                .replicas
+                .iter()
+                .copied()
+                .map(NodeId::get)
+                .collect();
             partitions.push(json!({
                 "id": partition.get(),
                 "primary": assignment.primary.map(NodeId::get),
@@ -720,7 +776,10 @@ impl ClusteredAgent {
             return;
         }
 
-        info!(count = pending.len(), "recovering pending LWTs from previous crash");
+        info!(
+            count = pending.len(),
+            "recovering pending LWTs from previous crash"
+        );
 
         let router = PublishRouter::new(&ctrl.stores().topics);
         let transport = ctrl.transport().clone();
@@ -784,4 +843,57 @@ fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() * 1000 + u64::from(d.subsec_millis()))
+}
+
+async fn clear_expired_session_subscriptions(
+    ctrl: &mut NodeController<MqttTransport>,
+    client_id: &str,
+) {
+    let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);
+    if let Some(snapshot) = snapshot {
+        for entry in &snapshot.topics {
+            let topic = std::str::from_utf8(&entry.topic).unwrap_or("");
+            if topic.is_empty() {
+                continue;
+            }
+
+            let is_wildcard = entry.is_wildcard != 0;
+            if is_wildcard {
+                let result = ctrl
+                    .stores_mut()
+                    .unsubscribe_wildcard_replicated(topic, client_id);
+                if result.is_ok() {
+                    let broadcast = WildcardBroadcast::unsubscribe(topic, client_id);
+                    let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                    let _ = ctrl.transport().broadcast(msg).await;
+                }
+            } else {
+                let result = ctrl
+                    .stores_mut()
+                    .unsubscribe_topic_replicated(topic, client_id);
+                if let Ok((_entry, writes)) = result {
+                    for write in writes {
+                        ctrl.write_or_forward(write).await;
+                    }
+                }
+            }
+
+            let result = ctrl
+                .stores_mut()
+                .remove_subscription_replicated(client_id, topic);
+            if let Ok((_snapshot, write)) = result {
+                ctrl.write_or_forward(write).await;
+            }
+        }
+    }
+
+    for write in ctrl.stores_mut().clear_qos2_client_replicated(client_id) {
+        ctrl.write_or_forward(write).await;
+    }
+    for write in ctrl
+        .stores_mut()
+        .clear_inflight_client_replicated(client_id)
+    {
+        ctrl.write_or_forward(write).await;
+    }
 }

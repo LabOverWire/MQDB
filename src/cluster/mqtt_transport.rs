@@ -564,7 +564,10 @@ impl ClusterTransport for MqttTransport {
             1 => QoS::AtLeastOnce,
             _ => QoS::ExactlyOnce,
         };
-        let _ = self.forward_client.publish_qos(&topic, payload, mqtt_qos).await;
+        let _ = self
+            .forward_client
+            .publish_qos(&topic, payload, mqtt_qos)
+            .await;
     }
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
@@ -578,7 +581,10 @@ impl ClusterTransport for MqttTransport {
             retain: true,
             ..Default::default()
         };
-        let _ = self.forward_client.publish_with_options(&topic, payload, options).await;
+        let _ = self
+            .forward_client
+            .publish_with_options(&topic, payload, options)
+            .await;
     }
 }
 

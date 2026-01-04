@@ -14,9 +14,9 @@
 | M5 | DB Integration | Done |
 | M6 | Topic Index & Subscription Routing | Done |
 | M7 | Wildcard Subscriptions | Done |
-| M8 | QoS State Replication | Not Started |
+| M8 | QoS State Replication | Done |
 | M9 | Last Will & Testament | Done |
-| M10 | Session Migration & Cleanup | Not Started |
+| M10 | Session Migration & Cleanup | Done |
 
 ---
 
@@ -199,15 +199,54 @@ Support wildcard patterns (+, #) across cluster.
 
 ---
 
-## M8: QoS State Replication (NOT STARTED)
+## M8: QoS State Replication (DONE)
 
 ### Goal
 Replicate QoS 1/2 delivery state for session continuity.
 
 ### Requirements
-1. Pending publishes tracked per partition
-2. PUBACK/PUBREC/PUBREL/PUBCOMP state replicated
-3. Retry on primary, failover to replica
+1. Pending publishes tracked per partition ✅
+2. PUBACK/PUBREC/PUBREL/PUBCOMP state replicated ✅
+3. Retry on primary, failover to replica ✅
+
+### Implementation
+
+#### 8.1 Qos2Store Replication (DONE)
+- [x] `start_inbound_replicated()` - creates state and returns ReplicationWrite
+- [x] `start_outbound_replicated()` - creates state and returns ReplicationWrite
+- [x] `advance_replicated()` - advances state and returns ReplicationWrite
+- [x] `complete_replicated()` - completes and returns Delete ReplicationWrite
+- [x] `clear_client_with_data()` - clears all client state, returns data for replication
+- [x] `apply_replicated()` - applies Insert/Update/Delete from replica
+- [x] File: `src/cluster/qos2_store.rs`
+
+#### 8.2 InflightStore Replication (DONE)
+- [x] `add_replicated()` - adds inflight message and returns ReplicationWrite
+- [x] `acknowledge_replicated()` - acknowledges and returns Delete ReplicationWrite
+- [x] `clear_client_with_data()` - clears all client state, returns data for replication
+- [x] `apply_replicated()` - applies Insert/Delete from replica
+- [x] File: `src/cluster/inflight_store.rs`
+
+#### 8.3 StoreManager Integration (DONE)
+- [x] `start_qos2_inbound_replicated()`, `start_qos2_outbound_replicated()`
+- [x] `advance_qos2_replicated()`, `complete_qos2_replicated()`
+- [x] `clear_qos2_client_replicated()` - generates Delete writes for all client QoS2 state
+- [x] `add_inflight_replicated()`, `acknowledge_inflight_replicated()`
+- [x] `clear_inflight_client_replicated()` - generates Delete writes for all client inflight
+- [x] File: `src/cluster/store_manager.rs`
+
+#### 8.4 Disconnect Cleanup (DONE)
+- [x] `on_client_disconnect()` uses replicated cleanup methods
+- [x] Delete operations forwarded to partition primary for replication
+- [x] File: `src/cluster/event_handler.rs`
+
+### Tests
+- `qos2_state_survives_primary_failover` - QoS2 state restored on new primary
+- `qos2_cleanup_replicates_delete_to_replica` - disconnect cleanup replicated
+
+### Known Limitations
+- No TTL/timeout for orphan QoS state (client never reconnects)
+- Retry timing not replicated (local timer only)
 
 ---
 
@@ -260,7 +299,7 @@ Deliver LWT messages when client disconnects unexpectedly.
 
 ---
 
-## M10: Session Migration & Cleanup (NOT STARTED)
+## M10: Session Migration & Cleanup (DONE)
 
 ### Goal
 Handle session migration on node failure and cleanup expired sessions.
@@ -269,6 +308,28 @@ Handle session migration on node failure and cleanup expired sessions.
 1. Session state on failed node's partitions migrated to new primary
 2. Expired sessions cleaned up cluster-wide
 3. Subscription cache reconciliation after failover
+
+### Implementation
+
+**Session cleanup on expiry** (`cluster_agent.rs`):
+- `cleanup_expired_sessions()` returns expired sessions
+- `clear_expired_session_subscriptions()` cleans up subscriptions for each expired session
+- Removes entries from TopicIndex, WildcardStore, SubscriptionCache
+- Clears QoS2 and Inflight state for expired clients
+- Replicates all cleanup operations
+
+**Subscription reconciliation on partition takeover**:
+- Track `became_primary` flag during partition map updates
+- Trigger immediate `reconcile()` when becoming primary for any partition
+- Ensures subscription cache matches actual topic subscriptions
+
+**Session disconnection on node death**:
+- Added `sessions_on_node(node_id)` method to SessionStore
+- Dead node detection marks sessions as disconnected
+- Updates replicated to ensure consistent session state
+
+### Testing
+- `session_expiry_cleans_subscriptions` test in `cluster_integration_test.rs`
 
 ---
 

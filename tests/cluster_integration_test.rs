@@ -340,7 +340,8 @@ async fn write_replication_quorum() {
 
     let seq = cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await
+        .replicate_write(write, &[n2, n3], 2)
+        .await
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -491,7 +492,8 @@ async fn node_failure_partition_reassignment() {
 
     let seq = cluster.nodes[1]
         .controller
-        .replicate_write(write, &[n3], 1).await
+        .replicate_write(write, &[n3], 1)
+        .await
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -851,7 +853,8 @@ async fn split_brain_prevented_on_partition() {
     );
     let old_result = cluster.nodes[0]
         .controller
-        .replicate_write(write_old, &[n2], 2).await;
+        .replicate_write(write_old, &[n2], 2)
+        .await;
 
     cluster.nodes[2]
         .controller
@@ -874,7 +877,8 @@ async fn split_brain_prevented_on_partition() {
     );
     let new_result = cluster.nodes[2]
         .controller
-        .replicate_write(write_new, &[n4, n5], 2).await;
+        .replicate_write(write_new, &[n4, n5], 2)
+        .await;
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -954,7 +958,8 @@ async fn write_rejected_without_quorum() {
 
     let result = cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await;
+        .replicate_write(write, &[n2, n3], 2)
+        .await;
 
     let seq_assigned = result.is_ok();
 
@@ -1023,7 +1028,8 @@ async fn quorum_write_reaches_replicas() {
 
     let seq1 = cluster.nodes[0]
         .controller
-        .replicate_write(write1, &[n2, n3], 2).await
+        .replicate_write(write1, &[n2, n3], 2)
+        .await
         .unwrap();
     assert_eq!(seq1, 1);
 
@@ -1047,7 +1053,8 @@ async fn quorum_write_reaches_replicas() {
 
     let seq2 = cluster.nodes[0]
         .controller
-        .replicate_write(write2, &[n2, n3], 2).await
+        .replicate_write(write2, &[n2, n3], 2)
+        .await
         .unwrap();
     assert_eq!(seq2, 2);
 
@@ -1118,7 +1125,8 @@ async fn rebalance_preserves_sequence_continuity() {
 
         let seq = cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2], 1).await
+            .replicate_write(write, &[n2], 1)
+            .await
             .unwrap();
         sequences_before_rebalance.push(seq);
 
@@ -1161,7 +1169,8 @@ async fn rebalance_preserves_sequence_continuity() {
 
     let seq_after = cluster.nodes[1]
         .controller
-        .replicate_write(write_after, &[n3], 1).await
+        .replicate_write(write_after, &[n3], 1)
+        .await
         .unwrap();
 
     assert!(
@@ -1230,7 +1239,8 @@ async fn epoch_prevents_stale_primary_writes() {
 
     let new_seq = cluster.nodes[1]
         .controller
-        .replicate_write(new_write, &[n3], 1).await
+        .replicate_write(new_write, &[n3], 1)
+        .await
         .unwrap();
     assert_eq!(new_seq, 1);
 
@@ -1251,7 +1261,8 @@ async fn epoch_prevents_stale_primary_writes() {
 
     let old_result = cluster.nodes[0]
         .controller
-        .replicate_write(old_write, &[n2, n3], 2).await;
+        .replicate_write(old_write, &[n2, n3], 2)
+        .await;
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1393,7 +1404,8 @@ async fn replica_catches_up_after_partition() {
 
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .unwrap();
 
         cluster.advance_ms(5);
@@ -1423,7 +1435,8 @@ async fn replica_catches_up_after_partition() {
     );
     cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await
+        .replicate_write(write, &[n2, n3], 2)
+        .await
         .unwrap();
 
     for _ in 0..10 {
@@ -1873,7 +1886,8 @@ async fn node_crash_restart_rejoins_cluster() {
     );
     cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await
+        .replicate_write(write, &[n2, n3], 2)
+        .await
         .unwrap();
 
     cluster.advance_ms(5);
@@ -1929,7 +1943,8 @@ async fn node_crash_restart_rejoins_cluster() {
     );
     let result = cluster.nodes[0]
         .controller
-        .replicate_write(write_after, &[n2, n3], 2).await;
+        .replicate_write(write_after, &[n2, n3], 2)
+        .await;
 
     assert!(
         result.is_ok(),
@@ -2060,7 +2075,8 @@ async fn graceful_shutdown_drain() {
 
     let seq = cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2], 1).await
+        .replicate_write(write, &[n2], 1)
+        .await
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -2254,7 +2270,12 @@ async fn wildcard_broadcast_replication() {
         SubscriptionType::Mqtt as u8,
     );
     let msg = ClusterMessage::WildcardBroadcast(broadcast);
-    cluster.nodes[0].controller.transport().broadcast(msg).await.ok();
+    cluster.nodes[0]
+        .controller
+        .transport()
+        .broadcast(msg)
+        .await
+        .ok();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2333,11 +2354,7 @@ async fn cross_node_wildcard_publish_routing() {
 
     let result = router.route_with_wildcards("sensors/room1/temp", &wildcard_matches);
 
-    assert_eq!(
-        result.targets.len(),
-        1,
-        "Should route to one subscriber"
-    );
+    assert_eq!(result.targets.len(), 1, "Should route to one subscriber");
     assert_eq!(
         result.targets[0].client_id, "wildcard-subscriber",
         "Should route to wildcard-subscriber"
@@ -2367,7 +2384,12 @@ async fn drain_notification_triggers_partition_reassignment() {
     let drain_msg = ClusterMessage::DrainNotification {
         node_id: draining_node_id,
     };
-    cluster.nodes[2].controller.transport().broadcast(drain_msg).await.ok();
+    cluster.nodes[2]
+        .controller
+        .transport()
+        .broadcast(drain_msg)
+        .await
+        .ok();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2507,7 +2529,8 @@ async fn db_crud_replication_to_replicas() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(create_write, &[n2, n3], 2).await
+        .replicate_write(create_write, &[n2, n3], 2)
+        .await
         .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -2541,7 +2564,8 @@ async fn db_crud_replication_to_replicas() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(update_write, &[n2, n3], 2).await
+        .replicate_write(update_write, &[n2, n3], 2)
+        .await
         .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -2574,7 +2598,8 @@ async fn db_crud_replication_to_replicas() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(delete_write, &[n2, n3], 2).await
+        .replicate_write(delete_write, &[n2, n3], 2)
+        .await
         .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -2636,7 +2661,8 @@ async fn db_list_returns_entities_by_type() {
 
     cluster.nodes[0]
         .controller
-        .db_create("orders", "order-1", b"order data", 1000).await
+        .db_create("orders", "order-1", b"order data", 1000)
+        .await
         .expect("create order should succeed");
 
     cluster.advance_ms(10);
@@ -2693,7 +2719,8 @@ async fn schema_broadcast_to_all_nodes() {
     for write in writes {
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .expect("schema replication should succeed");
     }
 
@@ -2781,7 +2808,8 @@ async fn schema_update_increments_version() {
     for write in writes_v1 {
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .ok();
     }
 
@@ -2800,7 +2828,8 @@ async fn schema_update_increments_version() {
     for write in writes_v2 {
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .ok();
     }
 
@@ -2859,7 +2888,8 @@ async fn index_add_and_lookup() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await
+        .replicate_write(write, &[n2, n3], 2)
+        .await
         .expect("replication should succeed");
 
     cluster.advance_ms(10);
@@ -2923,7 +2953,8 @@ async fn index_multiple_records_same_value() {
 
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .ok();
     }
 
@@ -2972,7 +3003,8 @@ async fn unique_constraint_reserve_commit_release() {
     if let Some(write) = write_opt {
         cluster.nodes[0]
             .controller
-            .replicate_write(write, &[n2, n3], 2).await
+            .replicate_write(write, &[n2, n3], 2)
+            .await
             .ok();
     }
     cluster.advance_ms(10);
@@ -3022,7 +3054,8 @@ async fn unique_constraint_reserve_commit_release() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(commit_write, &[n2, n3], 2).await
+        .replicate_write(commit_write, &[n2, n3], 2)
+        .await
         .ok();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -3145,7 +3178,8 @@ async fn fk_validation_request_lifecycle() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(write, &[n2, n3], 2).await
+        .replicate_write(write, &[n2, n3], 2)
+        .await
         .ok();
 
     cluster.advance_ms(10);
@@ -3188,7 +3222,8 @@ async fn fk_validation_request_lifecycle() {
 
     cluster.nodes[0]
         .controller
-        .replicate_write(complete_write, &[n2, n3], 2).await
+        .replicate_write(complete_write, &[n2, n3], 2)
+        .await
         .ok();
 
     cluster.advance_ms(10);
@@ -3335,11 +3370,21 @@ async fn cross_node_lwt_routing() {
     let subscriber_partition = session_partition("subscriber-client");
     cluster.nodes[0]
         .topics
-        .subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1)
+        .subscribe(
+            "status/lwt-client",
+            "subscriber-client",
+            subscriber_partition,
+            1,
+        )
         .unwrap();
     cluster.nodes[1]
         .topics
-        .subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1)
+        .subscribe(
+            "status/lwt-client",
+            "subscriber-client",
+            subscriber_partition,
+            1,
+        )
         .unwrap();
 
     cluster.nodes[0]
@@ -3387,7 +3432,10 @@ async fn cross_node_lwt_routing() {
         }
     }
 
-    assert!(remote_nodes.contains_key(&n2), "Should forward LWT to Node 2");
+    assert!(
+        remote_nodes.contains_key(&n2),
+        "Should forward LWT to Node 2"
+    );
     assert_eq!(remote_nodes[&n2].len(), 1);
     assert_eq!(remote_nodes[&n2][0].client_id, "subscriber-client");
 
@@ -3403,8 +3451,135 @@ async fn cross_node_lwt_routing() {
     assert_eq!(fwd.topic, "status/lwt-client");
     assert_eq!(fwd.targets.len(), 1);
 
-    publisher.complete_lwt("lwt-client", prepared.token).unwrap();
+    publisher
+        .complete_lwt("lwt-client", prepared.token)
+        .unwrap();
 
     let session = cluster.nodes[0].sessions.get("lwt-client").unwrap();
-    assert!(session.lwt_published != 0, "LWT should be marked as published");
+    assert!(
+        session.lwt_published != 0,
+        "LWT should be marked as published"
+    );
+}
+
+#[tokio::test]
+async fn qos2_cleanup_replicates_delete_to_replica() {
+    let cluster = TestCluster::new(2);
+
+    cluster.nodes[0]
+        .qos2
+        .start_inbound("cleanup-client", 1, "test/topic", b"payload1", 1000)
+        .unwrap();
+    cluster.nodes[0]
+        .qos2
+        .start_inbound("cleanup-client", 2, "test/topic", b"payload2", 1001)
+        .unwrap();
+
+    let initial_states: Vec<_> = cluster.nodes[0].qos2.pending_for_client("cleanup-client");
+    assert_eq!(initial_states.len(), 2);
+
+    for state in &initial_states {
+        let data = Qos2Store::serialize(state);
+        cluster.nodes[1]
+            .qos2
+            .apply_replicated(
+                Operation::Insert,
+                &format!("cleanup-client:{}", state.packet_id),
+                &data,
+            )
+            .unwrap();
+    }
+
+    assert!(cluster.nodes[1].qos2.get("cleanup-client", 1).is_some());
+    assert!(cluster.nodes[1].qos2.get("cleanup-client", 2).is_some());
+
+    let removed = cluster.nodes[0]
+        .qos2
+        .clear_client_with_data("cleanup-client");
+    assert_eq!(removed.len(), 2);
+
+    for (packet_id, data) in removed {
+        cluster.nodes[1]
+            .qos2
+            .apply_replicated(
+                Operation::Delete,
+                &format!("cleanup-client:{packet_id}"),
+                &data,
+            )
+            .unwrap();
+    }
+
+    assert!(cluster.nodes[0].qos2.get("cleanup-client", 1).is_none());
+    assert!(cluster.nodes[0].qos2.get("cleanup-client", 2).is_none());
+    assert!(cluster.nodes[1].qos2.get("cleanup-client", 1).is_none());
+    assert!(cluster.nodes[1].qos2.get("cleanup-client", 2).is_none());
+}
+
+#[tokio::test]
+async fn session_expiry_cleans_subscriptions() {
+    let cluster = TestCluster::new(1);
+    let node = &cluster.nodes[0];
+
+    let client_id = "expiry-test-client";
+    let session_p = session_partition(client_id);
+
+    node.sessions.create_session(client_id).unwrap();
+    node.sessions
+        .update(client_id, |s| {
+            s.set_session_expiry_interval(10);
+            s.set_connected(false, node.id, 1000);
+        })
+        .unwrap();
+
+    node.topics
+        .subscribe("sensor/temp", client_id, session_p, 1)
+        .unwrap();
+    node.topics
+        .subscribe("sensor/humidity", client_id, session_p, 0)
+        .unwrap();
+
+    node.subscriptions
+        .add_subscription(client_id, "sensor/temp", 1)
+        .unwrap();
+    node.subscriptions
+        .add_subscription(client_id, "sensor/humidity", 0)
+        .unwrap();
+
+    let router_before = PublishRouter::new(&node.topics);
+    assert_eq!(router_before.route("sensor/temp").targets.len(), 1);
+    assert_eq!(router_before.route("sensor/humidity").targets.len(), 1);
+
+    let snapshot_before = node.subscriptions.get_snapshot(client_id);
+    assert!(snapshot_before.is_some());
+    assert_eq!(snapshot_before.unwrap().topics.len(), 2);
+
+    let now_past_expiry = 1000 + 15_000;
+    let expired = node.sessions.cleanup_expired_sessions(now_past_expiry);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].client_id_str(), client_id);
+
+    for session in &expired {
+        let snap = node.subscriptions.get_snapshot(session.client_id_str());
+        if let Some(snap) = snap {
+            for entry in &snap.topics {
+                let topic = std::str::from_utf8(&entry.topic).unwrap_or("");
+                if !topic.is_empty() {
+                    let _ = node.topics.unsubscribe(topic, session.client_id_str());
+                }
+            }
+        }
+        let _ = node.subscriptions.clear_client(session.client_id_str());
+        let _ = node.qos2.clear_client(session.client_id_str());
+    }
+
+    let router_after = PublishRouter::new(&node.topics);
+    assert_eq!(router_after.route("sensor/temp").targets.len(), 0);
+    assert_eq!(router_after.route("sensor/humidity").targets.len(), 0);
+
+    let snapshot_after = node.subscriptions.get_snapshot(client_id);
+    assert!(
+        snapshot_after.is_none() || snapshot_after.unwrap().topics.is_empty()
+    );
+
+    assert!(node.sessions.get(client_id).is_none());
 }

@@ -785,6 +785,26 @@ impl StoreManager {
     }
 
     #[must_use]
+    pub fn clear_qos2_client_replicated(&self, client_id: &str) -> Vec<ReplicationWrite> {
+        let removed = self.qos2.clear_client_with_data(client_id);
+        let partition = session_partition(client_id);
+        removed
+            .into_iter()
+            .map(|(packet_id, data)| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Delete,
+                    Epoch::ZERO,
+                    0,
+                    entity::QOS2.to_string(),
+                    format!("{client_id}:{packet_id}"),
+                    data,
+                )
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn add_subscription_replicated(
         &self,
         client_id: &str,
@@ -1023,6 +1043,26 @@ impl StoreManager {
             data,
         );
         Ok((msg, write))
+    }
+
+    #[must_use]
+    pub fn clear_inflight_client_replicated(&self, client_id: &str) -> Vec<ReplicationWrite> {
+        let removed = self.inflight.clear_client_with_data(client_id);
+        let partition = session_partition(client_id);
+        removed
+            .into_iter()
+            .map(|(packet_id, data)| {
+                ReplicationWrite::new(
+                    partition,
+                    Operation::Delete,
+                    Epoch::ZERO,
+                    0,
+                    entity::INFLIGHT.to_string(),
+                    format!("{client_id}:{packet_id}"),
+                    data,
+                )
+            })
+            .collect()
     }
 
     #[must_use]

@@ -165,7 +165,11 @@ impl TopicIndex {
             .entry(topic.to_string())
             .or_insert_with(|| TopicIndexEntry::create(topic));
         entry.add_subscriber(client_id, client_partition, qos);
-        tracing::debug!(topic, count = entry.subscribers.len(), "subscribe: after add");
+        tracing::debug!(
+            topic,
+            count = entry.subscribers.len(),
+            "subscribe: after add"
+        );
         Ok(())
     }
 
@@ -464,7 +468,11 @@ impl TopicIndex {
         entries.retain(|topic, _| topic_partition(topic) != partition);
         let removed = before - entries.len();
         if removed > 0 {
-            tracing::debug!(partition = partition.get(), removed, "clear_partition: removed entries");
+            tracing::debug!(
+                partition = partition.get(),
+                removed,
+                "clear_partition: removed entries"
+            );
         }
         removed
     }
