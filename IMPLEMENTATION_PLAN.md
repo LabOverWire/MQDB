@@ -15,7 +15,7 @@
 | M6 | Topic Index & Subscription Routing | Done |
 | M7 | Wildcard Subscriptions | Done |
 | M8 | QoS State Replication | Not Started |
-| M9 | Last Will & Testament | Not Started |
+| M9 | Last Will & Testament | Done |
 | M10 | Session Migration & Cleanup | Not Started |
 
 ---
@@ -211,15 +211,52 @@ Replicate QoS 1/2 delivery state for session continuity.
 
 ---
 
-## M9: Last Will & Testament (NOT STARTED)
+## M9: Last Will & Testament (DONE)
 
 ### Goal
 Deliver LWT messages when client disconnects unexpectedly.
 
 ### Requirements
-1. LWT stored on client's session partition
-2. On disconnect, trigger LWT publish
-3. LWT publish routed through normal pub/sub path
+1. LWT stored on client's session partition ✅
+2. On disconnect, trigger LWT publish ✅
+3. LWT publish routed through normal pub/sub path ✅
+
+### Implementation
+
+#### 9.1 SessionData LWT Fields (DONE)
+- [x] `has_will`, `will_qos`, `will_retain`, `will_topic`, `will_payload`
+- [x] `lwt_published` flag to prevent duplicate delivery
+- [x] `lwt_token_present`, `lwt_token` for idempotent publishing
+- [x] File: `src/cluster/session.rs`
+
+#### 9.2 LwtPublisher API (DONE)
+- [x] `prepare_lwt(client_id)` - sets token, returns `LwtPrepared` with topic/payload/qos/retain
+- [x] `complete_lwt(client_id, token)` - validates token, marks `lwt_published = true`
+- [x] `recover_pending_lwts()` - finds sessions with pending LWT (token set but not published)
+- [x] Token-based idempotency prevents duplicate LWT delivery on retry
+- [x] File: `src/cluster/lwt.rs`
+
+#### 9.3 Event Handler Integration (DONE)
+- [x] `on_client_disconnect()` calls `prepare_lwt()` for unexpected disconnects
+- [x] LWT routed via TopicIndex + WildcardStore lookup
+- [x] Cross-node delivery via ForwardedPublish messages
+- [x] `complete_lwt()` called after routing completes
+- [x] File: `src/cluster/event_handler.rs`
+
+#### 9.4 Startup Recovery (DONE)
+- [x] `recover_pending_lwts()` called during cluster agent startup
+- [x] Pending LWTs from previous crash are re-routed and marked complete
+- [x] File: `src/cluster_agent.rs`
+
+### Tests
+- `lwt_triggered_on_death` - single-node LWT prepare/complete flow
+- `lwt_published_exactly_once` - idempotency with token validation
+- `cross_node_lwt_routing` - LWT forwarded to subscriber on remote node
+- `mqtt_lwt_death_detection` - end-to-end LWT delivery via MQTT protocol
+
+### Known Limitations
+- LWT delay timer (will_delay_interval) not implemented
+- LWT cleanup on clean disconnect not tested
 
 ---
 

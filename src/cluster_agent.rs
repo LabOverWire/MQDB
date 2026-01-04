@@ -1,7 +1,8 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
-    ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, MqttTransport, NodeController,
-    NodeId, PartitionId, RaftMessage, TransportConfig, NUM_PARTITIONS,
+    ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, ForwardTarget, ForwardedPublish,
+    LwtPublisher, MqttTransport, NodeController, NodeId, PartitionId, PublishRouter, RaftMessage,
+    TransportConfig, NUM_PARTITIONS,
 };
 use crate::config::DurabilityMode;
 use crate::transport::{ErrorCode, Response};
@@ -14,6 +15,7 @@ use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -364,6 +366,8 @@ impl ClusteredAgent {
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+        self.recover_pending_lwts().await;
+
         loop {
             tokio::select! {
                 _ = tick_interval.tick() => {
@@ -705,6 +709,74 @@ impl ClusteredAgent {
     #[must_use]
     pub fn controller(&self) -> &Arc<RwLock<NodeController<MqttTransport>>> {
         &self.controller
+    }
+
+    async fn recover_pending_lwts(&self) {
+        let ctrl = self.controller.read().await;
+        let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
+        let pending = lwt_publisher.recover_pending_lwts();
+
+        if pending.is_empty() {
+            return;
+        }
+
+        info!(count = pending.len(), "recovering pending LWTs from previous crash");
+
+        let router = PublishRouter::new(&ctrl.stores().topics);
+        let transport = ctrl.transport().clone();
+        let node_id = self.node_id;
+
+        for lwt in pending {
+            let wildcards = ctrl.stores().wildcards.match_topic(&lwt.topic);
+            let route = router.route_with_wildcards(&lwt.topic, &wildcards);
+
+            let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+            for target in route.targets {
+                let connected_node = ctrl
+                    .stores()
+                    .client_locations
+                    .get(&target.client_id)
+                    .or_else(|| {
+                        ctrl.stores()
+                            .sessions
+                            .get(&target.client_id)
+                            .filter(|s| s.connected == 1)
+                            .and_then(|s| NodeId::validated(s.connected_node))
+                    });
+
+                if let Some(target_node) = connected_node
+                    && target_node != node_id
+                {
+                    remote_nodes
+                        .entry(target_node)
+                        .or_default()
+                        .push(ForwardTarget::new(target.client_id, target.qos));
+                }
+            }
+
+            for (target_node, targets) in remote_nodes {
+                let fwd = ForwardedPublish::new(
+                    node_id,
+                    lwt.topic.clone(),
+                    lwt.qos,
+                    lwt.retain,
+                    lwt.payload.clone(),
+                    targets,
+                );
+                let fwd_msg = ClusterMessage::ForwardedPublish(fwd);
+                if let Err(e) = transport.send(target_node, fwd_msg).await {
+                    warn!(target = target_node.get(), error = %e, "failed to forward recovered LWT");
+                } else {
+                    debug!(target = target_node.get(), topic = %lwt.topic, "forwarded recovered LWT to node");
+                }
+            }
+
+            if let Err(e) = lwt_publisher.complete_lwt(&lwt.client_id, lwt.token) {
+                warn!(client_id = %lwt.client_id, error = %e, "failed to mark recovered LWT as published");
+            } else {
+                info!(client_id = %lwt.client_id, topic = %lwt.topic, "recovered and published pending LWT");
+            }
+        }
     }
 }
 

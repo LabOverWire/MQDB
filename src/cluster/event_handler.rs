@@ -7,8 +7,8 @@ use crate::cluster::Epoch;
 use crate::cluster::session::session_partition;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
-    ForwardTarget, ForwardedPublish, MqttTransport, NodeController, NodeId, PublishRouter,
-    SubscriptionType, WildcardBroadcast,
+    ForwardTarget, ForwardedPublish, LwtPublisher, MqttTransport, NodeController, NodeId,
+    PublishRouter, SubscriptionType, WildcardBroadcast,
 };
 use mqtt5::QoS;
 use mqtt5::broker::events::{
@@ -186,25 +186,21 @@ impl BrokerEventHandler for ClusterEventHandler {
             ctrl.write_or_forward(location_delete).await;
 
             if event.unexpected {
-                let session = ctrl.stores().sessions.get(client_id);
+                let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
+                let prepared = lwt_publisher.prepare_lwt(client_id);
+
                 debug!(
                     client_id,
-                    session_found = session.is_some(),
-                    has_will = session.as_ref().map_or(0, |s| s.has_will),
-                    lwt_published = session.as_ref().map_or(0, |s| s.lwt_published),
+                    has_lwt = prepared.as_ref().map_or(false, |p| p.is_some()),
                     "checking LWT conditions"
                 );
-                if let Some(session) = session
-                    && session.needs_lwt_publish()
-                {
-                    let topic = String::from_utf8_lossy(&session.will_topic).to_string();
-                    let payload = session.will_payload.clone();
-                    let qos = session.will_qos;
-                    debug!(client_id, %topic, qos, "routing LWT to remote subscribers");
 
-                    let wildcards = ctrl.stores().wildcards.match_topic(&topic);
+                if let Ok(Some(lwt)) = prepared {
+                    debug!(client_id, topic = %lwt.topic, qos = lwt.qos, "routing LWT to subscribers");
+
+                    let wildcards = ctrl.stores().wildcards.match_topic(&lwt.topic);
                     let router = PublishRouter::new(&ctrl.stores().topics);
-                    let route = router.route_with_wildcards(&topic, &wildcards);
+                    let route = router.route_with_wildcards(&lwt.topic, &wildcards);
 
                     let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
                     for target in route.targets {
@@ -230,39 +226,45 @@ impl BrokerEventHandler for ClusterEventHandler {
                         }
                     }
 
-                    if !remote_nodes.is_empty() {
-                        let transport = ctrl.transport().clone();
-                        let is_clean_session = session.is_clean_session();
-                        drop(ctrl);
+                    let transport = ctrl.transport().clone();
+                    let session = ctrl.stores().sessions.get(client_id);
+                    let is_clean_session = session.map_or(false, |s| s.is_clean_session());
+                    drop(ctrl);
 
-                        for (target_node, targets) in remote_nodes {
-                            let fwd = ForwardedPublish::new(
-                                node_id,
-                                topic.clone(),
-                                qos,
-                                session.will_retain != 0,
-                                payload.clone(),
-                                targets,
-                            );
-                            let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
-                            if let Err(e) = transport.send(target_node, fwd_msg).await {
-                                warn!(target = target_node.get(), error = %e, "failed to forward LWT");
-                            } else {
-                                debug!(target = target_node.get(), %topic, "forwarded LWT to node");
-                            }
+                    for (target_node, targets) in remote_nodes {
+                        let fwd = ForwardedPublish::new(
+                            node_id,
+                            lwt.topic.clone(),
+                            lwt.qos,
+                            lwt.retain,
+                            lwt.payload.clone(),
+                            targets,
+                        );
+                        let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
+                        if let Err(e) = transport.send(target_node, fwd_msg).await {
+                            warn!(target = target_node.get(), error = %e, "failed to forward LWT");
+                        } else {
+                            debug!(target = target_node.get(), topic = %lwt.topic, "forwarded LWT to node");
                         }
-
-                        if is_clean_session {
-                            let mut ctrl = self.controller.write().await;
-                            debug!(
-                                client_id,
-                                "clean_session disconnect - clearing subscriptions"
-                            );
-                            clear_client_subscriptions(&mut ctrl, client_id).await;
-                            let _ = ctrl.stores_mut().remove_session_replicated(client_id);
-                        }
-                        return;
                     }
+
+                    let mut ctrl = self.controller.write().await;
+                    let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
+                    if let Err(e) = lwt_publisher.complete_lwt(client_id, lwt.token) {
+                        warn!(client_id, error = %e, "failed to mark LWT as published");
+                    } else {
+                        debug!(client_id, "marked LWT as published");
+                    }
+
+                    if is_clean_session {
+                        debug!(
+                            client_id,
+                            "clean_session disconnect - clearing subscriptions"
+                        );
+                        clear_client_subscriptions(&mut ctrl, client_id).await;
+                        let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+                    }
+                    return;
                 }
             }
 
