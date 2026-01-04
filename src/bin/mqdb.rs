@@ -149,6 +149,10 @@ enum Commands {
         #[command(subcommand)]
         action: DevAction,
     },
+    Bench {
+        #[command(subcommand)]
+        action: BenchAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,6 +263,33 @@ enum DevAction {
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchAction {
+    #[command(about = "Benchmark pub/sub throughput and latency")]
+    Pubsub {
+        #[arg(long, default_value = "1", help = "Number of publisher tasks")]
+        publishers: usize,
+        #[arg(long, default_value = "1", help = "Number of subscriber tasks")]
+        subscribers: usize,
+        #[arg(long, default_value = "10000", help = "Total messages to send")]
+        messages: u64,
+        #[arg(long, default_value = "0", help = "Messages per second (0 = unlimited)")]
+        rate: u64,
+        #[arg(long, default_value = "64", help = "Payload size in bytes")]
+        size: usize,
+        #[arg(long, default_value = "0", help = "MQTT QoS level (0, 1, or 2)")]
+        qos: u8,
+        #[arg(long, default_value = "bench/test", help = "Topic pattern")]
+        topic: String,
+        #[arg(long, help = "Warmup messages before measuring")]
+        warmup: Option<u64>,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "table", help = "Output format")]
+        format: OutputFormat,
     },
 }
 
@@ -656,6 +687,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 db_prefix,
             } => {
                 cmd_dev_start_cluster(nodes, clean, &quic_cert, &quic_key, no_quic, &db_prefix)?;
+            }
+        },
+        Commands::Bench { action } => match action {
+            BenchAction::Pubsub {
+                publishers,
+                subscribers,
+                messages,
+                rate,
+                size,
+                qos,
+                topic,
+                warmup,
+                conn,
+                format,
+            } => {
+                Box::pin(cmd_bench_pubsub(BenchPubsubArgs {
+                    publishers,
+                    subscribers,
+                    messages,
+                    rate,
+                    size,
+                    qos,
+                    topic,
+                    warmup: warmup.unwrap_or(0),
+                    conn,
+                    format,
+                }))
+                .await?;
             }
         },
     }
@@ -2052,6 +2111,261 @@ fn cmd_dev_start_cluster(
     println!("\nCluster started with {nodes} nodes");
     println!("Use 'mqdb dev ps' to check status");
     println!("Use 'mqdb dev kill' to stop");
+
+    Ok(())
+}
+
+struct BenchPubsubArgs {
+    publishers: usize,
+    subscribers: usize,
+    messages: u64,
+    rate: u64,
+    size: usize,
+    qos: u8,
+    topic: String,
+    warmup: u64,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+}
+
+#[derive(Default)]
+struct BenchMetrics {
+    messages_sent: std::sync::atomic::AtomicU64,
+    messages_received: std::sync::atomic::AtomicU64,
+    bytes_sent: std::sync::atomic::AtomicU64,
+    bytes_received: std::sync::atomic::AtomicU64,
+    latencies_ns: std::sync::Mutex<Vec<u64>>,
+    errors: std::sync::atomic::AtomicU64,
+}
+
+impl BenchMetrics {
+    fn record_latency(&self, ns: u64) {
+        if let Ok(mut latencies) = self.latencies_ns.lock() {
+            latencies.push(ns);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    fn calculate_percentile(&self, p: f64) -> u64 {
+        if let Ok(mut latencies) = self.latencies_ns.lock() {
+            if latencies.is_empty() {
+                return 0;
+            }
+            latencies.sort_unstable();
+            let idx = ((latencies.len() as f64) * p / 100.0) as usize;
+            latencies[idx.min(latencies.len() - 1)]
+        } else {
+            0
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let metrics = Arc::new(BenchMetrics::default());
+    let running = Arc::new(AtomicBool::new(true));
+
+    println!(
+        "Benchmark: {} publishers, {} subscribers, {} messages, {} byte payload, QoS {}",
+        args.publishers, args.subscribers, args.messages, args.size, args.qos
+    );
+
+    let mut sub_handles = Vec::new();
+    let mut pub_handles = Vec::new();
+
+    for sub_id in 0..args.subscribers {
+        let conn = args.conn.clone();
+        let topic = args.topic.clone();
+        let metrics = Arc::clone(&metrics);
+        let running = Arc::clone(&running);
+
+        let handle = tokio::spawn(async move {
+            let client_id = format!("bench-sub-{sub_id}");
+            let client = MqttClient::new(&client_id);
+
+            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+                let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
+                    eprintln!("Subscriber {sub_id} connect failed: {e}");
+                    return;
+                }
+            } else if let Err(e) = client.connect(&conn.broker).await {
+                eprintln!("Subscriber {sub_id} connect failed: {e}");
+                return;
+            }
+
+            let metrics_clone = Arc::clone(&metrics);
+            if let Err(e) = client
+                .subscribe(&topic, move |msg| {
+                    let payload = &msg.payload;
+                    if payload.len() >= 8
+                        && let Ok(bytes) = payload[0..8].try_into()
+                    {
+                        let sent_ns = u64::from_be_bytes(bytes);
+                        let recv_time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos() as u64;
+                        if recv_time > sent_ns {
+                            metrics_clone.record_latency(recv_time - sent_ns);
+                        }
+                    }
+                    metrics_clone.messages_received.fetch_add(1, Ordering::Relaxed);
+                    metrics_clone.bytes_received.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                })
+                .await
+            {
+                eprintln!("Subscriber {sub_id} subscribe failed: {e}");
+                return;
+            }
+
+            while running.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let _ = client.disconnect().await;
+        });
+        sub_handles.push(handle);
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let payload_template: Vec<u8> = vec![0u8; args.size];
+    let total_messages = args.messages;
+    let messages_per_pub = total_messages / args.publishers.max(1) as u64;
+    let rate_per_pub = if args.rate > 0 {
+        args.rate / args.publishers.max(1) as u64
+    } else {
+        0
+    };
+
+    let start_time = Instant::now();
+
+    for pub_id in 0..args.publishers {
+        let conn = args.conn.clone();
+        let topic = args.topic.clone();
+        let metrics = Arc::clone(&metrics);
+        let payload_template = payload_template.clone();
+        let warmup = args.warmup;
+
+        let handle = tokio::spawn(async move {
+            let client_id = format!("bench-pub-{pub_id}");
+            let client = MqttClient::new(&client_id);
+
+            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+                let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
+                    eprintln!("Publisher {pub_id} connect failed: {e}");
+                    return;
+                }
+            } else if let Err(e) = client.connect(&conn.broker).await {
+                eprintln!("Publisher {pub_id} connect failed: {e}");
+                return;
+            }
+
+            let interval = if rate_per_pub > 0 {
+                Some(Duration::from_nanos(1_000_000_000 / rate_per_pub))
+            } else {
+                None
+            };
+
+            for i in 0..(warmup + messages_per_pub) {
+                let mut payload = payload_template.clone();
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                payload[0..8].copy_from_slice(&now_ns.to_be_bytes());
+
+                if let Err(e) = client.publish(&topic, payload.clone()).await {
+                    eprintln!("Publish error: {e}");
+                    metrics.errors.fetch_add(1, Ordering::Relaxed);
+                } else if i >= warmup {
+                    metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+                    metrics.bytes_sent.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                }
+
+                if let Some(interval) = interval {
+                    tokio::time::sleep(interval).await;
+                }
+            }
+
+            let _ = client.disconnect().await;
+        });
+        pub_handles.push(handle);
+    }
+
+    for handle in pub_handles {
+        let _ = handle.await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    running.store(false, Ordering::Release);
+
+    for handle in sub_handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    let sent = metrics.messages_sent.load(Ordering::Relaxed);
+    let received = metrics.messages_received.load(Ordering::Relaxed);
+    let bytes_sent = metrics.bytes_sent.load(Ordering::Relaxed);
+    let errors = metrics.errors.load(Ordering::Relaxed);
+
+    let p50 = metrics.calculate_percentile(50.0);
+    let p95 = metrics.calculate_percentile(95.0);
+    let p99 = metrics.calculate_percentile(99.0);
+
+    let throughput = sent as f64 / elapsed_secs;
+    let bandwidth_mbps = (bytes_sent as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+
+    if let OutputFormat::Json = args.format {
+        let result = json!({
+            "messages_sent": sent,
+            "messages_received": received,
+            "errors": errors,
+            "duration_secs": elapsed_secs,
+            "throughput_msg_sec": throughput,
+            "bandwidth_mbps": bandwidth_mbps,
+            "latency_p50_us": p50 / 1000,
+            "latency_p95_us": p95 / 1000,
+            "latency_p99_us": p99 / 1000,
+            "config": {
+                "publishers": args.publishers,
+                "subscribers": args.subscribers,
+                "messages": args.messages,
+                "payload_size": args.size,
+                "qos": args.qos,
+                "rate_limit": args.rate
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        let p50_us = p50 / 1000;
+        let p95_us = p95 / 1000;
+        let p99_us = p99 / 1000;
+        println!("\n┌─────────────────────────────────────────┐");
+        println!("│           BENCHMARK RESULTS             │");
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Messages sent:     {sent:>19} │");
+        println!("│ Messages received: {received:>19} │");
+        println!("│ Errors:            {errors:>19} │");
+        println!("│ Duration:          {elapsed_secs:>16.2} s │");
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Throughput:     {throughput:>16.0} msg/s │");
+        println!("│ Bandwidth:      {bandwidth_mbps:>16.2} Mbps │");
+        println!("├─────────────────────────────────────────┤");
+        println!("│ Latency p50:      {p50_us:>17} µs │");
+        println!("│ Latency p95:      {p95_us:>17} µs │");
+        println!("│ Latency p99:      {p99_us:>17} µs │");
+        println!("└─────────────────────────────────────────┘");
+    }
 
     Ok(())
 }
