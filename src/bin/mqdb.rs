@@ -291,6 +291,29 @@ enum BenchAction {
         #[arg(long, default_value = "table", help = "Output format")]
         format: OutputFormat,
     },
+    #[command(about = "Benchmark database CRUD operations")]
+    Db {
+        #[arg(long, default_value = "1000", help = "Number of operations to perform")]
+        operations: u64,
+        #[arg(long, default_value = "bench_entity", help = "Entity name to use")]
+        entity: String,
+        #[arg(long, default_value = "mixed", help = "Operation type: insert, get, update, delete, list, mixed")]
+        op: String,
+        #[arg(long, default_value = "1", help = "Number of concurrent clients")]
+        concurrency: usize,
+        #[arg(long, default_value = "5", help = "Number of fields per record")]
+        fields: usize,
+        #[arg(long, default_value = "100", help = "Approximate size of field values in bytes")]
+        field_size: usize,
+        #[arg(long, help = "Warmup operations before measuring")]
+        warmup: Option<u64>,
+        #[arg(long, help = "Clean up test entity after benchmark")]
+        cleanup: bool,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "table", help = "Output format")]
+        format: OutputFormat,
+    },
 }
 
 #[derive(Subcommand)]
@@ -711,6 +734,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     qos,
                     topic,
                     warmup: warmup.unwrap_or(0),
+                    conn,
+                    format,
+                }))
+                .await?;
+            }
+            BenchAction::Db {
+                operations,
+                entity,
+                op,
+                concurrency,
+                fields,
+                field_size,
+                warmup,
+                cleanup,
+                conn,
+                format,
+            } => {
+                Box::pin(cmd_bench_db(BenchDbArgs {
+                    operations,
+                    entity,
+                    op,
+                    concurrency,
+                    fields,
+                    field_size,
+                    warmup: warmup.unwrap_or(0),
+                    cleanup,
                     conn,
                     format,
                 }))
@@ -2365,6 +2414,521 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         println!("│ Latency p95:      {p95_us:>17} µs │");
         println!("│ Latency p99:      {p99_us:>17} µs │");
         println!("└─────────────────────────────────────────┘");
+    }
+
+    Ok(())
+}
+
+struct BenchDbArgs {
+    operations: u64,
+    entity: String,
+    op: String,
+    concurrency: usize,
+    fields: usize,
+    field_size: usize,
+    warmup: u64,
+    cleanup: bool,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbOp {
+    Insert,
+    Get,
+    Update,
+    Delete,
+    List,
+    Mixed,
+}
+
+impl DbOp {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "insert" => Some(Self::Insert),
+            "get" => Some(Self::Get),
+            "update" => Some(Self::Update),
+            "delete" => Some(Self::Delete),
+            "list" => Some(Self::List),
+            "mixed" => Some(Self::Mixed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct DbBenchMetrics {
+    inserts: std::sync::atomic::AtomicU64,
+    gets: std::sync::atomic::AtomicU64,
+    updates: std::sync::atomic::AtomicU64,
+    deletes: std::sync::atomic::AtomicU64,
+    lists: std::sync::atomic::AtomicU64,
+    errors: std::sync::atomic::AtomicU64,
+    latencies_ns: std::sync::Mutex<Vec<u64>>,
+}
+
+impl DbBenchMetrics {
+    fn record_latency(&self, ns: u64) {
+        if let Ok(mut latencies) = self.latencies_ns.lock() {
+            latencies.push(ns);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    fn calculate_percentile(&self, p: f64) -> u64 {
+        if let Ok(mut latencies) = self.latencies_ns.lock() {
+            if latencies.is_empty() {
+                return 0;
+            }
+            latencies.sort_unstable();
+            let idx = ((latencies.len() as f64) * p / 100.0) as usize;
+            latencies[idx.min(latencies.len() - 1)]
+        } else {
+            0
+        }
+    }
+
+    fn total_ops(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.inserts.load(Ordering::Relaxed)
+            + self.gets.load(Ordering::Relaxed)
+            + self.updates.load(Ordering::Relaxed)
+            + self.deletes.load(Ordering::Relaxed)
+            + self.lists.load(Ordering::Relaxed)
+    }
+}
+
+fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
+    let mut record = serde_json::Map::new();
+    let value_template: String = (0..field_size).map(|_| 'x').collect();
+    for i in 0..fields {
+        record.insert(format!("field_{i}"), json!(format!("{value_template}_{id}")));
+    }
+    Value::Object(record)
+}
+
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let op = DbOp::from_str(&args.op).ok_or_else(|| {
+        format!(
+            "Invalid operation '{}'. Use: insert, get, update, delete, list, mixed",
+            args.op
+        )
+    })?;
+
+    let record_size_approx = args.fields * (args.field_size + 20);
+    println!(
+        "DB Benchmark: {} ops, {} concurrent, op={:?}, ~{} bytes/record",
+        args.operations, args.concurrency, op, record_size_approx
+    );
+
+    let metrics = Arc::new(DbBenchMetrics::default());
+    let inserted_ids: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    let ops_per_client = args.operations / args.concurrency.max(1) as u64;
+    let warmup_per_client = args.warmup / args.concurrency.max(1) as u64;
+
+    let start_time = Instant::now();
+    let mut handles = Vec::new();
+
+    for client_id in 0..args.concurrency {
+        let conn = args.conn.clone();
+        let entity = args.entity.clone();
+        let metrics = Arc::clone(&metrics);
+        let inserted_ids = Arc::clone(&inserted_ids);
+        let id_counter = Arc::clone(&id_counter);
+        let fields = args.fields;
+        let field_size = args.field_size;
+
+        let handle = tokio::spawn(async move {
+            let client_name = format!("bench-db-{client_id}");
+            let client = MqttClient::new(client_name.clone());
+
+            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+                let opts = ConnectOptions::new(client_name)
+                    .with_credentials(user.clone(), pass.clone());
+                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
+                    eprintln!("Client {client_id} connect failed: {e}");
+                    return;
+                }
+            } else if let Err(e) = client.connect(&conn.broker).await {
+                eprintln!("Client {client_id} connect failed: {e}");
+                return;
+            }
+
+            for i in 0..(warmup_per_client + ops_per_client) {
+                let is_warmup = i < warmup_per_client;
+                let current_op = if op == DbOp::Mixed {
+                    match i % 5 {
+                        1 => DbOp::Get,
+                        2 => DbOp::Update,
+                        3 => DbOp::List,
+                        4 => DbOp::Delete,
+                        _ => DbOp::Insert,
+                    }
+                } else {
+                    op
+                };
+
+                let op_start = Instant::now();
+                let success = match current_op {
+                    DbOp::Insert => {
+                        let id = id_counter.fetch_add(1, Ordering::Relaxed);
+                        let record = generate_record(fields, field_size, id);
+                        let topic = format!("$DB/{entity}/create");
+                        let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+
+                        let (tx, mut rx) = mpsc::channel::<bool>(1);
+                        let tx_clone = tx.clone();
+                        if client
+                            .subscribe(&response_topic, move |msg| {
+                                let success = msg.payload.iter().any(|&b| b == b'"' || b == b'{');
+                                let _ = tx_clone.try_send(success);
+                            })
+                            .await
+                            .is_err()
+                        {
+                            false
+                        } else {
+                            let opts = PublishOptions {
+                                properties: PublishProperties {
+                                    response_topic: Some(response_topic.clone()),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            };
+                            if client
+                                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(false);
+                                if result
+                                    && let Ok(mut ids) = inserted_ids.lock()
+                                {
+                                    ids.push(format!("{id}"));
+                                }
+                                let _ = client.unsubscribe(&response_topic).await;
+                                result
+                            }
+                        }
+                    }
+                    DbOp::Get => {
+                        let id = {
+                            let ids = inserted_ids.lock().ok();
+                            ids.and_then(|ids| {
+                                if ids.is_empty() {
+                                    None
+                                } else {
+                                    Some(ids[i as usize % ids.len()].clone())
+                                }
+                            })
+                        };
+                        if let Some(id) = id {
+                            let topic = format!("$DB/{entity}/{id}");
+                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+
+                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let tx_clone = tx.clone();
+                            if client
+                                .subscribe(&response_topic, move |_msg| {
+                                    let _ = tx_clone.try_send(true);
+                                })
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                let opts = PublishOptions {
+                                    properties: PublishProperties {
+                                        response_topic: Some(response_topic.clone()),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                };
+                                if client
+                                    .publish_with_options(&topic, b"{}".to_vec(), opts)
+                                    .await
+                                    .is_err()
+                                {
+                                    false
+                                } else {
+                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(false);
+                                    let _ = client.unsubscribe(&response_topic).await;
+                                    result
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    DbOp::Update => {
+                        let id = {
+                            let ids = inserted_ids.lock().ok();
+                            ids.and_then(|ids| {
+                                if ids.is_empty() {
+                                    None
+                                } else {
+                                    Some(ids[i as usize % ids.len()].clone())
+                                }
+                            })
+                        };
+                        if let Some(id) = id {
+                            let record = generate_record(fields, field_size, i);
+                            let topic = format!("$DB/{entity}/{id}/update");
+                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+
+                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let tx_clone = tx.clone();
+                            if client
+                                .subscribe(&response_topic, move |_msg| {
+                                    let _ = tx_clone.try_send(true);
+                                })
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                let opts = PublishOptions {
+                                    properties: PublishProperties {
+                                        response_topic: Some(response_topic.clone()),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                };
+                                if client
+                                    .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                                    .await
+                                    .is_err()
+                                {
+                                    false
+                                } else {
+                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(false);
+                                    let _ = client.unsubscribe(&response_topic).await;
+                                    result
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    DbOp::Delete => {
+                        let id = {
+                            let mut ids = inserted_ids.lock().ok();
+                            ids.as_mut().and_then(|ids| ids.pop())
+                        };
+                        if let Some(id) = id {
+                            let topic = format!("$DB/{entity}/{id}/delete");
+                            let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+
+                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let tx_clone = tx.clone();
+                            if client
+                                .subscribe(&response_topic, move |_msg| {
+                                    let _ = tx_clone.try_send(true);
+                                })
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                let opts = PublishOptions {
+                                    properties: PublishProperties {
+                                        response_topic: Some(response_topic.clone()),
+                                        ..Default::default()
+                                    },
+                                    ..Default::default()
+                                };
+                                if client
+                                    .publish_with_options(&topic, b"{}".to_vec(), opts)
+                                    .await
+                                    .is_err()
+                                {
+                                    false
+                                } else {
+                                    let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .unwrap_or(false);
+                                    let _ = client.unsubscribe(&response_topic).await;
+                                    result
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    }
+                    DbOp::List => {
+                        let topic = format!("$DB/{entity}/list");
+                        let response_topic = format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
+
+                        let (tx, mut rx) = mpsc::channel::<bool>(1);
+                        let tx_clone = tx.clone();
+                        if client
+                            .subscribe(&response_topic, move |_msg| {
+                                let _ = tx_clone.try_send(true);
+                            })
+                            .await
+                            .is_err()
+                        {
+                            false
+                        } else {
+                            let opts = PublishOptions {
+                                properties: PublishProperties {
+                                    response_topic: Some(response_topic.clone()),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            };
+                            let payload = json!({"limit": 10});
+                            if client
+                                .publish_with_options(&topic, serde_json::to_vec(&payload).unwrap(), opts)
+                                .await
+                                .is_err()
+                            {
+                                false
+                            } else {
+                                let result = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or(false);
+                                let _ = client.unsubscribe(&response_topic).await;
+                                result
+                            }
+                        }
+                    }
+                    DbOp::Mixed => unreachable!(),
+                };
+
+                let latency_ns = op_start.elapsed().as_nanos() as u64;
+
+                if !is_warmup {
+                    if success {
+                        metrics.record_latency(latency_ns);
+                        match current_op {
+                            DbOp::Insert => metrics.inserts.fetch_add(1, Ordering::Relaxed),
+                            DbOp::Get => metrics.gets.fetch_add(1, Ordering::Relaxed),
+                            DbOp::Update => metrics.updates.fetch_add(1, Ordering::Relaxed),
+                            DbOp::Delete => metrics.deletes.fetch_add(1, Ordering::Relaxed),
+                            DbOp::List => metrics.lists.fetch_add(1, Ordering::Relaxed),
+                            DbOp::Mixed => 0,
+                        };
+                    } else {
+                        metrics.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            let _ = client.disconnect().await;
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+
+    let total = metrics.total_ops();
+    let inserts = metrics.inserts.load(Ordering::Relaxed);
+    let gets = metrics.gets.load(Ordering::Relaxed);
+    let updates = metrics.updates.load(Ordering::Relaxed);
+    let deletes = metrics.deletes.load(Ordering::Relaxed);
+    let lists = metrics.lists.load(Ordering::Relaxed);
+    let errors = metrics.errors.load(Ordering::Relaxed);
+
+    let p50 = metrics.calculate_percentile(50.0);
+    let p95 = metrics.calculate_percentile(95.0);
+    let p99 = metrics.calculate_percentile(99.0);
+
+    let throughput = total as f64 / elapsed_secs;
+
+    if args.cleanup {
+        println!("Cleaning up test entity...");
+        let ids_to_cleanup: Vec<String> = inserted_ids
+            .lock()
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        if !ids_to_cleanup.is_empty() {
+            let client = MqttClient::new("bench-cleanup");
+            if client.connect(&args.conn.broker).await.is_ok() {
+                for id in &ids_to_cleanup {
+                    let topic = format!("$DB/{}/{id}/delete", args.entity);
+                    let _ = client.publish(&topic, b"{}".to_vec()).await;
+                }
+                let _ = client.disconnect().await;
+            }
+        }
+    }
+
+    if let OutputFormat::Json = args.format {
+        let result = json!({
+            "total_ops": total,
+            "inserts": inserts,
+            "gets": gets,
+            "updates": updates,
+            "deletes": deletes,
+            "lists": lists,
+            "errors": errors,
+            "duration_secs": elapsed_secs,
+            "throughput_ops_sec": throughput,
+            "latency_p50_us": p50 / 1000,
+            "latency_p95_us": p95 / 1000,
+            "latency_p99_us": p99 / 1000,
+            "config": {
+                "operations": args.operations,
+                "concurrency": args.concurrency,
+                "op": args.op,
+                "fields": args.fields,
+                "field_size": args.field_size,
+                "record_size_approx": record_size_approx
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        let p50_us = p50 / 1000;
+        let p95_us = p95 / 1000;
+        let p99_us = p99 / 1000;
+        println!("\n┌───────────────────────────────────────────┐");
+        println!("│           DB BENCHMARK RESULTS            │");
+        println!("├───────────────────────────────────────────┤");
+        println!("│ Total operations:   {total:>20} │");
+        println!("│   Inserts:          {inserts:>20} │");
+        println!("│   Gets:             {gets:>20} │");
+        println!("│   Updates:          {updates:>20} │");
+        println!("│   Deletes:          {deletes:>20} │");
+        println!("│   Lists:            {lists:>20} │");
+        println!("│ Errors:             {errors:>20} │");
+        println!("│ Duration:           {elapsed_secs:>17.2} s │");
+        println!("├───────────────────────────────────────────┤");
+        println!("│ Throughput:       {throughput:>16.0} ops/s │");
+        println!("├───────────────────────────────────────────┤");
+        println!("│ Latency p50:        {p50_us:>17} µs │");
+        println!("│ Latency p95:        {p95_us:>17} µs │");
+        println!("│ Latency p99:        {p99_us:>17} µs │");
+        println!("└───────────────────────────────────────────┘");
     }
 
     Ok(())
