@@ -34,6 +34,7 @@ pub enum AdminOperation {
     Unsubscribe { sub_id: String },
     ConsumerGroupList,
     ConsumerGroupShow { name: String },
+    Health,
 }
 
 type ListOptions = (
@@ -46,6 +47,10 @@ type ListOptions = (
 
 #[allow(clippy::must_use_candidate)]
 pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
+    if topic == "$DB/_health" {
+        return Some(AdminOperation::Health);
+    }
+
     if let Some(rest) = topic.strip_prefix("$DB/_sub/") {
         let parts: Vec<&str> = rest.split('/').collect();
         return match parts.as_slice() {
@@ -801,6 +806,14 @@ async fn handle_admin_operation(
                 format!("consumer group not found: {name}"),
             ),
         },
+        AdminOperation::Health => Response::ok(json!({
+            "status": "healthy",
+            "ready": true,
+            "mode": "agent",
+            "details": {
+                "partitions": db.num_partitions()
+            }
+        })),
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -959,5 +972,11 @@ mod tests {
         };
         let result = build_request(op, &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_admin_topic_health() {
+        let op = parse_admin_topic("$DB/_health").unwrap();
+        assert!(matches!(op, AdminOperation::Health));
     }
 }

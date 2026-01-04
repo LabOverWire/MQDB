@@ -2164,6 +2164,78 @@ fn cmd_dev_start_cluster(
     Ok(())
 }
 
+async fn wait_for_broker_ready(conn: &ConnectionArgs, timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs);
+
+    print!("Waiting for broker...");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    loop {
+        if start.elapsed() > timeout {
+            println!(" timeout!");
+            return Err(format!("Broker not ready after {timeout_secs}s").into());
+        }
+
+        let client_id = format!("bench-ready-{}", uuid::Uuid::new_v4());
+        let client = MqttClient::new(&client_id);
+        let connected = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+            let opts = ConnectOptions::new(&client_id)
+                .with_credentials(user.clone(), pass.clone());
+            Box::pin(client.connect_with_options(&conn.broker, opts)).await.is_ok()
+        } else {
+            client.connect(&conn.broker).await.is_ok()
+        };
+
+        if connected {
+            let response_topic = format!("bench-ready/{}", uuid::Uuid::new_v4());
+            let (payload_tx, mut payload_rx) = mpsc::channel::<Vec<u8>>(1);
+
+            let sub_ok = client
+                .subscribe(&response_topic, move |msg| {
+                    let _ = payload_tx.try_send(msg.payload.clone());
+                })
+                .await
+                .is_ok();
+
+            if sub_ok {
+                let opts = PublishOptions {
+                    properties: PublishProperties {
+                        response_topic: Some(response_topic.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+
+                let _ = client.publish_with_options(
+                    "$DB/_health",
+                    b"{}".to_vec(),
+                    opts,
+                ).await;
+
+                if let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), payload_rx.recv()).await
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&payload)
+                    && json.get("data")
+                        .and_then(|d| d.get("ready"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                {
+                    let _ = client.disconnect().await;
+                    println!(" ready!");
+                    return Ok(());
+                }
+            }
+            let _ = client.disconnect().await;
+        }
+
+        print!(".");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 struct BenchPubsubArgs {
     publishers: usize,
     subscribers: usize,
@@ -2213,6 +2285,8 @@ impl BenchMetrics {
 async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
+
+    wait_for_broker_ready(&args.conn, 30).await?;
 
     let metrics = Arc::new(BenchMetrics::default());
     let running = Arc::new(AtomicBool::new(true));
@@ -2511,6 +2585,8 @@ fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
 async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
+
+    wait_for_broker_ready(&args.conn, 30).await?;
 
     let op = DbOp::from_str(&args.op).ok_or_else(|| {
         format!(

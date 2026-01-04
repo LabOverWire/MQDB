@@ -1,9 +1,10 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
     ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, MqttTransport, NodeController,
-    NodeId, PartitionId, RaftMessage, TransportConfig,
+    NodeId, PartitionId, RaftMessage, TransportConfig, NUM_PARTITIONS,
 };
 use crate::config::DurabilityMode;
+use crate::transport::{ErrorCode, Response};
 use crate::storage::FjallBackend;
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
@@ -315,6 +316,21 @@ impl ClusteredAgent {
             })
             .await
             .map_err(|e| format!("failed to subscribe to admin topics: {e}"))?;
+
+        admin_client
+            .subscribe("$DB/_health", {
+                let tx = admin_tx.clone();
+                move |msg: Message| {
+                    let req = AdminRequest {
+                        topic: msg.topic.clone(),
+                        response_topic: msg.properties.response_topic.clone(),
+                    };
+                    let _ = tx.try_send(req);
+                }
+            })
+            .await
+            .map_err(|e| format!("failed to subscribe to health topic: {e}"))?;
+
         info!("subscribed to admin topics");
 
         {
@@ -566,15 +582,14 @@ impl ClusteredAgent {
             return;
         };
 
-        let response = if req.topic.ends_with("/status") {
+        let response = if req.topic == "$DB/_health" {
+            self.build_health_response().await
+        } else if req.topic.ends_with("/status") {
             self.build_status_response().await
         } else if req.topic.ends_with("/rebalance") {
             self.handle_rebalance_request().await
         } else {
-            json!({
-                "ok": false,
-                "error": format!("unknown admin command: {}", req.topic)
-            })
+            Response::error(ErrorCode::BadRequest, format!("unknown admin command: {}", req.topic))
         };
 
         let payload = serde_json::to_vec(&response).unwrap_or_default();
@@ -583,7 +598,7 @@ impl ClusteredAgent {
         }
     }
 
-    async fn build_status_response(&self) -> serde_json::Value {
+    async fn build_status_response(&self) -> Response {
         let ctrl = self.controller.read().await;
         let raft = self.raft.read().await;
 
@@ -601,28 +616,22 @@ impl ClusteredAgent {
             }));
         }
 
-        json!({
-            "ok": true,
-            "data": {
-                "node_id": self.node_id.get(),
-                "node_name": self.node_name,
-                "is_raft_leader": raft.is_leader(),
-                "raft_term": raft.current_term(),
-                "alive_nodes": alive_nodes,
-                "partition_count": 64,
-                "partitions": partitions
-            }
-        })
+        Response::ok(json!({
+            "node_id": self.node_id.get(),
+            "node_name": self.node_name,
+            "is_raft_leader": raft.is_leader(),
+            "raft_term": raft.current_term(),
+            "alive_nodes": alive_nodes,
+            "partition_count": NUM_PARTITIONS,
+            "partitions": partitions
+        }))
     }
 
-    async fn handle_rebalance_request(&self) -> serde_json::Value {
+    async fn handle_rebalance_request(&self) -> Response {
         let mut raft = self.raft.write().await;
 
         if !raft.is_leader() {
-            return json!({
-                "ok": false,
-                "error": "not the Raft leader"
-            });
+            return Response::error(ErrorCode::Forbidden, "not the Raft leader");
         }
 
         let ctrl = self.controller.read().await;
@@ -635,12 +644,48 @@ impl ClusteredAgent {
             proposed += proposals.len();
         }
 
-        json!({
-            "ok": true,
-            "data": {
-                "proposed_changes": proposed
+        Response::ok(json!({
+            "proposed_changes": proposed
+        }))
+    }
+
+    async fn build_health_response(&self) -> Response {
+        let ctrl = self.controller.read().await;
+        let raft = self.raft.read().await;
+
+        let is_leader = raft.is_leader();
+        let leader_exists = is_leader || raft.leader_id().is_some();
+        let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
+
+        let mut partitions_ready = 0u16;
+        for partition in PartitionId::all() {
+            if ctrl.partition_map().get(partition).primary.is_some() {
+                partitions_ready += 1;
             }
-        })
+        }
+
+        let ready = leader_exists && partitions_ready == NUM_PARTITIONS;
+        let health_status = if partitions_ready == NUM_PARTITIONS && leader_exists {
+            "healthy"
+        } else if partitions_ready > 0 && leader_exists {
+            "degraded"
+        } else {
+            "unhealthy"
+        };
+
+        Response::ok(json!({
+            "health_status": health_status,
+            "ready": ready,
+            "mode": "cluster",
+            "details": {
+                "node_id": self.node_id.get(),
+                "is_leader": is_leader,
+                "raft_term": raft.current_term(),
+                "partitions_ready": partitions_ready,
+                "partitions_total": NUM_PARTITIONS,
+                "alive_nodes": alive_nodes
+            }
+        }))
     }
 
     pub fn shutdown(&self) {
