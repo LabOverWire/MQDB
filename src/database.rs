@@ -509,37 +509,37 @@ impl Database {
             let index_manager = self.index_manager.read().await;
             let mut used_index = false;
 
-            if let Some(filter) = filters.first() {
-                if filter.op == FilterOp::Eq {
-                    let value_bytes = keys::encode_value_for_index(&filter.value)?;
-                    let ids = index_manager.lookup_by_field(
-                        &self.storage,
-                        &entity_name,
-                        &filter.field,
-                        &value_bytes,
-                    )?;
+            if let Some(filter) = filters.first()
+                && filter.op == FilterOp::Eq
+            {
+                let value_bytes = keys::encode_value_for_index(&filter.value)?;
+                let ids = index_manager.lookup_by_field(
+                    &self.storage,
+                    &entity_name,
+                    &filter.field,
+                    &value_bytes,
+                )?;
 
-                    if !ids.is_empty() {
-                        used_index = true;
-                        for id in ids {
-                            match self
-                                .read(entity_name.clone(), id.clone(), vec![], None)
-                                .await
-                            {
-                                Ok(entity_data) => {
-                                    if Self::matches_filters(&entity_data, &filters) {
-                                        results.push(entity_data);
-                                    }
+                if !ids.is_empty() {
+                    used_index = true;
+                    for id in ids {
+                        match self
+                            .read(entity_name.clone(), id.clone(), vec![], None)
+                            .await
+                        {
+                            Ok(entity_data) => {
+                                if Self::matches_filters(&entity_data, &filters) {
+                                    results.push(entity_data);
                                 }
-                                Err(Error::NotFound { .. }) => {
-                                    tracing::warn!(
-                                        "index pointed to non-existent entity: {}/{}",
-                                        entity_name,
-                                        id
-                                    );
-                                }
-                                Err(e) => return Err(e),
                             }
+                            Err(Error::NotFound { .. }) => {
+                                tracing::warn!(
+                                    "index pointed to non-existent entity: {}/{}",
+                                    entity_name,
+                                    id
+                                );
+                            }
+                            Err(e) => return Err(e),
                         }
                     }
                 }

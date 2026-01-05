@@ -158,6 +158,26 @@ impl<T: ClusterTransport> NodeController<T> {
             .is_some_and(|s| s.role() == ReplicaRole::Primary)
     }
 
+    /// Pick a local partition for creating new entities (round-robin).
+    ///
+    /// # Panics
+    /// Panics if no valid partition can be created (should never happen with 64 partitions).
+    #[must_use]
+    pub fn pick_partition_for_create(&self) -> PartitionId {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static COUNTER: AtomicU16 = AtomicU16::new(0);
+
+        for _ in 0..super::NUM_PARTITIONS {
+            let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % super::NUM_PARTITIONS;
+            if let Some(partition) = PartitionId::new(idx)
+                && self.is_local_partition(partition)
+            {
+                return partition;
+            }
+        }
+        PartitionId::new(0).expect("partition 0 should always be valid")
+    }
+
     pub fn register_peer(&mut self, peer: NodeId) {
         self.heartbeat.register_node(peer);
     }

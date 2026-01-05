@@ -87,7 +87,16 @@ This creates a two-phase pattern for non-primary nodes: the write eventually rea
 
 Database operations enter through the `$DB/` MQTT topic namespace. The `DbRequestHandler` parses these publishes and calls controller methods (`db_create`, `db_update`, `db_delete`) that follow the same `ReplicationWrite → write_or_forward` pattern as MQTT operations.
 
-**Key Files**: `event_handler.rs:43-668`, `node_controller.rs:904-942`, `db_handler.rs`
+**Two API Levels:**
+
+| API | Topic Pattern | Payload | Use Case |
+|-----|---------------|---------|----------|
+| Low-level | `$DB/p{partition}/{entity}/{op}` | Binary BeBytes | Direct partition access, max performance |
+| High-level | `$DB/{entity}/{op}` | JSON | Auto-routing, CLI-friendly |
+
+The high-level JSON API (`db_topic.rs:174-218`) automatically selects a local partition for creates and routes operations to the appropriate partition primary. This enables standard CLI commands (`mqdb create/read/update/delete/list`) to work transparently in cluster mode.
+
+**Key Files**: `event_handler.rs:43-668`, `node_controller.rs:904-942`, `db_handler.rs`, `db_topic.rs`
 
 ### A2.4 Write Amplification: Subscription Example
 

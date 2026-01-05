@@ -1384,7 +1384,7 @@ fn parse_filters(filter_str: &str) -> Vec<Value> {
         .filter_map(|part| {
             let part = part.trim();
 
-            let ops = ["!=", ">=", "<=", "!?", ">", "<", "=", "~", "?"];
+            let ops = ["<>", "!=", ">=", "<=", "!?", ">", "<", "=", "~", "?"];
 
             for op in ops {
                 if let Some(pos) = part.find(op) {
@@ -1392,7 +1392,7 @@ fn parse_filters(filter_str: &str) -> Vec<Value> {
                     let value_str = part[pos + op.len()..].trim();
 
                     let filter_op = match op {
-                        "!=" => "neq",
+                        "!=" | "<>" => "neq",
                         ">" => "gt",
                         "<" => "lt",
                         ">=" => "gte",

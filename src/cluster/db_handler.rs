@@ -9,6 +9,7 @@ use super::node_controller::NodeController;
 use super::transport::ClusterTransport;
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
+use serde_json::{json, Value};
 
 pub struct DbPublishResponse {
     pub topic: String,
@@ -70,6 +71,22 @@ impl DbRequestHandler {
             }
             DbTopicOperation::QueryRequest { .. } | DbTopicOperation::QueryResponse { .. } => {
                 return None;
+            }
+            DbTopicOperation::JsonCreate { entity } => {
+                self.handle_json_create(controller, &entity, payload).await
+            }
+            DbTopicOperation::JsonRead { entity, id } => {
+                self.handle_json_read(controller, &entity, &id)
+            }
+            DbTopicOperation::JsonUpdate { entity, id } => {
+                self.handle_json_update(controller, &entity, &id, payload)
+                    .await
+            }
+            DbTopicOperation::JsonDelete { entity, id } => {
+                self.handle_json_delete(controller, &entity, &id).await
+            }
+            DbTopicOperation::JsonList { entity } => {
+                self.handle_json_list(controller, &entity, payload)
             }
         };
 
@@ -352,6 +369,218 @@ impl DbRequestHandler {
         };
 
         FkValidateResponse::create(status, request.request_id_str()).to_be_bytes()
+    }
+
+    async fn handle_json_create<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let data: Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+        };
+
+        let partition = controller.pick_partition_for_create();
+        let id = self.generate_id_for_partition(entity, partition, payload);
+
+        if !controller.is_local_partition(partition) {
+            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+        }
+
+        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(u64::MAX);
+
+        match controller.db_create(entity, &id, &data_bytes, now_ms).await {
+            Ok(db_entity) => {
+                let result = json!({
+                    "status": "ok",
+                    "data": {
+                        "id": db_entity.id_str(),
+                        "entity": entity,
+                        "data": data
+                    }
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::AlreadyExists) => {
+                Self::json_error(409, "entity already exists")
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    fn handle_json_read<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+    ) -> Vec<u8> {
+        let partition = data_partition(entity, id);
+
+        if !controller.is_local_partition(partition) {
+            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+        }
+
+        match controller.db_get(entity, id) {
+            Some(db_entity) => {
+                let data: Value =
+                    serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let result = json!({
+                    "status": "ok",
+                    "data": {
+                        "id": db_entity.id_str(),
+                        "entity": entity,
+                        "data": data
+                    }
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+        }
+    }
+
+    async fn handle_json_update<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let data: Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+        };
+
+        let partition = data_partition(entity, id);
+
+        if !controller.is_local_partition(partition) {
+            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+        }
+
+        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(u64::MAX);
+
+        match controller.db_update(entity, id, &data_bytes, now_ms).await {
+            Ok(db_entity) => {
+                let result = json!({
+                    "status": "ok",
+                    "data": {
+                        "id": db_entity.id_str(),
+                        "entity": entity,
+                        "data": data
+                    }
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    async fn handle_json_delete<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+    ) -> Vec<u8> {
+        let partition = data_partition(entity, id);
+
+        if !controller.is_local_partition(partition) {
+            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+        }
+
+        match controller.db_delete(entity, id).await {
+            Ok(_) => {
+                let result = json!({
+                    "status": "ok",
+                    "data": {
+                        "id": id,
+                        "entity": entity,
+                        "deleted": true
+                    }
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    fn handle_json_list<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let filters: Vec<crate::Filter> = if payload.is_empty() {
+            Vec::new()
+        } else if let Ok(data) = serde_json::from_slice::<Value>(payload) {
+            data.get("filters")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let entities = controller.db_list(entity);
+        let items: Vec<Value> = entities
+            .iter()
+            .filter_map(|e| {
+                let data: Value = serde_json::from_slice(&e.data).ok()?;
+                if Self::matches_filters(&data, &filters) {
+                    Some(json!({
+                        "id": e.id_str(),
+                        "data": data
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let result = json!({
+            "status": "ok",
+            "data": items
+        });
+        serde_json::to_vec(&result).unwrap_or_default()
+    }
+
+    fn matches_filters(entity: &Value, filters: &[crate::Filter]) -> bool {
+        for filter in filters {
+            if let Some(field_value) = entity.get(&filter.field) {
+                if !filter.matches(field_value) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn json_error(code: u16, message: &str) -> Vec<u8> {
+        let result = json!({
+            "status": "error",
+            "code": code,
+            "message": message
+        });
+        serde_json::to_vec(&result).unwrap_or_default()
     }
 
     fn generate_id_for_partition(

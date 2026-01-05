@@ -183,13 +183,16 @@ mqdb list products --filter 'category=electronics'
 
 **Expected:** Returns Laptop, Mouse, Keyboard
 
-### Not Equal Filter (!=)
+### Not Equal Filter (<>)
 
 ```bash
-mqdb list products --filter 'category!=electronics'
+mqdb list products --filter 'category<>electronics'
 ```
 
 **Expected:** Returns Desk, Chair
+
+> **Note:** Use `<>` (SQL-style) for not-equal. The `!=` syntax also works but requires
+> shell escaping due to bash history expansion.
 
 ### Greater Than Filter (>)
 
@@ -773,6 +776,10 @@ rm -rf ./data/quicktest
 
 Cluster mode runs a distributed MQDB with Raft consensus for partition management.
 
+> **Note:** Standard CRUD operations (`mqdb create/read/update/delete/list`) now work in cluster mode.
+> The cluster automatically routes operations to the appropriate partition.
+> For direct partition access, use the low-level `mqdb db` commands (Section 12).
+
 ### Starting a Single-Node Cluster
 
 ```bash
@@ -893,6 +900,37 @@ mqdb cluster status --broker 127.0.0.1:1883
 
 ```bash
 mqdb cluster rebalance --broker 127.0.0.1:1883
+```
+
+### Cluster CRUD Operations
+
+Standard CRUD commands work in cluster mode with automatic partition routing:
+
+```bash
+# Start a single-node cluster
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-cluster \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key &
+sleep 3
+
+# Create - automatically routed to a partition
+mqdb create users --data '{"name": "Alice", "email": "alice@example.com"}' --broker 127.0.0.1:1883
+# Returns: {"status":"ok","data":{"entity":"users","id":"<generated-id>","data":{...}}}
+
+# Read
+mqdb read users <id> --broker 127.0.0.1:1883
+
+# Update
+mqdb update users <id> --data '{"name": "Alice Updated", "age": 30}' --broker 127.0.0.1:1883
+
+# List with filter
+mqdb list users --broker 127.0.0.1:1883
+mqdb list users --filter "name=Alice Updated" --broker 127.0.0.1:1883
+
+# Delete
+mqdb delete users <id> --broker 127.0.0.1:1883
+
+# Cleanup
+pkill -f "mqdb cluster"
 ```
 
 ---
@@ -1362,21 +1400,21 @@ Verify data exists on replica nodes.
 # 1. Start cluster
 mqdb dev start-cluster --nodes 3 --clean
 
-# 2. Create data on Node 1
-mqdb db create -p 0 -e test_repl -d '{"key": "replication_test"}' --broker 127.0.0.1:1883
+# 2. Create data via Node 1
+mqdb create test_repl --data '{"key": "replication_test"}' --broker 127.0.0.1:1883
 # Note the returned ID
 
-# 3. Read from Node 1 (likely primary)
-mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1883
+# 3. Read from Node 1
+mqdb read test_repl <id> --broker 127.0.0.1:1883
 
-# 4. Read from Node 2 (likely replica)
-mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1884
+# 4. Read from Node 2
+mqdb read test_repl <id> --broker 127.0.0.1:1884
 
 # 5. Read from Node 3
-mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1885
+mqdb read test_repl <id> --broker 127.0.0.1:1885
 ```
 
-**Expected:** At least 2 nodes should return the data (primary + replica).
+**Expected:** All nodes should return the data (replicated across cluster).
 
 ### Test 3: Primary Failure with Replica Takeover
 
@@ -1654,6 +1692,8 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Partition assignment (64 partitions distributed)
 - [ ] Cross-node data routing
 - [ ] Cluster status command
+- [ ] Cluster CRUD (create, read, update, delete, list)
+- [ ] Cluster list with filters
 
 ### Cluster Resilience
 - [ ] Data persistence on restart
