@@ -1094,3 +1094,589 @@ mqdb cluster status --broker 127.0.0.1:1884
 pkill -f "mqdb cluster"
 rm -rf /tmp/mqdb-node{1,2,3}
 ```
+
+---
+
+## 14. Development Commands
+
+The `mqdb dev` commands help with local development and testing.
+
+### List Running Processes
+
+```bash
+mqdb dev ps
+```
+
+Shows all running MQDB processes (agents and cluster nodes).
+
+### Kill Processes
+
+```bash
+# Kill all MQDB processes
+mqdb dev kill --all
+
+# Kill specific node
+mqdb dev kill --node 2
+
+# Kill agent only
+mqdb dev kill --agent
+```
+
+### Clean Test Data
+
+```bash
+# Clean default test directory
+mqdb dev clean
+
+# Clean custom directory
+mqdb dev clean --db-prefix /tmp/my-test
+```
+
+### View Logs
+
+```bash
+# View logs from all nodes
+mqdb dev logs
+
+# Follow logs in real-time
+mqdb dev logs --follow
+
+# View specific node logs
+mqdb dev logs --node 2
+
+# Filter by pattern
+mqdb dev logs --pattern "error|warn"
+
+# Show last N lines
+mqdb dev logs --last 100
+```
+
+### Quick Cluster Start
+
+Start a multi-node cluster for testing:
+
+```bash
+# Start 3-node cluster (default)
+mqdb dev start-cluster
+
+# Start with custom node count
+mqdb dev start-cluster --nodes 5
+
+# Clean existing data first
+mqdb dev start-cluster --clean
+
+# Without QUIC transport
+mqdb dev start-cluster --no-quic
+```
+
+### Run Built-in Tests
+
+```bash
+# Run pub/sub tests
+mqdb dev test --pubsub
+
+# Run database tests
+mqdb dev test --db
+
+# Specify node count
+mqdb dev test --nodes 3
+```
+
+---
+
+## 15. Benchmarking
+
+The `mqdb bench` commands measure performance.
+
+### Pub/Sub Benchmark
+
+```bash
+mqdb bench pubsub \
+  --publishers 4 \
+  --subscribers 4 \
+  --messages 10000 \
+  --size 256 \
+  --qos 1 \
+  --topic "bench/test"
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--publishers` | Number of publisher tasks | 1 |
+| `--subscribers` | Number of subscriber tasks | 1 |
+| `--messages` | Total messages to send | 10000 |
+| `--rate` | Messages per second (0 = unlimited) | 0 |
+| `--size` | Payload size in bytes | 64 |
+| `--qos` | MQTT QoS level (0, 1, or 2) | 0 |
+| `--topic` | Topic pattern | bench/test |
+| `--warmup` | Warmup messages before measuring | (none) |
+
+**Expected output:**
+```
+Pub/Sub Benchmark Results
+─────────────────────────
+Messages sent:     10000
+Messages received: 10000
+Duration:          2.34s
+Throughput:        4273 msg/s
+Latency (p50):     1.2ms
+Latency (p99):     8.5ms
+```
+
+### Database Benchmark
+
+```bash
+mqdb bench db \
+  --operations 1000 \
+  --entity bench_entity \
+  --op mixed \
+  --concurrency 4 \
+  --fields 5 \
+  --field-size 100
+```
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--operations` | Number of operations | 1000 |
+| `--entity` | Entity name to use | bench_entity |
+| `--op` | Operation type (insert, get, update, delete, list, mixed) | mixed |
+| `--concurrency` | Concurrent clients | 1 |
+| `--fields` | Fields per record | 5 |
+| `--field-size` | Size of each field value | 100 |
+| `--warmup` | Warmup operations | (none) |
+| `--cleanup` | Delete test data after | false |
+
+**Expected output:**
+```
+Database Benchmark Results
+──────────────────────────
+Operations:    1000
+Duration:      1.56s
+Throughput:    641 ops/s
+Latency (p50): 1.4ms
+Latency (p99): 12.3ms
+
+By Operation:
+  insert: 234 ops, 2.1ms avg
+  get:    312 ops, 0.8ms avg
+  update: 267 ops, 1.9ms avg
+  delete: 187 ops, 1.2ms avg
+```
+
+---
+
+## 16. Health Endpoint Testing
+
+The `$DB/_health` topic provides cluster and node health status.
+
+### Subscribe to Health Status
+
+**Terminal 3:**
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 -t '$DB/_health' -v
+```
+
+**Terminal 2:**
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 -t '$DB/_health' -m ''
+```
+
+**Expected response:**
+```json
+{
+  "status": "ok",
+  "data": {
+    "ready": true,
+    "mode": "cluster",
+    "node_id": 1,
+    "node_name": "node-1",
+    "raft_leader": 1,
+    "alive_nodes": [1, 2, 3],
+    "partition_count": 64,
+    "primary_partitions": 22,
+    "replica_partitions": 21
+  }
+}
+```
+
+### Health Check After Node Failure
+
+1. Start 3-node cluster
+2. Subscribe to health on Node 2
+3. Kill Node 1
+4. Verify health shows updated alive_nodes
+
+```bash
+# After killing Node 1
+mosquitto_pub -h 127.0.0.1 -p 1884 -t '$DB/_health' -m ''
+```
+
+**Expected:** `alive_nodes` should show `[2, 3]` and a new leader elected.
+
+---
+
+## 17. Cluster Resilience Testing
+
+These tests verify data survives failures and replication works correctly.
+
+### Test 1: Data Persistence on Restart
+
+Verify data survives a full cluster restart.
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create test data
+mqdb create users --data '{"name": "Persist Test", "value": 123}' --broker 127.0.0.1:1883
+# Note the returned ID
+
+# 3. Verify data exists
+mqdb read users <id> --broker 127.0.0.1:1883
+
+# 4. Stop all nodes
+mqdb dev kill --all
+
+# 5. Restart cluster (without --clean)
+mqdb dev start-cluster --nodes 3
+
+# 6. Verify data survived
+mqdb read users <id> --broker 127.0.0.1:1883
+```
+
+**Expected:** Data should be readable after restart.
+
+### Test 2: Replication Verification
+
+Verify data exists on replica nodes.
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create data on Node 1
+mqdb db create -p 0 -e test_repl -d '{"key": "replication_test"}' --broker 127.0.0.1:1883
+# Note the returned ID
+
+# 3. Read from Node 1 (likely primary)
+mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1883
+
+# 4. Read from Node 2 (likely replica)
+mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1884
+
+# 5. Read from Node 3
+mqdb db read -p 0 -e test_repl -i <id> --broker 127.0.0.1:1885
+```
+
+**Expected:** At least 2 nodes should return the data (primary + replica).
+
+### Test 3: Primary Failure with Replica Takeover
+
+Verify replica becomes primary when original primary dies.
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create multiple entities across partitions
+for i in {1..10}; do
+  mqdb create failover_test --data "{\"index\": $i}" --broker 127.0.0.1:1883
+done
+
+# 3. Note the IDs and verify all readable
+mqdb list failover_test --broker 127.0.0.1:1883
+
+# 4. Kill Node 1
+mqdb dev kill --node 1
+
+# 5. Wait for failover (2-3 seconds)
+sleep 3
+
+# 6. Verify all data still accessible via Node 2
+mqdb list failover_test --broker 127.0.0.1:1884
+
+# 7. Verify count matches
+```
+
+**Expected:** All 10 entities should still be readable from surviving nodes.
+
+### Test 4: Network Partition Simulation
+
+```bash
+# 1. Start 3-node cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create data
+mqdb create partition_test --data '{"before": "partition"}' --broker 127.0.0.1:1883
+
+# 3. Simulate partition by killing Node 3
+mqdb dev kill --node 3
+
+# 4. Create more data (should succeed with 2 nodes)
+mqdb create partition_test --data '{"during": "partition"}' --broker 127.0.0.1:1883
+
+# 5. Restart Node 3
+mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-test-3 \
+  --peers 1@127.0.0.1:1883 --no-quic &
+
+# 6. Wait for rejoin
+sleep 5
+
+# 7. Verify Node 3 has all data
+mqdb list partition_test --broker 127.0.0.1:1885
+```
+
+**Expected:** Node 3 should catch up and have all data after rejoining.
+
+---
+
+## 18. MQTT Protocol Cluster Testing
+
+These tests verify MQTT protocol features work correctly across cluster nodes.
+
+### Test 1: QoS 1 Cross-Node Delivery
+
+```bash
+# Terminal 1: Start cluster
+mqdb dev start-cluster --nodes 2 --clean
+
+# Terminal 2: Subscribe on Node 2 with QoS 1
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "qos1/test" -q 1 -v
+
+# Terminal 3: Publish to Node 1 with QoS 1
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "qos1/test" -m "QoS1 message" -q 1
+```
+
+**Expected:** Subscriber on Node 2 receives the message exactly once.
+
+### Test 2: QoS 2 Cross-Node Delivery
+
+```bash
+# Terminal 2: Subscribe on Node 2 with QoS 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "qos2/test" -q 2 -v -C 5
+
+# Terminal 3: Publish 5 messages with QoS 2
+for i in {1..5}; do
+  mosquitto_pub -h 127.0.0.1 -p 1883 -t "qos2/test" -m "Message $i" -q 2
+done
+```
+
+**Expected:** Exactly 5 messages received, no duplicates.
+
+### Test 3: Retained Messages Across Nodes
+
+```bash
+# 1. Publish retained message to Node 1
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "retained/test" -m "Retained content" -r
+
+# 2. New subscriber on Node 2 should receive it
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "retained/test" -v -C 1
+```
+
+**Expected:** New subscriber immediately receives the retained message.
+
+### Test 4: Retained Message Survives Node Failure
+
+```bash
+# 1. Publish retained message
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "retained/failover" -m "Survives restart" -r
+
+# 2. Kill Node 1
+mqdb dev kill --node 1
+
+# 3. Subscribe on Node 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "retained/failover" -v -C 1
+```
+
+**Expected:** Retained message still delivered from replica.
+
+### Test 5: Wildcard Subscriptions Cross-Node
+
+```bash
+# Terminal 2: Subscribe with wildcard on Node 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "sensors/+/temperature" -v
+
+# Terminal 3: Publish to matching topics from Node 1
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "sensors/room1/temperature" -m "22.5"
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "sensors/room2/temperature" -m "23.1"
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "sensors/room3/temperature" -m "21.8"
+```
+
+**Expected:** All 3 messages received by wildcard subscriber.
+
+### Test 6: Multi-Level Wildcard (#)
+
+```bash
+# Terminal 2: Subscribe with # wildcard
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "events/#" -v
+
+# Terminal 3: Publish to various sub-topics
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/user/login" -m "user1"
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/user/logout" -m "user2"
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/system/startup" -m "node1"
+```
+
+**Expected:** All 3 messages received.
+
+### Test 7: Last Will Testament (LWT) Cross-Node
+
+```bash
+# Terminal 2: Subscribe to LWT topic on Node 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "clients/status" -v
+
+# Terminal 3: Connect client with LWT to Node 1
+mosquitto_sub -h 127.0.0.1 -p 1883 -t "dummy" \
+  --will-topic "clients/status" \
+  --will-payload "client123 disconnected" \
+  --will-qos 1 \
+  -i client123
+
+# Terminal 4: Kill the client ungracefully
+pkill -9 -f "mosquitto_sub.*client123"
+```
+
+**Expected:** Terminal 2 receives "client123 disconnected" after ungraceful disconnect.
+
+### Test 8: Session Persistence Across Failover
+
+```bash
+# 1. Connect with persistent session and subscribe on Node 1
+mosquitto_sub -h 127.0.0.1 -p 1883 -t "session/test" -q 1 \
+  -i persistent-client --disable-clean-session &
+SUB_PID=$!
+
+# 2. Disconnect client
+kill $SUB_PID
+
+# 3. Publish while client is disconnected
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "session/test" -m "Queued message" -q 1
+
+# 4. Kill Node 1
+mqdb dev kill --node 1
+
+# 5. Reconnect same client to Node 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "session/test" -q 1 \
+  -i persistent-client --disable-clean-session -C 1
+```
+
+**Expected:** Client receives the queued message after reconnecting to different node.
+
+### Test 9: Message Deduplication Under Load
+
+```bash
+# Terminal 2: Subscribe and count messages
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "dedup/test" -C 100 | wc -l
+
+# Terminal 3: Rapidly publish 100 messages
+for i in {1..100}; do
+  mosquitto_pub -h 127.0.0.1 -p 1883 -t "dedup/test" -m "msg$i" &
+done
+wait
+```
+
+**Expected:** Exactly 100 messages received (no duplicates).
+
+---
+
+## 19. Constraints in Cluster Mode
+
+Verify database constraints work across cluster nodes.
+
+### Unique Constraint Across Nodes
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 2 --clean
+
+# 2. Add unique constraint
+mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883
+
+# 3. Create entity on Node 1
+mqdb create cluster_users --data '{"name": "Alice", "email": "alice@test.com"}' \
+  --broker 127.0.0.1:1883
+
+# 4. Try duplicate on Node 2 (should fail)
+mqdb create cluster_users --data '{"name": "Bob", "email": "alice@test.com"}' \
+  --broker 127.0.0.1:1884
+```
+
+**Expected:** Second create fails with unique constraint violation.
+
+### Foreign Key Across Nodes
+
+```bash
+# 1. Create parent entity on Node 1
+mqdb create authors --data '{"name": "Jane"}' --broker 127.0.0.1:1883
+# Note the ID (e.g., author-123)
+
+# 2. Add FK constraint
+mqdb constraint add books --fk "author_id:authors:id:restrict" --broker 127.0.0.1:1883
+
+# 3. Create child with valid FK on Node 2
+mqdb create books --data '{"title": "Book 1", "author_id": "author-123"}' \
+  --broker 127.0.0.1:1884
+
+# 4. Try invalid FK on Node 2 (should fail)
+mqdb create books --data '{"title": "Book 2", "author_id": "nonexistent"}' \
+  --broker 127.0.0.1:1884
+```
+
+**Expected:** Valid FK succeeds, invalid FK fails with constraint violation.
+
+---
+
+## Complete Verification Checklist
+
+Run through this checklist to verify MQDB works completely:
+
+### Agent Mode
+- [ ] Agent start/stop
+- [ ] CRUD operations (create, read, update, delete, list)
+- [ ] Filtering and sorting
+- [ ] Schema validation
+- [ ] Constraints (unique, not-null, foreign key)
+- [ ] Watch/Subscribe
+- [ ] Consumer groups
+- [ ] Backup/Restore
+
+### Cluster Mode
+- [ ] Single-node cluster start
+- [ ] Multi-node cluster formation
+- [ ] Raft leader election
+- [ ] Partition assignment (64 partitions distributed)
+- [ ] Cross-node data routing
+- [ ] Cluster status command
+
+### Cluster Resilience
+- [ ] Data persistence on restart
+- [ ] Replication verification
+- [ ] Primary failure with replica takeover
+- [ ] Node rejoin and catch-up
+
+### MQTT Protocol (Cluster)
+- [ ] QoS 0 cross-node delivery
+- [ ] QoS 1 cross-node delivery
+- [ ] QoS 2 cross-node delivery (exactly-once)
+- [ ] Retained messages across nodes
+- [ ] Retained message survives node failure
+- [ ] Single-level wildcard (+) cross-node
+- [ ] Multi-level wildcard (#) cross-node
+- [ ] LWT cross-node delivery
+- [ ] Session persistence across failover
+- [ ] No message duplication under load
+
+### Constraints (Cluster)
+- [ ] Unique constraint enforced across nodes
+- [ ] Foreign key validated across nodes
+
+### Monitoring
+- [ ] Health endpoint returns correct status
+- [ ] Health updates on node failure
+
+### Performance
+- [ ] Pub/sub benchmark runs successfully
+- [ ] Database benchmark runs successfully
