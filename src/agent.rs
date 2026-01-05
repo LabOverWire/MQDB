@@ -13,6 +13,10 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 #[cfg(feature = "opentelemetry")]
 use mqtt5::telemetry::propagation;
 
+const BROKER_MAX_CLIENTS: usize = 10_000;
+const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
+const SESSION_EXPIRY_SECS: u64 = 3600;
+
 #[derive(Debug, Clone)]
 pub struct DbOperation {
     pub entity: String,
@@ -250,7 +254,7 @@ impl MqdbAgent {
         let backup_dir = db.path().join("backups");
         Self {
             db: Arc::new(db),
-            bind_address: "127.0.0.1:1884".parse().unwrap(),
+            bind_address: "127.0.0.1:1883".parse().unwrap(),
             shutdown_tx,
             password_file: None,
             acl_file: None,
@@ -304,9 +308,9 @@ impl MqdbAgent {
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
-            max_clients: 1000,
-            max_packet_size: 10 * 1024 * 1024,
-            session_expiry_interval: Duration::from_secs(3600),
+            max_clients: BROKER_MAX_CLIENTS,
+            max_packet_size: BROKER_MAX_PACKET_SIZE,
+            session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
             wildcard_subscription_available: true,
@@ -339,7 +343,12 @@ impl MqdbAgent {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let client = MqttClient::new("mqdb-internal-handler");
-            let addr = format!("{}:{}", bind_addr.ip(), bind_addr.port());
+            let connect_ip = if bind_addr.ip().is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                bind_addr.ip()
+            };
+            let addr = format!("{}:{}", connect_ip, bind_addr.port());
 
             let response_creds = (service_username.clone(), service_password.clone());
             let connect_result =

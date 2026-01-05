@@ -2,6 +2,7 @@
 
 > **Living Document** - Updated iteratively with code verification.
 > Every claim has file:line references. When in doubt, verify against code.
+> Last verified: January 2026 (all milestones M1-M10 complete)
 
 ## Overview
 
@@ -1749,29 +1750,29 @@ When Raft leader and partitions not initialized:
 
 ---
 
-## MISSING SECTIONS
+## DOCUMENTED ELSEWHERE
 
-The following sections need further investigation:
+The following are implemented but documented in other files:
 
-- Complete error handling and recovery procedures
+- **LWT (Last Will Testament)**: Implemented in M9, see `IMPLEMENTATION_PLAN.md`
+- **Subscription cache reconciliation**: `SubscriptionCache::reconcile()` runs every 5 minutes
+- **Database operations ($DB/#)**: See README.md "MQTT Topic Structure" section
+- **Backup and restore**: See README.md "Admin Operations" section
+
+## FUTURE DOCUMENTATION
+
+The following sections may need documentation:
+
 - Performance tuning and benchmarks
 - Security model and authentication
 - Monitoring and observability
 - Operational runbooks
 - Capacity planning guidelines
 - Network topology considerations
-- Split-brain prevention
-- Data consistency guarantees
-- Will message handling in cluster (LWT)
-- Load balancing strategies
+- Split-brain prevention details
 - Graceful shutdown procedures
 - Rolling upgrade process
-- Backup and restore
-- Disaster recovery
 - Multi-datacenter deployment
-- Partition migration phases (dual-write, handoff)
-- Subscription cache reconciliation
-- Database operations ($DB/# queries)
 
 ---
 

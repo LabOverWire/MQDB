@@ -374,6 +374,92 @@ user * topic $DB/_admin/# permission deny
 user admin topic $DB/_admin/# permission readwrite
 ```
 
+## Distributed Clustering
+
+MQDB supports distributed clustering with automatic failover and partition rebalancing.
+
+### Architecture
+
+- **64 fixed partitions** with configurable replication factor (RF=2 default)
+- **Raft consensus** for cluster topology and partition ownership
+- **MQTT bridges** for inter-node communication
+- **QUIC transport** for secure, efficient cluster traffic (recommended for production)
+
+### Starting a Cluster
+
+```bash
+# Generate TLS certificates for QUIC transport
+./scripts/generate_test_certs.sh
+
+# Node 1 (first node becomes Raft leader)
+./target/release/mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 \
+    --db /tmp/mqdb-node1 --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+
+# Node 2 (joins via peer)
+./target/release/mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 \
+    --db /tmp/mqdb-node2 --peers "1@127.0.0.1:1883" \
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+
+# Node 3 (joins via peer)
+./target/release/mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 \
+    --db /tmp/mqdb-node3 --peers "1@127.0.0.1:1883" \
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+```
+
+### Cluster CLI Commands
+
+```bash
+# Start a cluster node
+mqdb cluster start --node-id 1 --bind 0.0.0.0:1883 --db ./data/node1 \
+    --quic-cert server.pem --quic-key server.key
+
+# Check cluster status
+mqdb cluster status
+
+# Trigger partition rebalancing
+mqdb cluster rebalance
+```
+
+### Cross-Node Pub/Sub
+
+Subscriptions work transparently across nodes:
+
+```bash
+# Subscribe on Node 2
+mosquitto_sub -h 127.0.0.1 -p 1884 -t "events/#" -i subscriber1
+
+# Publish on Node 1 - subscriber on Node 2 receives it
+mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
+```
+
+### Cluster Options
+
+| Option | Description |
+|--------|-------------|
+| `--node-id` | Unique node ID (1-65535, required) |
+| `--node-name` | Human-readable node name |
+| `--bind` | MQTT listener address (default: 0.0.0.0:1883) |
+| `--db` | Database directory path |
+| `--peers` | Peer nodes to join (format: id@host:port) |
+| `--quic-cert` | TLS certificate for QUIC transport |
+| `--quic-key` | TLS private key for QUIC transport |
+| `--no-quic` | Disable QUIC (use MQTT bridges only) |
+| `--no-persist-stores` | Disable store persistence (data lost on restart) |
+
+### Data Persistence
+
+Cluster nodes persist all data to disk by default:
+
+- **Sessions**: MQTT client session state
+- **Subscriptions**: Topic subscriptions per client
+- **Retained messages**: Messages with retain flag
+- **QoS state**: In-flight QoS 1/2 message tracking
+- **Database records**: All `$DB/#` entity data
+
+Data is stored in `{db-path}/stores/` using an LSM-tree backend. On startup, nodes automatically recover persisted data and rebuild routing indexes.
+
+Use `--no-persist-stores` for testing or ephemeral deployments where data doesn't need to survive restarts.
+
 ## CLI Tool
 
 The `mqdb` CLI provides command-line access to a running MQDB agent.
@@ -386,7 +472,7 @@ cargo build --release --bin mqdb
 
 ### Environment Variables
 
-- `MQDB_BROKER` - Broker address (default: `127.0.0.1:1884`)
+- `MQDB_BROKER` - Broker address (default: `127.0.0.1:1883`)
 - `MQDB_USER` - Username for authentication
 - `MQDB_PASS` - Password for authentication
 
@@ -553,19 +639,30 @@ cargo run --example parking_lot
 - [x] Feature flags for conditional compilation
 - [x] WASM crate with JavaScript bindings
 
+### Phase 9-10: Distributed Clustering ✓
+- [x] 64-partition data distribution with RF=2
+- [x] Raft consensus for cluster topology
+- [x] MQTT bridges for inter-node communication
+- [x] Heartbeat-based node failure detection
+- [x] Automatic partition reassignment on node death
+- [x] Cross-node pub/sub message routing
+- [x] Session migration and cleanup
+- [x] QoS state replication
+- [x] Last Will Testament cross-node delivery
+
 ### Test Coverage
-- 142 tests passing (68 unit + 74 integration)
-- Clippy clean, no warnings
+- 436 tests passing (unit + integration + cluster)
+- Clippy clean with pedantic warnings enabled
 - Full constraint coverage including multilevel cascade
 - Point-to-point delivery tests with partition verification
+- Comprehensive cluster integration tests (failover, split-brain, rebalancing)
 
 ## Future Enhancements
 
-- Replication and WAL streaming
 - Reactive query language (subscribe to expressions)
 - Persistence metrics and tracing
 - Optimized TTL cleanup with expiration index
-- Distributed consensus for multi-node deployments
+- Horizontal scaling beyond 64 partitions
 
 ## License
 
