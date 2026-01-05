@@ -83,6 +83,23 @@ async fn test_list_operations() {
     for user in active_users {
         assert_eq!(user["status"], "active");
     }
+
+    let neq_filter = Filter::new("status".into(), FilterOp::Neq, json!("inactive"));
+    let not_inactive_users = db
+        .list(
+            "users".into(),
+            vec![neq_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_inactive_users.len(), 2, "Neq filter should return 2 active users");
+    for user in not_inactive_users {
+        assert_ne!(user["status"], "inactive");
+    }
 }
 
 #[tokio::test]

@@ -35,18 +35,20 @@ Terminal 3: Subscriber/watcher (for reactive tests)
 
 ## 1. Starting the Agent
 
-### Basic Start
+### Basic Start (Anonymous Mode)
 
 **Terminal 1:**
 ```bash
-mqdb agent start --db ./data/testdb
+mqdb agent start --db ./data/testdb --anonymous
 ```
 
 **Expected output:**
 ```
-agent started on mqtt://localhost:1883
-database: ./data/testdb
+(agent starts silently, listening on 127.0.0.1:1883)
 ```
+
+> **Note:** The `--anonymous` flag allows connections without authentication.
+> Without it, you must provide `--passwd` and `--acl` files.
 
 ### Check Agent Status
 
@@ -158,12 +160,14 @@ mqdb list users --format csv
 ### Setup Test Data
 
 ```bash
-mqdb create products --id p1 --data '{"name": "Laptop", "price": 999, "category": "electronics", "stock": 50}'
-mqdb create products --id p2 --data '{"name": "Mouse", "price": 29, "category": "electronics", "stock": 200}'
-mqdb create products --id p3 --data '{"name": "Desk", "price": 299, "category": "furniture", "stock": 25}'
-mqdb create products --id p4 --data '{"name": "Chair", "price": 199, "category": "furniture", "stock": 0}'
-mqdb create products --id p5 --data '{"name": "Keyboard", "price": 79, "category": "electronics", "stock": 150}'
+mqdb create products --data '{"name": "Laptop", "price": 999, "category": "electronics", "stock": 50}'
+mqdb create products --data '{"name": "Mouse", "price": 29, "category": "electronics", "stock": 200}'
+mqdb create products --data '{"name": "Desk", "price": 299, "category": "furniture", "stock": 25}'
+mqdb create products --data '{"name": "Chair", "price": 199, "category": "furniture", "stock": 0}'
+mqdb create products --data '{"name": "Keyboard", "price": 79, "category": "electronics", "stock": 150}'
 ```
+
+> **Note:** IDs are auto-generated (1, 2, 3...). Use the returned IDs in subsequent commands.
 
 ### Basic List
 

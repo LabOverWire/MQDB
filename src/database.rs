@@ -507,10 +507,10 @@ impl Database {
             }
         } else {
             let index_manager = self.index_manager.read().await;
-            let use_index = filters.first().is_some_and(|f| f.op == FilterOp::Eq);
+            let mut used_index = false;
 
-            if use_index {
-                if let Some(filter) = filters.first() {
+            if let Some(filter) = filters.first() {
+                if filter.op == FilterOp::Eq {
                     let value_bytes = keys::encode_value_for_index(&filter.value)?;
                     let ids = index_manager.lookup_by_field(
                         &self.storage,
@@ -519,28 +519,33 @@ impl Database {
                         &value_bytes,
                     )?;
 
-                    for id in ids {
-                        match self
-                            .read(entity_name.clone(), id.clone(), vec![], None)
-                            .await
-                        {
-                            Ok(entity_data) => {
-                                if Self::matches_filters(&entity_data, &filters) {
-                                    results.push(entity_data);
+                    if !ids.is_empty() {
+                        used_index = true;
+                        for id in ids {
+                            match self
+                                .read(entity_name.clone(), id.clone(), vec![], None)
+                                .await
+                            {
+                                Ok(entity_data) => {
+                                    if Self::matches_filters(&entity_data, &filters) {
+                                        results.push(entity_data);
+                                    }
                                 }
+                                Err(Error::NotFound { .. }) => {
+                                    tracing::warn!(
+                                        "index pointed to non-existent entity: {}/{}",
+                                        entity_name,
+                                        id
+                                    );
+                                }
+                                Err(e) => return Err(e),
                             }
-                            Err(Error::NotFound { .. }) => {
-                                tracing::warn!(
-                                    "index pointed to non-existent entity: {}/{}",
-                                    entity_name,
-                                    id
-                                );
-                            }
-                            Err(e) => return Err(e),
                         }
                     }
                 }
-            } else {
+            }
+
+            if !used_index {
                 let prefix = format!("data/{entity_name}/");
                 let items = self.storage.prefix_scan(prefix.as_bytes())?;
 

@@ -1392,7 +1392,7 @@ fn parse_filters(filter_str: &str) -> Vec<Value> {
                     let value_str = part[pos + op.len()..].trim();
 
                     let filter_op = match op {
-                        "!=" => "ne",
+                        "!=" => "neq",
                         ">" => "gt",
                         "<" => "lt",
                         ">=" => "gte",

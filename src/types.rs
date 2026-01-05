@@ -168,3 +168,29 @@ impl Filter {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_filter_neq_deserialization() {
+        let filter_json = json!({"field": "category", "op": "neq", "value": "furniture"});
+        let filter: Filter = serde_json::from_value(filter_json).expect("should deserialize");
+        assert_eq!(filter.field, "category");
+        assert_eq!(filter.op, FilterOp::Neq);
+        assert_eq!(filter.value, json!("furniture"));
+    }
+
+    #[test]
+    fn test_filter_neq_matches() {
+        let filter = Filter::new(
+            "category".to_string(),
+            FilterOp::Neq,
+            json!("furniture"),
+        );
+        assert!(filter.matches(&json!("electronics")));
+        assert!(!filter.matches(&json!("furniture")));
+    }
+}
