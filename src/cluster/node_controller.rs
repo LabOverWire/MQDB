@@ -21,6 +21,7 @@ use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
+use crate::storage::StorageBackend;
 use bebytes::BeBytes;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -82,7 +83,18 @@ impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
 }
 
 impl<T: ClusterTransport> NodeController<T> {
+    #[must_use]
     pub fn new(node_id: NodeId, transport: T, config: TransportConfig) -> Self {
+        Self::new_with_storage(node_id, transport, config, None)
+    }
+
+    #[must_use]
+    pub fn new_with_storage(
+        node_id: NodeId,
+        transport: T,
+        config: TransportConfig,
+        storage: Option<Arc<dyn StorageBackend>>,
+    ) -> Self {
         Self {
             node_id,
             heartbeat: HeartbeatManager::new(node_id, config),
@@ -91,7 +103,7 @@ impl<T: ClusterTransport> NodeController<T> {
             pending: PendingWrites::new(1000),
             partition_map: PartitionMap::default(),
             current_time: 0,
-            stores: StoreManager::new(node_id),
+            stores: StoreManager::new_with_storage(node_id, storage),
             write_log: PartitionWriteLog::new(),
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),

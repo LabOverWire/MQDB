@@ -393,6 +393,8 @@ enum ClusterAction {
         quic_key: Option<PathBuf>,
         #[arg(long, help = "Disable QUIC transport")]
         no_quic: bool,
+        #[arg(long, help = "Disable store persistence (data will not survive restarts)")]
+        no_persist_stores: bool,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -508,6 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quic_cert,
                 quic_key,
                 no_quic,
+                no_persist_stores,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -520,6 +523,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     quic_cert,
                     quic_key,
                     no_quic,
+                    no_persist_stores,
                 }))
                 .await?;
             }
@@ -832,6 +836,7 @@ struct ClusterStartArgs {
     quic_cert: Option<PathBuf>,
     quic_key: Option<PathBuf>,
     no_quic: bool,
+    no_persist_stores: bool,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -854,6 +859,9 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     }
     if args.no_quic {
         config = config.with_quic(false);
+    }
+    if args.no_persist_stores {
+        config = config.with_persist_stores(false);
     }
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;

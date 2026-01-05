@@ -20,6 +20,7 @@ mod node_controller;
 mod offset_store;
 mod partition;
 mod partition_map;
+mod partition_storage;
 mod protocol;
 mod publish_router;
 mod qos2_store;
@@ -75,6 +76,7 @@ pub use node_controller::{NodeController, RaftMessage};
 pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key};
 pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};
+pub use partition_storage::PartitionStorage;
 pub use protocol::{
     AckStatus, BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardTarget,
     ForwardedPublish, Heartbeat, MessageType, Operation, QueryRequest, QueryResponse, QueryStatus,
@@ -103,7 +105,7 @@ pub use snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
     SnapshotStatus,
 };
-pub use store_manager::{StoreApplyError, StoreManager};
+pub use store_manager::{RecoveryStats, StoreApplyError, StoreManager};
 pub use subscription_cache::{
     MqttSubscriptionSnapshot, MqttTopicEntry, ReconciliationResult,
     SUBSCRIPTION_RECONCILIATION_INTERVAL_MS, SubscriptionCache, SubscriptionCacheError,

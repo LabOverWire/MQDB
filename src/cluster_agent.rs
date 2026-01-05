@@ -23,6 +23,11 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
+const BROKER_MAX_CLIENTS: usize = 10_000;
+const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
+const SESSION_EXPIRY_SECS: u64 = 3600;
+const CLEANUP_INTERVAL_SECS: u64 = 3600;
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub node_id: u16,
@@ -41,6 +46,7 @@ pub struct ClusterConfig {
     pub node_name: String,
     pub bind_address: SocketAddr,
     pub db_path: PathBuf,
+    pub persist_stores: bool,
     pub peers: Vec<PeerConfig>,
     pub password_file: Option<PathBuf>,
     pub acl_file: Option<PathBuf>,
@@ -60,6 +66,7 @@ impl ClusterConfig {
             node_name: format!("node-{node_id}"),
             bind_address: "0.0.0.0:1883".parse().expect("valid default address"),
             db_path,
+            persist_stores: true,
             peers,
             password_file: None,
             acl_file: None,
@@ -91,6 +98,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
         self.acl_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_persist_stores(mut self, persist: bool) -> Self {
+        self.persist_stores = persist;
         self
     }
 
@@ -140,12 +153,49 @@ impl ClusteredAgent {
     /// # Errors
     /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
     pub fn new(config: ClusterConfig) -> Result<Self, String> {
+        use crate::storage::StorageBackend;
+
         let node_id =
             NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
 
+        let stores_backend: Option<Arc<dyn StorageBackend>> = if config.persist_stores {
+            let stores_path = config.db_path.join("stores");
+            Some(Arc::new(
+                FjallBackend::open(&stores_path, DurabilityMode::Immediate).map_err(|e| {
+                    format!(
+                        "failed to open stores storage at {}: {e}",
+                        stores_path.display()
+                    )
+                })?,
+            ))
+        } else {
+            None
+        };
+
         let transport = MqttTransport::new(node_id);
         let transport_config = TransportConfig::default();
-        let controller = NodeController::new(node_id, transport.clone(), transport_config);
+        let controller =
+            NodeController::new_with_storage(node_id, transport.clone(), transport_config, stores_backend);
+
+        if controller.stores().has_persistence() {
+            match controller.stores().recover() {
+                Ok(stats) => {
+                    info!(
+                        sessions = stats.sessions,
+                        subscriptions = stats.subscriptions,
+                        retained = stats.retained,
+                        db_data = stats.db_data,
+                        topic_index_rebuilt = stats.topic_index_rebuilt,
+                        wildcards_rebuilt = stats.wildcards_rebuilt,
+                        total = stats.total(),
+                        "recovered cluster stores from disk"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = ?e, "failed to recover stores, starting fresh");
+                }
+            }
+        }
 
         let raft_path = config.db_path.join("raft");
         let raft_backend = Arc::new(
@@ -236,9 +286,9 @@ impl ClusteredAgent {
 
         let mut broker_config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
-            max_clients: 10000,
-            max_packet_size: 10 * 1024 * 1024,
-            session_expiry_interval: Duration::from_secs(3600),
+            max_clients: BROKER_MAX_CLIENTS,
+            max_packet_size: BROKER_MAX_PACKET_SIZE,
+            session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
             wildcard_subscription_available: true,
@@ -291,7 +341,12 @@ impl ClusteredAgent {
             "cluster node started"
         );
 
-        let broker_addr = format!("127.0.0.1:{}", self.bind_address.port());
+        let connect_ip = if self.bind_address.ip().is_unspecified() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            self.bind_address.ip()
+        };
+        let broker_addr = format!("{}:{}", connect_ip, self.bind_address.port());
         info!(broker_addr = %broker_addr, "connecting transport to local broker");
         let transport = {
             let ctrl = self.controller.read().await;
@@ -361,7 +416,7 @@ impl ClusteredAgent {
         let mut partitions_initialized = false;
 
         let mut tick_interval = interval(Duration::from_millis(100));
-        let mut cleanup_interval = interval(Duration::from_secs(3600));
+        let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut shutdown_rx = self.shutdown_tx.subscribe();

@@ -269,6 +269,13 @@ impl SubscriptionCache {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn all_snapshots(&self) -> Vec<MqttSubscriptionSnapshot> {
+        self.snapshots.read().unwrap().values().cloned().collect()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
     /// This function currently always succeeds.

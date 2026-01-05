@@ -2,6 +2,78 @@ use bebytes::BeBytes;
 
 use super::SubscriptionType;
 use super::client_location::ClientLocationStore;
+
+#[derive(Debug, Default, Clone)]
+pub struct RecoveryStats {
+    pub sessions: usize,
+    pub qos2: usize,
+    pub subscriptions: usize,
+    pub retained: usize,
+    pub inflight: usize,
+    pub offsets: usize,
+    pub idempotency: usize,
+    pub db_data: usize,
+    pub db_schema: usize,
+    pub db_index: usize,
+    pub db_unique: usize,
+    pub db_fk: usize,
+    pub topic_index_rebuilt: usize,
+    pub wildcards_rebuilt: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RecoveryField {
+    Sessions,
+    Qos2,
+    Subscriptions,
+    Retained,
+    Inflight,
+    Offsets,
+    Idempotency,
+    DbData,
+    DbSchema,
+    DbIndex,
+    DbUnique,
+    DbFk,
+}
+
+impl RecoveryStats {
+    fn increment(&mut self, field: RecoveryField) {
+        match field {
+            RecoveryField::Sessions => self.sessions += 1,
+            RecoveryField::Qos2 => self.qos2 += 1,
+            RecoveryField::Subscriptions => self.subscriptions += 1,
+            RecoveryField::Retained => self.retained += 1,
+            RecoveryField::Inflight => self.inflight += 1,
+            RecoveryField::Offsets => self.offsets += 1,
+            RecoveryField::Idempotency => self.idempotency += 1,
+            RecoveryField::DbData => self.db_data += 1,
+            RecoveryField::DbSchema => self.db_schema += 1,
+            RecoveryField::DbIndex => self.db_index += 1,
+            RecoveryField::DbUnique => self.db_unique += 1,
+            RecoveryField::DbFk => self.db_fk += 1,
+        }
+    }
+
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.sessions
+            + self.qos2
+            + self.subscriptions
+            + self.retained
+            + self.inflight
+            + self.offsets
+            + self.idempotency
+            + self.db_data
+            + self.db_schema
+            + self.db_index
+            + self.db_unique
+            + self.db_fk
+    }
+}
+use super::partition_storage::PartitionStorage;
+use crate::storage::StorageBackend;
+use std::sync::Arc;
 use super::db::{
     ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest, FkValidationStore,
     IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation, UniqueStore,
@@ -41,6 +113,7 @@ pub enum StoreApplyError {
     DbUniqueError,
     DbFkError,
     ClientLocationError,
+    PersistenceError,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -62,6 +135,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::DbUniqueError => write!(f, "db unique store error"),
             Self::DbFkError => write!(f, "db fk store error"),
             Self::ClientLocationError => write!(f, "client location store error"),
+            Self::PersistenceError => write!(f, "persistence error"),
         }
     }
 }
@@ -69,6 +143,7 @@ impl std::fmt::Display for StoreApplyError {
 impl std::error::Error for StoreApplyError {}
 
 pub struct StoreManager {
+    storage: Option<PartitionStorage>,
     pub sessions: SessionStore,
     pub qos2: Qos2Store,
     pub subscriptions: SubscriptionCache,
@@ -90,7 +165,13 @@ pub struct StoreManager {
 impl StoreManager {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
+        Self::new_with_storage(node_id, None)
+    }
+
+    #[must_use]
+    pub fn new_with_storage(node_id: NodeId, backend: Option<Arc<dyn StorageBackend>>) -> Self {
         Self {
+            storage: backend.map(PartitionStorage::new),
             sessions: SessionStore::new(node_id),
             qos2: Qos2Store::new(node_id),
             subscriptions: SubscriptionCache::new(node_id),
@@ -110,9 +191,136 @@ impl StoreManager {
         }
     }
 
+    #[must_use]
+    pub fn has_persistence(&self) -> bool {
+        self.storage.is_some()
+    }
+
+    /// Recovers persisted data from storage on startup.
+    ///
+    /// # Errors
+    /// Returns an error if persistence is not configured or recovery fails.
+    pub fn recover(&self) -> Result<RecoveryStats, StoreApplyError> {
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or(StoreApplyError::PersistenceError)?;
+
+        let mut stats = RecoveryStats::default();
+
+        let entities_to_recover = [
+            (entity::SESSIONS, RecoveryField::Sessions),
+            (entity::QOS2, RecoveryField::Qos2),
+            (entity::SUBSCRIPTIONS, RecoveryField::Subscriptions),
+            (entity::RETAINED, RecoveryField::Retained),
+            (entity::INFLIGHT, RecoveryField::Inflight),
+            (entity::OFFSETS, RecoveryField::Offsets),
+            (entity::IDEMPOTENCY, RecoveryField::Idempotency),
+            (entity::DB_DATA, RecoveryField::DbData),
+            (entity::DB_SCHEMA, RecoveryField::DbSchema),
+            (entity::DB_INDEX, RecoveryField::DbIndex),
+            (entity::DB_UNIQUE, RecoveryField::DbUnique),
+            (entity::DB_FK, RecoveryField::DbFk),
+        ];
+
+        for (entity_name, field) in entities_to_recover {
+            match storage.scan_entity(entity_name) {
+                Ok(entries) => {
+                    for (partition, id, data) in entries {
+                        let write = ReplicationWrite::new(
+                            partition,
+                            Operation::Insert,
+                            Epoch::ZERO,
+                            0,
+                            entity_name.to_string(),
+                            id,
+                            data,
+                        );
+                        if self.apply_to_memory(&write).is_ok() {
+                            stats.increment(field);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(entity = entity_name, error = ?e, "failed to scan entity during recovery");
+                }
+            }
+        }
+
+        stats.topic_index_rebuilt = self.rebuild_topic_index();
+        stats.wildcards_rebuilt = self.rebuild_wildcards();
+
+        Ok(stats)
+    }
+
+    fn rebuild_topic_index(&self) -> usize {
+        let mut count = 0;
+        for snapshot in self.subscriptions.all_snapshots() {
+            let client_id = snapshot.client_id_str();
+            let partition = session_partition(client_id);
+            for entry in snapshot.exact_subscriptions() {
+                if self
+                    .topics
+                    .subscribe(entry.topic_str(), client_id, partition, entry.qos)
+                    .is_ok()
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn rebuild_wildcards(&self) -> usize {
+        let mut count = 0;
+        for snapshot in self.subscriptions.all_snapshots() {
+            let client_id = snapshot.client_id_str();
+            for entry in snapshot.wildcard_subscriptions() {
+                if self
+                    .wildcards
+                    .subscribe(entry.topic_str(), client_id, entry.qos, SubscriptionType::Mqtt)
+                    .is_ok()
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Persists a batch of writes atomically to storage.
+    /// Used for broadcast entities that write to all 64 partitions.
+    ///
+    /// # Errors
+    /// Returns an error if persistence fails.
+    pub fn persist_writes_batch(&self, writes: &[ReplicationWrite]) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .write_batch(writes)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+        Ok(())
+    }
+
+    fn persist_broadcast_batch(&self, writes: &[ReplicationWrite], context: &str) {
+        if let Some(storage) = &self.storage
+            && let Err(e) = storage.write_batch(writes)
+        {
+            tracing::warn!(context, error = ?e, "failed to persist broadcast batch");
+        }
+    }
+
     /// # Errors
     /// Returns an error if the entity type is unknown or store application fails.
     pub fn apply_write(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage.write(write).map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+
+        self.apply_to_memory(write)
+    }
+
+    fn apply_to_memory(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         match write.entity.as_str() {
             entity::SESSIONS => self.apply_session(write),
             entity::QOS2 => self.apply_qos2(write),
@@ -347,6 +555,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "schema_register");
+
         Ok((schema, writes))
     }
 
@@ -372,6 +583,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "schema_update");
+
         Ok((schema, writes))
     }
 
@@ -905,6 +1119,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "topic_subscribe");
+
         (entry, writes)
     }
 
@@ -932,6 +1149,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "topic_unsubscribe");
+
         Ok((entry, writes))
     }
 
@@ -968,6 +1188,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "wildcard_subscribe");
+
         Ok((entry, writes))
     }
 
@@ -994,6 +1217,9 @@ impl StoreManager {
                 )
             })
             .collect();
+
+        self.persist_broadcast_batch(&writes, "wildcard_unsubscribe");
+
         Ok(writes)
     }
 
@@ -1429,6 +1655,7 @@ impl StoreManager {
 impl std::fmt::Debug for StoreManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StoreManager")
+            .field("persistence", &self.storage.is_some())
             .field("sessions", &self.sessions.session_count())
             .field("qos2", &self.qos2.count())
             .field("subscriptions", &self.subscriptions.client_count())
