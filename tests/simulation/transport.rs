@@ -4,9 +4,10 @@ use mqdb::cluster::raft::{
 };
 use mqdb::cluster::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
-    ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, NodeId, PartitionId,
-    QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete,
-    SnapshotRequest, TransportError, WildcardBroadcast,
+    ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, JsonDbRequest,
+    JsonDbResponse, NodeId, PartitionId, QueryRequest, QueryResponse, ReplicationAck,
+    ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest, TransportError,
+    WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -121,6 +122,13 @@ impl SimulatedTransport {
             }
             ClusterMessage::PartitionUpdate(update) => {
                 buf.extend_from_slice(&update.to_be_bytes());
+            }
+            ClusterMessage::JsonDbRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::JsonDbResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
             }
         }
 
@@ -237,6 +245,19 @@ impl SimulatedTransport {
             70 => {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::PartitionUpdate(update))
+            }
+            54 => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let partition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                let partition = PartitionId::new(partition_id)?;
+                let request = JsonDbRequest::from_bytes(&payload[2..])?;
+                Some(ClusterMessage::JsonDbRequest { partition, request })
+            }
+            55 => {
+                let response = JsonDbResponse::from_bytes(payload)?;
+                Some(ClusterMessage::JsonDbResponse(response))
             }
             _ => None,
         }

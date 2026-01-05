@@ -6,6 +6,7 @@ use super::db_protocol::{
 };
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};
 use super::node_controller::NodeController;
+use super::protocol::JsonDbOp;
 use super::transport::ClusterTransport;
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -76,14 +77,41 @@ impl DbRequestHandler {
                 self.handle_json_create(controller, &entity, payload).await
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                self.handle_json_read(controller, &entity, &id)
+                let resp_topic = response_topic?;
+                let result = self
+                    .handle_json_read(controller, &entity, &id, resp_topic, correlation_data)
+                    .await;
+                match result {
+                    Some(payload) => payload,
+                    None => return None,
+                }
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
-                self.handle_json_update(controller, &entity, &id, payload)
-                    .await
+                let resp_topic = response_topic?;
+                let result = self
+                    .handle_json_update(
+                        controller,
+                        &entity,
+                        &id,
+                        payload,
+                        resp_topic,
+                        correlation_data,
+                    )
+                    .await;
+                match result {
+                    Some(payload) => payload,
+                    None => return None,
+                }
             }
             DbTopicOperation::JsonDelete { entity, id } => {
-                self.handle_json_delete(controller, &entity, &id).await
+                let resp_topic = response_topic?;
+                let result = self
+                    .handle_json_delete(controller, &entity, &id, resp_topic, correlation_data)
+                    .await;
+                match result {
+                    Some(payload) => payload,
+                    None => return None,
+                }
             }
             DbTopicOperation::JsonList { entity } => {
                 self.handle_json_list(controller, &entity, payload)
@@ -401,11 +429,9 @@ impl DbRequestHandler {
             Ok(db_entity) => {
                 let result = json!({
                     "status": "ok",
-                    "data": {
-                        "id": db_entity.id_str(),
-                        "entity": entity,
-                        "data": data
-                    }
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data
                 });
                 serde_json::to_vec(&result).unwrap_or_default()
             }
@@ -416,16 +442,41 @@ impl DbRequestHandler {
         }
     }
 
-    fn handle_json_read<T: ClusterTransport>(
+    async fn handle_json_read<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-    ) -> Vec<u8> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
         let partition = data_partition(entity, id);
+        let is_local = controller.is_local_partition(partition);
 
-        if !controller.is_local_partition(partition) {
-            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+        tracing::debug!(
+            ?partition,
+            is_local,
+            entity,
+            id,
+            "handle_json_read"
+        );
+
+        if !is_local {
+            let forwarded = controller
+                .forward_json_db_request(
+                    partition,
+                    JsonDbOp::Read,
+                    entity,
+                    Some(id),
+                    &[],
+                    response_topic,
+                    correlation_data,
+                )
+                .await;
+            if forwarded {
+                return None;
+            }
+            return Some(Self::json_error(503, "partition not local and forwarding failed"));
         }
 
         match controller.db_get(entity, id) {
@@ -434,15 +485,13 @@ impl DbRequestHandler {
                     serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
                 let result = json!({
                     "status": "ok",
-                    "data": {
-                        "id": db_entity.id_str(),
-                        "entity": entity,
-                        "data": data
-                    }
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data
                 });
-                serde_json::to_vec(&result).unwrap_or_default()
+                Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+            None => Some(Self::json_error(404, &format!("entity not found: {entity} id={id}"))),
         }
     }
 
@@ -452,16 +501,32 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         payload: &[u8],
-    ) -> Vec<u8> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+            Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
 
         let partition = data_partition(entity, id);
 
         if !controller.is_local_partition(partition) {
-            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+            let forwarded = controller
+                .forward_json_db_request(
+                    partition,
+                    JsonDbOp::Update,
+                    entity,
+                    Some(id),
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
+                .await;
+            if forwarded {
+                return None;
+            }
+            return Some(Self::json_error(503, "partition not local and forwarding failed"));
         }
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -476,18 +541,16 @@ impl DbRequestHandler {
             Ok(db_entity) => {
                 let result = json!({
                     "status": "ok",
-                    "data": {
-                        "id": db_entity.id_str(),
-                        "entity": entity,
-                        "data": data
-                    }
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data
                 });
-                serde_json::to_vec(&result).unwrap_or_default()
+                Some(serde_json::to_vec(&result).unwrap_or_default())
             }
             Err(super::db::DbDataStoreError::NotFound) => {
-                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }
 
@@ -496,29 +559,43 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-    ) -> Vec<u8> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
         let partition = data_partition(entity, id);
 
         if !controller.is_local_partition(partition) {
-            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+            let forwarded = controller
+                .forward_json_db_request(
+                    partition,
+                    JsonDbOp::Delete,
+                    entity,
+                    Some(id),
+                    &[],
+                    response_topic,
+                    correlation_data,
+                )
+                .await;
+            if forwarded {
+                return None;
+            }
+            return Some(Self::json_error(503, "partition not local and forwarding failed"));
         }
 
         match controller.db_delete(entity, id).await {
             Ok(_) => {
                 let result = json!({
                     "status": "ok",
-                    "data": {
-                        "id": id,
-                        "entity": entity,
-                        "deleted": true
-                    }
+                    "id": id,
+                    "entity": entity,
+                    "deleted": true
                 });
-                serde_json::to_vec(&result).unwrap_or_default()
+                Some(serde_json::to_vec(&result).unwrap_or_default())
             }
             Err(super::db::DbDataStoreError::NotFound) => {
-                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }
 

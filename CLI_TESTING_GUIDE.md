@@ -85,10 +85,14 @@ mqdb create users --data '{"name": "Alice", "email": "alice@example.com", "age":
 **Expected output:**
 ```json
 {
-  "id": "generated-uuid",
-  "name": "Alice",
-  "email": "alice@example.com",
-  "age": 30
+  "status": "ok",
+  "entity": "users",
+  "id": "18c09201f3ac5801-0039",
+  "data": {
+    "name": "Alice",
+    "email": "alice@example.com",
+    "age": 30
+  }
 }
 ```
 
@@ -102,10 +106,14 @@ mqdb read users <id>
 **Expected output:**
 ```json
 {
-  "id": "<generated-uuid>",
-  "name": "Alice",
-  "email": "alice@example.com",
-  "age": 30
+  "status": "ok",
+  "entity": "users",
+  "id": "<id>",
+  "data": {
+    "name": "Alice",
+    "email": "alice@example.com",
+    "age": 30
+  }
 }
 ```
 
@@ -118,10 +126,14 @@ mqdb update users <id> --data '{"age": 25}'
 **Expected output:**
 ```json
 {
+  "status": "ok",
+  "entity": "users",
   "id": "<id>",
-  "name": "Alice",
-  "email": "alice@example.com",
-  "age": 25
+  "data": {
+    "name": "Alice",
+    "email": "alice@example.com",
+    "age": 25
+  }
 }
 ```
 
@@ -132,8 +144,13 @@ mqdb delete users <id>
 ```
 
 **Expected output:**
-```
-deleted users/<id>
+```json
+{
+  "status": "ok",
+  "entity": "users",
+  "id": "<id>",
+  "deleted": true
+}
 ```
 
 ### Output Formats
@@ -914,7 +931,7 @@ sleep 3
 
 # Create - automatically routed to a partition
 mqdb create users --data '{"name": "Alice", "email": "alice@example.com"}' --broker 127.0.0.1:1883
-# Returns: {"status":"ok","data":{"entity":"users","id":"<generated-id>","data":{...}}}
+# Returns: {"status":"ok","entity":"users","id":"<generated-id>","data":{...}}
 
 # Read
 mqdb read users <id> --broker 127.0.0.1:1883

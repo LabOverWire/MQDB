@@ -1,6 +1,7 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Heartbeat, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite, WildcardBroadcast,
+    Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
+    ReplicationWrite, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -301,6 +302,19 @@ impl MqttTransport {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
                 ClusterMessage::PartitionUpdate(update)
             }
+            54 => {
+                if data.len() < 2 {
+                    return None;
+                }
+                let partition_id = u16::from_be_bytes([data[0], data[1]]);
+                let partition = PartitionId::new(partition_id)?;
+                let request = JsonDbRequest::from_bytes(&data[2..])?;
+                ClusterMessage::JsonDbRequest { partition, request }
+            }
+            55 => {
+                let response = JsonDbResponse::from_bytes(data)?;
+                ClusterMessage::JsonDbResponse(response)
+            }
             _ => return None,
         };
 
@@ -389,6 +403,13 @@ impl MqttTransport {
             }
             ClusterMessage::PartitionUpdate(update) => {
                 buf.extend_from_slice(&update.to_be_bytes());
+            }
+            ClusterMessage::JsonDbRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::JsonDbResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
             }
         }
 
@@ -659,6 +680,13 @@ mod tests {
             }
             ClusterMessage::PartitionUpdate(update) => {
                 buf.extend_from_slice(&update.to_be_bytes());
+            }
+            ClusterMessage::JsonDbRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            ClusterMessage::JsonDbResponse(response) => {
+                buf.extend_from_slice(&response.to_bytes());
             }
         }
 

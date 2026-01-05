@@ -5,7 +5,8 @@ use super::migration::{MigrationManager, MigrationPhase};
 use super::offset_store::ConsumerOffset;
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Operation, QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
+    JsonDbOp, JsonDbRequest, JsonDbResponse, Operation, QueryRequest, QueryResponse, QueryStatus,
+    ReplicationAck, ReplicationWrite,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
@@ -443,6 +444,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         || NodeId::validated(update.replica2) == Some(self.node_id)
                     {
                         self.become_replica(partition, epoch, 0);
+                    } else {
+                        self.step_down(partition);
                     }
                 }
 
@@ -454,6 +457,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     primary = update.primary,
                     "received partition update from cluster"
                 );
+            }
+            ClusterMessage::JsonDbRequest {
+                partition,
+                ref request,
+            } => {
+                self.handle_json_db_request(msg.from, partition, request)
+                    .await;
+            }
+            ClusterMessage::JsonDbResponse(ref response) => {
+                self.handle_json_db_response(response).await;
             }
         }
     }
@@ -1604,6 +1617,236 @@ impl<T: ClusterTransport> NodeController<T> {
         BatchReadResponse::new(request.request_id, request.partition, results)
     }
 
+    async fn handle_json_db_request(
+        &mut self,
+        from: NodeId,
+        partition: PartitionId,
+        request: &JsonDbRequest,
+    ) {
+        let response_payload = match request.op {
+            JsonDbOp::Read => {
+                let id = request.id.as_deref().unwrap_or("");
+                self.handle_json_read_local(&request.entity, id)
+            }
+            JsonDbOp::Update => {
+                let id = request.id.as_deref().unwrap_or("");
+                self.handle_json_update_local(&request.entity, id, &request.payload)
+                    .await
+            }
+            JsonDbOp::Delete => {
+                let id = request.id.as_deref().unwrap_or("");
+                self.handle_json_delete_local(&request.entity, id).await
+            }
+            JsonDbOp::Create => {
+                self.handle_json_create_local(partition, &request.entity, &request.payload)
+                    .await
+            }
+            JsonDbOp::List => self.handle_json_list_local(&request.entity, &request.payload),
+        };
+
+        let response = JsonDbResponse::new(
+            request.request_id,
+            response_payload,
+            request.response_topic.clone(),
+            request.correlation_data.clone(),
+        );
+
+        let _ = self.transport.send(from, ClusterMessage::JsonDbResponse(response)).await;
+    }
+
+    async fn handle_json_db_response(&self, response: &JsonDbResponse) {
+        self.transport
+            .queue_local_publish(
+                response.response_topic.clone(),
+                response.payload.clone(),
+                0,
+            )
+            .await;
+    }
+
+    fn handle_json_read_local(&self, entity: &str, id: &str) -> Vec<u8> {
+        match self.stores.db_get(entity, id) {
+            Some(db_entity) => {
+                let data_json: serde_json::Value =
+                    serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
+                let result = serde_json::json!({
+                    "status": "ok",
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data_json
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+        }
+    }
+
+    async fn handle_json_update_local(&mut self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
+        let data: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+        };
+
+        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let now_ms = Self::current_time_ms();
+
+        match self.db_update(entity, id, &data_bytes, now_ms).await {
+            Ok(db_entity) => {
+                let result = serde_json::json!({
+                    "status": "ok",
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    async fn handle_json_delete_local(&mut self, entity: &str, id: &str) -> Vec<u8> {
+        match self.db_delete(entity, id).await {
+            Ok(_) => {
+                let result = serde_json::json!({
+                    "status": "ok",
+                    "id": id,
+                    "entity": entity,
+                    "deleted": true
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    async fn handle_json_create_local(
+        &mut self,
+        partition: PartitionId,
+        entity: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let data: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+        };
+
+        let id = self.generate_id_for_partition(entity, partition, payload);
+        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let now_ms = Self::current_time_ms();
+
+        match self.db_create(entity, &id, &data_bytes, now_ms).await {
+            Ok(db_entity) => {
+                let result = serde_json::json!({
+                    "status": "ok",
+                    "id": db_entity.id_str(),
+                    "entity": entity,
+                    "data": data
+                });
+                serde_json::to_vec(&result).unwrap_or_default()
+            }
+            Err(super::db::DbDataStoreError::AlreadyExists) => {
+                Self::json_error(409, "entity already exists")
+            }
+            Err(_) => Self::json_error(500, "internal error"),
+        }
+    }
+
+    fn handle_json_list_local(&self, entity: &str, payload: &[u8]) -> Vec<u8> {
+        let filters: Vec<crate::Filter> = if payload.is_empty() {
+            Vec::new()
+        } else if let Ok(data) = serde_json::from_slice::<serde_json::Value>(payload) {
+            data.get("filters")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let entities = self.db_list(entity);
+        let items: Vec<serde_json::Value> = entities
+            .iter()
+            .filter_map(|e| {
+                let data: serde_json::Value = serde_json::from_slice(&e.data).ok()?;
+                if Self::matches_filters(&data, &filters) {
+                    Some(serde_json::json!({
+                        "id": e.id_str(),
+                        "data": data
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "status": "ok",
+            "data": items
+        });
+        serde_json::to_vec(&result).unwrap_or_default()
+    }
+
+    fn matches_filters(entity: &serde_json::Value, filters: &[crate::Filter]) -> bool {
+        for filter in filters {
+            if let Some(field_value) = entity.get(&filter.field) {
+                if !filter.matches(field_value) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn json_error(code: u16, message: &str) -> Vec<u8> {
+        let result = serde_json::json!({
+            "status": "error",
+            "code": code,
+            "message": message
+        });
+        serde_json::to_vec(&result).unwrap_or_default()
+    }
+
+    fn current_time_ms() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    fn generate_id_for_partition(&self, entity: &str, partition: PartitionId, data: &[u8]) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        entity.hash(&mut hasher);
+        data.hash(&mut hasher);
+        self.node_id.get().hash(&mut hasher);
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+            .hash(&mut hasher);
+
+        let base_id = hasher.finish();
+
+        for suffix in 0..1000_u16 {
+            let id = format!("{base_id:016x}-{suffix:04x}");
+            if super::db::data_partition(entity, &id) == partition {
+                return id;
+            }
+        }
+
+        format!("{base_id:016x}-p{}", partition.get())
+    }
+
     #[must_use]
     pub fn query_local_retained_exact(&self, topic: &str) -> Option<RetainedMessage> {
         self.stores.retained.get(topic)
@@ -1662,6 +1905,63 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn is_partition_primary(&self, partition: PartitionId) -> bool {
         self.partition_map.primary(partition) == Some(self.node_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_json_db_request(
+        &self,
+        partition: PartitionId,
+        op: JsonDbOp,
+        entity: &str,
+        id: Option<&str>,
+        payload: &[u8],
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> bool {
+        let Some(primary) = self.partition_map.primary(partition) else {
+            tracing::warn!(
+                ?partition,
+                "cannot forward JSON request: no primary known"
+            );
+            return false;
+        };
+
+        if primary == self.node_id {
+            return false;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let request_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+
+        let request = JsonDbRequest::new(
+            request_id,
+            op,
+            entity.to_string(),
+            id.map(String::from),
+            payload.to_vec(),
+            response_topic.to_string(),
+            correlation_data.map(<[u8]>::to_vec),
+        );
+
+        let msg = ClusterMessage::JsonDbRequest { partition, request };
+        if let Err(e) = self.transport.send(primary, msg).await {
+            tracing::warn!(
+                ?partition,
+                primary = primary.get(),
+                ?e,
+                "failed to forward JSON request"
+            );
+            return false;
+        }
+
+        tracing::debug!(
+            ?partition,
+            primary = primary.get(),
+            "forwarded JSON request to partition primary"
+        );
+        true
     }
 
     #[must_use]
