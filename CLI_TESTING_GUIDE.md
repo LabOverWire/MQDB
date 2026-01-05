@@ -90,39 +90,35 @@ mqdb create users --data '{"name": "Alice", "email": "alice@example.com", "age":
 }
 ```
 
-### Create with Custom ID
-
-```bash
-mqdb create users --id user-001 --data '{"name": "Bob", "email": "bob@example.com"}'
-```
-
 ### Read Entity
 
 ```bash
-mqdb read users user-001
+# Use the ID returned from create
+mqdb read users <id>
 ```
 
 **Expected output:**
 ```json
 {
-  "id": "user-001",
-  "name": "Bob",
-  "email": "bob@example.com"
+  "id": "<generated-uuid>",
+  "name": "Alice",
+  "email": "alice@example.com",
+  "age": 30
 }
 ```
 
 ### Update Entity
 
 ```bash
-mqdb update users user-001 --data '{"age": 25}'
+mqdb update users <id> --data '{"age": 25}'
 ```
 
 **Expected output:**
 ```json
 {
-  "id": "user-001",
-  "name": "Bob",
-  "email": "bob@example.com",
+  "id": "<id>",
+  "name": "Alice",
+  "email": "alice@example.com",
   "age": 25
 }
 ```
@@ -130,12 +126,12 @@ mqdb update users user-001 --data '{"age": 25}'
 ### Delete Entity
 
 ```bash
-mqdb delete users user-001
+mqdb delete users <id>
 ```
 
 **Expected output:**
 ```
-deleted users/user-001
+deleted users/<id>
 ```
 
 ### Output Formats
@@ -360,7 +356,7 @@ mqdb read users <id>
 ### Unique Constraint (Single Field)
 
 ```bash
-mqdb constraint add users unique email
+mqdb constraint add users --unique email
 mqdb create users --data '{"name": "User1", "email": "unique@test.com"}'
 mqdb create users --data '{"name": "User2", "email": "unique@test.com"}'
 ```
@@ -370,16 +366,10 @@ mqdb create users --data '{"name": "User2", "email": "unique@test.com"}'
 error: unique constraint violation on field 'email'
 ```
 
-### Unique Constraint (Composite)
-
-```bash
-mqdb constraint add orders unique customer_id,product_id
-```
-
 ### Not-Null Constraint
 
 ```bash
-mqdb constraint add users not_null name
+mqdb constraint add users --not-null name
 ```
 
 ### List Constraints
@@ -399,9 +389,12 @@ users constraints:
 
 Setup:
 ```bash
-mqdb create authors --id author-1 --data '{"name": "Jane Author"}'
-mqdb constraint add posts foreign_key author_id authors cascade
+mqdb create authors --data '{"name": "Jane Author"}'
+# Note the returned ID (e.g., author-abc123)
+mqdb constraint add posts --fk "author_id:authors:id:cascade"
 ```
+
+The `--fk` format is `field:target_entity:target_field:action` where action is `cascade`, `restrict`, or `set_null`.
 
 Test referential integrity:
 ```bash
@@ -415,17 +408,17 @@ error: foreign key constraint violation: author_id references non-existent autho
 
 Valid foreign key:
 ```bash
-mqdb create posts --data '{"title": "Post 1", "author_id": "author-1"}'
+mqdb create posts --data '{"title": "Post 1", "author_id": "author-abc123"}'
 ```
 
 ### Cascade Delete
 
 ```bash
-mqdb delete authors author-1
+mqdb delete authors <author-id>
 mqdb list posts
 ```
 
-**Expected:** Posts with author_id=author-1 are also deleted
+**Expected:** Posts with matching author_id are also deleted
 
 ---
 
@@ -556,7 +549,7 @@ Backups:
 
 **Terminal 2:**
 ```bash
-mqdb restore backup_20241208_143022
+mqdb restore --name backup_20241208_143022
 ```
 
 **Terminal 1:** Restart agent
@@ -570,9 +563,21 @@ mqdb agent start --db ./data/testdb
 
 ### Create Password File
 
+Interactive mode (prompts for password):
 ```bash
-mqdb passwd add admin --password secret123
-mqdb passwd add readonly --password viewer456
+mqdb passwd admin
+mqdb passwd readonly
+```
+
+Batch mode (password via command line):
+```bash
+mqdb passwd admin --batch secret123
+mqdb passwd readonly --batch viewer456
+```
+
+Output to stdout instead of file:
+```bash
+mqdb passwd admin --batch secret123 --stdout
 ```
 
 Creates/updates `passwd.txt` with hashed credentials.
@@ -587,7 +592,7 @@ mqdb list users
 
 Or inline:
 ```bash
-mqdb --user admin --password secret123 list users
+mqdb list users --user admin --pass secret123
 ```
 
 ---
@@ -630,7 +635,7 @@ error: invalid filter syntax: 'invalid'
 ### Constraint Violation
 
 ```bash
-mqdb constraint add users not_null email
+mqdb constraint add users --not-null email
 mqdb create users --data '{"name": "No Email"}'
 ```
 
@@ -650,16 +655,17 @@ Run through these commands to validate core functionality:
 mqdb agent start --db ./data/quicktest
 
 # 2. CRUD operations
-mqdb create users --id test-1 --data '{"name": "Test User", "email": "test@example.com"}'
-mqdb read users test-1
-mqdb update users test-1 --data '{"age": 25}'
+mqdb create users --data '{"name": "Test User", "email": "test@example.com"}'
+# Note the returned ID (e.g., abc123)
+mqdb read users <id>
+mqdb update users <id> --data '{"age": 25}'
 mqdb list users
-mqdb delete users test-1
+mqdb delete users <id>
 
 # 3. Filtering and sorting
-mqdb create items --id i1 --data '{"name": "A", "value": 10}'
-mqdb create items --id i2 --data '{"name": "B", "value": 20}'
-mqdb create items --id i3 --data '{"name": "C", "value": 5}'
+mqdb create items --data '{"name": "A", "value": 10}'
+mqdb create items --data '{"name": "B", "value": 20}'
+mqdb create items --data '{"name": "C", "value": 5}'
 mqdb list items --filter 'value>5' --sort value:desc
 
 # 4. Schema validation
@@ -668,12 +674,12 @@ mqdb schema set validated --file /tmp/schema.json
 mqdb create validated --data '{}'  # Should fail
 
 # 5. Constraints
-mqdb constraint add items unique name
-mqdb create items --id i4 --data '{"name": "A", "value": 100}'  # Should fail
+mqdb constraint add items --unique name
+mqdb create items --data '{"name": "A", "value": 100}'  # Should fail (duplicate name)
 
 # 6. Subscriptions (in separate terminal)
 # Terminal 3: mqdb watch items
-# Terminal 2: mqdb create items --id i5 --data '{"name": "D", "value": 15}'
+# Terminal 2: mqdb create items --data '{"name": "D", "value": 15}'
 
 # 7. Consumer groups
 mqdb consumer-group list
@@ -788,7 +794,7 @@ mqdb cluster start \
   --node-id 1 \
   --bind 127.0.0.1:1883 \
   --db /tmp/mqdb-node1 \
-  --peers 2=127.0.0.1:1884,3=127.0.0.1:1885 \
+  --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 \
   --no-quic
 ```
 
@@ -798,7 +804,7 @@ mqdb cluster start \
   --node-id 2 \
   --bind 127.0.0.1:1884 \
   --db /tmp/mqdb-node2 \
-  --peers 1=127.0.0.1:1883,3=127.0.0.1:1885 \
+  --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 \
   --no-quic
 ```
 
@@ -808,7 +814,7 @@ mqdb cluster start \
   --node-id 3 \
   --bind 127.0.0.1:1885 \
   --db /tmp/mqdb-node3 \
-  --peers 1=127.0.0.1:1883,2=127.0.0.1:1884 \
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
   --no-quic
 ```
 
@@ -830,9 +836,34 @@ mqdb cluster start \
   --node-id 1 \
   --bind 127.0.0.1:1883 \
   --db /tmp/mqdb-node1 \
-  --peers 2=127.0.0.1:1884 \
-  --quic-cert certs/server.crt \
-  --quic-key certs/server.key
+  --peers 2@127.0.0.1:1884 \
+  --quic-cert test_certs/server.pem \
+  --quic-key test_certs/server.key
+```
+
+### Cluster Options Reference
+
+| Option | Description |
+|--------|-------------|
+| `--node-id` | Unique node ID (1-65535, required) |
+| `--node-name` | Human-readable node name (optional) |
+| `--bind` | MQTT listener address (default: 0.0.0.0:1883) |
+| `--db` | Database directory path (required) |
+| `--peers` | Peer nodes in format `id@host:port` (comma-separated) |
+| `--passwd` | Path to password file |
+| `--acl` | Path to ACL file |
+| `--quic-cert` | TLS certificate for QUIC transport |
+| `--quic-key` | TLS private key for QUIC transport |
+| `--no-quic` | Disable QUIC (use TCP bridges only) |
+| `--no-persist-stores` | Disable store persistence (data lost on restart) |
+
+### Testing Without Persistence
+
+For quick tests where data doesn't need to survive restarts:
+
+```bash
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test \
+  --no-quic --no-persist-stores
 ```
 
 ### Check Cluster Status
@@ -1010,15 +1041,15 @@ rm -rf /tmp/mqdb-node{1,2,3}
 
 # Terminal 1
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
-  --peers 2=127.0.0.1:1884,3=127.0.0.1:1885 --no-quic
+  --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 --no-quic
 
 # Terminal 2
 mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 --db /tmp/mqdb-node2 \
-  --peers 1=127.0.0.1:1883,3=127.0.0.1:1885 --no-quic
+  --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 --no-quic
 
 # Terminal 3
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-node3 \
-  --peers 1=127.0.0.1:1883,2=127.0.0.1:1884 --no-quic
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 --no-quic
 ```
 
 ### Verify Cluster Formation
