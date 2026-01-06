@@ -877,11 +877,12 @@ async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Box<dyn std::
     let topic = "$SYS/mqdb/cluster/rebalance";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
 
-    if response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if is_ok {
         let proposed = response
             .get("data")
             .and_then(|d| d.get("proposed_changes"))
@@ -893,7 +894,7 @@ async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Box<dyn std::
         } else {
             println!("Cluster already balanced, no changes needed");
         }
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -904,12 +905,13 @@ async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::err
     let topic = "$SYS/mqdb/cluster/status";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
 
-    if !response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
-        if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if !is_ok {
+        if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
             eprintln!("Error: {error}");
         } else {
             output_response(&response, &OutputFormat::Json);
@@ -1263,17 +1265,18 @@ async fn cmd_backup_create(
     let payload = json!({"name": name});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
-    if response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if is_ok {
         if let Some(data) = response.get("data")
             && let Some(msg) = data.get("message").and_then(serde_json::Value::as_str)
         {
             println!("{msg}");
         }
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -1285,11 +1288,12 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
     let payload = json!({});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
-    if response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if is_ok {
         if let Some(backups) = response.get("data").and_then(|v| v.as_array()) {
             if backups.is_empty() {
                 println!("No backups found");
@@ -1302,7 +1306,7 @@ async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error
                 }
             }
         }
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -1314,13 +1318,14 @@ async fn cmd_restore(name: &str, conn: &ConnectionArgs) -> Result<(), Box<dyn st
     let payload = json!({"name": name});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
 
-    if response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if is_ok {
         println!("Restore initiated");
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 
@@ -1567,11 +1572,12 @@ async fn cmd_subscribe(
 
     let response = Box::pin(execute_request(&conn, topic, payload)).await?;
 
-    if response
-        .get("ok")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let is_ok = response
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| s == "ok");
+
+    if is_ok {
         let data = response.get("data").unwrap_or(&Value::Null);
         let sub_id = data
             .get("id")
@@ -1646,7 +1652,7 @@ async fn cmd_subscribe(
         let unsub_topic = format!("$DB/_sub/{sub_id}/unsubscribe");
         let _ = Box::pin(execute_request(&conn, &unsub_topic, json!({}))).await;
         client.disconnect().await?;
-    } else if let Some(error) = response.get("error").and_then(serde_json::Value::as_str) {
+    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");
     }
 

@@ -141,6 +141,7 @@ pub struct ClusteredAgent {
     raft: Arc<RwLock<RaftCoordinator<MqttTransport>>>,
     shutdown_tx: broadcast::Sender<()>,
     bind_address: SocketAddr,
+    db_path: PathBuf,
     peers: Vec<PeerConfig>,
     password_file: Option<PathBuf>,
     acl_file: Option<PathBuf>,
@@ -229,6 +230,7 @@ impl ClusteredAgent {
             raft: Arc::new(RwLock::new(raft)),
             shutdown_tx,
             bind_address: config.bind_address,
+            db_path: config.db_path,
             peers: config.peers,
             password_file: config.password_file,
             acl_file: config.acl_file,
@@ -724,6 +726,27 @@ impl ClusteredAgent {
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid schema operation")
             }
+        } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/constraint/") {
+            if let Some(entity) = rest.strip_suffix("/add") {
+                Self::handle_constraint_add(entity, &req.payload)
+            } else if let Some(entity) = rest.strip_suffix("/list") {
+                Self::handle_constraint_list(entity)
+            } else {
+                Response::error(ErrorCode::BadRequest, "invalid constraint operation")
+            }
+        } else if req.topic == "$DB/_admin/backup" {
+            self.handle_backup_create(&req.payload)
+        } else if req.topic == "$DB/_admin/backup/list" {
+            self.handle_backup_list()
+        } else if req.topic == "$DB/_admin/restore" {
+            Response::error(
+                ErrorCode::BadRequest,
+                "restore requires agent restart - use CLI with --restore flag",
+            )
+        } else if req.topic == "$DB/_admin/consumer-groups" {
+            Self::handle_consumer_group_list()
+        } else if let Some(name) = req.topic.strip_prefix("$DB/_admin/consumer-groups/") {
+            Self::handle_consumer_group_show(name)
         } else {
             Response::error(
                 ErrorCode::BadRequest,
@@ -832,6 +855,99 @@ impl ClusteredAgent {
                 format!("no schema for entity: {entity}"),
             ),
         }
+    }
+
+    fn handle_constraint_add(_entity: &str, _payload: &[u8]) -> Response {
+        Response::error(
+            ErrorCode::BadRequest,
+            "constraints not yet supported in cluster mode",
+        )
+    }
+
+    fn handle_constraint_list(_entity: &str) -> Response {
+        Response::ok(json!([]))
+    }
+
+    fn handle_backup_create(&self, payload: &[u8]) -> Response {
+        let name = serde_json::from_slice::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+            .unwrap_or_else(|| "backup".to_string());
+
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+            return Response::error(
+                ErrorCode::BadRequest,
+                "invalid backup name: must be alphanumeric, underscore, or hyphen only",
+            );
+        }
+
+        let backup_dir = self.db_path.join("backups").join(&name);
+        let stores_dir = self.db_path.join("stores");
+
+        if backup_dir.exists() {
+            return Response::error(
+                ErrorCode::BadRequest,
+                format!("backup already exists: {name}"),
+            );
+        }
+
+        if !stores_dir.exists() {
+            return Response::error(ErrorCode::Internal, "no stores directory to backup");
+        }
+
+        match Self::copy_dir_recursive(&stores_dir, &backup_dir) {
+            Ok(()) => Response::ok(json!({
+                "message": "backup created",
+                "name": name,
+                "path": backup_dir.display().to_string()
+            })),
+            Err(e) => Response::error(ErrorCode::Internal, format!("backup failed: {e}")),
+        }
+    }
+
+    fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                Self::copy_dir_recursive(&src_path, &dst_path)?;
+            } else {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_backup_list(&self) -> Response {
+        let backup_dir = self.db_path.join("backups");
+        if !backup_dir.exists() {
+            return Response::ok(json!([]));
+        }
+
+        match std::fs::read_dir(&backup_dir) {
+            Ok(entries) => {
+                let backups: Vec<String> = entries
+                    .filter_map(std::result::Result::ok)
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                Response::ok(json!(backups))
+            }
+            Err(e) => Response::error(ErrorCode::Internal, format!("failed to list backups: {e}")),
+        }
+    }
+
+    fn handle_consumer_group_list() -> Response {
+        Response::ok(json!([]))
+    }
+
+    fn handle_consumer_group_show(name: &str) -> Response {
+        Response::error(
+            ErrorCode::NotFound,
+            format!("consumer group not found: {name}"),
+        )
     }
 
     async fn build_health_response(&self) -> Response {
