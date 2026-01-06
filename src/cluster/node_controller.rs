@@ -36,6 +36,7 @@ pub struct PendingScatterRequest {
     pub client_response_topic: String,
     pub created_at_ms: u64,
     pub filters: Vec<crate::Filter>,
+    pub sorts: Vec<crate::SortOrder>,
 }
 
 #[derive(Debug)]
@@ -2135,6 +2136,16 @@ impl<T: ClusterTransport> NodeController<T> {
             return false;
         }
 
+        let sorts: Vec<crate::SortOrder> = if payload.is_empty() {
+            Vec::new()
+        } else if let Ok(data) = serde_json::from_slice::<serde_json::Value>(payload) {
+            data.get("sort")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         #[allow(clippy::cast_possible_truncation)]
         let request_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2158,6 +2169,7 @@ impl<T: ClusterTransport> NodeController<T> {
             client_response_topic,
             created_at_ms: self.current_time,
             filters,
+            sorts,
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
@@ -2223,7 +2235,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 })
                 .collect();
 
-            let filtered: Vec<serde_json::Value> = deduped
+            let mut filtered: Vec<serde_json::Value> = deduped
                 .into_iter()
                 .filter(|item| {
                     if let Some(data) = item.get("data") {
@@ -2234,6 +2246,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 })
                 .collect();
 
+            Self::sort_scatter_results(&mut filtered, &completed.sorts);
+
             let result = serde_json::json!({
                 "status": "ok",
                 "data": filtered
@@ -2243,6 +2257,55 @@ impl<T: ClusterTransport> NodeController<T> {
             self.transport
                 .queue_local_publish(completed.client_response_topic, payload, 0)
                 .await;
+        }
+    }
+
+    fn sort_scatter_results(results: &mut [serde_json::Value], sorts: &[crate::SortOrder]) {
+        if sorts.is_empty() {
+            return;
+        }
+
+        results.sort_by(|a, b| {
+            let a_data = a.get("data");
+            let b_data = b.get("data");
+
+            for order in sorts {
+                let a_val = a_data.and_then(|d| d.get(&order.field));
+                let b_val = b_data.and_then(|d| d.get(&order.field));
+
+                let cmp = match (a_val, b_val) {
+                    (Some(av), Some(bv)) => Self::compare_json_values(av, bv),
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
+
+                let cmp = match order.direction {
+                    crate::SortDirection::Asc => cmp,
+                    crate::SortDirection::Desc => cmp.reverse(),
+                };
+
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    fn compare_json_values(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
+        use serde_json::Value;
+        match (a, b) {
+            (Value::Number(a_num), Value::Number(b_num)) => {
+                let a_f64 = a_num.as_f64().unwrap_or(0.0);
+                let b_f64 = b_num.as_f64().unwrap_or(0.0);
+                a_f64
+                    .partial_cmp(&b_f64)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
+            (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
+            _ => std::cmp::Ordering::Equal,
         }
     }
 
