@@ -1688,6 +1688,132 @@ mqdb create books --data '{"title": "Book 2", "author_id": "nonexistent"}' \
 
 ---
 
+## 20. Cluster Database Features
+
+These tests verify database-specific features work correctly in cluster mode.
+
+### Test 1: UPDATE Merges Fields (Not Replace)
+
+Verify that UPDATE only modifies specified fields, preserving others.
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create entity with multiple fields
+mqdb create products --data '{"name": "Widget", "price": 100, "stock": 50, "category": "electronics"}' \
+  --broker 127.0.0.1:1883
+# Note the returned ID (e.g., abc123-0042)
+
+# 3. Update only price field
+mqdb update products <id> --data '{"price": 150}' --broker 127.0.0.1:1883
+
+# 4. Read and verify ALL fields preserved
+mqdb read products <id> --broker 127.0.0.1:1883
+```
+
+**Expected:** Response shows `price: 150` AND all other fields (`name`, `stock`, `category`) preserved.
+
+```json
+{
+  "status": "ok",
+  "entity": "products",
+  "id": "<id>",
+  "data": {
+    "name": "Widget",
+    "price": 150,
+    "stock": 50,
+    "category": "electronics"
+  }
+}
+```
+
+### Test 2: UPDATE Adds New Fields
+
+```bash
+# 1. Add a new field to existing entity
+mqdb update products <id> --data '{"discount": true}' --broker 127.0.0.1:1883
+
+# 2. Read and verify new field added
+mqdb read products <id> --broker 127.0.0.1:1883
+```
+
+**Expected:** Entity now has `discount: true` plus all original fields.
+
+### Test 3: Schema Commands in Cluster Mode
+
+Verify schema set/get works across cluster nodes.
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 3 --clean
+
+# 2. Create schema file
+echo '{"type": "object", "properties": {"title": {"type": "string"}}}' > /tmp/articles_schema.json
+
+# 3. Set schema on Node 1
+mqdb schema set articles --file /tmp/articles_schema.json --broker 127.0.0.1:1883
+
+# 4. Get schema from Node 2 (verifies broadcast)
+mqdb schema get articles --broker 127.0.0.1:1884
+
+# 5. Get schema from Node 3 (verifies broadcast)
+mqdb schema get articles --broker 127.0.0.1:1885
+```
+
+**Expected:** All nodes return the same schema:
+```json
+{
+  "status": "ok",
+  "data": {
+    "entity": "articles",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"}
+      }
+    },
+    "version": 1
+  }
+}
+```
+
+### Test 4: Schema Update Broadcasts
+
+```bash
+# 1. Update schema with new field
+echo '{"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}}}' \
+  > /tmp/articles_schema2.json
+
+# 2. Update schema on Node 1
+mqdb schema set articles --file /tmp/articles_schema2.json --broker 127.0.0.1:1883
+
+# 3. Verify update on Node 3
+mqdb schema get articles --broker 127.0.0.1:1885
+```
+
+**Expected:** Node 3 shows updated schema with version 2.
+
+### Test 5: Cross-Node Update Merge
+
+Verify UPDATE merge works when connecting to different nodes.
+
+```bash
+# 1. Create on Node 1
+mqdb create items --data '{"a": 1, "b": 2, "c": 3}' --broker 127.0.0.1:1883
+# Note ID
+
+# 2. Update via Node 2
+mqdb update items <id> --data '{"b": 20}' --broker 127.0.0.1:1884
+
+# 3. Read from Node 3
+mqdb read items <id> --broker 127.0.0.1:1885
+```
+
+**Expected:** `{"a": 1, "b": 20, "c": 3}` - only `b` changed.
+
+---
+
 ## Complete Verification Checklist
 
 Run through this checklist to verify MQDB works completely:
@@ -1711,6 +1837,9 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Cluster status command
 - [ ] Cluster CRUD (create, read, update, delete, list)
 - [ ] Cluster list with filters
+- [ ] UPDATE merges fields (not replace)
+- [ ] Schema set broadcasts to all nodes
+- [ ] Schema get works on all nodes
 
 ### Cluster Resilience
 - [ ] Data persistence on restart

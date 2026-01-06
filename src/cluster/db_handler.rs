@@ -538,7 +538,26 @@ impl DbRequestHandler {
             ));
         }
 
-        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let merged_data = if let Some(existing) = controller.db_get(entity, id) {
+            let mut existing_data: Value = serde_json::from_slice(&existing.data)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            if let (Value::Object(existing_obj), Value::Object(updates)) =
+                (&mut existing_data, data)
+            {
+                for (key, value) in updates {
+                    existing_obj.insert(key, value);
+                }
+            }
+            existing_data
+        } else {
+            return Some(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
+        };
+
+        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
         let now_ms = u64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -552,7 +571,7 @@ impl DbRequestHandler {
                     "status": "ok",
                     "id": db_entity.id_str(),
                     "entity": entity,
-                    "data": data
+                    "data": merged_data
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }

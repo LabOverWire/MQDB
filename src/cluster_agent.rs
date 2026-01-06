@@ -131,6 +131,7 @@ impl ClusterConfig {
 struct AdminRequest {
     topic: String,
     response_topic: Option<String>,
+    payload: Vec<u8>,
 }
 
 pub struct ClusteredAgent {
@@ -370,6 +371,7 @@ impl ClusteredAgent {
                     let req = AdminRequest {
                         topic: msg.topic.clone(),
                         response_topic: msg.properties.response_topic.clone(),
+                        payload: msg.payload.clone(),
                     };
                     let _ = tx.try_send(req);
                 }
@@ -384,12 +386,28 @@ impl ClusteredAgent {
                     let req = AdminRequest {
                         topic: msg.topic.clone(),
                         response_topic: msg.properties.response_topic.clone(),
+                        payload: msg.payload.clone(),
                     };
                     let _ = tx.try_send(req);
                 }
             })
             .await
             .map_err(|e| format!("failed to subscribe to health topic: {e}"))?;
+
+        admin_client
+            .subscribe("$DB/_admin/#", {
+                let tx = admin_tx.clone();
+                move |msg: Message| {
+                    let req = AdminRequest {
+                        topic: msg.topic.clone(),
+                        response_topic: msg.properties.response_topic.clone(),
+                        payload: msg.payload.clone(),
+                    };
+                    let _ = tx.try_send(req);
+                }
+            })
+            .await
+            .map_err(|e| format!("failed to subscribe to db admin topics: {e}"))?;
 
         info!("subscribed to admin topics");
 
@@ -698,6 +716,14 @@ impl ClusteredAgent {
             self.build_status_response().await
         } else if req.topic.ends_with("/rebalance") {
             self.handle_rebalance_request().await
+        } else if let Some(entity) = req.topic.strip_prefix("$DB/_admin/schema/") {
+            if let Some(entity) = entity.strip_suffix("/set") {
+                self.handle_schema_set(entity, &req.payload).await
+            } else if let Some(entity) = entity.strip_suffix("/get") {
+                self.handle_schema_get(entity).await
+            } else {
+                Response::error(ErrorCode::BadRequest, "invalid schema operation")
+            }
         } else {
             Response::error(
                 ErrorCode::BadRequest,
@@ -765,6 +791,47 @@ impl ClusteredAgent {
         Response::ok(json!({
             "proposed_changes": proposed
         }))
+    }
+
+    async fn handle_schema_set(&self, entity: &str, payload: &[u8]) -> Response {
+        let schema_data: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(e) => return Response::error(ErrorCode::BadRequest, e.to_string()),
+        };
+
+        let schema_bytes = serde_json::to_vec(&schema_data).unwrap_or_default();
+        let mut ctrl = self.controller.write().await;
+
+        if ctrl.schema_get(entity).is_some() {
+            match ctrl.schema_update(entity, &schema_bytes).await {
+                Ok(_) => Response::ok(json!({"message": "schema updated"})),
+                Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+            }
+        } else {
+            match ctrl.schema_register(entity, &schema_bytes).await {
+                Ok(_) => Response::ok(json!({"message": "schema set"})),
+                Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+            }
+        }
+    }
+
+    async fn handle_schema_get(&self, entity: &str) -> Response {
+        let ctrl = self.controller.read().await;
+        match ctrl.schema_get(entity) {
+            Some(schema) => {
+                let data: serde_json::Value =
+                    serde_json::from_slice(&schema.data).unwrap_or(serde_json::Value::Null);
+                Response::ok(json!({
+                    "entity": entity,
+                    "version": schema.schema_version,
+                    "schema": data
+                }))
+            }
+            None => Response::error(
+                ErrorCode::NotFound,
+                format!("no schema for entity: {entity}"),
+            ),
+        }
     }
 
     async fn build_health_response(&self) -> Response {

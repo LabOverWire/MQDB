@@ -649,7 +649,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let partition = write.partition;
         let is_broadcast = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
-            || write.entity == entity::CLIENT_LOCATIONS;
+            || write.entity == entity::CLIENT_LOCATIONS
+            || write.entity == entity::DB_SCHEMA;
 
         tracing::debug!(
             ?partition,
@@ -1025,7 +1026,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
-            || write.entity == entity::CLIENT_LOCATIONS;
+            || write.entity == entity::CLIENT_LOCATIONS
+            || write.entity == entity::DB_SCHEMA;
         if is_broadcast_entity {
             let _ = self.stores.apply_write(&write);
             let alive = self.heartbeat.alive_nodes();
@@ -1149,27 +1151,51 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `SchemaStoreError::AlreadyExists` if the schema already exists.
+    ///
+    /// # Panics
+    /// Panics if partition 0 is invalid (should never happen as 0-63 are valid).
     pub async fn schema_register(
         &mut self,
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
-        let (schema, writes) = self
-            .stores
-            .schema_register_replicated(entity, schema_data)?;
-        self.broadcast_wildcard_writes(writes).await;
+        let schema = self.stores.db_schema.register(entity, schema_data)?;
+        let serialized = super::db::SchemaStore::serialize(&schema);
+        let write = ReplicationWrite::new(
+            PartitionId::new(0).unwrap(),
+            super::protocol::Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_SCHEMA.to_string(),
+            entity.to_string(),
+            serialized,
+        );
+        self.write_or_forward(write).await;
         Ok(schema)
     }
 
     /// # Errors
     /// Returns `SchemaStoreError::NotFound` if the schema does not exist.
+    ///
+    /// # Panics
+    /// Panics if partition 0 is invalid (should never happen as 0-63 are valid).
     pub async fn schema_update(
         &mut self,
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
-        let (schema, writes) = self.stores.schema_update_replicated(entity, schema_data)?;
-        self.broadcast_wildcard_writes(writes).await;
+        let schema = self.stores.db_schema.update(entity, schema_data)?;
+        let serialized = super::db::SchemaStore::serialize(&schema);
+        let write = ReplicationWrite::new(
+            PartitionId::new(0).unwrap(),
+            super::protocol::Operation::Update,
+            Epoch::ZERO,
+            0,
+            entity::DB_SCHEMA.to_string(),
+            entity.to_string(),
+            serialized,
+        );
+        self.write_or_forward(write).await;
         Ok(schema)
     }
 
@@ -1783,7 +1809,23 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
         };
 
-        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let merged_data = if let Some(existing) = self.db_get(entity, id) {
+            let mut existing_data: serde_json::Value = serde_json::from_slice(&existing.data)
+                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+            if let (serde_json::Value::Object(existing_obj), serde_json::Value::Object(updates)) =
+                (&mut existing_data, data)
+            {
+                for (key, value) in updates {
+                    existing_obj.insert(key, value);
+                }
+            }
+            existing_data
+        } else {
+            return Self::json_error(404, &format!("entity not found: {entity} id={id}"));
+        };
+
+        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
         let now_ms = Self::current_time_ms();
 
         match self.db_update(entity, id, &data_bytes, now_ms).await {
@@ -1792,7 +1834,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     "status": "ok",
                     "id": db_entity.id_str(),
                     "entity": entity,
-                    "data": data
+                    "data": merged_data
                 });
                 serde_json::to_vec(&result).unwrap_or_default()
             }
@@ -3049,25 +3091,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_register_broadcasts_to_all_partitions() {
+    async fn schema_register_broadcasts_to_alive_nodes() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
+        let node3 = NodeId::validated(3).unwrap();
 
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        let mut map = PartitionMap::default();
-        for p in 0..64 {
-            map.set(
-                PartitionId::new(p).unwrap(),
-                crate::cluster::PartitionAssignment {
-                    primary: Some(node1),
-                    replicas: vec![node2],
-                    epoch: Epoch::new(1),
-                },
-            );
-        }
-        ctrl.update_partition_map(map);
+        ctrl.heartbeat.receive_heartbeat(
+            node2,
+            &super::super::Heartbeat::create(node2, 0),
+            0,
+        );
+        ctrl.heartbeat.receive_heartbeat(
+            node3,
+            &super::super::Heartbeat::create(node3, 0),
+            0,
+        );
 
         let schema = ctrl
             .schema_register("users", b"{\"fields\":[]}")
@@ -3076,7 +3117,11 @@ mod tests {
         assert_eq!(schema.entity_str(), "users");
 
         let sent = ctrl.transport.sent_messages();
-        assert_eq!(sent.len(), 64);
+        assert_eq!(sent.len(), 2);
+
+        let targets: Vec<_> = sent.iter().map(|(n, _)| n.get()).collect();
+        assert!(targets.contains(&2));
+        assert!(targets.contains(&3));
     }
 
     #[tokio::test]
