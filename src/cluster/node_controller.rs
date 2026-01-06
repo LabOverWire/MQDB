@@ -30,6 +30,14 @@ use tokio::sync::oneshot;
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 
+pub struct PendingScatterRequest {
+    pub expected_count: usize,
+    pub received: Vec<serde_json::Value>,
+    pub client_response_topic: String,
+    pub created_at_ms: u64,
+    pub filters: Vec<crate::Filter>,
+}
+
 #[derive(Debug)]
 pub enum RaftMessage {
     RequestVote {
@@ -73,6 +81,7 @@ pub struct NodeController<T: ClusterTransport> {
     query_coordinator: QueryCoordinator,
     synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
     pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
+    pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
 }
 
 impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
@@ -119,6 +128,7 @@ impl<T: ClusterTransport> NodeController<T> {
             query_coordinator: QueryCoordinator::new(node_id),
             synced_retained_topics: None,
             pending_retained_queries: HashMap::new(),
+            pending_scatter_requests: HashMap::new(),
         }
     }
 
@@ -235,6 +245,65 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         self.initiate_catchup_requests(now).await;
+        self.cleanup_stale_scatter_requests(now).await;
+    }
+
+    async fn cleanup_stale_scatter_requests(&mut self, now: u64) {
+        const SCATTER_TIMEOUT_MS: u64 = 10_000;
+        let stale_threshold = now.saturating_sub(SCATTER_TIMEOUT_MS);
+
+        let stale_ids: Vec<u64> = self
+            .pending_scatter_requests
+            .iter()
+            .filter(|(_, req)| req.created_at_ms < stale_threshold)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in stale_ids {
+            if let Some(pending) = self.pending_scatter_requests.remove(&id) {
+                tracing::warn!(
+                    request_id = id,
+                    expected = pending.expected_count,
+                    received = pending.received.len(),
+                    "scatter request timed out, sending partial results"
+                );
+
+                let mut seen_ids = std::collections::HashSet::new();
+                let deduped: Vec<serde_json::Value> = pending
+                    .received
+                    .into_iter()
+                    .filter(|item| {
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                            seen_ids.insert(id.to_string())
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                let filtered: Vec<serde_json::Value> = deduped
+                    .into_iter()
+                    .filter(|item| {
+                        if let Some(data) = item.get("data") {
+                            Self::matches_filters(data, &pending.filters)
+                        } else {
+                            false
+                        }
+                    })
+                    .collect();
+
+                let result = serde_json::json!({
+                    "status": "ok",
+                    "data": filtered,
+                    "partial": true
+                });
+                let payload = serde_json::to_vec(&result).unwrap_or_default();
+
+                self.transport
+                    .queue_local_publish(pending.client_response_topic, payload, 0)
+                    .await;
+            }
+        }
     }
 
     async fn initiate_catchup_requests(&mut self, now: u64) {
@@ -1651,16 +1720,37 @@ impl<T: ClusterTransport> NodeController<T> {
             request.correlation_data.clone(),
         );
 
-        let _ = self.transport.send(from, ClusterMessage::JsonDbResponse(response)).await;
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::JsonDbResponse(response))
+            .await;
     }
 
-    async fn handle_json_db_response(&self, response: &JsonDbResponse) {
+    async fn handle_json_db_response(&mut self, response: &JsonDbResponse) {
+        let scatter_prefix = format!("_mqdb/scatter/{}/", self.node_id.get());
+
+        tracing::debug!(
+            response_topic = %response.response_topic,
+            scatter_prefix = %scatter_prefix,
+            pending_count = self.pending_scatter_requests.len(),
+            "received JsonDbResponse"
+        );
+
+        if let Some(request_id_str) = response.response_topic.strip_prefix(&scatter_prefix)
+            && let Ok(request_id) = request_id_str.parse::<u64>()
+        {
+            tracing::debug!(request_id, "matched scatter response");
+            let items: Vec<serde_json::Value> =
+                serde_json::from_slice::<serde_json::Value>(&response.payload)
+                    .ok()
+                    .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned())
+                    .unwrap_or_default();
+            self.handle_scatter_list_response(request_id, items).await;
+            return;
+        }
+
         self.transport
-            .queue_local_publish(
-                response.response_topic.clone(),
-                response.payload.clone(),
-                0,
-            )
+            .queue_local_publish(response.response_topic.clone(), response.payload.clone(), 0)
             .await;
     }
 
@@ -1681,7 +1771,12 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn handle_json_update_local(&mut self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
+    async fn handle_json_update_local(
+        &mut self,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let data: serde_json::Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
@@ -1822,7 +1917,12 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or(u64::MAX)
     }
 
-    fn generate_id_for_partition(&self, entity: &str, partition: PartitionId, data: &[u8]) -> String {
+    fn generate_id_for_partition(
+        &self,
+        entity: &str,
+        partition: PartitionId,
+        data: &[u8],
+    ) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -1919,10 +2019,7 @@ impl<T: ClusterTransport> NodeController<T> {
         correlation_data: Option<&[u8]>,
     ) -> bool {
         let Some(primary) = self.partition_map.primary(partition) else {
-            tracing::warn!(
-                ?partition,
-                "cannot forward JSON request: no primary known"
-            );
+            tracing::warn!(?partition, "cannot forward JSON request: no primary known");
             return false;
         };
 
@@ -2017,6 +2114,135 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn complete_retained_query(&mut self, query_id: u64, results: Vec<RetainedMessage>) {
         if let Some(sender) = self.pending_retained_queries.remove(&query_id) {
             let _ = sender.send(results);
+        }
+    }
+
+    #[allow(clippy::missing_panics_doc)]
+    pub async fn start_scatter_list_query(
+        &mut self,
+        entity: &str,
+        payload: &[u8],
+        client_response_topic: String,
+        filters: Vec<crate::Filter>,
+    ) -> bool {
+        let alive_nodes = self.heartbeat.alive_nodes();
+        let remote_nodes: Vec<NodeId> = alive_nodes
+            .into_iter()
+            .filter(|&n| n != self.node_id)
+            .collect();
+
+        if remote_nodes.is_empty() {
+            return false;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let request_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+
+        let local_results = self.handle_json_list_local(entity, payload);
+        let local_items: Vec<serde_json::Value> =
+            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&local_results) {
+                parsed
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+        let pending = PendingScatterRequest {
+            expected_count: remote_nodes.len(),
+            received: local_items,
+            client_response_topic,
+            created_at_ms: self.current_time,
+            filters,
+        };
+        self.pending_scatter_requests.insert(request_id, pending);
+
+        let scatter_response_topic = format!("_mqdb/scatter/{}/{request_id}", self.node_id.get());
+
+        for &target_node in &remote_nodes {
+            let request = JsonDbRequest::new(
+                request_id,
+                JsonDbOp::List,
+                entity.to_string(),
+                None,
+                payload.to_vec(),
+                scatter_response_topic.clone(),
+                None,
+            );
+
+            let msg = ClusterMessage::JsonDbRequest {
+                partition: PartitionId::new(0).expect("partition 0 is always valid"),
+                request,
+            };
+
+            if let Err(e) = self.transport.send(target_node, msg).await {
+                tracing::warn!(?target_node, ?e, "failed to send scatter LIST request");
+            }
+        }
+
+        tracing::debug!(
+            request_id,
+            entity,
+            remote_count = remote_nodes.len(),
+            "started scatter LIST query"
+        );
+
+        true
+    }
+
+    pub async fn handle_scatter_list_response(
+        &mut self,
+        request_id: u64,
+        items: Vec<serde_json::Value>,
+    ) {
+        let Some(pending) = self.pending_scatter_requests.get_mut(&request_id) else {
+            tracing::debug!(request_id, "scatter response for unknown request");
+            return;
+        };
+
+        pending.received.extend(items);
+        pending.expected_count = pending.expected_count.saturating_sub(1);
+
+        if pending.expected_count == 0
+            && let Some(completed) = self.pending_scatter_requests.remove(&request_id)
+        {
+            let mut seen_ids = std::collections::HashSet::new();
+            let deduped: Vec<serde_json::Value> = completed
+                .received
+                .into_iter()
+                .filter(|item| {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        seen_ids.insert(id.to_string())
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+
+            let filtered: Vec<serde_json::Value> = deduped
+                .into_iter()
+                .filter(|item| {
+                    if let Some(data) = item.get("data") {
+                        Self::matches_filters(data, &completed.filters)
+                    } else {
+                        false
+                    }
+                })
+                .collect();
+
+            let result = serde_json::json!({
+                "status": "ok",
+                "data": filtered
+            });
+            let payload = serde_json::to_vec(&result).unwrap_or_default();
+
+            self.transport
+                .queue_local_publish(completed.client_response_topic, payload, 0)
+                .await;
         }
     }
 

@@ -990,7 +990,11 @@ impl JsonDbRequest {
         let corr_len = self.correlation_data.as_ref().map_or(0, Vec::len);
 
         let mut buf = Vec::with_capacity(
-            18 + entity_bytes.len() + id_len + self.payload.len() + response_topic_bytes.len() + corr_len,
+            18 + entity_bytes.len()
+                + id_len
+                + self.payload.len()
+                + response_topic_bytes.len()
+                + corr_len,
         );
 
         buf.push(Self::VERSION);

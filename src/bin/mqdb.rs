@@ -393,7 +393,10 @@ enum ClusterAction {
         quic_key: Option<PathBuf>,
         #[arg(long, help = "Disable QUIC transport")]
         no_quic: bool,
-        #[arg(long, help = "Disable store persistence (data will not survive restarts)")]
+        #[arg(
+            long,
+            help = "Disable store persistence (data will not survive restarts)"
+        )]
         no_persist_stores: bool,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]

@@ -185,11 +185,7 @@ mod tests {
 
     #[test]
     fn test_filter_neq_matches() {
-        let filter = Filter::new(
-            "category".to_string(),
-            FilterOp::Neq,
-            json!("furniture"),
-        );
+        let filter = Filter::new("category".to_string(), FilterOp::Neq, json!("furniture"));
         assert!(filter.matches(&json!("electronics")));
         assert!(!filter.matches(&json!("furniture")));
     }

@@ -3577,9 +3577,7 @@ async fn session_expiry_cleans_subscriptions() {
     assert_eq!(router_after.route("sensor/humidity").targets.len(), 0);
 
     let snapshot_after = node.subscriptions.get_snapshot(client_id);
-    assert!(
-        snapshot_after.is_none() || snapshot_after.unwrap().topics.is_empty()
-    );
+    assert!(snapshot_after.is_none() || snapshot_after.unwrap().topics.is_empty());
 
     assert!(node.sessions.get(client_id).is_none());
 }

@@ -71,9 +71,6 @@ impl RecoveryStats {
             + self.db_fk
     }
 }
-use super::partition_storage::PartitionStorage;
-use crate::storage::StorageBackend;
-use std::sync::Arc;
 use super::db::{
     ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest, FkValidationStore,
     IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation, UniqueStore,
@@ -83,6 +80,7 @@ use super::entity;
 use super::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
 use super::inflight_store::{InflightMessage, InflightStore, InflightStoreError};
 use super::offset_store::{ConsumerOffset, OffsetStore};
+use super::partition_storage::PartitionStorage;
 use super::protocol::{Operation, ReplicationWrite};
 use super::qos2_store::{Qos2Phase, Qos2State, Qos2Store, Qos2StoreError};
 use super::retained_store::{RetainedMessage, RetainedStore};
@@ -94,6 +92,8 @@ use super::topic_index::{TopicIndex, TopicIndexEntry, TopicIndexError, topic_par
 use super::wildcard_pending::WildcardPendingStore;
 use super::wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError};
 use super::{Epoch, NodeId, PartitionId};
+use crate::storage::StorageBackend;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreApplyError {
@@ -278,7 +278,12 @@ impl StoreManager {
             for entry in snapshot.wildcard_subscriptions() {
                 if self
                     .wildcards
-                    .subscribe(entry.topic_str(), client_id, entry.qos, SubscriptionType::Mqtt)
+                    .subscribe(
+                        entry.topic_str(),
+                        client_id,
+                        entry.qos,
+                        SubscriptionType::Mqtt,
+                    )
                     .is_ok()
                 {
                     count += 1;
@@ -314,7 +319,9 @@ impl StoreManager {
     /// Returns an error if the entity type is unknown or store application fails.
     pub fn apply_write(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         if let Some(storage) = &self.storage {
-            storage.write(write).map_err(|_| StoreApplyError::PersistenceError)?;
+            storage
+                .write(write)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
         }
 
         self.apply_to_memory(write)

@@ -10,7 +10,7 @@ use super::protocol::JsonDbOp;
 use super::transport::ClusterTransport;
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub struct DbPublishResponse {
     pub topic: String,
@@ -114,7 +114,14 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonList { entity } => {
-                self.handle_json_list(controller, &entity, payload)
+                let resp_topic = response_topic?;
+                let result = self
+                    .handle_json_list(controller, &entity, payload, resp_topic)
+                    .await;
+                match result {
+                    Some(payload) => payload,
+                    None => return None,
+                }
             }
         };
 
@@ -453,13 +460,7 @@ impl DbRequestHandler {
         let partition = data_partition(entity, id);
         let is_local = controller.is_local_partition(partition);
 
-        tracing::debug!(
-            ?partition,
-            is_local,
-            entity,
-            id,
-            "handle_json_read"
-        );
+        tracing::debug!(?partition, is_local, entity, id, "handle_json_read");
 
         if !is_local {
             let forwarded = controller
@@ -476,13 +477,15 @@ impl DbRequestHandler {
             if forwarded {
                 return None;
             }
-            return Some(Self::json_error(503, "partition not local and forwarding failed"));
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         match controller.db_get(entity, id) {
             Some(db_entity) => {
-                let data: Value =
-                    serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
                 let result = json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -491,7 +494,10 @@ impl DbRequestHandler {
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            None => Some(Self::json_error(404, &format!("entity not found: {entity} id={id}"))),
+            None => Some(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            )),
         }
     }
 
@@ -526,7 +532,10 @@ impl DbRequestHandler {
             if forwarded {
                 return None;
             }
-            return Some(Self::json_error(503, "partition not local and forwarding failed"));
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -547,9 +556,10 @@ impl DbRequestHandler {
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            Err(super::db::DbDataStoreError::NotFound) => {
-                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
-            }
+            Err(super::db::DbDataStoreError::NotFound) => Some(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            )),
             Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }
@@ -579,7 +589,10 @@ impl DbRequestHandler {
             if forwarded {
                 return None;
             }
-            return Some(Self::json_error(503, "partition not local and forwarding failed"));
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         match controller.db_delete(entity, id).await {
@@ -592,19 +605,21 @@ impl DbRequestHandler {
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            Err(super::db::DbDataStoreError::NotFound) => {
-                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
-            }
+            Err(super::db::DbDataStoreError::NotFound) => Some(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            )),
             Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }
 
-    fn handle_json_list<T: ClusterTransport>(
+    async fn handle_json_list<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         payload: &[u8],
-    ) -> Vec<u8> {
+        response_topic: &str,
+    ) -> Option<Vec<u8>> {
         let filters: Vec<crate::Filter> = if payload.is_empty() {
             Vec::new()
         } else if let Ok(data) = serde_json::from_slice::<Value>(payload) {
@@ -615,19 +630,27 @@ impl DbRequestHandler {
             Vec::new()
         };
 
+        let has_remote_nodes = !controller.alive_nodes().is_empty();
+
+        if has_remote_nodes {
+            let started = controller
+                .start_scatter_list_query(entity, payload, response_topic.to_string(), filters)
+                .await;
+
+            if started {
+                return None;
+            }
+        }
+
         let entities = controller.db_list(entity);
         let items: Vec<Value> = entities
             .iter()
             .filter_map(|e| {
                 let data: Value = serde_json::from_slice(&e.data).ok()?;
-                if Self::matches_filters(&data, &filters) {
-                    Some(json!({
-                        "id": e.id_str(),
-                        "data": data
-                    }))
-                } else {
-                    None
-                }
+                Some(json!({
+                    "id": e.id_str(),
+                    "data": data
+                }))
             })
             .collect();
 
@@ -635,20 +658,7 @@ impl DbRequestHandler {
             "status": "ok",
             "data": items
         });
-        serde_json::to_vec(&result).unwrap_or_default()
-    }
-
-    fn matches_filters(entity: &Value, filters: &[crate::Filter]) -> bool {
-        for filter in filters {
-            if let Some(field_value) = entity.get(&filter.field) {
-                if !filter.matches(field_value) {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-        true
+        Some(serde_json::to_vec(&result).unwrap_or_default())
     }
 
     fn json_error(code: u16, message: &str) -> Vec<u8> {

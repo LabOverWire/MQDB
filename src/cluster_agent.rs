@@ -174,8 +174,12 @@ impl ClusteredAgent {
 
         let transport = MqttTransport::new(node_id);
         let transport_config = TransportConfig::default();
-        let controller =
-            NodeController::new_with_storage(node_id, transport.clone(), transport_config, stores_backend);
+        let controller = NodeController::new_with_storage(
+            node_id,
+            transport.clone(),
+            transport_config,
+            stores_backend,
+        );
 
         if controller.stores().has_persistence() {
             match controller.stores().recover() {
