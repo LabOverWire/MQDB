@@ -5,7 +5,7 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn test_crud_operations() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     let user = json!({
         "name": "Alice",
@@ -46,7 +46,7 @@ async fn test_crud_operations() {
 #[tokio::test]
 async fn test_list_operations() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     db.add_index("users".into(), vec!["status".into()]).await;
 
@@ -102,7 +102,7 @@ async fn test_list_operations() {
 #[tokio::test]
 async fn test_reactive_subscriptions() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     let mut receiver = db.event_receiver();
 
@@ -131,14 +131,14 @@ async fn test_subscription_persistence() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
         db.subscribe("users/#".into(), Some("users".into()))
             .await
             .unwrap();
     }
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
         let mut receiver = db.event_receiver();
 
         let user = json!({"name": "Persisted Test", "email": "test@example.com"});
@@ -156,7 +156,7 @@ async fn test_subscription_persistence() {
 #[tokio::test]
 async fn test_wildcard_subscriptions() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     let mut receiver = db.event_receiver();
 
@@ -189,7 +189,7 @@ async fn test_wildcard_subscriptions() {
 #[tokio::test]
 async fn test_extended_filter_operators() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     db.add_index("users".into(), vec!["status".into(), "role".into()])
         .await;
@@ -280,7 +280,7 @@ async fn test_sorting_and_pagination() {
     use mqdb::{Pagination, SortOrder};
 
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     for i in 0..10 {
         let user = json!({
@@ -402,7 +402,7 @@ async fn test_sorting_and_pagination() {
 #[tokio::test]
 async fn test_relationships_and_includes() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     db.add_relationship("posts".into(), "author".into(), "users".into())
         .await;
@@ -584,7 +584,7 @@ async fn test_ttl_with_indexes() {
 #[tokio::test]
 async fn test_cursor_api() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     for i in 0..50 {
         let user = json!({
@@ -627,7 +627,7 @@ async fn test_cursor_api() {
 #[tokio::test]
 async fn test_cursor_with_sorting() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
 
     for i in 0..20 {
         let user = json!({
@@ -695,7 +695,7 @@ async fn test_physical_backup_and_restore() {
     let db_path = tmp.path().join("db");
     let backup_path = tmp.path().join("backup");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
 
     for i in 0..10 {
         let user = json!({
@@ -709,7 +709,7 @@ async fn test_physical_backup_and_restore() {
 
     drop(db);
 
-    let restored_db = Database::open(&backup_path).await.unwrap();
+    let restored_db = Database::open_without_background_tasks(&backup_path).await.unwrap();
     let users = restored_db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -724,7 +724,7 @@ async fn test_logical_backup_and_restore() {
     let db_path = tmp.path().join("db");
     let backup_file = tmp.path().join("backup.jsonl");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
 
     for i in 0..20 {
         let product = json!({
@@ -738,7 +738,7 @@ async fn test_logical_backup_and_restore() {
     db.backup_logical(&backup_file).unwrap();
 
     let new_db_path = tmp.path().join("restored_db");
-    let new_db = Database::open(&new_db_path).await.unwrap();
+    let new_db = Database::open_without_background_tasks(&new_db_path).await.unwrap();
 
     let count = new_db.restore_logical(&backup_file).await.unwrap();
     assert_eq!(count, 20);
@@ -762,7 +762,7 @@ async fn test_backup_fails_if_destination_exists() {
     let db_path = tmp.path().join("db");
     let backup_path = tmp.path().join("backup");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
 
     db.create("users".into(), json!({"name": "Test"}))
         .await
@@ -781,7 +781,7 @@ async fn test_restore_fails_if_source_not_found() {
     let db_path = tmp.path().join("db");
     let missing_backup = tmp.path().join("missing.jsonl");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
 
     let result = db.restore_logical(&missing_backup).await;
     assert!(result.is_err());

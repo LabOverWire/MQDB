@@ -9,7 +9,9 @@ async fn test_durability_immediate_survives_reopen() {
 
     let id: String;
     {
-        let config = DatabaseConfig::new(path.clone()).with_durability(DurabilityMode::Immediate);
+        let config = DatabaseConfig::new(path.clone())
+            .with_durability(DurabilityMode::Immediate)
+            .without_background_tasks();
         let db = Database::open_with_config(config).await.unwrap();
 
         let user = json!({
@@ -23,7 +25,7 @@ async fn test_durability_immediate_survives_reopen() {
     }
 
     {
-        let db = Database::open(&path).await.unwrap();
+        let db = Database::open_without_background_tasks(&path).await.unwrap();
 
         let retrieved = db
             .read("users".into(), id.clone(), vec![], None)
@@ -43,7 +45,9 @@ async fn test_index_consistency_after_crash_during_delete() {
 
     let id: String;
     {
-        let config = DatabaseConfig::new(path.clone()).with_durability(DurabilityMode::Immediate);
+        let config = DatabaseConfig::new(path.clone())
+            .with_durability(DurabilityMode::Immediate)
+            .without_background_tasks();
         let db = Database::open_with_config(config).await.unwrap();
 
         db.add_index("users".into(), vec!["email".into(), "status".into()])
@@ -86,7 +90,7 @@ async fn test_index_consistency_after_crash_during_delete() {
     }
 
     {
-        let db = Database::open(&path).await.unwrap();
+        let db = Database::open_without_background_tasks(&path).await.unwrap();
 
         let result = db.read("users".into(), id.clone(), vec![], None).await;
         assert!(

@@ -22,6 +22,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, watch};
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
@@ -43,6 +44,7 @@ pub struct Database {
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
+    background_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl Database {
@@ -50,6 +52,13 @@ impl Database {
     /// Returns an error if the database cannot be opened.
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = DatabaseConfig::new(path.as_ref().to_path_buf());
+        Self::open_with_config(config).await
+    }
+
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
+    pub async fn open_without_background_tasks<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let config = DatabaseConfig::new(path.as_ref().to_path_buf()).without_background_tasks();
         Self::open_with_config(config).await
     }
 
@@ -70,6 +79,7 @@ impl Database {
         Self::init_with_storage(storage, config).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn init_with_storage(storage: Arc<Storage>, config: DatabaseConfig) -> Result<Self> {
         let registry = Arc::new(SubscriptionRegistry::new(Arc::clone(&storage)));
         let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
@@ -94,75 +104,78 @@ impl Database {
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut handles = Vec::new();
 
-        if config.outbox.enabled {
-            let pending_count = outbox.pending_count().unwrap_or(0);
-            if pending_count > 0 {
-                tracing::info!(
-                    pending = pending_count,
-                    "found pending outbox entries, starting processor"
+        if config.spawn_background_tasks {
+            if config.outbox.enabled {
+                let pending_count = outbox.pending_count().unwrap_or(0);
+                if pending_count > 0 {
+                    tracing::info!(
+                        pending = pending_count,
+                        "found pending outbox entries, starting processor"
+                    );
+                }
+
+                let mut processor = OutboxProcessor::new(
+                    Arc::clone(&outbox),
+                    Arc::clone(&dispatcher),
+                    config.outbox.clone(),
+                    shutdown_rx.clone(),
                 );
+                handles.push(tokio::spawn(async move {
+                    processor.run().await;
+                }));
             }
 
-            let mut processor = OutboxProcessor::new(
-                Arc::clone(&outbox),
-                Arc::clone(&dispatcher),
-                config.outbox.clone(),
-                shutdown_rx.clone(),
-            );
-            tokio::spawn(async move {
-                processor.run().await;
-            });
-        }
+            if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
+                let storage_clone = Arc::clone(&storage);
+                let dispatcher_clone = Arc::clone(&dispatcher);
+                let outbox_clone = Arc::clone(&outbox);
+                let index_manager_clone = Arc::clone(&index_manager);
 
-        if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
-            let storage_clone = Arc::clone(&storage);
-            let dispatcher_clone = Arc::clone(&dispatcher);
-            let outbox_clone = Arc::clone(&outbox);
-            let index_manager_clone = Arc::clone(&index_manager);
+                handles.push(tokio::spawn(async move {
+                    ttl_cleanup_task(
+                        storage_clone,
+                        dispatcher_clone,
+                        outbox_clone,
+                        index_manager_clone,
+                        interval_secs,
+                    )
+                    .await;
+                }));
+            }
 
-            tokio::spawn(async move {
-                ttl_cleanup_task(
-                    storage_clone,
-                    dispatcher_clone,
-                    outbox_clone,
-                    index_manager_clone,
-                    interval_secs,
-                )
-                .await;
-            });
-        }
+            if config.shared_subscription.consumer_timeout_ms > 0 {
+                let consumer_groups_clone = Arc::clone(&consumer_groups);
+                let timeout_ms = config.shared_subscription.consumer_timeout_ms;
+                let mut shutdown_rx_clone = shutdown_rx.clone();
 
-        if config.shared_subscription.consumer_timeout_ms > 0 {
-            let consumer_groups_clone = Arc::clone(&consumer_groups);
-            let timeout_ms = config.shared_subscription.consumer_timeout_ms;
-            let mut shutdown_rx_clone = shutdown_rx.clone();
-
-            tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let mut groups = consumer_groups_clone.write().await;
-                            for (name, group) in groups.iter_mut() {
-                                let stale = group.remove_stale_members(timeout_ms);
-                                if !stale.is_empty() {
-                                    tracing::info!(
-                                        group = %name,
-                                        removed = ?stale,
-                                        "removed stale consumers"
-                                    );
+                handles.push(tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                let mut groups = consumer_groups_clone.write().await;
+                                for (name, group) in groups.iter_mut() {
+                                    let stale = group.remove_stale_members(timeout_ms);
+                                    if !stale.is_empty() {
+                                        tracing::info!(
+                                            group = %name,
+                                            removed = ?stale,
+                                            "removed stale consumers"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        _ = shutdown_rx_clone.changed() => {
-                            tracing::debug!("heartbeat cleanup task shutting down");
-                            break;
+                            _ = shutdown_rx_clone.changed() => {
+                                tracing::debug!("heartbeat cleanup task shutting down");
+                                break;
+                            }
                         }
                     }
-                }
-            });
+                }));
+            }
         }
 
         Ok(Self {
@@ -178,6 +191,7 @@ impl Database {
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
             shutdown_tx,
+            background_handles: Arc::new(std::sync::Mutex::new(handles)),
         })
     }
 
@@ -848,6 +862,18 @@ impl Database {
         tracing::info!("database shutdown signal sent");
     }
 
+    pub async fn close(self) {
+        let _ = self.shutdown_tx.send(true);
+        let handles: Vec<_> = self
+            .background_handles
+            .lock()
+            .map(|mut guard| guard.drain(..).collect())
+            .unwrap_or_default();
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
     /// # Errors
     /// Returns an error if the backup fails.
     pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
@@ -1263,6 +1289,17 @@ async fn ttl_cleanup_task(
             op_id = %operation_id,
             "TTL cleanup processed expired entities"
         );
+    }
+}
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+        if let Ok(mut handles) = self.background_handles.lock() {
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
+        }
     }
 }
 
