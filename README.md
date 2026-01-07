@@ -460,6 +460,20 @@ Data is stored in `{db-path}/stores/` using an LSM-tree backend. On startup, nod
 
 Use `--no-persist-stores` for testing or ephemeral deployments where data doesn't need to survive restarts.
 
+### Cluster Mode Features
+
+**Fully Supported:**
+- CRUD operations (create, read, update, delete, list)
+- Cross-node pub/sub with automatic routing
+- TTL expiration (60-second cleanup interval)
+- Schema validation and registration
+- Authentication with password file (auto-generated internal credentials)
+
+**Limited Support:**
+- **Backups**: Creates per-node backup only (not cluster-wide snapshot)
+- **Constraints**: Returns "not yet supported in cluster mode"
+- **Consumer Groups**: Returns empty list (shared subscriptions work, but group tracking is local)
+
 ## CLI Tool
 
 The `mqdb` CLI provides command-line access to a running MQDB agent.
@@ -659,6 +673,9 @@ cargo run --example parking_lot
 
 ## Future Enhancements
 
+- Cluster-wide constraints (unique across all nodes)
+- Cluster-wide consumer group tracking
+- Coordinated cluster backup/restore
 - Reactive query language (subscribe to expressions)
 - Persistence metrics and tracing
 - Optimized TTL cleanup with expiration index
