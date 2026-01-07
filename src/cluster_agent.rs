@@ -10,7 +10,7 @@ use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
 use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
@@ -27,6 +27,7 @@ const BROKER_MAX_CLIENTS: usize = 10_000;
 const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
 const SESSION_EXPIRY_SECS: u64 = 3600;
 const CLEANUP_INTERVAL_SECS: u64 = 3600;
+const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
@@ -307,10 +308,23 @@ impl ClusteredAgent {
         .with_storage(storage_config)
         .with_event_handler(event_handler);
 
-        if let Some(ref path) = self.password_file {
-            broker_config.auth_config.password_file = Some(path.clone());
-            broker_config.auth_config.allow_anonymous = false;
-        }
+        let (service_username, service_password, custom_auth_provider) =
+            if let Some(ref path) = self.password_file {
+                let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
+                let svc_pass = uuid::Uuid::new_v4().to_string();
+                let auth_provider = PasswordAuthProvider::from_file(path)
+                    .await
+                    .map_err(|e| format!("failed to load password file: {e}"))?;
+                auth_provider
+                    .add_user(svc_user.clone(), &svc_pass)
+                    .await
+                    .map_err(|e| format!("failed to add service user: {e}"))?;
+                broker_config.auth_config.allow_anonymous = false;
+                (Some(svc_user), Some(svc_pass), Some(Arc::new(auth_provider)))
+            } else {
+                (None, None, None)
+            };
+
         if let Some(ref path) = self.acl_file {
             broker_config.auth_config.acl_file = Some(path.clone());
         }
@@ -328,7 +342,13 @@ impl ClusteredAgent {
             }
         }
 
-        let mut broker = MqttBroker::with_config(broker_config).await?;
+        let mut broker = if let Some(provider) = custom_auth_provider {
+            MqttBroker::with_config(broker_config)
+                .await?
+                .with_auth_provider(provider)
+        } else {
+            MqttBroker::with_config(broker_config).await?
+        };
         let mut ready_rx = broker.ready_receiver();
 
         let broker_handle = tokio::spawn(async move {
@@ -358,10 +378,13 @@ impl ClusteredAgent {
             let ctrl = self.controller.read().await;
             ctrl.transport().clone()
         };
-        transport
-            .connect(&broker_addr)
-            .await
-            .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
+        Box::pin(transport.connect_with_credentials(
+            &broker_addr,
+            service_username.as_deref(),
+            service_password.as_deref(),
+        ))
+        .await
+        .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
 
         let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(32);
@@ -440,6 +463,7 @@ impl ClusteredAgent {
 
         let mut tick_interval = interval(Duration::from_millis(100));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -617,6 +641,17 @@ impl ClusteredAgent {
                                 }
                             }
                         }
+                    }
+                }
+                _ = ttl_cleanup_interval.tick() => {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let ctrl = self.controller.read().await;
+                    let expired_ttl = ctrl.stores().db_data.cleanup_expired_ttl(now_secs);
+                    if !expired_ttl.is_empty() {
+                        info!(count = expired_ttl.len(), "cleaned up TTL-expired entities");
                     }
                 }
                 _ = cleanup_interval.tick() => {

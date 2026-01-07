@@ -1,5 +1,5 @@
 use crate::{Database, Request, Response};
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -321,23 +321,40 @@ impl MqdbAgent {
         };
 
         config.auth_config.allow_anonymous = self.allow_anonymous;
-        if let Some(ref path) = self.password_file {
-            config.auth_config.password_file = Some(path.clone());
-        }
         if let Some(ref path) = self.acl_file {
             config.auth_config.acl_file = Some(path.clone());
         }
 
-        let mut broker = MqttBroker::with_config(config).await?;
+        let (service_username, service_password, custom_auth_provider) =
+            if let Some(ref path) = self.password_file {
+                if self.service_username.is_none() {
+                    let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
+                    let svc_pass = uuid::Uuid::new_v4().to_string();
+                    let auth_provider = PasswordAuthProvider::from_file(path).await?;
+                    auth_provider.add_user(svc_user.clone(), &svc_pass).await?;
+                    (Some(svc_user), Some(svc_pass), Some(Arc::new(auth_provider)))
+                } else {
+                    config.auth_config.password_file = Some(path.clone());
+                    (self.service_username.clone(), self.service_password.clone(), None)
+                }
+            } else {
+                (self.service_username.clone(), self.service_password.clone(), None)
+            };
+
+        let mut broker = if let Some(provider) = custom_auth_provider {
+            MqttBroker::with_config(config).await?.with_auth_provider(provider)
+        } else {
+            MqttBroker::with_config(config).await?
+        };
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let db = Arc::clone(&self.db);
         let bind_addr = self.bind_address;
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let service_username = self.service_username.clone();
-        let service_password = self.service_password.clone();
         let backup_dir = self.backup_dir.clone();
+        let handler_username = service_username.clone();
+        let handler_password = service_password.clone();
 
         let handler_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -350,9 +367,9 @@ impl MqdbAgent {
             };
             let addr = format!("{}:{}", connect_ip, bind_addr.port());
 
-            let response_creds = (service_username.clone(), service_password.clone());
+            let response_creds = (handler_username.clone(), handler_password.clone());
             let connect_result =
-                if let (Some(user), Some(pass)) = (service_username, service_password) {
+                if let (Some(user), Some(pass)) = (handler_username, handler_password) {
                     let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
                         .with_credentials(user, pass);
                     Box::pin(client.connect_with_options(&addr, options))
@@ -419,8 +436,8 @@ impl MqdbAgent {
         let event_db = Arc::clone(&self.db);
         let event_addr = self.bind_address;
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
-        let event_service_username = self.service_username.clone();
-        let event_service_password = self.service_password.clone();
+        let event_service_username = service_username.clone();
+        let event_service_password = service_password.clone();
         let num_partitions = self.db.num_partitions();
 
         let event_task = tokio::spawn(async move {

@@ -90,15 +90,45 @@ impl MqttTransport {
     /// # Panics
     /// Panics if the mutex is poisoned.
     pub async fn connect(&self, broker_addr: &str) -> Result<(), TransportError> {
-        self.client
-            .connect(broker_addr)
-            .await
-            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+        Box::pin(self.connect_with_credentials(broker_addr, None, None)).await
+    }
 
-        self.forward_client
-            .connect(broker_addr)
-            .await
-            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+    /// # Errors
+    /// Returns `SendFailed` if connection fails.
+    ///
+    /// # Panics
+    /// Panics if the mutex is poisoned.
+    pub async fn connect_with_credentials(
+        &self,
+        broker_addr: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<(), TransportError> {
+        if let (Some(user), Some(pass)) = (username, password) {
+            let client_id = format!("mqdb-node-{}", self.node_id.get());
+            let options =
+                mqtt5::types::ConnectOptions::new(&client_id).with_credentials(user, pass);
+            Box::pin(self.client.connect_with_options(broker_addr, options))
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+            let forward_client_id = format!("mqdb-forward-{}", self.node_id.get());
+            let forward_options =
+                mqtt5::types::ConnectOptions::new(&forward_client_id).with_credentials(user, pass);
+            Box::pin(self.forward_client.connect_with_options(broker_addr, forward_options))
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+        } else {
+            self.client
+                .connect(broker_addr)
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+
+            self.forward_client
+                .connect(broker_addr)
+                .await
+                .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+        }
 
         {
             let mut state = self.state.lock().unwrap();

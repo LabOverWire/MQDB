@@ -405,6 +405,43 @@ impl DbDataStore {
 
         Ok(imported)
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn cleanup_expired_ttl(&self, now_secs: u64) -> Vec<(String, String)> {
+        let expired: Vec<(String, String, String)> = self
+            .entities
+            .read()
+            .expect("entities lock poisoned")
+            .iter()
+            .filter_map(|(key, entity)| {
+                let data: serde_json::Value = serde_json::from_slice(&entity.data).ok()?;
+                let expires_at = data.get("_expires_at").and_then(serde_json::Value::as_u64)?;
+                if expires_at <= now_secs {
+                    Some((
+                        key.clone(),
+                        entity.entity_str().to_string(),
+                        entity.id_str().to_string(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if expired.is_empty() {
+            return Vec::new();
+        }
+
+        let mut entities = self.entities.write().expect("entities lock poisoned");
+        let mut deleted = Vec::new();
+        for (key, entity_name, entity_id) in expired {
+            entities.remove(&key);
+            deleted.push((entity_name, entity_id));
+        }
+        deleted
+    }
 }
 
 impl std::fmt::Debug for DbDataStore {

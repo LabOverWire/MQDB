@@ -1869,10 +1869,25 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         payload: &[u8],
     ) -> Vec<u8> {
-        let data: serde_json::Value = match serde_json::from_slice(payload) {
+        let mut data: serde_json::Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
         };
+
+        if let serde_json::Value::Object(ref mut obj) = data
+            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(serde_json::Value::as_u64)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let expires_at = now + ttl_secs;
+            obj.insert(
+                "_expires_at".to_string(),
+                serde_json::Value::Number(expires_at.into()),
+            );
+            obj.remove("ttl_secs");
+        }
 
         let id = self.generate_id_for_partition(entity, partition, payload);
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
