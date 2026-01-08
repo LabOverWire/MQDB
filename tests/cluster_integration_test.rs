@@ -2,9 +2,9 @@ mod simulation;
 
 use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 use mqdb::cluster::{
-    Epoch, NodeController, NodeId, NodeStatus, Operation, PartitionAssignment, PartitionId,
-    PartitionMap, PublishRouter, Qos2Store, ReplicationWrite, RetainedStore, SessionStore,
-    SubscriptionCache, TopicIndex, TransportConfig, WildcardStore, session_partition,
+    ClusterTransport, Epoch, NodeController, NodeId, NodeStatus, Operation, PartitionAssignment,
+    PartitionId, PartitionMap, PublishRouter, Qos2Store, ReplicationWrite, RetainedStore,
+    SessionStore, SubscriptionCache, TopicIndex, TransportConfig, WildcardStore, session_partition,
     topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
@@ -3580,4 +3580,126 @@ async fn session_expiry_cleans_subscriptions() {
     assert!(snapshot_after.is_none() || snapshot_after.unwrap().topics.is_empty());
 
     assert!(node.sessions.get(client_id).is_none());
+}
+
+#[tokio::test]
+async fn transport_requeue_preserves_message_order() {
+    use mqdb::cluster::{ClusterMessage, InboundMessage, UniqueReserveResponse, UniqueReserveStatus};
+
+    let cluster = TestCluster::new(2);
+    cluster.runtime.network().set_base_latency_ms(0);
+
+    let node1_id = cluster.nodes[0].id;
+
+    let response1 = UniqueReserveResponse::create(1, UniqueReserveStatus::Reserved);
+    let response2 = UniqueReserveResponse::create(2, UniqueReserveStatus::Conflict);
+
+    let msg1 = InboundMessage {
+        from: node1_id,
+        message: ClusterMessage::UniqueReserveResponse(response1),
+        received_at: 100,
+    };
+    let msg2 = InboundMessage {
+        from: node1_id,
+        message: ClusterMessage::UniqueReserveResponse(response2),
+        received_at: 200,
+    };
+
+    cluster.nodes[1].controller.transport().requeue(msg2);
+    cluster.nodes[1].controller.transport().requeue(msg1);
+
+    let first = cluster.nodes[1].controller.transport().recv();
+    assert!(first.is_some(), "First message should be receivable");
+    let first_msg = first.unwrap();
+    if let ClusterMessage::UniqueReserveResponse(ref resp) = first_msg.message {
+        assert_eq!(resp.request_id, 1, "Requeue should use LIFO order (push_front)");
+    } else {
+        panic!("Expected UniqueReserveResponse");
+    }
+
+    let second = cluster.nodes[1].controller.transport().recv();
+    assert!(second.is_some(), "Second message should be receivable");
+    let second_msg = second.unwrap();
+    if let ClusterMessage::UniqueReserveResponse(ref resp) = second_msg.message {
+        assert_eq!(resp.request_id, 2, "Second message should have request_id 2");
+    } else {
+        panic!("Expected UniqueReserveResponse");
+    }
+
+    cluster.nodes[1].controller.transport().requeue(second_msg);
+    cluster.nodes[1].controller.transport().requeue(first_msg);
+
+    let re_first = cluster.nodes[1].controller.transport().recv();
+    assert!(re_first.is_some(), "Re-requeued messages should be receivable");
+    if let ClusterMessage::UniqueReserveResponse(ref resp) = re_first.unwrap().message {
+        assert_eq!(resp.request_id, 1, "After re-requeue, first should be request_id 1 again");
+    }
+}
+
+#[tokio::test]
+async fn unique_constraint_cross_node_message_flow() {
+    use mqdb::cluster::{
+        ClusterMessage, InboundMessage, UniqueReserveRequest, UniqueReserveStatus,
+    };
+
+    let mut cluster = TestCluster::new(2);
+    cluster.runtime.network().set_base_latency_ms(0);
+
+    for i in 0..64 {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        node.controller.tick(0).await;
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages().await;
+    }
+
+    let request = UniqueReserveRequest::create(
+        42,
+        "products",
+        "sku",
+        b"SKU-123",
+        "product-1",
+        "req-001",
+        PartitionId::new(5).unwrap(),
+        30_000,
+    );
+
+    let node1_id = cluster.nodes[0].id;
+    let node2_id = cluster.nodes[1].id;
+
+    let request_msg = InboundMessage {
+        from: node2_id,
+        message: ClusterMessage::UniqueReserveRequest(request),
+        received_at: 0,
+    };
+    cluster.nodes[0].controller.transport().requeue(request_msg);
+    cluster.advance_ms(1);
+    cluster.nodes[0].controller.process_messages().await;
+
+    cluster.advance_ms(1);
+    let response = cluster.nodes[1].controller.transport().recv();
+    assert!(response.is_some(), "Node 1 should have sent response to Node 2");
+
+    if let Some(msg) = response {
+        assert_eq!(msg.from, node1_id, "Response should be from node 1");
+        if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
+            assert_eq!(resp.request_id, 42, "Response request_id should match");
+            assert!(
+                matches!(resp.status(), UniqueReserveStatus::Reserved),
+                "First reserve should succeed"
+            );
+        } else {
+            panic!("Expected UniqueReserveResponse");
+        }
+    }
 }
