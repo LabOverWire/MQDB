@@ -652,6 +652,11 @@ impl ClusterTransport for MqttTransport {
         self.recv()
     }
 
+    fn requeue(&self, msg: InboundMessage) {
+        let mut state = self.state.lock().unwrap();
+        state.inbox.push_front(msg);
+    }
+
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, _qos: u8) {
         let _ = self
             .forward_client

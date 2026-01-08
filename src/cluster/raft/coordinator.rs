@@ -713,6 +713,8 @@ mod tests {
             None
         }
 
+        fn requeue(&self, _msg: InboundMessage) {}
+
         async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
 
         async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}

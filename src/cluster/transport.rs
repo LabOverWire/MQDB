@@ -161,6 +161,8 @@ pub trait ClusterTransport: Send + Sync + Debug {
 
     fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage>;
 
+    fn requeue(&self, msg: InboundMessage);
+
     fn queue_local_publish(
         &self,
         topic: String,

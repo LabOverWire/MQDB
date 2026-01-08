@@ -119,6 +119,17 @@ impl VirtualNetwork {
         inbox.remove(idx)
     }
 
+    pub fn requeue(&self, to: u16, from: u16, payload: Vec<u8>) {
+        let mut state = self.state.lock().unwrap();
+        let inbox = state.inboxes.entry(to).or_default();
+        inbox.push_front(Message {
+            from,
+            to,
+            payload,
+            deliver_at: 0,
+        });
+    }
+
     #[allow(dead_code)]
     pub fn receive_all(&self, node_id: u16) -> Vec<Message> {
         let now = self.clock.now();

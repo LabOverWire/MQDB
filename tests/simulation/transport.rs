@@ -377,6 +377,11 @@ impl ClusterTransport for SimulatedTransport {
         self.recv()
     }
 
+    fn requeue(&self, msg: InboundMessage) {
+        let data = Self::serialize_message(&msg.message);
+        self.network.requeue(self.node_id.get(), msg.from.get(), data);
+    }
+
     async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
 
     async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}

@@ -2895,7 +2895,7 @@ impl<T: ClusterTransport> NodeController<T> {
         ttl_ms: u64,
     ) -> Result<UniqueReserveStatus, super::transport::TransportError> {
         let request_id = self.allocate_unique_request_id();
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
 
         self.pending_unique_requests.insert(request_id, tx);
 
@@ -2914,14 +2914,38 @@ impl<T: ClusterTransport> NodeController<T> {
             .send(target_node, ClusterMessage::UniqueReserveRequest(request))
             .await?;
 
-        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(status)) => Ok(status),
-            Ok(Err(_)) => Ok(UniqueReserveStatus::Error),
-            Err(_) => {
-                self.pending_unique_requests.remove(&request_id);
-                Ok(UniqueReserveStatus::Error)
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+
+        loop {
+            match rx.try_recv() {
+                Ok(status) => return Ok(status),
+                Err(oneshot::error::TryRecvError::Closed) => return Ok(UniqueReserveStatus::Error),
+                Err(oneshot::error::TryRecvError::Empty) => {}
             }
+
+            let mut requeue_msgs = Vec::new();
+            while let Some(msg) = self.transport.recv() {
+                if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
+                    self.handle_unique_reserve_response(resp);
+                } else if let ClusterMessage::UniqueCommitResponse(ref resp) = msg.message {
+                    self.handle_unique_commit_response(resp);
+                } else if let ClusterMessage::UniqueReleaseResponse(ref resp) = msg.message {
+                    self.handle_unique_release_response(resp);
+                } else {
+                    requeue_msgs.push(msg);
+                }
+            }
+            for msg in requeue_msgs.into_iter().rev() {
+                self.transport.requeue(msg);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                self.pending_unique_requests.remove(&request_id);
+                return Ok(UniqueReserveStatus::Error);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -2935,7 +2959,7 @@ impl<T: ClusterTransport> NodeController<T> {
         idempotency_key: &str,
     ) -> Result<bool, super::transport::TransportError> {
         let request_id = self.allocate_unique_request_id();
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
 
         self.pending_unique_commit_requests.insert(request_id, tx);
 
@@ -2945,14 +2969,38 @@ impl<T: ClusterTransport> NodeController<T> {
             .send(target_node, ClusterMessage::UniqueCommitRequest(request))
             .await?;
 
-        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(success)) => Ok(success),
-            Ok(Err(_)) => Ok(false),
-            Err(_) => {
-                self.pending_unique_commit_requests.remove(&request_id);
-                Ok(false)
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+
+        loop {
+            match rx.try_recv() {
+                Ok(success) => return Ok(success),
+                Err(oneshot::error::TryRecvError::Closed) => return Ok(false),
+                Err(oneshot::error::TryRecvError::Empty) => {}
             }
+
+            let mut requeue_msgs = Vec::new();
+            while let Some(msg) = self.transport.recv() {
+                if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
+                    self.handle_unique_reserve_response(resp);
+                } else if let ClusterMessage::UniqueCommitResponse(ref resp) = msg.message {
+                    self.handle_unique_commit_response(resp);
+                } else if let ClusterMessage::UniqueReleaseResponse(ref resp) = msg.message {
+                    self.handle_unique_release_response(resp);
+                } else {
+                    requeue_msgs.push(msg);
+                }
+            }
+            for msg in requeue_msgs.into_iter().rev() {
+                self.transport.requeue(msg);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                self.pending_unique_commit_requests.remove(&request_id);
+                return Ok(false);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 
@@ -2966,7 +3014,7 @@ impl<T: ClusterTransport> NodeController<T> {
         idempotency_key: &str,
     ) -> Result<bool, super::transport::TransportError> {
         let request_id = self.allocate_unique_request_id();
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
 
         self.pending_unique_release_requests.insert(request_id, tx);
 
@@ -2976,14 +3024,38 @@ impl<T: ClusterTransport> NodeController<T> {
             .send(target_node, ClusterMessage::UniqueReleaseRequest(request))
             .await?;
 
-        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(success)) => Ok(success),
-            Ok(Err(_)) => Ok(false),
-            Err(_) => {
-                self.pending_unique_release_requests.remove(&request_id);
-                Ok(false)
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+
+        loop {
+            match rx.try_recv() {
+                Ok(success) => return Ok(success),
+                Err(oneshot::error::TryRecvError::Closed) => return Ok(false),
+                Err(oneshot::error::TryRecvError::Empty) => {}
             }
+
+            let mut requeue_msgs = Vec::new();
+            while let Some(msg) = self.transport.recv() {
+                if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
+                    self.handle_unique_reserve_response(resp);
+                } else if let ClusterMessage::UniqueCommitResponse(ref resp) = msg.message {
+                    self.handle_unique_commit_response(resp);
+                } else if let ClusterMessage::UniqueReleaseResponse(ref resp) = msg.message {
+                    self.handle_unique_release_response(resp);
+                } else {
+                    requeue_msgs.push(msg);
+                }
+            }
+            for msg in requeue_msgs.into_iter().rev() {
+                self.transport.requeue(msg);
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                self.pending_unique_release_requests.remove(&request_id);
+                return Ok(false);
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
 }
@@ -3084,6 +3156,10 @@ mod tests {
 
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             self.inbox.lock().unwrap().pop_front()
+        }
+
+        fn requeue(&self, msg: InboundMessage) {
+            self.inbox.lock().unwrap().push_front(msg);
         }
 
         async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
