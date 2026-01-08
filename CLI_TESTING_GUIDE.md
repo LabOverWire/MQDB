@@ -1231,14 +1231,18 @@ mqdb dev start-cluster --no-quic
 ### Run Built-in Tests
 
 ```bash
-# Run pub/sub tests
-mqdb dev test --pubsub
+# Run all cross-node tests
+mqdb dev test --all
 
-# Run database tests
-mqdb dev test --db
+# Run specific test suites
+mqdb dev test --pubsub      # Cross-node pub/sub matrix
+mqdb dev test --db          # Cross-node DB CRUD
+mqdb dev test --wildcards   # Wildcard subscriptions
+mqdb dev test --retained    # Retained messages
+mqdb dev test --lwt         # Last Will & Testament
 
 # Specify node count
-mqdb dev test --nodes 3
+mqdb dev test --all --nodes 5
 ```
 
 ---
