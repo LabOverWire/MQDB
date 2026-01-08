@@ -444,6 +444,8 @@ enum ConstraintAction {
     Add {
         entity: String,
         #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
         unique: Option<String>,
         #[arg(long)]
         fk: Option<String>,
@@ -623,12 +625,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Constraint { action } => match action {
             ConstraintAction::Add {
                 entity,
+                name,
                 unique,
                 fk,
                 not_null,
                 conn,
             } => {
-                Box::pin(cmd_constraint_add(entity, unique, fk, not_null, conn)).await?;
+                Box::pin(cmd_constraint_add(entity, name, unique, fk, not_null, conn)).await?;
             }
             ConstraintAction::List {
                 entity,
@@ -1233,6 +1236,7 @@ async fn cmd_schema_get(
 
 async fn cmd_constraint_add(
     entity: String,
+    name: Option<String>,
     unique: Option<String>,
     fk: Option<String>,
     not_null: Option<String>,
@@ -1241,21 +1245,26 @@ async fn cmd_constraint_add(
     let topic = format!("$DB/_admin/constraint/{entity}/add");
 
     let payload = if let Some(field) = unique {
-        json!({ "type": "unique", "fields": [field] })
+        let constraint_name = name.unwrap_or_else(|| format!("unique_{entity}_{field}"));
+        json!({ "type": "unique", "name": constraint_name, "field": field })
     } else if let Some(fk_spec) = fk {
         let parts: Vec<&str> = fk_spec.split(':').collect();
         if parts.len() < 3 {
             return Err("FK format: field:target_entity:target_field[:action]".into());
         }
+        let constraint_name =
+            name.unwrap_or_else(|| format!("fk_{entity}_{}", parts[0]));
         json!({
             "type": "foreign_key",
+            "name": constraint_name,
             "field": parts[0],
             "target_entity": parts[1],
             "target_field": parts[2],
             "on_delete": parts.get(3).unwrap_or(&"restrict")
         })
     } else if let Some(field) = not_null {
-        json!({ "type": "not_null", "field": field })
+        let constraint_name = name.unwrap_or_else(|| format!("not_null_{entity}_{field}"));
+        json!({ "type": "not_null", "name": constraint_name, "field": field })
     } else {
         return Err("Must specify --unique, --fk, or --not-null".into());
     };
@@ -2236,10 +2245,114 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
     println!("\nResults: {passed} passed, {failed} failed\n");
 }
 
-fn run_test_constraints(_nodes: u8, _ports: &[u16]) {
-    println!("=== Cross-Node Unique Constraint Test ===\n");
-    println!("  (Skipped - CLI/server constraint API mismatch to be fixed)");
-    println!("\nResults: 0 passed, 0 failed (skipped)\n");
+fn run_test_constraints(nodes: u8, ports: &[u16]) {
+    println!("=== Unique Constraint Test ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0;
+    let mut failed = 0;
+
+    let ts = std::time::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let entity = format!("test_products_{ts}");
+    let constraint_name = format!("unique_{entity}_sku");
+
+    let add_output = Command::new(&exe)
+        .args([
+            "constraint",
+            "add",
+            &entity,
+            "--unique",
+            "sku",
+            "--name",
+            &constraint_name,
+            "--broker",
+            &format!("127.0.0.1:{}", ports[0]),
+        ])
+        .output();
+
+    let constraint_added = add_output
+        .as_ref()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
+        })
+        .unwrap_or(false);
+
+    if constraint_added {
+        println!("  Add unique constraint via Node 1: ✓");
+        passed += 1;
+    } else {
+        println!("  Add unique constraint via Node 1: ✗");
+        if let Ok(o) = &add_output {
+            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
+            eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
+        }
+        failed += 1;
+        println!("\nResults: {passed} passed, {failed} failed\n");
+        return;
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let create1 = Command::new(&exe)
+        .args([
+            "create",
+            &entity,
+            "-d",
+            r#"{"name": "Widget A", "sku": "SKU-001"}"#,
+            "--broker",
+            &format!("127.0.0.1:{}", ports[0]),
+        ])
+        .output();
+
+    let first_created = create1.map(|o| o.status.success()).unwrap_or(false);
+
+    if first_created {
+        println!("  Create first product (SKU-001) via Node 1: ✓");
+        passed += 1;
+    } else {
+        println!("  Create first product (SKU-001) via Node 1: ✗");
+        failed += 1;
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let create_dup = Command::new(&exe)
+        .args([
+            "create",
+            &entity,
+            "-d",
+            r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#,
+            "--broker",
+            &format!("127.0.0.1:{}", ports[0]),
+        ])
+        .output();
+
+    let dup_rejected = create_dup
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let combined = format!("{stdout}{stderr}").to_lowercase();
+            !o.status.success()
+                || combined.contains("unique")
+                || combined.contains("conflict")
+                || combined.contains("duplicate")
+                || combined.contains("constraint")
+        })
+        .unwrap_or(false);
+
+    if dup_rejected {
+        println!("  Duplicate SKU-001 rejected: ✓");
+        passed += 1;
+    } else {
+        println!("  Duplicate SKU-001 rejected: ✗");
+        failed += 1;
+    }
+
+    println!("\nResults: {passed} passed, {failed} failed\n");
 }
 
 fn run_test_wildcards(nodes: u8, ports: &[u16]) {
