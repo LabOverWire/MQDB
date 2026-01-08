@@ -842,18 +842,10 @@ impl ClusteredAgent {
             return Response::error(ErrorCode::Forbidden, "not the Raft leader");
         }
 
-        let ctrl = self.controller.read().await;
-        let alive_nodes = ctrl.alive_nodes();
-        drop(ctrl);
-
-        let mut proposed = 0;
-        for node in alive_nodes {
-            let proposals = raft.handle_node_alive(node).await;
-            proposed += proposals.len();
-        }
+        let proposals = raft.force_rebalance().await;
 
         Response::ok(json!({
-            "proposed_changes": proposed
+            "proposed_changes": proposals.len()
         }))
     }
 

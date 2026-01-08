@@ -439,6 +439,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     async fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
+        self.trigger_rebalance_internal().await
+    }
+
+    async fn trigger_rebalance_internal(&mut self) -> Vec<u64> {
         let config = RebalanceConfig::default();
         let reassignments =
             compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config);
@@ -450,7 +454,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         tracing::info!(
             count = reassignments.len(),
-            "proposing partition reassignments for new node"
+            "proposing partition reassignments"
         );
 
         let mut proposed_indices = Vec::new();
@@ -468,6 +472,20 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
 
         proposed_indices
+    }
+
+    pub async fn force_rebalance(&mut self) -> Vec<u64> {
+        if !self.is_leader() {
+            tracing::warn!("cannot force rebalance - not the Raft leader");
+            return Vec::new();
+        }
+
+        tracing::info!(
+            cluster_members = ?self.cluster_members,
+            "forcing partition rebalance"
+        );
+
+        self.trigger_rebalance_internal().await
     }
 
     async fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {

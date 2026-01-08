@@ -796,3 +796,77 @@ async fn rebalancer_node_failure() {
         assert!(r.new_primary == remaining[0] || r.new_primary == remaining[1]);
     }
 }
+
+#[tokio::test]
+async fn rebalancer_assigns_partitions_to_node_with_zero_primaries() {
+    use mqdb::cluster::{
+        Epoch, PartitionAssignment, PartitionId, PartitionMap, RebalanceConfig,
+        compute_incremental_assignments,
+    };
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+
+    let mut map = PartitionMap::new();
+    for i in 0..64u16 {
+        let partition = PartitionId::new(i).unwrap();
+        let primary = if i % 2 == 0 { node1 } else { node2 };
+        let replica = if i % 2 == 0 { node2 } else { node1 };
+        map.set(
+            partition,
+            PartitionAssignment::new(primary, vec![replica], Epoch::new(1)),
+        );
+    }
+
+    assert_eq!(map.primary_count(node1), 32);
+    assert_eq!(map.primary_count(node2), 32);
+    assert_eq!(map.primary_count(node3), 0);
+
+    let all_nodes = vec![node1, node2, node3];
+    let config = RebalanceConfig::default();
+    let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
+
+    assert!(
+        !reassignments.is_empty(),
+        "rebalancer must propose changes when node has zero partitions"
+    );
+
+    let node3_primaries = reassignments
+        .iter()
+        .filter(|r| r.new_primary == node3)
+        .count();
+    assert!(
+        node3_primaries >= 20,
+        "node3 should receive at least 20 primaries (got {node3_primaries})"
+    );
+}
+
+#[tokio::test]
+async fn rebalancer_distributes_partitions_fairly() {
+    use mqdb::cluster::{Epoch, PartitionId, RebalanceConfig, compute_balanced_assignments};
+
+    let nodes = vec![
+        NodeId::validated(1).unwrap(),
+        NodeId::validated(2).unwrap(),
+        NodeId::validated(3).unwrap(),
+    ];
+    let config = RebalanceConfig::default();
+    let map = compute_balanced_assignments(&nodes, &config, Epoch::ZERO);
+
+    let n1_count = map.primary_count(nodes[0]);
+    let n2_count = map.primary_count(nodes[1]);
+    let n3_count = map.primary_count(nodes[2]);
+
+    assert!((21..=22).contains(&n1_count), "node1 should have ~21-22 primaries");
+    assert!((21..=22).contains(&n2_count), "node2 should have ~21-22 primaries");
+    assert!((21..=22).contains(&n3_count), "node3 should have ~21-22 primaries");
+    assert_eq!(n1_count + n2_count + n3_count, 64, "total should be 64 partitions");
+
+    for partition in PartitionId::all() {
+        assert!(
+            map.primary(partition).is_some(),
+            "partition {partition:?} must have a primary"
+        );
+    }
+}
