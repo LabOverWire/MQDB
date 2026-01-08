@@ -21,6 +21,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     processed_dead_nodes: HashSet<NodeId>,
     pending_draining_nodes: HashSet<NodeId>,
     processed_draining_nodes: HashSet<NodeId>,
+    pending_new_nodes: HashSet<NodeId>,
     was_leader: bool,
 }
 
@@ -35,6 +36,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_dead_nodes: HashSet::new(),
             pending_draining_nodes: HashSet::new(),
             processed_draining_nodes: HashSet::new(),
+            pending_new_nodes: HashSet::new(),
             was_leader: false,
         }
     }
@@ -58,6 +60,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_dead_nodes: HashSet::new(),
             pending_draining_nodes: HashSet::new(),
             processed_draining_nodes: HashSet::new(),
+            pending_new_nodes: HashSet::new(),
             was_leader: false,
         };
 
@@ -117,6 +120,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             tracing::info!("became Raft leader, processing pending nodes");
             let mut indices = self.process_pending_dead_nodes().await;
             indices.extend(self.process_pending_draining_nodes().await);
+            indices.extend(self.process_pending_new_nodes().await);
             return indices;
         }
 
@@ -135,6 +139,17 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
 
         proposed_indices
+    }
+
+    async fn process_pending_new_nodes(&mut self) -> Vec<u64> {
+        let pending: Vec<NodeId> = self.pending_new_nodes.drain().collect();
+
+        if pending.is_empty() {
+            return Vec::new();
+        }
+
+        tracing::info!(count = pending.len(), "processing pending new nodes for rebalance");
+        self.trigger_rebalance_for_new_node().await
     }
 
     async fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
@@ -371,14 +386,19 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             tracing::info!(?node, "added new node as Raft peer");
         }
 
+        let node_has_partitions = self.node_has_partitions(node);
+        let partitions_initialized = self.partitions_initialized();
+        let needs_rebalance = is_new_member && !node_has_partitions && partitions_initialized;
+
         if !self.is_leader() {
+            if needs_rebalance {
+                tracing::info!(?node, "not leader, queuing new node for later rebalance");
+                self.pending_new_nodes.insert(node);
+            }
             return Vec::new();
         }
 
-        let node_has_partitions = self.node_has_partitions(node);
-        let partitions_initialized = self.partitions_initialized();
-
-        if is_new_member && !node_has_partitions && partitions_initialized {
+        if needs_rebalance {
             tracing::info!(?node, "new node joined, triggering rebalance");
             return self.trigger_rebalance_for_new_node().await;
         }

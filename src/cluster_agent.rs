@@ -666,6 +666,10 @@ impl ClusteredAgent {
                         if stale_offsets > 0 {
                             info!(stale_offsets, "cleaned up stale consumer offsets");
                         }
+                        let expired_unique = ctrl.stores().unique_cleanup_expired(now);
+                        if expired_unique > 0 {
+                            info!(expired_unique, "cleaned up expired unique reservations");
+                        }
                         ctrl.stores().cleanup_expired_sessions(now)
                     };
                     if !expired_sessions.is_empty() {
@@ -763,9 +767,11 @@ impl ClusteredAgent {
             }
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/constraint/") {
             if let Some(entity) = rest.strip_suffix("/add") {
-                Self::handle_constraint_add(entity, &req.payload)
+                self.handle_constraint_add(entity, &req.payload).await
             } else if let Some(entity) = rest.strip_suffix("/list") {
-                Self::handle_constraint_list(entity)
+                self.handle_constraint_list(entity).await
+            } else if let Some(entity) = rest.strip_suffix("/remove") {
+                self.handle_constraint_remove(entity, &req.payload).await
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid constraint operation")
             }
@@ -892,15 +898,89 @@ impl ClusteredAgent {
         }
     }
 
-    fn handle_constraint_add(_entity: &str, _payload: &[u8]) -> Response {
-        Response::error(
-            ErrorCode::BadRequest,
-            "constraints not yet supported in cluster mode",
-        )
+    async fn handle_constraint_add(&self, entity: &str, payload: &[u8]) -> Response {
+        let constraint_def: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(e) => return Response::error(ErrorCode::BadRequest, e.to_string()),
+        };
+
+        let constraint_type = constraint_def
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unique");
+        let name = constraint_def
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let field = constraint_def
+            .get("field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if name.is_empty() || field.is_empty() {
+            return Response::error(
+                ErrorCode::BadRequest,
+                "constraint requires 'name' and 'field' parameters",
+            );
+        }
+
+        match constraint_type {
+            "unique" => {
+                let constraint =
+                    crate::cluster::db::ClusterConstraint::unique(entity, name, field);
+                let mut ctrl = self.controller.write().await;
+                match ctrl.constraint_add(&constraint).await {
+                    Ok(()) => Response::ok(json!({"message": "constraint added"})),
+                    Err(crate::cluster::db::ConstraintStoreError::AlreadyExists) => {
+                        Response::error(ErrorCode::Conflict, "constraint already exists")
+                    }
+                    Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+                }
+            }
+            _ => Response::error(
+                ErrorCode::BadRequest,
+                format!("unsupported constraint type: {constraint_type}"),
+            ),
+        }
     }
 
-    fn handle_constraint_list(_entity: &str) -> Response {
-        Response::ok(json!([]))
+    async fn handle_constraint_remove(&self, entity: &str, payload: &[u8]) -> Response {
+        let remove_def: serde_json::Value = match serde_json::from_slice(payload) {
+            Ok(v) => v,
+            Err(e) => return Response::error(ErrorCode::BadRequest, e.to_string()),
+        };
+
+        let Some(name) = remove_def.get("name").and_then(|v| v.as_str()) else {
+            return Response::error(
+                ErrorCode::BadRequest,
+                "constraint removal requires 'name' parameter",
+            );
+        };
+
+        let mut ctrl = self.controller.write().await;
+        match ctrl.constraint_remove(entity, name).await {
+            Ok(()) => Response::ok(json!({"message": "constraint removed"})),
+            Err(crate::cluster::db::ConstraintStoreError::NotFound) => {
+                Response::error(ErrorCode::NotFound, "constraint not found")
+            }
+            Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+        }
+    }
+
+    async fn handle_constraint_list(&self, entity: &str) -> Response {
+        let ctrl = self.controller.read().await;
+        let constraints = ctrl.constraint_list(entity);
+        let data: Vec<serde_json::Value> = constraints
+            .iter()
+            .map(|c| {
+                json!({
+                    "name": c.name_str(),
+                    "type": "unique",
+                    "field": c.field_str()
+                })
+            })
+            .collect();
+        Response::ok(json!(data))
     }
 
     fn handle_backup_create(&self, payload: &[u8]) -> Response {
@@ -1148,7 +1228,7 @@ async fn clear_expired_session_subscriptions(
                     .stores_mut()
                     .unsubscribe_topic_replicated(topic, client_id);
                 if let Ok((_entry, writes)) = result {
-                    for write in writes {
+                    if let Some(write) = writes.into_iter().next() {
                         ctrl.write_or_forward(write).await;
                     }
                 }

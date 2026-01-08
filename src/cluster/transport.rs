@@ -1,7 +1,8 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
     Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, WildcardBroadcast,
+    ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -47,6 +48,12 @@ pub enum ClusterMessage {
         request: JsonDbRequest,
     },
     JsonDbResponse(JsonDbResponse),
+    UniqueReserveRequest(UniqueReserveRequest),
+    UniqueReserveResponse(UniqueReserveResponse),
+    UniqueCommitRequest(UniqueCommitRequest),
+    UniqueCommitResponse(UniqueCommitResponse),
+    UniqueReleaseRequest(UniqueReleaseRequest),
+    UniqueReleaseResponse(UniqueReleaseResponse),
 }
 
 impl ClusterMessage {
@@ -77,6 +84,12 @@ impl ClusterMessage {
             Self::PartitionUpdate(_) => 70,
             Self::JsonDbRequest { .. } => 54,
             Self::JsonDbResponse(_) => 55,
+            Self::UniqueReserveRequest(_) => 80,
+            Self::UniqueReserveResponse(_) => 81,
+            Self::UniqueCommitRequest(_) => 82,
+            Self::UniqueCommitResponse(_) => 83,
+            Self::UniqueReleaseRequest(_) => 84,
+            Self::UniqueReleaseResponse(_) => 85,
         }
     }
 
@@ -107,6 +120,12 @@ impl ClusterMessage {
             Self::PartitionUpdate(_) => "PartitionUpdate",
             Self::JsonDbRequest { .. } => "JsonDbRequest",
             Self::JsonDbResponse(_) => "JsonDbResponse",
+            Self::UniqueReserveRequest(_) => "UniqueReserveRequest",
+            Self::UniqueReserveResponse(_) => "UniqueReserveResponse",
+            Self::UniqueCommitRequest(_) => "UniqueCommitRequest",
+            Self::UniqueCommitResponse(_) => "UniqueCommitResponse",
+            Self::UniqueReleaseRequest(_) => "UniqueReleaseRequest",
+            Self::UniqueReleaseResponse(_) => "UniqueReleaseResponse",
         }
     }
 }

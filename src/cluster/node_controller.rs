@@ -6,7 +6,9 @@ use super::offset_store::ConsumerOffset;
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
     JsonDbOp, JsonDbRequest, JsonDbResponse, Operation, QueryRequest, QueryResponse, QueryStatus,
-    ReplicationAck, ReplicationWrite,
+    ReplicationAck, ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    UniqueReserveStatus,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
@@ -29,6 +31,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
+const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 pub struct PendingScatterRequest {
     pub expected_count: usize,
@@ -83,6 +86,10 @@ pub struct NodeController<T: ClusterTransport> {
     synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
     pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
+    pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
+    pending_unique_commit_requests: HashMap<u64, oneshot::Sender<bool>>,
+    pending_unique_release_requests: HashMap<u64, oneshot::Sender<bool>>,
+    next_unique_request_id: u64,
 }
 
 impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
@@ -130,6 +137,10 @@ impl<T: ClusterTransport> NodeController<T> {
             synced_retained_topics: None,
             pending_retained_queries: HashMap::new(),
             pending_scatter_requests: HashMap::new(),
+            pending_unique_requests: HashMap::new(),
+            pending_unique_commit_requests: HashMap::new(),
+            pending_unique_release_requests: HashMap::new(),
+            next_unique_request_id: 1,
         }
     }
 
@@ -538,6 +549,24 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::JsonDbResponse(ref response) => {
                 self.handle_json_db_response(response).await;
             }
+            ClusterMessage::UniqueReserveRequest(ref req) => {
+                self.handle_unique_reserve_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueReserveResponse(ref resp) => {
+                self.handle_unique_reserve_response(resp);
+            }
+            ClusterMessage::UniqueCommitRequest(ref req) => {
+                self.handle_unique_commit_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueCommitResponse(ref resp) => {
+                self.handle_unique_commit_response(resp);
+            }
+            ClusterMessage::UniqueReleaseRequest(ref req) => {
+                self.handle_unique_release_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueReleaseResponse(ref resp) => {
+                self.handle_unique_release_response(resp);
+            }
         }
     }
 
@@ -650,7 +679,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let is_broadcast = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
             || write.entity == entity::CLIENT_LOCATIONS
-            || write.entity == entity::DB_SCHEMA;
+            || write.entity == entity::DB_SCHEMA
+            || write.entity == entity::DB_CONSTRAINT;
 
         tracing::debug!(
             ?partition,
@@ -1027,7 +1057,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
             || write.entity == entity::CLIENT_LOCATIONS
-            || write.entity == entity::DB_SCHEMA;
+            || write.entity == entity::DB_SCHEMA
+            || write.entity == entity::DB_CONSTRAINT;
         if is_broadcast_entity {
             let _ = self.stores.apply_write(&write);
             let alive = self.heartbeat.alive_nodes();
@@ -1212,6 +1243,211 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn schema_is_valid_for_write(&self, entity: &str) -> bool {
         self.stores.schema_is_valid_for_write(entity)
+    }
+
+    /// # Errors
+    /// Returns `ConstraintStoreError::AlreadyExists` if the constraint already exists.
+    pub async fn constraint_add(
+        &mut self,
+        constraint: &super::db::ClusterConstraint,
+    ) -> Result<(), super::db::ConstraintStoreError> {
+        let write = self.stores.constraint_add_replicated(constraint)?;
+        self.write_or_forward(write).await;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns `ConstraintStoreError::NotFound` if the constraint does not exist.
+    pub async fn constraint_remove(
+        &mut self,
+        entity: &str,
+        name: &str,
+    ) -> Result<(), super::db::ConstraintStoreError> {
+        let write = self.stores.constraint_remove_replicated(entity, name)?;
+        self.write_or_forward(write).await;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn constraint_list(&self, entity: &str) -> Vec<super::db::ClusterConstraint> {
+        self.stores.constraint_list(entity)
+    }
+
+    #[must_use]
+    pub fn constraint_list_all(&self) -> Vec<super::db::ClusterConstraint> {
+        self.stores.constraint_list_all()
+    }
+
+    #[must_use]
+    pub fn constraint_get_unique_fields(&self, entity: &str) -> Vec<String> {
+        self.stores.constraint_get_unique_fields(entity)
+    }
+
+    /// # Errors
+    /// Returns the conflicting field name if a unique constraint violation is detected.
+    pub async fn check_unique_constraints(
+        &mut self,
+        entity: &str,
+        id: &str,
+        data: &serde_json::Value,
+        data_partition: PartitionId,
+        request_id: &str,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let unique_fields = self.stores.constraint_get_unique_fields(entity);
+        let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+
+        for field in &unique_fields {
+            let value = match data.get(field) {
+                Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                None => continue,
+            };
+
+            let unique_part = super::db::unique_partition(entity, field, &value);
+            let primary = self.partition_map.primary(unique_part);
+
+            let is_conflict = if primary == Some(self.node_id) {
+                let (result, write) = self.stores.unique_reserve_replicated(
+                    entity,
+                    field,
+                    &value,
+                    id,
+                    request_id,
+                    data_partition,
+                    30_000,
+                    now_ms,
+                );
+
+                match result {
+                    super::db::ReserveResult::Reserved => {
+                        if let Some(w) = write {
+                            self.write_or_forward(w).await;
+                        }
+                        local_reserved.push((field.clone(), value));
+                        false
+                    }
+                    super::db::ReserveResult::AlreadyReservedBySameRequest => {
+                        local_reserved.push((field.clone(), value));
+                        false
+                    }
+                    super::db::ReserveResult::Conflict => true,
+                }
+            } else if let Some(target_node) = primary {
+                let result = self
+                    .send_unique_reserve_request(
+                        target_node,
+                        entity,
+                        field,
+                        &value,
+                        id,
+                        request_id,
+                        data_partition,
+                        30_000,
+                    )
+                    .await;
+
+                match result {
+                    Ok(
+                        UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved,
+                    ) => {
+                        remote_reserved.push((field.clone(), value, target_node));
+                        false
+                    }
+                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => {
+                        true
+                    }
+                }
+            } else {
+                true
+            };
+
+            if is_conflict {
+                for (f, v) in &local_reserved {
+                    if let Some(w) =
+                        self.stores.unique_release_replicated(entity, f, v, request_id)
+                    {
+                        self.write_or_forward(w).await;
+                    }
+                }
+                for (f, v, target) in &remote_reserved {
+                    let _ = self
+                        .send_unique_release_request(*target, entity, f, v, request_id)
+                        .await;
+                }
+                return Err(field.clone());
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn commit_unique_constraints(
+        &mut self,
+        entity: &str,
+        _id: &str,
+        data: &serde_json::Value,
+        _data_partition: PartitionId,
+        request_id: &str,
+        _now_ms: u64,
+    ) {
+        let unique_fields = self.stores.constraint_get_unique_fields(entity);
+
+        for field in &unique_fields {
+            let value = match data.get(field) {
+                Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                None => continue,
+            };
+
+            let unique_part = super::db::unique_partition(entity, field, &value);
+            let primary = self.partition_map.primary(unique_part);
+
+            if primary == Some(self.node_id) {
+                if let Ok((_, w)) =
+                    self.stores
+                        .unique_commit_replicated(entity, field, &value, request_id)
+                {
+                    self.write_or_forward(w).await;
+                }
+            } else if let Some(target_node) = primary {
+                let _ = self
+                    .send_unique_commit_request(target_node, entity, field, &value, request_id)
+                    .await;
+            }
+        }
+    }
+
+    pub async fn release_unique_constraints(
+        &mut self,
+        entity: &str,
+        _id: &str,
+        data: &serde_json::Value,
+        _data_partition: PartitionId,
+        request_id: &str,
+        _now_ms: u64,
+    ) {
+        let unique_fields = self.stores.constraint_get_unique_fields(entity);
+
+        for field in &unique_fields {
+            let value = match data.get(field) {
+                Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                None => continue,
+            };
+
+            let unique_part = super::db::unique_partition(entity, field, &value);
+            let primary = self.partition_map.primary(unique_part);
+
+            if primary == Some(self.node_id) {
+                if let Some(w) =
+                    self.stores.unique_release_replicated(entity, field, &value, request_id)
+                {
+                    self.write_or_forward(w).await;
+                }
+            } else if let Some(target_node) = primary {
+                let _ = self
+                    .send_unique_release_request(target_node, entity, field, &value, request_id)
+                    .await;
+            }
+        }
     }
 
     pub async fn commit_offset(
@@ -1863,6 +2099,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
@@ -1890,11 +2127,115 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let id = self.generate_id_for_partition(entity, partition, payload);
-        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+        let request_id = uuid::Uuid::new_v4().to_string();
         let now_ms = Self::current_time_ms();
+
+        let unique_fields = self.stores.constraint_get_unique_fields(entity);
+        let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+
+        for field in &unique_fields {
+            let value = match data.get(field) {
+                Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                None => continue,
+            };
+
+            let unique_part = super::db::unique_partition(entity, field, &value);
+            let primary = self.partition_map.primary(unique_part);
+
+            let is_conflict = if primary == Some(self.node_id) {
+                let (result, write) = self.stores.unique_reserve_replicated(
+                    entity,
+                    field,
+                    &value,
+                    &id,
+                    &request_id,
+                    partition,
+                    30_000,
+                    now_ms,
+                );
+
+                match result {
+                    super::db::ReserveResult::Reserved => {
+                        if let Some(w) = write {
+                            self.write_or_forward(w).await;
+                        }
+                        local_reserved.push((field.clone(), value));
+                        false
+                    }
+                    super::db::ReserveResult::AlreadyReservedBySameRequest => {
+                        local_reserved.push((field.clone(), value));
+                        false
+                    }
+                    super::db::ReserveResult::Conflict => true,
+                }
+            } else if let Some(target_node) = primary {
+                let result = self
+                    .send_unique_reserve_request(
+                        target_node,
+                        entity,
+                        field,
+                        &value,
+                        &id,
+                        &request_id,
+                        partition,
+                        30_000,
+                    )
+                    .await;
+
+                match result {
+                    Ok(
+                        UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved,
+                    ) => {
+                        remote_reserved.push((field.clone(), value, target_node));
+                        false
+                    }
+                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => {
+                        true
+                    }
+                }
+            } else {
+                true
+            };
+
+            if is_conflict {
+                for (f, v) in &local_reserved {
+                    if let Some(w) =
+                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                    {
+                        self.write_or_forward(w).await;
+                    }
+                }
+                for (f, v, target) in &remote_reserved {
+                    let _ = self
+                        .send_unique_release_request(*target, entity, f, v, &request_id)
+                        .await;
+                }
+                return Self::json_error(
+                    409,
+                    &format!("unique constraint violation on field '{field}'"),
+                );
+            }
+        }
+
+        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
         match self.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
+                for (field, value) in &local_reserved {
+                    if let Ok((_, w)) =
+                        self.stores
+                            .unique_commit_replicated(entity, field, value, &request_id)
+                    {
+                        self.write_or_forward(w).await;
+                    }
+                }
+                for (field, value, target) in &remote_reserved {
+                    let _ = self
+                        .send_unique_commit_request(*target, entity, field, value, &request_id)
+                        .await;
+                }
+
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -1904,9 +2245,35 @@ impl<T: ClusterTransport> NodeController<T> {
                 serde_json::to_vec(&result).unwrap_or_default()
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
+                for (f, v) in &local_reserved {
+                    if let Some(w) =
+                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                    {
+                        self.write_or_forward(w).await;
+                    }
+                }
+                for (f, v, target) in &remote_reserved {
+                    let _ = self
+                        .send_unique_release_request(*target, entity, f, v, &request_id)
+                        .await;
+                }
                 Self::json_error(409, "entity already exists")
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(_) => {
+                for (f, v) in &local_reserved {
+                    if let Some(w) =
+                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                    {
+                        self.write_or_forward(w).await;
+                    }
+                }
+                for (f, v, target) in &remote_reserved {
+                    let _ = self
+                        .send_unique_release_request(*target, entity, f, v, &request_id)
+                        .await;
+                }
+                Self::json_error(500, "internal error")
+            }
         }
     }
 
@@ -2421,6 +2788,202 @@ impl<T: ClusterTransport> NodeController<T> {
             self.transport
                 .queue_local_publish_retained(topic, payload, qos)
                 .await;
+        }
+    }
+
+    async fn handle_unique_reserve_request(&mut self, from: NodeId, req: &UniqueReserveRequest) {
+        let entity = req.entity_str();
+        let field = req.field_str();
+        let record_id = req.record_id_str();
+        let idempotency_key = req.idempotency_key_str();
+
+        let status = if let Some(data_partition) = req.data_partition() {
+            let result = self.stores.unique_reserve(
+                entity,
+                field,
+                &req.value,
+                record_id,
+                idempotency_key,
+                data_partition,
+                req.ttl_ms,
+                Self::current_time_ms(),
+            );
+            match result {
+                super::db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
+                super::db::ReserveResult::AlreadyReservedBySameRequest => {
+                    UniqueReserveStatus::AlreadyReserved
+                }
+                super::db::ReserveResult::Conflict => UniqueReserveStatus::Conflict,
+            }
+        } else {
+            UniqueReserveStatus::Error
+        };
+
+        let response = UniqueReserveResponse::create(req.request_id, status);
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::UniqueReserveResponse(response))
+            .await;
+    }
+
+    fn handle_unique_reserve_response(&mut self, resp: &UniqueReserveResponse) {
+        if let Some(tx) = self.pending_unique_requests.remove(&resp.request_id) {
+            let _ = tx.send(resp.status());
+        }
+    }
+
+    async fn handle_unique_commit_request(&mut self, from: NodeId, req: &UniqueCommitRequest) {
+        let entity = req.entity_str();
+        let field = req.field_str();
+        let idempotency_key = req.idempotency_key_str();
+
+        let success = self
+            .stores
+            .unique_commit(entity, field, &req.value, idempotency_key);
+
+        let response = UniqueCommitResponse::create(req.request_id, success);
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::UniqueCommitResponse(response))
+            .await;
+    }
+
+    fn handle_unique_commit_response(&mut self, resp: &UniqueCommitResponse) {
+        if let Some(tx) = self.pending_unique_commit_requests.remove(&resp.request_id) {
+            let _ = tx.send(resp.is_success());
+        }
+    }
+
+    async fn handle_unique_release_request(&mut self, from: NodeId, req: &UniqueReleaseRequest) {
+        let entity = req.entity_str();
+        let field = req.field_str();
+        let idempotency_key = req.idempotency_key_str();
+
+        let success = self
+            .stores
+            .unique_release(entity, field, &req.value, idempotency_key);
+
+        let response = UniqueReleaseResponse::create(req.request_id, success);
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::UniqueReleaseResponse(response))
+            .await;
+    }
+
+    fn handle_unique_release_response(&mut self, resp: &UniqueReleaseResponse) {
+        if let Some(tx) = self.pending_unique_release_requests.remove(&resp.request_id) {
+            let _ = tx.send(resp.is_success());
+        }
+    }
+
+    fn allocate_unique_request_id(&mut self) -> u64 {
+        let id = self.next_unique_request_id;
+        self.next_unique_request_id += 1;
+        id
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::missing_errors_doc)]
+    pub async fn send_unique_reserve_request(
+        &mut self,
+        target_node: NodeId,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        idempotency_key: &str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+    ) -> Result<UniqueReserveStatus, super::transport::TransportError> {
+        let request_id = self.allocate_unique_request_id();
+        let (tx, rx) = oneshot::channel();
+
+        self.pending_unique_requests.insert(request_id, tx);
+
+        let request = UniqueReserveRequest::create(
+            request_id,
+            entity,
+            field,
+            value,
+            record_id,
+            idempotency_key,
+            data_partition,
+            ttl_ms,
+        );
+
+        self.transport
+            .send(target_node, ClusterMessage::UniqueReserveRequest(request))
+            .await?;
+
+        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(_)) => Ok(UniqueReserveStatus::Error),
+            Err(_) => {
+                self.pending_unique_requests.remove(&request_id);
+                Ok(UniqueReserveStatus::Error)
+            }
+        }
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn send_unique_commit_request(
+        &mut self,
+        target_node: NodeId,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        idempotency_key: &str,
+    ) -> Result<bool, super::transport::TransportError> {
+        let request_id = self.allocate_unique_request_id();
+        let (tx, rx) = oneshot::channel();
+
+        self.pending_unique_commit_requests.insert(request_id, tx);
+
+        let request = UniqueCommitRequest::create(request_id, entity, field, value, idempotency_key);
+
+        self.transport
+            .send(target_node, ClusterMessage::UniqueCommitRequest(request))
+            .await?;
+
+        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(success)) => Ok(success),
+            Ok(Err(_)) => Ok(false),
+            Err(_) => {
+                self.pending_unique_commit_requests.remove(&request_id);
+                Ok(false)
+            }
+        }
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn send_unique_release_request(
+        &mut self,
+        target_node: NodeId,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        idempotency_key: &str,
+    ) -> Result<bool, super::transport::TransportError> {
+        let request_id = self.allocate_unique_request_id();
+        let (tx, rx) = oneshot::channel();
+
+        self.pending_unique_release_requests.insert(request_id, tx);
+
+        let request = UniqueReleaseRequest::create(request_id, entity, field, value, idempotency_key);
+
+        self.transport
+            .send(target_node, ClusterMessage::UniqueReleaseRequest(request))
+            .await?;
+
+        let timeout = std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(success)) => Ok(success),
+            Ok(Err(_)) => Ok(false),
+            Err(_) => {
+                self.pending_unique_release_requests.remove(&request_id);
+                Ok(false)
+            }
         }
     }
 }

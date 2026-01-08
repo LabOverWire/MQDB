@@ -1,7 +1,8 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
     Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, WildcardBroadcast,
+    ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -345,6 +346,30 @@ impl MqttTransport {
                 let response = JsonDbResponse::from_bytes(data)?;
                 ClusterMessage::JsonDbResponse(response)
             }
+            80 => {
+                let (req, _) = UniqueReserveRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueReserveRequest(req)
+            }
+            81 => {
+                let (resp, _) = UniqueReserveResponse::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueReserveResponse(resp)
+            }
+            82 => {
+                let (req, _) = UniqueCommitRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueCommitRequest(req)
+            }
+            83 => {
+                let (resp, _) = UniqueCommitResponse::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueCommitResponse(resp)
+            }
+            84 => {
+                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueReleaseRequest(req)
+            }
+            85 => {
+                let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
+                ClusterMessage::UniqueReleaseResponse(resp)
+            }
             _ => return None,
         };
 
@@ -440,6 +465,24 @@ impl MqttTransport {
             }
             ClusterMessage::JsonDbResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::UniqueReserveRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReserveResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
             }
         }
 
@@ -609,26 +652,16 @@ impl ClusterTransport for MqttTransport {
         self.recv()
     }
 
-    async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let mqtt_qos = match qos {
-            0 => QoS::AtMostOnce,
-            1 => QoS::AtLeastOnce,
-            _ => QoS::ExactlyOnce,
-        };
+    async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, _qos: u8) {
         let _ = self
             .forward_client
-            .publish_qos(&topic, payload, mqtt_qos)
+            .publish_qos(&topic, payload, QoS::AtMostOnce)
             .await;
     }
 
-    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let mqtt_qos = match qos {
-            0 => QoS::AtMostOnce,
-            1 => QoS::AtLeastOnce,
-            _ => QoS::ExactlyOnce,
-        };
+    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _qos: u8) {
         let options = mqtt5::PublishOptions {
-            qos: mqtt_qos,
+            qos: QoS::AtMostOnce,
             retain: true,
             ..Default::default()
         };
@@ -717,6 +750,24 @@ mod tests {
             }
             ClusterMessage::JsonDbResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::UniqueReserveRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReserveResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
             }
         }
 

@@ -389,7 +389,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                             client_partition,
                             qos,
                         );
-                        for write in writes {
+                        if let Some(write) = writes.into_iter().next() {
                             ctrl.write_or_forward(write).await;
                         }
                     }
@@ -491,7 +491,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         .stores_mut()
                         .unsubscribe_topic_replicated(topic, client_id);
                     if let Ok((_entry, writes)) = result {
-                        for write in writes {
+                        if let Some(write) = writes.into_iter().next() {
                             ctrl.write_or_forward(write).await;
                         }
                     }
@@ -782,7 +782,7 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                     .stores_mut()
                     .unsubscribe_topic_replicated(topic, client_id);
                 if let Ok((_entry, writes)) = result {
-                    for write in writes {
+                    if let Some(write) = writes.into_iter().next() {
                         ctrl.write_or_forward(write).await;
                     }
                 }

@@ -14,3 +14,4 @@ pub const DB_SCHEMA: &str = "_db_schema";
 pub const DB_INDEX: &str = "_db_idx";
 pub const DB_UNIQUE: &str = "_db_unique";
 pub const DB_FK: &str = "_db_fk";
+pub const DB_CONSTRAINT: &str = "_db_constraint";

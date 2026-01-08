@@ -72,9 +72,9 @@ impl RecoveryStats {
     }
 }
 use super::db::{
-    ClusterSchema, DbDataStore, DbDataStoreError, DbEntity, FkValidationRequest, FkValidationStore,
-    IndexEntry, IndexStore, ReserveResult, SchemaStore, UniqueReservation, UniqueStore,
-    data_partition, index_partition, unique_partition,
+    ClusterConstraint, ClusterSchema, ConstraintStore, DbDataStore, DbDataStoreError, DbEntity,
+    FkValidationRequest, FkValidationStore, IndexEntry, IndexStore, ReserveResult, SchemaStore,
+    UniqueReservation, UniqueStore, data_partition, index_partition, unique_partition,
 };
 use super::entity;
 use super::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
@@ -112,6 +112,7 @@ pub enum StoreApplyError {
     DbIndexError,
     DbUniqueError,
     DbFkError,
+    DbConstraintError,
     ClientLocationError,
     PersistenceError,
 }
@@ -134,6 +135,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::DbIndexError => write!(f, "db index store error"),
             Self::DbUniqueError => write!(f, "db unique store error"),
             Self::DbFkError => write!(f, "db fk store error"),
+            Self::DbConstraintError => write!(f, "db constraint store error"),
             Self::ClientLocationError => write!(f, "client location store error"),
             Self::PersistenceError => write!(f, "persistence error"),
         }
@@ -159,6 +161,7 @@ pub struct StoreManager {
     pub db_index: IndexStore,
     pub db_unique: UniqueStore,
     pub db_fk: FkValidationStore,
+    pub db_constraints: ConstraintStore,
     pub client_locations: ClientLocationStore,
 }
 
@@ -187,6 +190,7 @@ impl StoreManager {
             db_index: IndexStore::new(node_id),
             db_unique: UniqueStore::new(node_id),
             db_fk: FkValidationStore::new(node_id),
+            db_constraints: ConstraintStore::new(node_id),
             client_locations: ClientLocationStore::new(),
         }
     }
@@ -343,6 +347,7 @@ impl StoreManager {
             entity::DB_INDEX => self.apply_db_index(write),
             entity::DB_UNIQUE => self.apply_db_unique(write),
             entity::DB_FK => self.apply_db_fk(write),
+            entity::DB_CONSTRAINT => self.apply_db_constraint(write),
             entity::CLIENT_LOCATIONS => self.apply_client_location(write),
             _ => Err(StoreApplyError::UnknownEntity),
         }
@@ -436,6 +441,12 @@ impl StoreManager {
         self.db_fk
             .apply_replicated(write.operation, &write.id, &write.data)
             .map_err(|_| StoreApplyError::DbFkError)
+    }
+
+    fn apply_db_constraint(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.db_constraints
+            .apply_replicated(write.operation, &write.id, &write.data)
+            .map_err(|_| StoreApplyError::DbConstraintError)
     }
 
     /// # Errors
@@ -609,6 +620,77 @@ impl StoreManager {
     #[must_use]
     pub fn schema_is_valid_for_write(&self, entity: &str) -> bool {
         self.db_schema.is_valid_for_write(entity)
+    }
+
+    /// # Errors
+    /// Returns `ConstraintStoreError::AlreadyExists` if the constraint already exists.
+    ///
+    /// # Panics
+    /// Panics if partition 0 is not a valid partition ID (will not happen with default config).
+    pub fn constraint_add_replicated(
+        &self,
+        constraint: &ClusterConstraint,
+    ) -> Result<ReplicationWrite, super::db::ConstraintStoreError> {
+        let key = super::db::constraint_key(constraint.entity_str(), constraint.name_str());
+        if self.db_constraints.exists(constraint.entity_str(), constraint.name_str()) {
+            return Err(super::db::ConstraintStoreError::AlreadyExists);
+        }
+        let serialized = ConstraintStore::serialize(constraint);
+
+        let write = ReplicationWrite::new(
+            PartitionId::new(0).expect("0 is valid"),
+            Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_CONSTRAINT.to_string(),
+            key,
+            serialized,
+        );
+
+        Ok(write)
+    }
+
+    /// # Errors
+    /// Returns `ConstraintStoreError::NotFound` if the constraint does not exist.
+    ///
+    /// # Panics
+    /// Panics if partition 0 is not a valid partition ID (will not happen with default config).
+    pub fn constraint_remove_replicated(
+        &self,
+        entity_type: &str,
+        name: &str,
+    ) -> Result<ReplicationWrite, super::db::ConstraintStoreError> {
+        let key = super::db::constraint_key(entity_type, name);
+        if !self.db_constraints.exists(entity_type, name) {
+            return Err(super::db::ConstraintStoreError::NotFound);
+        }
+
+        let write = ReplicationWrite::new(
+            PartitionId::new(0).expect("0 is valid"),
+            Operation::Delete,
+            Epoch::ZERO,
+            0,
+            entity::DB_CONSTRAINT.to_string(),
+            key,
+            Vec::new(),
+        );
+
+        Ok(write)
+    }
+
+    #[must_use]
+    pub fn constraint_list(&self, entity_type: &str) -> Vec<ClusterConstraint> {
+        self.db_constraints.list(entity_type)
+    }
+
+    #[must_use]
+    pub fn constraint_list_all(&self) -> Vec<ClusterConstraint> {
+        self.db_constraints.list_all()
+    }
+
+    #[must_use]
+    pub fn constraint_get_unique_fields(&self, entity_type: &str) -> Vec<String> {
+        self.db_constraints.get_unique_fields(entity_type)
     }
 
     /// # Errors
@@ -791,6 +873,31 @@ impl StoreManager {
     #[must_use]
     pub fn unique_get(&self, entity: &str, field: &str, value: &[u8]) -> Option<UniqueReservation> {
         self.db_unique.get(entity, field, value)
+    }
+
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn unique_reserve(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        request_id: &str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+        now: u64,
+    ) -> ReserveResult {
+        self.db_unique
+            .reserve(entity, field, value, record_id, request_id, data_partition, ttl_ms, now)
+    }
+
+    pub fn unique_commit(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {
+        self.db_unique.commit(entity, field, value, request_id).is_ok()
+    }
+
+    pub fn unique_release(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {
+        self.db_unique.release(entity, field, value, request_id)
     }
 
     /// # Errors
@@ -1678,6 +1785,7 @@ impl std::fmt::Debug for StoreManager {
             .field("db_index", &self.db_index.count())
             .field("db_unique", &self.db_unique.count())
             .field("db_fk", &self.db_fk.count())
+            .field("db_constraints", &self.db_constraints.count())
             .field("client_locations", &self.client_locations.count())
             .finish()
     }

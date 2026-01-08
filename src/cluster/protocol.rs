@@ -22,6 +22,12 @@ pub enum MessageType {
     BatchReadResponse = 53,
     JsonDbRequest = 54,
     JsonDbResponse = 55,
+    UniqueReserveRequest = 80,
+    UniqueReserveResponse = 81,
+    UniqueCommitRequest = 82,
+    UniqueCommitResponse = 83,
+    UniqueReleaseRequest = 84,
+    UniqueReleaseResponse = 85,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1541,6 +1547,297 @@ impl WildcardBroadcast {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UniqueReserveStatus {
+    Reserved = 0,
+    AlreadyReserved = 1,
+    Conflict = 2,
+    Error = 3,
+}
+
+impl UniqueReserveStatus {
+    #[must_use]
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Reserved,
+            1 => Self::AlreadyReserved,
+            2 => Self::Conflict,
+            _ => Self::Error,
+        }
+    }
+
+    #[must_use]
+    pub fn is_ok(self) -> bool {
+        matches!(self, Self::Reserved | Self::AlreadyReserved)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReserveRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub entity_len: u16,
+    #[FromField(entity_len)]
+    pub entity: Vec<u8>,
+    pub field_len: u16,
+    #[FromField(field_len)]
+    pub field: Vec<u8>,
+    pub value_len: u32,
+    #[FromField(value_len)]
+    pub value: Vec<u8>,
+    pub record_id_len: u16,
+    #[FromField(record_id_len)]
+    pub record_id: Vec<u8>,
+    pub idempotency_key_len: u16,
+    #[FromField(idempotency_key_len)]
+    pub idempotency_key: Vec<u8>,
+    pub data_partition: u16,
+    pub ttl_ms: u64,
+}
+
+impl UniqueReserveRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
+    pub fn create(
+        request_id: u64,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        idempotency_key: &str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            entity_len: entity.len() as u16,
+            entity: entity.as_bytes().to_vec(),
+            field_len: field.len() as u16,
+            field: field.as_bytes().to_vec(),
+            value_len: value.len() as u32,
+            value: value.to_vec(),
+            record_id_len: record_id.len() as u16,
+            record_id: record_id.as_bytes().to_vec(),
+            idempotency_key_len: idempotency_key.len() as u16,
+            idempotency_key: idempotency_key.as_bytes().to_vec(),
+            data_partition: data_partition.get(),
+            ttl_ms,
+        }
+    }
+
+    #[must_use]
+    pub fn entity_str(&self) -> &str {
+        std::str::from_utf8(&self.entity).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn field_str(&self) -> &str {
+        std::str::from_utf8(&self.field).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn record_id_str(&self) -> &str {
+        std::str::from_utf8(&self.record_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn idempotency_key_str(&self) -> &str {
+        std::str::from_utf8(&self.idempotency_key).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn data_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.data_partition)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReserveResponse {
+    pub version: u8,
+    pub request_id: u64,
+    pub result: u8,
+}
+
+impl UniqueReserveResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, result: UniqueReserveStatus) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            result: result as u8,
+        }
+    }
+
+    #[must_use]
+    pub fn status(&self) -> UniqueReserveStatus {
+        UniqueReserveStatus::from_u8(self.result)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueCommitRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub entity_len: u16,
+    #[FromField(entity_len)]
+    pub entity: Vec<u8>,
+    pub field_len: u16,
+    #[FromField(field_len)]
+    pub field: Vec<u8>,
+    pub value_len: u32,
+    #[FromField(value_len)]
+    pub value: Vec<u8>,
+    pub idempotency_key_len: u16,
+    #[FromField(idempotency_key_len)]
+    pub idempotency_key: Vec<u8>,
+}
+
+impl UniqueCommitRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create(request_id: u64, entity: &str, field: &str, value: &[u8], idempotency_key: &str) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            entity_len: entity.len() as u16,
+            entity: entity.as_bytes().to_vec(),
+            field_len: field.len() as u16,
+            field: field.as_bytes().to_vec(),
+            value_len: value.len() as u32,
+            value: value.to_vec(),
+            idempotency_key_len: idempotency_key.len() as u16,
+            idempotency_key: idempotency_key.as_bytes().to_vec(),
+        }
+    }
+
+    #[must_use]
+    pub fn entity_str(&self) -> &str {
+        std::str::from_utf8(&self.entity).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn field_str(&self) -> &str {
+        std::str::from_utf8(&self.field).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn idempotency_key_str(&self) -> &str {
+        std::str::from_utf8(&self.idempotency_key).unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueCommitResponse {
+    pub version: u8,
+    pub request_id: u64,
+    pub success: u8,
+}
+
+impl UniqueCommitResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, success: bool) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            success: u8::from(success),
+        }
+    }
+
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.success != 0
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReleaseRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub entity_len: u16,
+    #[FromField(entity_len)]
+    pub entity: Vec<u8>,
+    pub field_len: u16,
+    #[FromField(field_len)]
+    pub field: Vec<u8>,
+    pub value_len: u32,
+    #[FromField(value_len)]
+    pub value: Vec<u8>,
+    pub idempotency_key_len: u16,
+    #[FromField(idempotency_key_len)]
+    pub idempotency_key: Vec<u8>,
+}
+
+impl UniqueReleaseRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create(request_id: u64, entity: &str, field: &str, value: &[u8], idempotency_key: &str) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            entity_len: entity.len() as u16,
+            entity: entity.as_bytes().to_vec(),
+            field_len: field.len() as u16,
+            field: field.as_bytes().to_vec(),
+            value_len: value.len() as u32,
+            value: value.to_vec(),
+            idempotency_key_len: idempotency_key.len() as u16,
+            idempotency_key: idempotency_key.as_bytes().to_vec(),
+        }
+    }
+
+    #[must_use]
+    pub fn entity_str(&self) -> &str {
+        std::str::from_utf8(&self.entity).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn field_str(&self) -> &str {
+        std::str::from_utf8(&self.field).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn idempotency_key_str(&self) -> &str {
+        std::str::from_utf8(&self.idempotency_key).unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReleaseResponse {
+    pub version: u8,
+    pub request_id: u64,
+    pub success: u8,
+}
+
+impl UniqueReleaseResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, success: bool) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            success: u8::from(success),
+        }
+    }
+
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.success != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1883,5 +2180,94 @@ mod tests {
         assert_eq!(QueryStatus::from_u8(2), Some(QueryStatus::Error));
         assert_eq!(QueryStatus::from_u8(3), Some(QueryStatus::NotPrimary));
         assert_eq!(QueryStatus::from_u8(255), None);
+    }
+
+    #[test]
+    fn unique_reserve_request_roundtrip() {
+        let partition = PartitionId::new(10).unwrap();
+        let req = UniqueReserveRequest::create(
+            12345,
+            "users",
+            "email",
+            b"test@example.com",
+            "user-123",
+            "req-abc",
+            partition,
+            30_000,
+        );
+
+        let bytes = req.to_be_bytes();
+        let (decoded, _) = UniqueReserveRequest::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 12345);
+        assert_eq!(decoded.entity_str(), "users");
+        assert_eq!(decoded.field_str(), "email");
+        assert_eq!(decoded.value, b"test@example.com");
+        assert_eq!(decoded.record_id_str(), "user-123");
+        assert_eq!(decoded.idempotency_key_str(), "req-abc");
+        assert_eq!(decoded.data_partition(), Some(partition));
+        assert_eq!(decoded.ttl_ms, 30_000);
+    }
+
+    #[test]
+    fn unique_reserve_response_roundtrip() {
+        let resp = UniqueReserveResponse::create(12345, UniqueReserveStatus::Reserved);
+
+        let bytes = resp.to_be_bytes();
+        let (decoded, _) = UniqueReserveResponse::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 12345);
+        assert_eq!(decoded.status(), UniqueReserveStatus::Reserved);
+        assert!(decoded.status().is_ok());
+    }
+
+    #[test]
+    fn unique_commit_request_roundtrip() {
+        let req = UniqueCommitRequest::create(999, "users", "email", b"test@example.com", "req-abc");
+
+        let bytes = req.to_be_bytes();
+        let (decoded, _) = UniqueCommitRequest::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 999);
+        assert_eq!(decoded.entity_str(), "users");
+        assert_eq!(decoded.field_str(), "email");
+        assert_eq!(decoded.value, b"test@example.com");
+        assert_eq!(decoded.idempotency_key_str(), "req-abc");
+    }
+
+    #[test]
+    fn unique_commit_response_roundtrip() {
+        let resp = UniqueCommitResponse::create(999, true);
+
+        let bytes = resp.to_be_bytes();
+        let (decoded, _) = UniqueCommitResponse::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 999);
+        assert!(decoded.is_success());
+    }
+
+    #[test]
+    fn unique_release_request_roundtrip() {
+        let req = UniqueReleaseRequest::create(777, "orders", "order_id", b"ORD-001", "req-xyz");
+
+        let bytes = req.to_be_bytes();
+        let (decoded, _) = UniqueReleaseRequest::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 777);
+        assert_eq!(decoded.entity_str(), "orders");
+        assert_eq!(decoded.field_str(), "order_id");
+        assert_eq!(decoded.value, b"ORD-001");
+        assert_eq!(decoded.idempotency_key_str(), "req-xyz");
+    }
+
+    #[test]
+    fn unique_release_response_roundtrip() {
+        let resp = UniqueReleaseResponse::create(777, false);
+
+        let bytes = resp.to_be_bytes();
+        let (decoded, _) = UniqueReleaseResponse::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.request_id, 777);
+        assert!(!decoded.is_success());
     }
 }

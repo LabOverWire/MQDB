@@ -432,8 +432,22 @@ impl DbRequestHandler {
         )
         .unwrap_or(u64::MAX);
 
+        let request_id = uuid::Uuid::new_v4().to_string();
+        if let Err(conflict_field) = controller
+            .check_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
+            .await
+        {
+            return Self::json_error(
+                409,
+                &format!("unique constraint violation on field '{conflict_field}'"),
+            );
+        }
+
         match controller.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
+                controller
+                    .commit_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
+                    .await;
                 let result = json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -443,9 +457,17 @@ impl DbRequestHandler {
                 serde_json::to_vec(&result).unwrap_or_default()
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
+                controller
+                    .release_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
+                    .await;
                 Self::json_error(409, "entity already exists")
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(_) => {
+                controller
+                    .release_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
+                    .await;
+                Self::json_error(500, "internal error")
+            }
         }
     }
 

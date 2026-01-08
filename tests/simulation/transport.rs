@@ -7,7 +7,8 @@ use mqdb::cluster::{
     ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, JsonDbRequest,
     JsonDbResponse, NodeId, PartitionId, QueryRequest, QueryResponse, ReplicationAck,
     ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest, TransportError,
-    WildcardBroadcast,
+    UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest, UniqueReleaseResponse,
+    UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -129,6 +130,24 @@ impl SimulatedTransport {
             }
             ClusterMessage::JsonDbResponse(response) => {
                 buf.extend_from_slice(&response.to_bytes());
+            }
+            ClusterMessage::UniqueReserveRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReserveResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueCommitResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseRequest(req) => {
+                buf.extend_from_slice(&req.to_be_bytes());
+            }
+            ClusterMessage::UniqueReleaseResponse(resp) => {
+                buf.extend_from_slice(&resp.to_be_bytes());
             }
         }
 
@@ -258,6 +277,30 @@ impl SimulatedTransport {
             55 => {
                 let response = JsonDbResponse::from_bytes(payload)?;
                 Some(ClusterMessage::JsonDbResponse(response))
+            }
+            80 => {
+                let (req, _) = UniqueReserveRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReserveRequest(req))
+            }
+            81 => {
+                let (resp, _) = UniqueReserveResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReserveResponse(resp))
+            }
+            82 => {
+                let (req, _) = UniqueCommitRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueCommitRequest(req))
+            }
+            83 => {
+                let (resp, _) = UniqueCommitResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueCommitResponse(resp))
+            }
+            84 => {
+                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReleaseRequest(req))
+            }
+            85 => {
+                let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReleaseResponse(resp))
             }
             _ => None,
         }
