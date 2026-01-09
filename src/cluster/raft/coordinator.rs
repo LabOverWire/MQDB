@@ -23,6 +23,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     processed_draining_nodes: HashSet<NodeId>,
     pending_new_nodes: HashSet<NodeId>,
     was_leader: bool,
+    pending_partition_proposals: usize,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -38,6 +39,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
             was_leader: false,
+            pending_partition_proposals: 0,
         }
     }
 
@@ -62,6 +64,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
             was_leader: false,
+            pending_partition_proposals: 0,
         };
 
         coordinator.rebuild_partition_map();
@@ -124,6 +127,15 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return indices;
         }
 
+        if is_leader && self.pending_partition_proposals == 0 && !self.pending_new_nodes.is_empty()
+        {
+            tracing::info!(
+                pending_nodes = self.pending_new_nodes.len(),
+                "partition proposals complete, processing pending new nodes"
+            );
+            return self.process_pending_new_nodes().await;
+        }
+
         Vec::new()
     }
 
@@ -148,7 +160,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Vec::new();
         }
 
-        tracing::info!(count = pending.len(), "processing pending new nodes for rebalance");
+        tracing::info!(
+            count = pending.len(),
+            "processing pending new nodes for rebalance"
+        );
         self.trigger_rebalance_for_new_node().await
     }
 
@@ -338,6 +353,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 .transport
                 .broadcast(ClusterMessage::PartitionUpdate(update))
                 .await;
+
+            self.pending_partition_proposals = self.pending_partition_proposals.saturating_sub(1);
         }
     }
 
@@ -399,6 +416,15 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
 
         if needs_rebalance {
+            if self.pending_partition_proposals > 0 {
+                tracing::info!(
+                    ?node,
+                    pending = self.pending_partition_proposals,
+                    "new node joined but rebalance in progress, queuing for later"
+                );
+                self.pending_new_nodes.insert(node);
+                return Vec::new();
+            }
             tracing::info!(?node, "new node joined, triggering rebalance");
             return self.trigger_rebalance_for_new_node().await;
         }
@@ -469,6 +495,14 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             if let Ok(idx) = self.propose_partition_update(cmd).await {
                 proposed_indices.push(idx);
             }
+        }
+
+        self.pending_partition_proposals = proposed_indices.len();
+        if self.pending_partition_proposals > 0 {
+            tracing::debug!(
+                count = self.pending_partition_proposals,
+                "tracking pending partition proposals"
+            );
         }
 
         proposed_indices
