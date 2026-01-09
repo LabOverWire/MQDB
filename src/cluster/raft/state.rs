@@ -190,6 +190,10 @@ impl RaftState {
         self.leader_id
     }
 
+    pub fn set_leader(&mut self, leader: Option<NodeId>) {
+        self.leader_id = leader;
+    }
+
     #[must_use]
     pub fn voted_for(&self) -> Option<NodeId> {
         self.voted_for

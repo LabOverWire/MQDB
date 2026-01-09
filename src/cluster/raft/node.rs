@@ -363,6 +363,8 @@ impl RaftNode {
             self.state.become_follower(request.term, leader);
             self.persist_state();
             outputs.push(RaftOutput::BecameFollower { leader });
+        } else if self.state.leader_id() != leader {
+            self.state.set_leader(leader);
         }
 
         self.last_heartbeat_time = now_ms;
