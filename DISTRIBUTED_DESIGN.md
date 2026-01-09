@@ -584,6 +584,7 @@ All cluster-managed data types (`src/cluster/entity.rs`):
 | `DB_INDEX` | `"_db_idx"` | Database indexes |
 | `DB_UNIQUE` | `"_db_unique"` | Database unique constraints |
 | `DB_FK` | `"_db_fk"` | Database foreign keys |
+| `DB_CONSTRAINT` | `"_db_constraint"` | Constraint definitions (BROADCAST) |
 
 **BROADCAST entities** (`TOPIC_INDEX`, `WILDCARDS`, `CLIENT_LOCATIONS`) must exist on ALL nodes for publish routing.
 
@@ -651,6 +652,7 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | Code | Type | Purpose |
 |------|------|---------|
 | 0 | `Heartbeat` | Node liveness and partition claims |
+| 1 | `DetailedHeartbeat` | Reserved (not currently used) |
 | 2 | `DeathNotice` | Node declared dead |
 | 3 | `DrainNotification` | Node draining for shutdown |
 | 10 | `Write` | ReplicationWrite to replicas |
@@ -670,8 +672,16 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | 51 | `QueryResponse` | Query results |
 | 52 | `BatchReadRequest` | Batch read request |
 | 53 | `BatchReadResponse` | Batch read response |
+| 54 | `JsonDbRequest` | JSON database operation request |
+| 55 | `JsonDbResponse` | JSON database operation response |
 | 60 | `WildcardBroadcast` | Wildcard subscription broadcast |
 | 70 | `PartitionUpdate` | Partition assignment change |
+| 80 | `UniqueReserveRequest` | Reserve unique constraint value |
+| 81 | `UniqueReserveResponse` | Unique reservation response |
+| 82 | `UniqueCommitRequest` | Commit reserved unique value |
+| 83 | `UniqueCommitResponse` | Unique commit response |
+| 84 | `UniqueReleaseRequest` | Release reserved unique value |
+| 85 | `UniqueReleaseResponse` | Unique release response |
 
 ### 2.3 Heartbeat Message (27 bytes)
 
@@ -851,8 +861,10 @@ struct Heartbeat {
 ### 3.2 Heartbeat Interval
 
 - Send interval: 1000ms (1 second)
-- Timeout threshold: 500ms (node marked suspected)
-- Death threshold: 1000ms (node marked dead)
+- Suspect threshold: 7500ms (timeout / 2, node marked suspected)
+- Death threshold: 15000ms (node marked dead)
+
+**Note**: Suspect threshold is computed dynamically as `heartbeat_timeout_ms / 2`.
 
 ### 3.3 Heartbeat Purposes
 
@@ -1239,6 +1251,16 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Fix Applied**: Added `timestamp_ms` field to ForwardedPublish (VERSION 2) for proper deduplication.
 
+### 11.10 Auto-Rebalance Race Condition
+
+**Status**: FIXED
+
+**Symptom**: When Node 3 joined a cluster, it sometimes received zero partitions even though auto-rebalancing should assign ~21 partitions (64/3).
+
+**Root Cause**: Race condition in `handle_node_alive()`. When a new node joined, `trigger_rebalance()` was called which proposed multiple `AssignPartition` commands via Raft. However, `compute_balanced_assignments()` was called based on pre-rebalance state, and if multiple nodes joined quickly, the partition counts became inconsistent.
+
+**Fix Applied**: Added `pending_partition_proposals` counter in `RaftCoordinator` to track in-flight partition assignments. `trigger_rebalance()` now waits for pending proposals to be applied before computing new assignments.
+
 ---
 
 ## Part 12: Session Management
@@ -1376,13 +1398,19 @@ pub fn get_subscribers(&self, topic: &str) -> Vec<SubscriberLocation> {
 
 ```rust
 for target in route.targets {
-    let session = ctrl.stores().sessions.get(&target.client_id);
-    let connected_node = session
-        .as_ref()
-        .filter(|s| s.connected == 1)
-        .and_then(|s| NodeId::validated(s.connected_node));
-
-    let is_local = connected_node == Some(node_id);
+    // ClientLocationStore is checked FIRST (preferred source)
+    // Falls back to session if not found
+    let connected_node = ctrl
+        .stores()
+        .client_locations
+        .get(&target.client_id)
+        .or_else(|| {
+            ctrl.stores()
+                .sessions
+                .get(&target.client_id)
+                .filter(|s| s.connected == 1)
+                .and_then(|s| NodeId::validated(s.connected_node))
+        });
 
     if let Some(target_node) = connected_node
         && target_node != node_id
@@ -1393,6 +1421,8 @@ for target in route.targets {
     }
 }
 ```
+
+**Note**: `ClientLocationStore` is the primary lookup source for client→node mapping. Session `connected_node` is the fallback.
 
 ### 13.4 ForwardedPublish Sending
 
@@ -1430,7 +1460,7 @@ fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
 }
 ```
 
-**Deduplication fingerprint** = hash of (origin_node, topic, payload)
+**Deduplication fingerprint** = hash of (origin_node, timestamp_ms, topic, payload)
 
 ### 13.6 Final Delivery
 
