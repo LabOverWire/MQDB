@@ -294,7 +294,6 @@ Deliver LWT messages when client disconnects unexpectedly.
 - `mqtt_lwt_death_detection` - end-to-end LWT delivery via MQTT protocol
 
 ### Known Limitations
-- LWT delay timer (will_delay_interval) not implemented
 - LWT cleanup on clean disconnect not tested
 
 ---
