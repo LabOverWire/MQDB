@@ -1,5 +1,5 @@
-use crate::cluster::protocol::Operation;
 use crate::cluster::NodeId;
+use crate::cluster::protocol::Operation;
 use bebytes::BeBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -128,7 +128,11 @@ impl ConstraintStore {
     ///
     /// # Errors
     /// Returns `NotFound` if the constraint does not exist.
-    pub fn remove(&self, entity: &str, name: &str) -> Result<ClusterConstraint, ConstraintStoreError> {
+    pub fn remove(
+        &self,
+        entity: &str,
+        name: &str,
+    ) -> Result<ClusterConstraint, ConstraintStoreError> {
         let key = Self::constraint_key(entity, name);
         self.constraints
             .write()
@@ -312,10 +316,18 @@ mod tests {
             .add(ClusterConstraint::unique("users", "unique_email", "email"))
             .unwrap();
         store
-            .add(ClusterConstraint::unique("users", "unique_username", "username"))
+            .add(ClusterConstraint::unique(
+                "users",
+                "unique_username",
+                "username",
+            ))
             .unwrap();
         store
-            .add(ClusterConstraint::unique("orders", "unique_order_id", "order_id"))
+            .add(ClusterConstraint::unique(
+                "orders",
+                "unique_order_id",
+                "order_id",
+            ))
             .unwrap();
 
         let user_constraints = store.list("users");
@@ -333,7 +345,11 @@ mod tests {
             .add(ClusterConstraint::unique("users", "unique_email", "email"))
             .unwrap();
         store
-            .add(ClusterConstraint::unique("users", "unique_username", "username"))
+            .add(ClusterConstraint::unique(
+                "users",
+                "unique_username",
+                "username",
+            ))
             .unwrap();
 
         let fields = store.get_unique_fields("users");

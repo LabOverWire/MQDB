@@ -3584,7 +3584,9 @@ async fn session_expiry_cleans_subscriptions() {
 
 #[tokio::test]
 async fn transport_requeue_preserves_message_order() {
-    use mqdb::cluster::{ClusterMessage, InboundMessage, UniqueReserveResponse, UniqueReserveStatus};
+    use mqdb::cluster::{
+        ClusterMessage, InboundMessage, UniqueReserveResponse, UniqueReserveStatus,
+    };
 
     let cluster = TestCluster::new(2);
     cluster.runtime.network().set_base_latency_ms(0);
@@ -3612,7 +3614,10 @@ async fn transport_requeue_preserves_message_order() {
     assert!(first.is_some(), "First message should be receivable");
     let first_msg = first.unwrap();
     if let ClusterMessage::UniqueReserveResponse(ref resp) = first_msg.message {
-        assert_eq!(resp.request_id, 1, "Requeue should use LIFO order (push_front)");
+        assert_eq!(
+            resp.request_id, 1,
+            "Requeue should use LIFO order (push_front)"
+        );
     } else {
         panic!("Expected UniqueReserveResponse");
     }
@@ -3621,7 +3626,10 @@ async fn transport_requeue_preserves_message_order() {
     assert!(second.is_some(), "Second message should be receivable");
     let second_msg = second.unwrap();
     if let ClusterMessage::UniqueReserveResponse(ref resp) = second_msg.message {
-        assert_eq!(resp.request_id, 2, "Second message should have request_id 2");
+        assert_eq!(
+            resp.request_id, 2,
+            "Second message should have request_id 2"
+        );
     } else {
         panic!("Expected UniqueReserveResponse");
     }
@@ -3630,9 +3638,15 @@ async fn transport_requeue_preserves_message_order() {
     cluster.nodes[1].controller.transport().requeue(first_msg);
 
     let re_first = cluster.nodes[1].controller.transport().recv();
-    assert!(re_first.is_some(), "Re-requeued messages should be receivable");
+    assert!(
+        re_first.is_some(),
+        "Re-requeued messages should be receivable"
+    );
     if let ClusterMessage::UniqueReserveResponse(ref resp) = re_first.unwrap().message {
-        assert_eq!(resp.request_id, 1, "After re-requeue, first should be request_id 1 again");
+        assert_eq!(
+            resp.request_id, 1,
+            "After re-requeue, first should be request_id 1 again"
+        );
     }
 }
 
@@ -3688,7 +3702,10 @@ async fn unique_constraint_cross_node_message_flow() {
 
     cluster.advance_ms(1);
     let response = cluster.nodes[1].controller.transport().recv();
-    assert!(response.is_some(), "Node 1 should have sent response to Node 2");
+    assert!(
+        response.is_some(),
+        "Node 1 should have sent response to Node 2"
+    );
 
     if let Some(msg) = response {
         assert_eq!(msg.from, node1_id, "Response should be from node 1");

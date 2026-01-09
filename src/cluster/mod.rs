@@ -79,9 +79,10 @@ pub use partition_storage::PartitionStorage;
 pub use protocol::{
     AckStatus, BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardTarget,
     ForwardedPublish, Heartbeat, JsonDbOp, JsonDbRequest, JsonDbResponse, MessageType, Operation,
-    QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite, UniqueCommitRequest,
-    UniqueCommitResponse, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueReserveStatus, WildcardBroadcast, WildcardOp,
+    QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
+    UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest, UniqueReleaseResponse,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus, WildcardBroadcast,
+    WildcardOp,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};
 pub use qos2_store::{

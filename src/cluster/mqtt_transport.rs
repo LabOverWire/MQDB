@@ -116,9 +116,12 @@ impl MqttTransport {
             let forward_client_id = format!("mqdb-forward-{}", self.node_id.get());
             let forward_options =
                 mqtt5::types::ConnectOptions::new(&forward_client_id).with_credentials(user, pass);
-            Box::pin(self.forward_client.connect_with_options(broker_addr, forward_options))
-                .await
-                .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+            Box::pin(
+                self.forward_client
+                    .connect_with_options(broker_addr, forward_options),
+            )
+            .await
+            .map_err(|e| TransportError::SendFailed(e.to_string()))?;
         } else {
             self.client
                 .connect(broker_addr)

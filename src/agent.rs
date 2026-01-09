@@ -332,17 +332,31 @@ impl MqdbAgent {
                     let svc_pass = uuid::Uuid::new_v4().to_string();
                     let auth_provider = PasswordAuthProvider::from_file(path).await?;
                     auth_provider.add_user(svc_user.clone(), &svc_pass).await?;
-                    (Some(svc_user), Some(svc_pass), Some(Arc::new(auth_provider)))
+                    (
+                        Some(svc_user),
+                        Some(svc_pass),
+                        Some(Arc::new(auth_provider)),
+                    )
                 } else {
                     config.auth_config.password_file = Some(path.clone());
-                    (self.service_username.clone(), self.service_password.clone(), None)
+                    (
+                        self.service_username.clone(),
+                        self.service_password.clone(),
+                        None,
+                    )
                 }
             } else {
-                (self.service_username.clone(), self.service_password.clone(), None)
+                (
+                    self.service_username.clone(),
+                    self.service_password.clone(),
+                    None,
+                )
             };
 
         let mut broker = if let Some(provider) = custom_auth_provider {
-            MqttBroker::with_config(config).await?.with_auth_provider(provider)
+            MqttBroker::with_config(config)
+                .await?
+                .with_auth_provider(provider)
         } else {
             MqttBroker::with_config(config).await?
         };

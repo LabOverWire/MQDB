@@ -858,10 +858,23 @@ async fn rebalancer_distributes_partitions_fairly() {
     let n2_count = map.primary_count(nodes[1]);
     let n3_count = map.primary_count(nodes[2]);
 
-    assert!((21..=22).contains(&n1_count), "node1 should have ~21-22 primaries");
-    assert!((21..=22).contains(&n2_count), "node2 should have ~21-22 primaries");
-    assert!((21..=22).contains(&n3_count), "node3 should have ~21-22 primaries");
-    assert_eq!(n1_count + n2_count + n3_count, 64, "total should be 64 partitions");
+    assert!(
+        (21..=22).contains(&n1_count),
+        "node1 should have ~21-22 primaries"
+    );
+    assert!(
+        (21..=22).contains(&n2_count),
+        "node2 should have ~21-22 primaries"
+    );
+    assert!(
+        (21..=22).contains(&n3_count),
+        "node3 should have ~21-22 primaries"
+    );
+    assert_eq!(
+        n1_count + n2_count + n3_count,
+        64,
+        "total should be 64 partitions"
+    );
 
     for partition in PartitionId::all() {
         assert!(

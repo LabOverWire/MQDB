@@ -320,7 +320,11 @@ impl ClusteredAgent {
                     .await
                     .map_err(|e| format!("failed to add service user: {e}"))?;
                 broker_config.auth_config.allow_anonymous = false;
-                (Some(svc_user), Some(svc_pass), Some(Arc::new(auth_provider)))
+                (
+                    Some(svc_user),
+                    Some(svc_pass),
+                    Some(Arc::new(auth_provider)),
+                )
             } else {
                 (None, None, None)
             };
@@ -918,8 +922,7 @@ impl ClusteredAgent {
 
         match constraint_type {
             "unique" => {
-                let constraint =
-                    crate::cluster::db::ClusterConstraint::unique(entity, name, field);
+                let constraint = crate::cluster::db::ClusterConstraint::unique(entity, name, field);
                 let mut ctrl = self.controller.write().await;
                 match ctrl.constraint_add(&constraint).await {
                     Ok(()) => Response::ok(json!({"message": "constraint added"})),
@@ -981,7 +984,10 @@ impl ClusteredAgent {
             .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
             .unwrap_or_else(|| "backup".to_string());
 
-        if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
             return Response::error(
                 ErrorCode::BadRequest,
                 "invalid backup name: must be alphanumeric, underscore, or hyphen only",

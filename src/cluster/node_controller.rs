@@ -1348,15 +1348,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
 
                 match result {
-                    Ok(
-                        UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved,
-                    ) => {
+                    Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved) => {
                         remote_reserved.push((field.clone(), value, target_node));
                         false
                     }
-                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => {
-                        true
-                    }
+                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => true,
                 }
             } else {
                 true
@@ -1364,8 +1360,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
             if is_conflict {
                 for (f, v) in &local_reserved {
-                    if let Some(w) =
-                        self.stores.unique_release_replicated(entity, f, v, request_id)
+                    if let Some(w) = self
+                        .stores
+                        .unique_release_replicated(entity, f, v, request_id)
                     {
                         self.write_or_forward(w).await;
                     }
@@ -1402,9 +1399,9 @@ impl<T: ClusterTransport> NodeController<T> {
             let primary = self.partition_map.primary(unique_part);
 
             if primary == Some(self.node_id) {
-                if let Ok((_, w)) =
-                    self.stores
-                        .unique_commit_replicated(entity, field, &value, request_id)
+                if let Ok((_, w)) = self
+                    .stores
+                    .unique_commit_replicated(entity, field, &value, request_id)
                 {
                     self.write_or_forward(w).await;
                 }
@@ -1437,8 +1434,9 @@ impl<T: ClusterTransport> NodeController<T> {
             let primary = self.partition_map.primary(unique_part);
 
             if primary == Some(self.node_id) {
-                if let Some(w) =
-                    self.stores.unique_release_replicated(entity, field, &value, request_id)
+                if let Some(w) = self
+                    .stores
+                    .unique_release_replicated(entity, field, &value, request_id)
                 {
                     self.write_or_forward(w).await;
                 }
@@ -2184,15 +2182,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
 
                 match result {
-                    Ok(
-                        UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved,
-                    ) => {
+                    Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved) => {
                         remote_reserved.push((field.clone(), value, target_node));
                         false
                     }
-                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => {
-                        true
-                    }
+                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => true,
                 }
             } else {
                 true
@@ -2201,7 +2195,8 @@ impl<T: ClusterTransport> NodeController<T> {
             if is_conflict {
                 for (f, v) in &local_reserved {
                     if let Some(w) =
-                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                        self.stores
+                            .unique_release_replicated(entity, f, v, &request_id)
                     {
                         self.write_or_forward(w).await;
                     }
@@ -2247,7 +2242,8 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(super::db::DbDataStoreError::AlreadyExists) => {
                 for (f, v) in &local_reserved {
                     if let Some(w) =
-                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                        self.stores
+                            .unique_release_replicated(entity, f, v, &request_id)
                     {
                         self.write_or_forward(w).await;
                     }
@@ -2262,7 +2258,8 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(_) => {
                 for (f, v) in &local_reserved {
                     if let Some(w) =
-                        self.stores.unique_release_replicated(entity, f, v, &request_id)
+                        self.stores
+                            .unique_release_replicated(entity, f, v, &request_id)
                     {
                         self.write_or_forward(w).await;
                     }
@@ -2871,7 +2868,10 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn handle_unique_release_response(&mut self, resp: &UniqueReleaseResponse) {
-        if let Some(tx) = self.pending_unique_release_requests.remove(&resp.request_id) {
+        if let Some(tx) = self
+            .pending_unique_release_requests
+            .remove(&resp.request_id)
+        {
             let _ = tx.send(resp.is_success());
         }
     }
@@ -2914,8 +2914,8 @@ impl<T: ClusterTransport> NodeController<T> {
             .send(target_node, ClusterMessage::UniqueReserveRequest(request))
             .await?;
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
 
         loop {
             match rx.try_recv() {
@@ -2963,14 +2963,15 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.pending_unique_commit_requests.insert(request_id, tx);
 
-        let request = UniqueCommitRequest::create(request_id, entity, field, value, idempotency_key);
+        let request =
+            UniqueCommitRequest::create(request_id, entity, field, value, idempotency_key);
 
         self.transport
             .send(target_node, ClusterMessage::UniqueCommitRequest(request))
             .await?;
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
 
         loop {
             match rx.try_recv() {
@@ -3018,14 +3019,15 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.pending_unique_release_requests.insert(request_id, tx);
 
-        let request = UniqueReleaseRequest::create(request_id, entity, field, value, idempotency_key);
+        let request =
+            UniqueReleaseRequest::create(request_id, entity, field, value, idempotency_key);
 
         self.transport
             .send(target_node, ClusterMessage::UniqueReleaseRequest(request))
             .await?;
 
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(UNIQUE_REQUEST_TIMEOUT_SECS);
 
         loop {
             match rx.try_recv() {
@@ -3753,16 +3755,10 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
 
-        ctrl.heartbeat.receive_heartbeat(
-            node2,
-            &super::super::Heartbeat::create(node2, 0),
-            0,
-        );
-        ctrl.heartbeat.receive_heartbeat(
-            node3,
-            &super::super::Heartbeat::create(node3, 0),
-            0,
-        );
+        ctrl.heartbeat
+            .receive_heartbeat(node2, &super::super::Heartbeat::create(node2, 0), 0);
+        ctrl.heartbeat
+            .receive_heartbeat(node3, &super::super::Heartbeat::create(node3, 0), 0);
 
         let schema = ctrl
             .schema_register("users", b"{\"fields\":[]}")

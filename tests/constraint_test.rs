@@ -496,7 +496,9 @@ async fn test_constraint_persistence_unique() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_unique_constraint("users".into(), vec!["email".into()])
             .await
             .unwrap();
@@ -505,7 +507,9 @@ async fn test_constraint_persistence_unique() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"name": "Bob", "email": "alice@example.com"});
     let result = db.create("users".into(), user).await;
@@ -521,13 +525,17 @@ async fn test_constraint_persistence_not_null() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_not_null("users".into(), "email".into())
             .await
             .unwrap();
     }
 
-    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"name": "Alice"});
     let result = db.create("users".into(), user).await;
@@ -543,7 +551,9 @@ async fn test_constraint_persistence_foreign_key() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_foreign_key(
             "posts".into(),
             "author_id".into(),
@@ -555,7 +565,9 @@ async fn test_constraint_persistence_foreign_key() {
         .unwrap();
     }
 
-    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let post = json!({"title": "Hello", "author_id": "nonexistent"});
     let result = db.create("posts".into(), post).await;
@@ -571,13 +583,17 @@ async fn test_schema_persistence() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         let schema = Schema::new("users")
             .add_field(FieldDefinition::new("name", FieldType::String).required());
         db.add_schema(schema).await.unwrap();
     }
 
-    let db = Database::open_without_background_tasks(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"age": 30});
     let result = db.create("users".into(), user).await;

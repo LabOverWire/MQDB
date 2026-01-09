@@ -632,7 +632,10 @@ impl StoreManager {
         constraint: &ClusterConstraint,
     ) -> Result<ReplicationWrite, super::db::ConstraintStoreError> {
         let key = super::db::constraint_key(constraint.entity_str(), constraint.name_str());
-        if self.db_constraints.exists(constraint.entity_str(), constraint.name_str()) {
+        if self
+            .db_constraints
+            .exists(constraint.entity_str(), constraint.name_str())
+        {
             return Err(super::db::ConstraintStoreError::AlreadyExists);
         }
         let serialized = ConstraintStore::serialize(constraint);
@@ -888,15 +891,31 @@ impl StoreManager {
         ttl_ms: u64,
         now: u64,
     ) -> ReserveResult {
-        self.db_unique
-            .reserve(entity, field, value, record_id, request_id, data_partition, ttl_ms, now)
+        self.db_unique.reserve(
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            ttl_ms,
+            now,
+        )
     }
 
     pub fn unique_commit(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {
-        self.db_unique.commit(entity, field, value, request_id).is_ok()
+        self.db_unique
+            .commit(entity, field, value, request_id)
+            .is_ok()
     }
 
-    pub fn unique_release(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {
+    pub fn unique_release(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        request_id: &str,
+    ) -> bool {
         self.db_unique.release(entity, field, value, request_id)
     }
 

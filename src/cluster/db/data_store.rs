@@ -417,7 +417,9 @@ impl DbDataStore {
             .iter()
             .filter_map(|(key, entity)| {
                 let data: serde_json::Value = serde_json::from_slice(&entity.data).ok()?;
-                let expires_at = data.get("_expires_at").and_then(serde_json::Value::as_u64)?;
+                let expires_at = data
+                    .get("_expires_at")
+                    .and_then(serde_json::Value::as_u64)?;
                 if expires_at <= now_secs {
                     Some((
                         key.clone(),

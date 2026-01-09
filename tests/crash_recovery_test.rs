@@ -9,7 +9,9 @@ async fn test_recovery_after_immediate_close_during_writes() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..100 {
             let user = json!({
@@ -20,7 +22,9 @@ async fn test_recovery_after_immediate_close_during_writes() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -52,7 +56,9 @@ async fn test_recovery_with_periodic_durability() {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let products = db
         .list("products".into(), vec![], vec![], None, vec![], None)
         .await
@@ -67,7 +73,9 @@ async fn test_recovery_after_many_operations() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..50 {
             let user = json!({
@@ -97,7 +105,9 @@ async fn test_recovery_after_many_operations() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -118,7 +128,9 @@ async fn test_recovery_with_indexes() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
         db.add_index("users".into(), vec!["email".into()]).await;
 
         for i in 0..30 {
@@ -130,7 +142,9 @@ async fn test_recovery_with_indexes() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     db.add_index("users".into(), vec!["email".into()]).await;
 
     let filter = Filter::new("email".into(), FilterOp::Eq, json!("user15@example.com"));
@@ -149,7 +163,11 @@ async fn test_recovery_after_concurrent_writes() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Arc::new(Database::open_without_background_tasks(&db_path).await.unwrap());
+        let db = Arc::new(
+            Database::open_without_background_tasks(&db_path)
+                .await
+                .unwrap(),
+        );
 
         let mut handles = vec![];
         for thread_id in 0..5 {
@@ -172,7 +190,9 @@ async fn test_recovery_after_concurrent_writes() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let items = db
         .list("items".into(), vec![], vec![], None, vec![], None)
         .await
@@ -187,7 +207,9 @@ async fn test_recovery_maintains_data_integrity() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..20 {
             let record = json!({
@@ -199,7 +221,9 @@ async fn test_recovery_maintains_data_integrity() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let records = db
         .list("records".into(), vec![], vec![], None, vec![], None)
         .await
@@ -220,7 +244,9 @@ async fn test_recovery_with_ttl_entries() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..15 {
             let item = json!({
@@ -231,7 +257,9 @@ async fn test_recovery_with_ttl_entries() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let items = db
         .list("items".into(), vec![], vec![], None, vec![], None)
         .await
@@ -246,10 +274,14 @@ async fn test_recovery_empty_database() {
     let db_path = tmp.path().join("db");
 
     {
-        let _db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let _db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -266,7 +298,9 @@ async fn test_recovery_after_delete_operations() {
     let ids_to_delete: Vec<String>;
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..50 {
             let user = json!({
@@ -298,7 +332,9 @@ async fn test_recovery_after_delete_operations() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -318,7 +354,9 @@ async fn test_recovery_with_mixed_entity_types() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..10 {
             db.create("users".into(), json!({"name": format!("User {}", i)}))
@@ -333,7 +371,9 @@ async fn test_recovery_with_mixed_entity_types() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
 
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
@@ -359,7 +399,9 @@ async fn test_recovery_after_update_operations() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..10 {
             let user = json!({
@@ -387,7 +429,9 @@ async fn test_recovery_after_update_operations() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -407,7 +451,9 @@ async fn test_multiple_reopen_cycles() {
     let db_path = tmp.path().join("db");
 
     for cycle in 0..5 {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..5 {
             let item = json!({
@@ -418,7 +464,9 @@ async fn test_multiple_reopen_cycles() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let items = db
         .list("items".into(), vec![], vec![], None, vec![], None)
         .await
@@ -433,7 +481,9 @@ async fn test_recovery_preserves_checksums() {
     let db_path = tmp.path().join("db");
 
     {
-        let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+        let db = Database::open_without_background_tasks(&db_path)
+            .await
+            .unwrap();
 
         for i in 0..20 {
             let record = json!({
@@ -443,7 +493,9 @@ async fn test_recovery_preserves_checksums() {
         }
     }
 
-    let db = Database::open_without_background_tasks(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
     let records = db
         .list("records".into(), vec![], vec![], None, vec![], None)
         .await

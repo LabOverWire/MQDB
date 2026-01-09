@@ -744,7 +744,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 all,
                 nodes,
             } => {
-                cmd_dev_test(pubsub, db, constraints, wildcards, retained, lwt, all, nodes);
+                cmd_dev_test(
+                    pubsub,
+                    db,
+                    constraints,
+                    wildcards,
+                    retained,
+                    lwt,
+                    all,
+                    nodes,
+                );
             }
             DevAction::StartCluster {
                 nodes,
@@ -1252,8 +1261,7 @@ async fn cmd_constraint_add(
         if parts.len() < 3 {
             return Err("FK format: field:target_entity:target_field[:action]".into());
         }
-        let constraint_name =
-            name.unwrap_or_else(|| format!("fk_{entity}_{}", parts[0]));
+        let constraint_name = name.unwrap_or_else(|| format!("fk_{entity}_{}", parts[0]));
         json!({
             "type": "foreign_key",
             "name": constraint_name,
@@ -2476,10 +2484,16 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         .unwrap_or(false);
 
     if received {
-        println!("  Retained from Node 1, received on Node {}: ✓", ports.len());
+        println!(
+            "  Retained from Node 1, received on Node {}: ✓",
+            ports.len()
+        );
         passed += 1;
     } else {
-        println!("  Retained from Node 1, received on Node {}: ✗", ports.len());
+        println!(
+            "  Retained from Node 1, received on Node {}: ✗",
+            ports.len()
+        );
         failed += 1;
     }
 

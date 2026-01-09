@@ -1703,7 +1703,13 @@ impl UniqueCommitRequest {
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn create(request_id: u64, entity: &str, field: &str, value: &[u8], idempotency_key: &str) -> Self {
+    pub fn create(
+        request_id: u64,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        idempotency_key: &str,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             request_id,
@@ -1782,7 +1788,13 @@ impl UniqueReleaseRequest {
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn create(request_id: u64, entity: &str, field: &str, value: &[u8], idempotency_key: &str) -> Self {
+    pub fn create(
+        request_id: u64,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        idempotency_key: &str,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             request_id,
@@ -2223,7 +2235,8 @@ mod tests {
 
     #[test]
     fn unique_commit_request_roundtrip() {
-        let req = UniqueCommitRequest::create(999, "users", "email", b"test@example.com", "req-abc");
+        let req =
+            UniqueCommitRequest::create(999, "users", "email", b"test@example.com", "req-abc");
 
         let bytes = req.to_be_bytes();
         let (decoded, _) = UniqueCommitRequest::try_from_be_bytes(&bytes).unwrap();
