@@ -509,8 +509,29 @@ impl Database {
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
+        let mut early_pagination_applied = false;
 
-        if filters.is_empty() {
+        if filters.is_empty() && sort.is_empty() {
+            let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
+            let offset = pagination.as_ref().map_or(0, |p| p.offset);
+            let prefix = format!("data/{entity_name}/");
+            let items = self.storage.prefix_scan(prefix.as_bytes())?;
+
+            let mut skipped = 0;
+            for (key, value) in items {
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if results.len() >= limit {
+                    break;
+                }
+                let (_, id) = keys::decode_data_key(&key)?;
+                let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
+                results.push(entity.to_json());
+            }
+            early_pagination_applied = true;
+        } else if filters.is_empty() {
             let prefix = format!("data/{entity_name}/");
             let items = self.storage.prefix_scan(prefix.as_bytes())?;
 
@@ -578,30 +599,34 @@ impl Database {
             Self::sort_results(&mut results, &sort);
         }
 
-        let offset = pagination.as_ref().map_or(0, |p| p.offset);
-        let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
+        let mut paginated_results = if early_pagination_applied {
+            results
+        } else {
+            let offset = pagination.as_ref().map_or(0, |p| p.offset);
+            let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
 
-        let requested_end = offset.saturating_add(limit).min(results.len());
+            let requested_end = offset.saturating_add(limit).min(results.len());
 
-        let final_end = if let Some(max) = self.config.max_list_results {
-            if requested_end > max {
-                tracing::warn!(
-                    "list operation would exceed max_list_results limit of {}, truncating",
-                    max
-                );
-                max.min(results.len())
+            let final_end = if let Some(max) = self.config.max_list_results {
+                if requested_end > max {
+                    tracing::warn!(
+                        "list operation would exceed max_list_results limit of {}, truncating",
+                        max
+                    );
+                    max.min(results.len())
+                } else {
+                    requested_end
+                }
             } else {
                 requested_end
+            };
+
+            if offset >= results.len() {
+                return Ok(vec![]);
             }
-        } else {
-            requested_end
+
+            results[offset..final_end].to_vec()
         };
-
-        if offset >= results.len() {
-            return Ok(vec![]);
-        }
-
-        let mut paginated_results = results[offset..final_end].to_vec();
 
         if !includes.is_empty() {
             for entity in &mut paginated_results {
