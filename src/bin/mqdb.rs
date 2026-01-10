@@ -361,7 +361,11 @@ enum BenchAction {
         publishers: usize,
         #[arg(long, default_value = "1", help = "Number of subscriber tasks")]
         subscribers: usize,
-        #[arg(long, default_value = "10", help = "Duration in seconds to run at max speed")]
+        #[arg(
+            long,
+            default_value = "10",
+            help = "Duration in seconds to run at max speed"
+        )]
         duration: u64,
         #[arg(long, default_value = "64", help = "Payload size in bytes")]
         size: usize,
@@ -2837,8 +2841,6 @@ struct BenchPubsubArgs {
 struct BenchMetrics {
     messages_sent: std::sync::atomic::AtomicU64,
     messages_received: std::sync::atomic::AtomicU64,
-    bytes_sent: std::sync::atomic::AtomicU64,
-    bytes_received: std::sync::atomic::AtomicU64,
     latencies_ns: std::sync::Mutex<Vec<u64>>,
     errors: std::sync::atomic::AtomicU64,
 }
@@ -2882,7 +2884,6 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
 
     let metrics = Arc::new(BenchMetrics::default());
     let running = Arc::new(AtomicBool::new(true));
-    let measuring = Arc::new(AtomicBool::new(false));
 
     println!(
         "Benchmark: {} publishers, {} subscribers, {}s duration ({}s warmup), {} byte payload, QoS {}",
@@ -2897,50 +2898,31 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         let topic = args.topic.clone();
         let metrics = Arc::clone(&metrics);
         let running = Arc::clone(&running);
-        let measuring = Arc::clone(&measuring);
 
         let handle = tokio::spawn(async move {
             let client_id = format!("bench-sub-{sub_id}");
             let client = MqttClient::new(&client_id);
 
-            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts =
-                    ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
-                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
-                    eprintln!("Subscriber {sub_id} connect failed: {e}");
-                    return;
-                }
-            } else if let Err(e) = client.connect(&conn.broker).await {
+            let opts = ConnectOptions::new(&client_id)
+                .with_clean_start(true)
+                .with_keep_alive(Duration::from_secs(30));
+            let opts = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+                opts.with_credentials(user.clone(), pass.clone())
+            } else {
+                opts
+            };
+
+            if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                 eprintln!("Subscriber {sub_id} connect failed: {e}");
                 return;
             }
 
             let metrics_clone = Arc::clone(&metrics);
-            let measuring_clone = Arc::clone(&measuring);
             if let Err(e) = client
-                .subscribe(&topic, move |msg| {
-                    if !measuring_clone.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let payload = &msg.payload;
-                    if payload.len() >= 8
-                        && let Ok(bytes) = payload[0..8].try_into()
-                    {
-                        let sent_ns = u64::from_be_bytes(bytes);
-                        let recv_time = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos() as u64;
-                        if recv_time > sent_ns {
-                            metrics_clone.record_latency(recv_time - sent_ns);
-                        }
-                    }
+                .subscribe(&topic, move |_| {
                     metrics_clone
                         .messages_received
                         .fetch_add(1, Ordering::Relaxed);
-                    metrics_clone
-                        .bytes_received
-                        .fetch_add(payload.len() as u64, Ordering::Relaxed);
                 })
                 .await
             {
@@ -2959,7 +2941,7 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let payload_template: Vec<u8> = vec![0u8; args.size];
+    let payload: Arc<[u8]> = vec![0u8; args.size].into();
     let warmup_duration = Duration::from_secs(args.warmup);
     let measure_duration = Duration::from_secs(args.duration);
 
@@ -2968,41 +2950,29 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         let topic = args.topic.clone();
         let metrics = Arc::clone(&metrics);
         let running = Arc::clone(&running);
-        let measuring = Arc::clone(&measuring);
-        let payload_template = payload_template.clone();
+        let payload = Arc::clone(&payload);
 
         let handle = tokio::spawn(async move {
             let client_id = format!("bench-pub-{pub_id}");
             let client = MqttClient::new(&client_id);
 
-            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts =
-                    ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
-                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
-                    eprintln!("Publisher {pub_id} connect failed: {e}");
-                    return;
-                }
-            } else if let Err(e) = client.connect(&conn.broker).await {
+            let opts = ConnectOptions::new(&client_id)
+                .with_clean_start(true)
+                .with_keep_alive(Duration::from_secs(30));
+            let opts = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+                opts.with_credentials(user.clone(), pass.clone())
+            } else {
+                opts
+            };
+
+            if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                 eprintln!("Publisher {pub_id} connect failed: {e}");
                 return;
             }
 
             while running.load(Ordering::Relaxed) {
-                let mut payload = payload_template.clone();
-                let now_ns = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
-                payload[0..8].copy_from_slice(&now_ns.to_be_bytes());
-
-                if let Err(e) = client.publish(&topic, payload.clone()).await {
-                    eprintln!("Publish error: {e}");
-                    metrics.errors.fetch_add(1, Ordering::Relaxed);
-                } else if measuring.load(Ordering::Relaxed) {
+                if client.publish(&topic, payload.to_vec()).await.is_ok() {
                     metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
-                    metrics
-                        .bytes_sent
-                        .fetch_add(payload.len() as u64, Ordering::Relaxed);
                 }
             }
 
@@ -3016,14 +2986,15 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         tokio::time::sleep(warmup_duration).await;
     }
 
+    metrics.messages_sent.store(0, Ordering::SeqCst);
+    metrics.messages_received.store(0, Ordering::SeqCst);
+
     println!("Measuring for {}s...", args.duration);
-    measuring.store(true, Ordering::Release);
     let start_time = Instant::now();
 
     tokio::time::sleep(measure_duration).await;
 
     let elapsed = start_time.elapsed();
-    measuring.store(false, Ordering::Release);
     running.store(false, Ordering::Release);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3039,15 +3010,15 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
 
     let sent = metrics.messages_sent.load(Ordering::Relaxed);
     let received = metrics.messages_received.load(Ordering::Relaxed);
-    let bytes_sent = metrics.bytes_sent.load(Ordering::Relaxed);
     let errors = metrics.errors.load(Ordering::Relaxed);
 
     let p50 = metrics.calculate_percentile(50.0);
     let p95 = metrics.calculate_percentile(95.0);
     let p99 = metrics.calculate_percentile(99.0);
 
-    let throughput = sent as f64 / elapsed_secs;
-    let bandwidth_mbps = (bytes_sent as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
+    let throughput = received as f64 / elapsed_secs;
+    let bytes_received = received * args.size as u64;
+    let bandwidth_mbps = (bytes_received as f64 * 8.0) / (elapsed_secs * 1_000_000.0);
 
     if let OutputFormat::Json = args.format {
         let result = json!({
