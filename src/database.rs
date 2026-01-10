@@ -497,6 +497,58 @@ impl Database {
         Ok(())
     }
 
+    fn scan_all_entities(&self, entity_name: &str) -> Result<Vec<Value>> {
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+        let mut results = Vec::new();
+        for (key, value) in items {
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            results.push(entity.to_json());
+        }
+        Ok(results)
+    }
+
+    fn scan_filtered_entities(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+        let mut results = Vec::new();
+        for (key, value) in items {
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            let entity_data = entity.to_json();
+            if Self::matches_filters(&entity_data, filters) {
+                results.push(entity_data);
+            }
+        }
+        Ok(results)
+    }
+
+    fn apply_pagination(&self, results: &[Value], pagination: Option<&Pagination>) -> Vec<Value> {
+        let offset = pagination.map_or(0, |p| p.offset);
+        let limit = pagination.map_or(usize::MAX, |p| p.limit);
+        let requested_end = offset.saturating_add(limit).min(results.len());
+
+        let final_end = if let Some(max) = self.config.max_list_results {
+            if requested_end > max {
+                tracing::warn!(
+                    "list operation would exceed max_list_results limit of {}, truncating",
+                    max
+                );
+                max.min(results.len())
+            } else {
+                requested_end
+            }
+        } else {
+            requested_end
+        };
+
+        if offset >= results.len() {
+            return vec![];
+        }
+        results[offset..final_end].to_vec()
+    }
+
     /// # Errors
     /// Returns an error if listing entities fails.
     pub async fn list(
@@ -508,143 +560,101 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
-        let mut results = Vec::new();
-        let mut early_pagination_applied = false;
-
-        if filters.is_empty() && sort.is_empty() {
-            let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
-            let offset = pagination.as_ref().map_or(0, |p| p.offset);
-            let prefix = format!("data/{entity_name}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes())?;
-
-            let mut skipped = 0;
-            for (key, value) in items {
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                if results.len() >= limit {
-                    break;
-                }
-                let (_, id) = keys::decode_data_key(&key)?;
-                let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
-                results.push(entity.to_json());
-            }
-            early_pagination_applied = true;
+        let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
+            (self.list_with_early_pagination(&entity_name, pagination.as_ref())?, true)
         } else if filters.is_empty() {
-            let prefix = format!("data/{entity_name}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes())?;
-
-            for (key, value) in items {
-                let (_, id) = keys::decode_data_key(&key)?;
-                let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
-                results.push(entity.to_json());
-            }
+            (self.scan_all_entities(&entity_name)?, false)
         } else {
-            let index_manager = self.index_manager.read().await;
-            let mut used_index = false;
-
-            if let Some(filter) = filters.first()
-                && filter.op == FilterOp::Eq
-            {
-                let value_bytes = keys::encode_value_for_index(&filter.value)?;
-                let ids = index_manager.lookup_by_field(
-                    &self.storage,
-                    &entity_name,
-                    &filter.field,
-                    &value_bytes,
-                )?;
-
-                if !ids.is_empty() {
-                    used_index = true;
-                    for id in ids {
-                        match self
-                            .read(entity_name.clone(), id.clone(), vec![], None)
-                            .await
-                        {
-                            Ok(entity_data) => {
-                                if Self::matches_filters(&entity_data, &filters) {
-                                    results.push(entity_data);
-                                }
-                            }
-                            Err(Error::NotFound { .. }) => {
-                                tracing::warn!(
-                                    "index pointed to non-existent entity: {}/{}",
-                                    entity_name,
-                                    id
-                                );
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-            }
-
-            if !used_index {
-                let prefix = format!("data/{entity_name}/");
-                let items = self.storage.prefix_scan(prefix.as_bytes())?;
-
-                for (key, value) in items {
-                    let (_, id) = keys::decode_data_key(&key)?;
-                    let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
-                    let entity_data = entity.to_json();
-                    if Self::matches_filters(&entity_data, &filters) {
-                        results.push(entity_data);
-                    }
-                }
-            }
-        }
+            (self.list_with_filters(&entity_name, &filters).await?, false)
+        };
 
         if !sort.is_empty() {
             Self::sort_results(&mut results, &sort);
         }
 
-        let mut paginated_results = if early_pagination_applied {
+        let mut paginated = if early_pagination_applied {
             results
         } else {
-            let offset = pagination.as_ref().map_or(0, |p| p.offset);
-            let limit = pagination.as_ref().map_or(usize::MAX, |p| p.limit);
-
-            let requested_end = offset.saturating_add(limit).min(results.len());
-
-            let final_end = if let Some(max) = self.config.max_list_results {
-                if requested_end > max {
-                    tracing::warn!(
-                        "list operation would exceed max_list_results limit of {}, truncating",
-                        max
-                    );
-                    max.min(results.len())
-                } else {
-                    requested_end
-                }
-            } else {
-                requested_end
-            };
-
-            if offset >= results.len() {
-                return Ok(vec![]);
-            }
-
-            results[offset..final_end].to_vec()
+            self.apply_pagination(&results, pagination.as_ref())
         };
 
         if !includes.is_empty() {
-            for entity in &mut paginated_results {
-                self.load_includes(entity, &entity_name, &includes, 0)
-                    .await?;
+            for entity in &mut paginated {
+                self.load_includes(entity, &entity_name, &includes, 0).await?;
             }
         }
 
-        let paginated_results = if let Some(ref fields) = projection {
-            paginated_results
-                .into_iter()
-                .map(|e| Self::project_fields(e, fields))
-                .collect()
+        Ok(if let Some(ref fields) = projection {
+            paginated.into_iter().map(|e| Self::project_fields(e, fields)).collect()
         } else {
-            paginated_results
-        };
+            paginated
+        })
+    }
 
-        Ok(paginated_results)
+    fn list_with_early_pagination(
+        &self,
+        entity_name: &str,
+        pagination: Option<&Pagination>,
+    ) -> Result<Vec<Value>> {
+        let requested_limit = pagination.map_or(usize::MAX, |p| p.limit);
+        let limit = self.config.max_list_results.map_or(requested_limit, |max| requested_limit.min(max));
+        let offset = pagination.map_or(0, |p| p.offset);
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+
+        let mut results = Vec::new();
+        let mut skipped = 0;
+        for (key, value) in items {
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            results.push(entity.to_json());
+        }
+        Ok(results)
+    }
+
+    async fn list_with_filters(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+        let index_manager = self.index_manager.read().await;
+
+        if let Some(filter) = filters.first()
+            && filter.op == FilterOp::Eq
+        {
+            let value_bytes = keys::encode_value_for_index(&filter.value)?;
+            let ids = index_manager.lookup_by_field(&self.storage, entity_name, &filter.field, &value_bytes)?;
+            if !ids.is_empty() {
+                return self.list_from_index_ids(entity_name, &ids, filters).await;
+            }
+        }
+        self.scan_filtered_entities(entity_name, filters)
+    }
+
+    async fn list_from_index_ids(
+        &self,
+        entity_name: &str,
+        ids: &[String],
+        filters: &[Filter],
+    ) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+        for id in ids {
+            match self.read(entity_name.to_string(), id.clone(), vec![], None).await {
+                Ok(entity_data) => {
+                    if Self::matches_filters(&entity_data, filters) {
+                        results.push(entity_data);
+                    }
+                }
+                Err(Error::NotFound { .. }) => {
+                    tracing::warn!("index pointed to non-existent entity: {}/{}", entity_name, id);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(results)
     }
 
     /// # Errors

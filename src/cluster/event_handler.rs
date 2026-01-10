@@ -490,10 +490,10 @@ impl BrokerEventHandler for ClusterEventHandler {
                     let result = ctrl
                         .stores_mut()
                         .unsubscribe_topic_replicated(topic, client_id);
-                    if let Ok((_entry, writes)) = result {
-                        if let Some(write) = writes.into_iter().next() {
-                            ctrl.write_or_forward(write).await;
-                        }
+                    if let Ok((_entry, writes)) = result
+                        && let Some(write) = writes.into_iter().next()
+                    {
+                        ctrl.write_or_forward(write).await;
                     }
                 }
             }
@@ -784,10 +784,10 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                 let result = ctrl
                     .stores_mut()
                     .unsubscribe_topic_replicated(topic, client_id);
-                if let Ok((_entry, writes)) = result {
-                    if let Some(write) = writes.into_iter().next() {
-                        ctrl.write_or_forward(write).await;
-                    }
+                if let Ok((_entry, writes)) = result
+                    && let Some(write) = writes.into_iter().next()
+                {
+                    ctrl.write_or_forward(write).await;
                 }
             }
 

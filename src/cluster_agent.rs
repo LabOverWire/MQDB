@@ -1225,10 +1225,10 @@ async fn clear_expired_session_subscriptions(
                 let result = ctrl
                     .stores_mut()
                     .unsubscribe_topic_replicated(topic, client_id);
-                if let Ok((_entry, writes)) = result {
-                    if let Some(write) = writes.into_iter().next() {
-                        ctrl.write_or_forward(write).await;
-                    }
+                if let Ok((_entry, writes)) = result
+                    && let Some(write) = writes.into_iter().next()
+                {
+                    ctrl.write_or_forward(write).await;
                 }
             }
 

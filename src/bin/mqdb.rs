@@ -406,6 +406,8 @@ enum BenchAction {
         warmup: Option<u64>,
         #[arg(long, help = "Clean up test entity after benchmark")]
         cleanup: bool,
+        #[arg(long, default_value = "0", help = "Seed records before benchmark (for get/update/delete ops)")]
+        seed: u64,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "table", help = "Output format")]
@@ -909,6 +911,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 field_size,
                 warmup,
                 cleanup,
+                seed,
                 conn,
                 format,
             } => {
@@ -921,6 +924,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     field_size,
                     warmup: warmup.unwrap_or(0),
                     cleanup,
+                    seed,
                     conn,
                     format,
                 }))
@@ -3099,6 +3103,7 @@ struct BenchDbArgs {
     field_size: usize,
     warmup: u64,
     cleanup: bool,
+    seed: u64,
     conn: ConnectionArgs,
     format: OutputFormat,
 }
@@ -3213,6 +3218,57 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
     let inserted_ids: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
+    if args.seed > 0 {
+        println!("Seeding {} records...", args.seed);
+        let client = MqttClient::new("bench-db-seeder".to_string());
+        client.connect(&args.conn.broker).await?;
+
+        for i in 0..args.seed {
+            let id = id_counter.fetch_add(1, Ordering::Relaxed);
+            let record = generate_record(args.fields, args.field_size, id);
+            let topic = format!("$DB/{}/create", args.entity);
+            let response_topic = format!("bench-db-seeder/resp/{}", uuid::Uuid::new_v4());
+
+            let (tx, mut rx) = mpsc::channel::<bool>(1);
+            let tx_clone = tx.clone();
+            client
+                .subscribe(&response_topic, move |msg| {
+                    let success = msg.payload.iter().any(|&b| b == b'"' || b == b'{');
+                    let _ = tx_clone.try_send(success);
+                })
+                .await?;
+
+            let opts = PublishOptions {
+                properties: PublishProperties {
+                    response_topic: Some(response_topic.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            client
+                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                .await?;
+
+            if tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false)
+                && let Ok(mut ids) = inserted_ids.lock()
+            {
+                ids.push(format!("{id}"));
+            }
+            let _ = client.unsubscribe(&response_topic).await;
+
+            if (i + 1) % 1000 == 0 {
+                println!("  Seeded {} records...", i + 1);
+            }
+        }
+
+        let _ = client.disconnect().await;
+        println!("Seeding complete. {} records ready.", args.seed);
+    }
 
     let ops_per_client = args.operations / args.concurrency.max(1) as u64;
     let warmup_per_client = args.warmup / args.concurrency.max(1) as u64;
@@ -4300,88 +4356,10 @@ fn profile_with_sample(
     Ok(())
 }
 
-fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+mod profile_analysis {
     use std::collections::HashMap;
-    use std::io::BufRead;
 
-    let file = std::fs::File::open(filepath)?;
-    let reader = std::io::BufReader::new(file);
-
-    let mut inclusive: HashMap<String, u64> = HashMap::new();
-    let mut exclusive: HashMap<String, u64> = HashMap::new();
-    let mut thread_totals: Vec<u64> = Vec::new();
-    let mut call_graph_lines: Vec<(usize, u64, String)> = Vec::new();
-    let mut in_call_graph = false;
-
-    let thread_re = regex::Regex::new(r"^\s*(\d+)\s+Thread_\d+")?;
-    let call_re = regex::Regex::new(r"^(\s*[+!|:\s]*)(\d+)\s+(.+?)\s+\(in\s+([^)]+)\)")?;
-
-    for line in reader.lines() {
-        let line = line?;
-
-        if line.contains("Call graph:") {
-            in_call_graph = true;
-            continue;
-        }
-
-        if in_call_graph && line.trim().starts_with("Total number") {
-            break;
-        }
-
-        if let Some(caps) = thread_re.captures(&line) {
-            if let Ok(count) = caps[1].parse::<u64>() {
-                thread_totals.push(count);
-            }
-            continue;
-        }
-
-        if !in_call_graph {
-            continue;
-        }
-
-        if let Some(caps) = call_re.captures(&line) {
-            let prefix = &caps[1];
-            let count: u64 = caps[2].parse().unwrap_or(0);
-            let func_name = demangle_rust_symbol(&caps[3]);
-            let library = &caps[4];
-
-            let key = format!("{func_name} [{library}]");
-            let depth = prefix.replace(' ', "").len();
-
-            call_graph_lines.push((depth, count, key.clone()));
-            let entry = inclusive.entry(key).or_insert(0);
-            *entry = (*entry).max(count);
-        }
-    }
-
-    for i in 0..call_graph_lines.len() {
-        let (depth, count, ref key) = call_graph_lines[i];
-        let mut is_leaf = true;
-
-        for j in (i + 1)..call_graph_lines.len() {
-            let (next_depth, _, _) = call_graph_lines[j];
-            if next_depth <= depth {
-                break;
-            }
-            if next_depth > depth {
-                is_leaf = false;
-                break;
-            }
-        }
-
-        if is_leaf {
-            *exclusive.entry(key.clone()).or_insert(0) += count;
-        }
-    }
-
-    let total_samples = thread_totals.iter().max().copied().unwrap_or(1);
-    let total_excl: u64 = exclusive.values().sum();
-
-    println!("================================================================================");
-    println!("MQDB PROFILE ANALYSIS REPORT");
-    println!("================================================================================");
-    println!("\nTotal samples (per thread): {total_samples}");
-    println!("Total exclusive samples: {total_excl}");
+    type CategoryFilter = fn(&str) -> bool;
 
     fn is_waiting(f: &str) -> bool {
         f.contains("__psynch_cvwait") || f.contains("__psynch_mutexwait")
@@ -4408,7 +4386,7 @@ fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::
         f.contains("flume::")
     }
 
-    let categories: &[(&str, fn(&str) -> bool)] = &[
+    const CATEGORIES: &[(&str, CategoryFilter)] = &[
         ("WAITING", is_waiting),
         ("IO_WAIT", is_io_wait),
         ("NETWORK_IO", is_network_io),
@@ -4419,72 +4397,155 @@ fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::
         ("CHANNEL", is_channel),
     ];
 
-    println!("\n--------------------------------------------------------------------------------");
-    println!("EXCLUSIVE TIME BY CATEGORY");
-    println!("--------------------------------------------------------------------------------\n");
+    fn pct(num: u64, denom: u64) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let result = (num as f64 / denom as f64) * 100.0;
+        result
+    }
 
-    for (cat_name, filter) in categories {
-        let cat_total: u64 = exclusive
-            .iter()
-            .filter(|(k, _)| filter(k))
-            .map(|(_, v)| v)
-            .sum();
-        if cat_total > 0 {
-            let pct = (cat_total as f64 / total_excl as f64) * 100.0;
-            println!("{cat_name:15} {cat_total:8} samples ({pct:5.1}%)");
+    fn compute_exclusive(call_graph: &[(usize, u64, String)]) -> HashMap<String, u64> {
+        let mut exclusive: HashMap<String, u64> = HashMap::new();
+        for (i, (depth, count, key)) in call_graph.iter().enumerate() {
+            let is_leaf = call_graph
+                .iter()
+                .skip(i + 1)
+                .take_while(|(d, _, _)| *d > *depth)
+                .next()
+                .is_none();
+            if is_leaf {
+                *exclusive.entry(key.clone()).or_insert(0) += count;
+            }
+        }
+        exclusive
+    }
+
+    fn print_category_breakdown(exclusive: &HashMap<String, u64>, total_excl: u64) {
+        println!("\n--------------------------------------------------------------------------------");
+        println!("EXCLUSIVE TIME BY CATEGORY");
+        println!("--------------------------------------------------------------------------------\n");
+
+        for (cat_name, filter) in CATEGORIES {
+            let cat_total: u64 = exclusive
+                .iter()
+                .filter(|(k, _)| filter(k))
+                .map(|(_, v)| v)
+                .sum();
+            if cat_total > 0 {
+                println!("{cat_name:15} {cat_total:8} samples ({:5.1}%)", pct(cat_total, total_excl));
+            }
         }
     }
 
-    println!("\n--------------------------------------------------------------------------------");
-    println!("TOP MQTT5/MQDB FUNCTIONS (by inclusive time)");
-    println!("--------------------------------------------------------------------------------\n");
+    fn print_top_functions(inclusive: &HashMap<String, u64>, total_samples: u64) {
+        println!("\n--------------------------------------------------------------------------------");
+        println!("TOP MQTT5/MQDB FUNCTIONS (by inclusive time)");
+        println!("--------------------------------------------------------------------------------\n");
 
-    let mut mqtt_funcs: Vec<_> = inclusive
-        .iter()
-        .filter(|(k, v)| {
-            (k.contains("mqtt5::") || k.contains("mqdb::"))
-                && !k.to_lowercase().contains("main")
-                && **v > total_samples / 100
-        })
-        .collect();
-    mqtt_funcs.sort_by(|a, b| b.1.cmp(a.1));
+        let mut mqtt_funcs: Vec<_> = inclusive
+            .iter()
+            .filter(|(k, v)| {
+                (k.contains("mqtt5::") || k.contains("mqdb::"))
+                    && !k.to_lowercase().contains("main")
+                    && **v > total_samples / 100
+            })
+            .collect();
+        mqtt_funcs.sort_by(|a, b| b.1.cmp(a.1));
 
-    for (func, count) in mqtt_funcs.iter().take(12) {
-        let pct = (**count as f64 / total_samples as f64) * 100.0;
-        let short = if func.len() > 70 { &func[..70] } else { func };
-        println!("{count:6} ({pct:5.2}%) {short}");
+        for (func, count) in mqtt_funcs.iter().take(12) {
+            let short = if func.len() > 70 { &func[..70] } else { func };
+            println!("{count:6} ({:5.2}%) {short}", pct(**count, total_samples));
+        }
     }
 
-    let waiting: u64 = exclusive
-        .iter()
-        .filter(|(k, _)| {
-            k.contains("__psynch_cvwait")
-                || k.contains("__psynch_mutexwait")
-                || k.contains("kevent")
-        })
-        .map(|(_, v)| v)
-        .sum();
-    let active = total_excl.saturating_sub(waiting);
+    pub fn analyze(filepath: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::BufRead;
 
-    println!("\n--------------------------------------------------------------------------------");
-    println!("SUMMARY");
-    println!("--------------------------------------------------------------------------------");
-    println!(
-        "\nActive work: {active} samples ({:.1}%)",
-        (active as f64 / total_excl as f64) * 100.0
-    );
-    println!(
-        "Waiting/idle: {waiting} samples ({:.1}%)",
-        (waiting as f64 / total_excl as f64) * 100.0
-    );
+        let file = std::fs::File::open(filepath)?;
+        let reader = std::io::BufReader::new(file);
 
-    if active < total_excl / 10 {
-        println!("\n[INFO] System is mostly idle - try longer benchmark or more clients");
+        let mut inclusive: HashMap<String, u64> = HashMap::new();
+        let mut thread_totals: Vec<u64> = Vec::new();
+        let mut call_graph_lines: Vec<(usize, u64, String)> = Vec::new();
+        let mut in_call_graph = false;
+
+        let thread_re = regex::Regex::new(r"^\s*(\d+)\s+Thread_\d+")?;
+        let call_re = regex::Regex::new(r"^(\s*[+!|:\s]*)(\d+)\s+(.+?)\s+\(in\s+([^)]+)\)")?;
+
+        for line in reader.lines() {
+            let line = line?;
+
+            if line.contains("Call graph:") {
+                in_call_graph = true;
+                continue;
+            }
+            if in_call_graph && line.trim().starts_with("Total number") {
+                break;
+            }
+            if let Some(caps) = thread_re.captures(&line) {
+                if let Ok(count) = caps[1].parse::<u64>() {
+                    thread_totals.push(count);
+                }
+                continue;
+            }
+            if !in_call_graph {
+                continue;
+            }
+            if let Some(caps) = call_re.captures(&line) {
+                let prefix = &caps[1];
+                let count: u64 = caps[2].parse().unwrap_or(0);
+                let func_name = super::demangle_rust_symbol(&caps[3]);
+                let library = &caps[4];
+
+                let key = format!("{func_name} [{library}]");
+                let depth = prefix.replace(' ', "").len();
+
+                call_graph_lines.push((depth, count, key.clone()));
+                let entry = inclusive.entry(key).or_insert(0);
+                *entry = (*entry).max(count);
+            }
+        }
+
+        let exclusive = compute_exclusive(&call_graph_lines);
+        let total_samples = thread_totals.iter().max().copied().unwrap_or(1);
+        let total_excl: u64 = exclusive.values().sum();
+
+        println!("================================================================================");
+        println!("MQDB PROFILE ANALYSIS REPORT");
+        println!("================================================================================");
+        println!("\nTotal samples (per thread): {total_samples}");
+        println!("Total exclusive samples: {total_excl}");
+
+        print_category_breakdown(&exclusive, total_excl);
+        print_top_functions(&inclusive, total_samples);
+
+        let waiting: u64 = exclusive
+            .iter()
+            .filter(|(k, _)| {
+                k.contains("__psynch_cvwait")
+                    || k.contains("__psynch_mutexwait")
+                    || k.contains("kevent")
+            })
+            .map(|(_, v)| v)
+            .sum();
+        let active = total_excl.saturating_sub(waiting);
+
+        println!("\n--------------------------------------------------------------------------------");
+        println!("SUMMARY");
+        println!("--------------------------------------------------------------------------------");
+        println!("\nActive work: {active} samples ({:.1}%)", pct(active, total_excl));
+        println!("Waiting/idle: {waiting} samples ({:.1}%)", pct(waiting, total_excl));
+
+        if active < total_excl / 10 {
+            println!("\n[INFO] System is mostly idle - try longer benchmark or more clients");
+        }
+
+        println!("\n================================================================================");
+        Ok(())
     }
+}
 
-    println!("\n================================================================================");
-
-    Ok(())
+fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    profile_analysis::analyze(filepath)
 }
 
 fn demangle_rust_symbol(name: &str) -> String {

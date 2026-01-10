@@ -3327,6 +3327,24 @@ async fn fk_validation_cleanup_expired() {
     );
 }
 
+fn setup_lwt_test_sessions(cluster: &mut TestCluster, n1: NodeId, n2: NodeId) {
+    cluster.nodes[0].sessions.create_session("lwt-client").unwrap();
+    cluster.nodes[0].sessions.update("lwt-client", |s| {
+        s.set_will(1, false, "status/lwt-client", b"offline");
+        s.set_connected(true, n1, 0);
+    }).unwrap();
+
+    cluster.nodes[1].sessions.create_session("subscriber-client").unwrap();
+    cluster.nodes[1].sessions.update("subscriber-client", |s| {
+        s.set_connected(true, n2, 0);
+    }).unwrap();
+
+    let subscriber_partition = session_partition("subscriber-client");
+    cluster.nodes[0].topics.subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1).unwrap();
+    cluster.nodes[1].topics.subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1).unwrap();
+    cluster.nodes[0].controller.stores().client_locations.set("subscriber-client", n2);
+}
+
 #[tokio::test]
 async fn cross_node_lwt_routing() {
     use mqdb::cluster::{ForwardTarget, ForwardedPublish, LwtPublisher};
@@ -3344,59 +3362,9 @@ async fn cross_node_lwt_routing() {
         node.controller.process_messages().await;
     }
 
-    cluster.nodes[0]
-        .sessions
-        .create_session("lwt-client")
-        .unwrap();
-    cluster.nodes[0]
-        .sessions
-        .update("lwt-client", |s| {
-            s.set_will(1, false, "status/lwt-client", b"offline");
-            s.set_connected(true, n1, 0);
-        })
-        .unwrap();
+    setup_lwt_test_sessions(&mut cluster, n1, n2);
 
-    cluster.nodes[1]
-        .sessions
-        .create_session("subscriber-client")
-        .unwrap();
-    cluster.nodes[1]
-        .sessions
-        .update("subscriber-client", |s| {
-            s.set_connected(true, n2, 0);
-        })
-        .unwrap();
-
-    let subscriber_partition = session_partition("subscriber-client");
-    cluster.nodes[0]
-        .topics
-        .subscribe(
-            "status/lwt-client",
-            "subscriber-client",
-            subscriber_partition,
-            1,
-        )
-        .unwrap();
-    cluster.nodes[1]
-        .topics
-        .subscribe(
-            "status/lwt-client",
-            "subscriber-client",
-            subscriber_partition,
-            1,
-        )
-        .unwrap();
-
-    cluster.nodes[0]
-        .controller
-        .stores()
-        .client_locations
-        .set("subscriber-client", n2);
-
-    cluster.nodes[0]
-        .sessions
-        .mark_disconnected("lwt-client", 1000)
-        .unwrap();
+    cluster.nodes[0].sessions.mark_disconnected("lwt-client", 1000).unwrap();
 
     let publisher = LwtPublisher::new(&cluster.nodes[0].sessions);
     let prepared = publisher.prepare_lwt("lwt-client").unwrap().unwrap();
@@ -3404,11 +3372,7 @@ async fn cross_node_lwt_routing() {
     assert_eq!(prepared.payload, b"offline");
 
     let router = PublishRouter::new(&cluster.nodes[0].topics);
-    let wildcards = cluster.nodes[0]
-        .controller
-        .stores()
-        .wildcards
-        .match_topic(&prepared.topic);
+    let wildcards = cluster.nodes[0].controller.stores().wildcards.match_topic(&prepared.topic);
     let route = router.route_with_wildcards(&prepared.topic, &wildcards);
 
     assert_eq!(route.targets.len(), 1, "Should have one routing target");
@@ -3416,50 +3380,27 @@ async fn cross_node_lwt_routing() {
 
     let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
     for target in route.targets {
-        let connected_node = cluster.nodes[0]
-            .controller
-            .stores()
-            .client_locations
-            .get(&target.client_id);
-
+        let connected_node = cluster.nodes[0].controller.stores().client_locations.get(&target.client_id);
         if let Some(target_node) = connected_node
             && target_node != n1
         {
-            remote_nodes
-                .entry(target_node)
-                .or_default()
-                .push(ForwardTarget::new(target.client_id, target.qos));
+            remote_nodes.entry(target_node).or_default().push(ForwardTarget::new(target.client_id, target.qos));
         }
     }
 
-    assert!(
-        remote_nodes.contains_key(&n2),
-        "Should forward LWT to Node 2"
-    );
+    assert!(remote_nodes.contains_key(&n2), "Should forward LWT to Node 2");
     assert_eq!(remote_nodes[&n2].len(), 1);
     assert_eq!(remote_nodes[&n2][0].client_id, "subscriber-client");
 
-    let fwd = ForwardedPublish::new(
-        n1,
-        prepared.topic.clone(),
-        prepared.qos,
-        prepared.retain,
-        prepared.payload.clone(),
-        remote_nodes[&n2].clone(),
-    );
+    let fwd = ForwardedPublish::new(n1, prepared.topic.clone(), prepared.qos, prepared.retain, prepared.payload.clone(), remote_nodes[&n2].clone());
     assert_eq!(fwd.origin_node, n1);
     assert_eq!(fwd.topic, "status/lwt-client");
     assert_eq!(fwd.targets.len(), 1);
 
-    publisher
-        .complete_lwt("lwt-client", prepared.token)
-        .unwrap();
+    publisher.complete_lwt("lwt-client", prepared.token).unwrap();
 
     let session = cluster.nodes[0].sessions.get("lwt-client").unwrap();
-    assert!(
-        session.lwt_published != 0,
-        "LWT should be marked as published"
-    );
+    assert!(session.lwt_published != 0, "LWT should be marked as published");
 }
 
 #[tokio::test]

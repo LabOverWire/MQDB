@@ -207,12 +207,19 @@ fn extract_list_options(data: &Value) -> ListOptions {
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
 
+    #[allow(clippy::cast_possible_truncation)]
     let pagination: Option<crate::Pagination> = data
         .get("pagination")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .or_else(|| {
-            let limit = data.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let offset = data.get("offset").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let limit = data
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .map(|v| v as usize);
+            let offset = data
+                .get("offset")
+                .and_then(serde_json::Value::as_u64)
+                .map(|v| v as usize);
             match (limit, offset) {
                 (Some(l), Some(o)) => Some(crate::Pagination::new(l, o)),
                 (Some(l), None) => Some(crate::Pagination::new(l, 0)),
