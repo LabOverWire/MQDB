@@ -432,8 +432,8 @@ enum ConsumerGroupAction {
 
 #[derive(Clone, Copy, Default, ValueEnum)]
 enum DurabilityArg {
-    #[default]
     Immediate,
+    #[default]
     Periodic,
     None,
 }
@@ -451,8 +451,10 @@ enum AgentAction {
         acl: Option<PathBuf>,
         #[arg(long)]
         anonymous: bool,
-        #[arg(long, default_value = "immediate", help = "Durability mode: immediate (fsync every write), periodic (fsync every 100ms), none (no fsync)")]
+        #[arg(long, default_value = "periodic", help = "Durability mode: immediate (fsync every write), periodic (fsync periodically), none (no fsync)")]
         durability: DurabilityArg,
+        #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
+        durability_ms: u64,
     },
     Status {
         #[command(flatten)]
@@ -592,8 +594,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 acl,
                 anonymous,
                 durability,
+                durability_ms,
             } => {
-                cmd_agent_start(bind, db, passwd, acl, anonymous, durability).await?;
+                cmd_agent_start(bind, db, passwd, acl, anonymous, durability, durability_ms).await?;
             }
             AgentAction::Status { conn } => {
                 Box::pin(cmd_agent_status(conn)).await?;
@@ -936,12 +939,13 @@ async fn cmd_agent_start(
     acl: Option<PathBuf>,
     anonymous: bool,
     durability: DurabilityArg,
+    durability_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb::config::{DatabaseConfig, DurabilityMode};
 
     let durability_mode = match durability {
         DurabilityArg::Immediate => DurabilityMode::Immediate,
-        DurabilityArg::Periodic => DurabilityMode::PeriodicMs(100),
+        DurabilityArg::Periodic => DurabilityMode::PeriodicMs(durability_ms),
         DurabilityArg::None => DurabilityMode::None,
     };
 
