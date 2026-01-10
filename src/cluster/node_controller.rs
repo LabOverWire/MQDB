@@ -870,6 +870,11 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[must_use]
+    pub fn has_alive_peers(&self) -> bool {
+        self.heartbeat.has_alive_peers()
+    }
+
+    #[must_use]
     pub fn sequence(&self, partition: PartitionId) -> Option<u64> {
         self.replicas
             .get(&partition.get())

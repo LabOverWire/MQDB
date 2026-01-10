@@ -546,22 +546,25 @@ impl BrokerEventHandler for ClusterEventHandler {
                 return;
             }
 
-            let ctrl = self.controller.read().await;
+            let ctrl = match self.controller.try_read() {
+                Ok(guard) => guard,
+                Err(_) => self.controller.read().await,
+            };
             let topic = event.topic.as_ref();
 
             let wildcards = ctrl.stores().wildcards.match_topic(topic);
             let router = PublishRouter::new(&ctrl.stores().topics);
-            let route = router.route_with_wildcards(topic, &wildcards);
+            let targets = router.route_targets(topic, &wildcards);
 
             debug!(
                 topic,
-                target_count = route.targets.len(),
+                target_count = targets.len(),
                 wildcard_matches = wildcards.len(),
                 "routing publish"
             );
 
             let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
-            for target in route.targets {
+            for target in targets {
                 let connected_node = ctrl
                     .stores()
                     .client_locations

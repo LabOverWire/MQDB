@@ -128,6 +128,43 @@ impl<'a> PublishRouter<'a> {
             seq,
         }
     }
+
+    #[must_use]
+    pub fn route_targets(
+        &self,
+        topic: &str,
+        wildcard_matches: &[SubscriberLocation],
+    ) -> Vec<RoutingTarget> {
+        let exact_subscribers = self.topic_index.get_subscribers(topic);
+
+        let mut targets_by_client: HashMap<String, RoutingTarget> = HashMap::new();
+
+        for sub in &exact_subscribers {
+            if let Some(target) = RoutingTarget::from_subscriber(sub) {
+                let client_id = target.client_id.clone();
+                targets_by_client
+                    .entry(client_id)
+                    .and_modify(|existing| {
+                        existing.qos = existing.qos.max(target.qos);
+                    })
+                    .or_insert(target);
+            }
+        }
+
+        for sub in wildcard_matches {
+            if let Some(target) = RoutingTarget::from_subscriber(sub) {
+                let client_id = target.client_id.clone();
+                targets_by_client
+                    .entry(client_id)
+                    .and_modify(|existing| {
+                        existing.qos = existing.qos.max(target.qos);
+                    })
+                    .or_insert(target);
+            }
+        }
+
+        targets_by_client.into_values().collect()
+    }
 }
 
 #[must_use]

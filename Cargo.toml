@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = [
     "env-filter",
 ], optional = true }
 glob = "0.3"
+regex = "1.12.2"
 
 [features]
 default = ["native"]
@@ -59,3 +60,16 @@ uuid = { version = "1.18.1", features = ["v4", "js"] }
 [dev-dependencies]
 tempfile = "3.23.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+lto = false
+codegen-units = 1
+split-debuginfo = "packed"

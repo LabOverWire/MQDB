@@ -1150,6 +1150,7 @@ dependencies = [
  "glob",
  "mqtt5",
  "opentelemetry",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

@@ -274,6 +274,83 @@ enum DevAction {
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
     },
+    #[command(about = "Run benchmarks with auto-start and result saving")]
+    Bench {
+        #[command(subcommand)]
+        scenario: DevBenchScenario,
+        #[arg(long, help = "Save results to file")]
+        output: Option<PathBuf>,
+        #[arg(long, help = "Compare against baseline file")]
+        baseline: Option<PathBuf>,
+        #[arg(long, default_value = "/tmp/mqdb-dev-bench")]
+        db: String,
+    },
+    #[command(about = "Profile with samply or flamegraph")]
+    Profile {
+        #[command(subcommand)]
+        scenario: DevBenchScenario,
+        #[arg(
+            long,
+            default_value = "samply",
+            help = "Profiling tool: samply or flamegraph"
+        )]
+        tool: String,
+        #[arg(long, default_value = "30", help = "Profile duration in seconds")]
+        duration: u64,
+        #[arg(long, help = "Output file for profile data")]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "/tmp/mqdb-dev-profile")]
+        db: String,
+    },
+    #[command(about = "Manage benchmark baselines")]
+    Baseline {
+        #[command(subcommand)]
+        action: DevBaselineAction,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum DevBenchScenario {
+    #[command(about = "Pub/sub throughput benchmark")]
+    Pubsub {
+        #[arg(long, default_value = "4")]
+        publishers: usize,
+        #[arg(long, default_value = "4")]
+        subscribers: usize,
+        #[arg(long, default_value = "10")]
+        duration: u64,
+        #[arg(long, default_value = "64")]
+        size: usize,
+        #[arg(long, default_value = "0")]
+        qos: u8,
+    },
+    #[command(about = "Database CRUD benchmark")]
+    Db {
+        #[arg(long, default_value = "10000")]
+        operations: u64,
+        #[arg(long, default_value = "4")]
+        concurrency: usize,
+        #[arg(long, default_value = "mixed")]
+        op: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevBaselineAction {
+    #[command(about = "Save current benchmark as baseline")]
+    Save {
+        name: String,
+        #[command(subcommand)]
+        scenario: DevBenchScenario,
+    },
+    #[command(about = "List saved baselines")]
+    List,
+    #[command(about = "Compare current results to a baseline")]
+    Compare {
+        name: String,
+        #[command(subcommand)]
+        scenario: DevBenchScenario,
+    },
 }
 
 #[derive(Subcommand)]
@@ -284,22 +361,16 @@ enum BenchAction {
         publishers: usize,
         #[arg(long, default_value = "1", help = "Number of subscriber tasks")]
         subscribers: usize,
-        #[arg(long, default_value = "10000", help = "Total messages to send")]
-        messages: u64,
-        #[arg(
-            long,
-            default_value = "0",
-            help = "Messages per second (0 = unlimited)"
-        )]
-        rate: u64,
+        #[arg(long, default_value = "10", help = "Duration in seconds to run at max speed")]
+        duration: u64,
         #[arg(long, default_value = "64", help = "Payload size in bytes")]
         size: usize,
         #[arg(long, default_value = "0", help = "MQTT QoS level (0, 1, or 2)")]
         qos: u8,
         #[arg(long, default_value = "bench/test", help = "Topic pattern")]
         topic: String,
-        #[arg(long, help = "Warmup messages before measuring")]
-        warmup: Option<u64>,
+        #[arg(long, default_value = "1", help = "Warmup duration in seconds")]
+        warmup: u64,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "table", help = "Output format")]
@@ -765,13 +836,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 cmd_dev_start_cluster(nodes, clean, &quic_cert, &quic_key, no_quic, &db_prefix)?;
             }
+            DevAction::Bench {
+                scenario,
+                output,
+                baseline,
+                db,
+            } => {
+                Box::pin(cmd_dev_bench(scenario, output, baseline, &db)).await?;
+            }
+            DevAction::Profile {
+                scenario,
+                tool,
+                duration,
+                output,
+                db,
+            } => {
+                cmd_dev_profile(&scenario, &tool, duration, output, &db)?;
+            }
+            DevAction::Baseline { action } => {
+                cmd_dev_baseline(action)?;
+            }
         },
         Commands::Bench { action } => match action {
             BenchAction::Pubsub {
                 publishers,
                 subscribers,
-                messages,
-                rate,
+                duration,
                 size,
                 qos,
                 topic,
@@ -782,12 +872,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Box::pin(cmd_bench_pubsub(BenchPubsubArgs {
                     publishers,
                     subscribers,
-                    messages,
-                    rate,
+                    duration,
                     size,
                     qos,
                     topic,
-                    warmup: warmup.unwrap_or(0),
+                    warmup,
                     conn,
                     format,
                 }))
@@ -2735,8 +2824,7 @@ async fn wait_for_broker_ready(
 struct BenchPubsubArgs {
     publishers: usize,
     subscribers: usize,
-    messages: u64,
-    rate: u64,
+    duration: u64,
     size: usize,
     qos: u8,
     topic: String,
@@ -2794,10 +2882,11 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
 
     let metrics = Arc::new(BenchMetrics::default());
     let running = Arc::new(AtomicBool::new(true));
+    let measuring = Arc::new(AtomicBool::new(false));
 
     println!(
-        "Benchmark: {} publishers, {} subscribers, {} messages, {} byte payload, QoS {}",
-        args.publishers, args.subscribers, args.messages, args.size, args.qos
+        "Benchmark: {} publishers, {} subscribers, {}s duration ({}s warmup), {} byte payload, QoS {}",
+        args.publishers, args.subscribers, args.duration, args.warmup, args.size, args.qos
     );
 
     let mut sub_handles = Vec::new();
@@ -2808,6 +2897,7 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         let topic = args.topic.clone();
         let metrics = Arc::clone(&metrics);
         let running = Arc::clone(&running);
+        let measuring = Arc::clone(&measuring);
 
         let handle = tokio::spawn(async move {
             let client_id = format!("bench-sub-{sub_id}");
@@ -2826,8 +2916,12 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
             }
 
             let metrics_clone = Arc::clone(&metrics);
+            let measuring_clone = Arc::clone(&measuring);
             if let Err(e) = client
                 .subscribe(&topic, move |msg| {
+                    if !measuring_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
                     let payload = &msg.payload;
                     if payload.len() >= 8
                         && let Ok(bytes) = payload[0..8].try_into()
@@ -2866,22 +2960,16 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let payload_template: Vec<u8> = vec![0u8; args.size];
-    let total_messages = args.messages;
-    let messages_per_pub = total_messages / args.publishers.max(1) as u64;
-    let rate_per_pub = if args.rate > 0 {
-        args.rate / args.publishers.max(1) as u64
-    } else {
-        0
-    };
-
-    let start_time = Instant::now();
+    let warmup_duration = Duration::from_secs(args.warmup);
+    let measure_duration = Duration::from_secs(args.duration);
 
     for pub_id in 0..args.publishers {
         let conn = args.conn.clone();
         let topic = args.topic.clone();
         let metrics = Arc::clone(&metrics);
+        let running = Arc::clone(&running);
+        let measuring = Arc::clone(&measuring);
         let payload_template = payload_template.clone();
-        let warmup = args.warmup;
 
         let handle = tokio::spawn(async move {
             let client_id = format!("bench-pub-{pub_id}");
@@ -2899,13 +2987,7 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                 return;
             }
 
-            let interval = if rate_per_pub > 0 {
-                Some(Duration::from_nanos(1_000_000_000 / rate_per_pub))
-            } else {
-                None
-            };
-
-            for i in 0..(warmup + messages_per_pub) {
+            while running.load(Ordering::Relaxed) {
                 let mut payload = payload_template.clone();
                 let now_ns = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -2916,15 +2998,11 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                 if let Err(e) = client.publish(&topic, payload.clone()).await {
                     eprintln!("Publish error: {e}");
                     metrics.errors.fetch_add(1, Ordering::Relaxed);
-                } else if i >= warmup {
+                } else if measuring.load(Ordering::Relaxed) {
                     metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                     metrics
                         .bytes_sent
                         .fetch_add(payload.len() as u64, Ordering::Relaxed);
-                }
-
-                if let Some(interval) = interval {
-                    tokio::time::sleep(interval).await;
                 }
             }
 
@@ -2933,19 +3011,30 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         pub_handles.push(handle);
     }
 
-    for handle in pub_handles {
-        let _ = handle.await;
+    if args.warmup > 0 {
+        println!("Warming up for {}s...", args.warmup);
+        tokio::time::sleep(warmup_duration).await;
     }
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    println!("Measuring for {}s...", args.duration);
+    measuring.store(true, Ordering::Release);
+    let start_time = Instant::now();
 
-    running.store(false, Ordering::Release);
-
-    for handle in sub_handles {
-        let _ = handle.await;
-    }
+    tokio::time::sleep(measure_duration).await;
 
     let elapsed = start_time.elapsed();
+    measuring.store(false, Ordering::Release);
+    running.store(false, Ordering::Release);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for handle in pub_handles {
+        handle.abort();
+    }
+    for handle in sub_handles {
+        handle.abort();
+    }
+
     let elapsed_secs = elapsed.as_secs_f64();
 
     let sent = metrics.messages_sent.load(Ordering::Relaxed);
@@ -2974,10 +3063,10 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
             "config": {
                 "publishers": args.publishers,
                 "subscribers": args.subscribers,
-                "messages": args.messages,
+                "duration_secs": args.duration,
+                "warmup_secs": args.warmup,
                 "payload_size": args.size,
-                "qos": args.qos,
-                "rate_limit": args.rate
+                "qos": args.qos
             }
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -3549,6 +3638,979 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
         println!("│ Latency p95:        {p95_us:>17} µs │");
         println!("│ Latency p99:        {p99_us:>17} µs │");
         println!("└───────────────────────────────────────────┘");
+    }
+
+    Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DevBenchResult {
+    scenario: String,
+    timestamp: String,
+    throughput: f64,
+    latency_p50_us: u64,
+    latency_p95_us: u64,
+    latency_p99_us: u64,
+    config: serde_json::Value,
+}
+
+async fn cmd_dev_bench(
+    scenario: DevBenchScenario,
+    output: Option<PathBuf>,
+    baseline: Option<PathBuf>,
+    db: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let conn = ConnectionArgs {
+        broker: "127.0.0.1:1883".to_string(),
+        user: None,
+        pass: None,
+        timeout: 30,
+    };
+
+    if !is_agent_running() {
+        println!("Starting agent for benchmark...");
+        start_agent_for_bench(&exe, db)?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    wait_for_broker_ready(&conn, 30).await?;
+
+    let result = match &scenario {
+        DevBenchScenario::Pubsub {
+            publishers,
+            subscribers,
+            duration,
+            size,
+            qos,
+        } => run_pubsub_benchmark(&conn, *publishers, *subscribers, *duration, *size, *qos).await?,
+        DevBenchScenario::Db {
+            operations,
+            concurrency,
+            op,
+        } => run_db_benchmark(&conn, *operations, *concurrency, op).await?,
+    };
+
+    print_bench_result(&result);
+
+    if let Some(baseline_path) = baseline {
+        compare_with_baseline(&result, &baseline_path)?;
+    }
+
+    if let Some(output_path) = output {
+        let json = serde_json::to_string_pretty(&result)?;
+        std::fs::write(&output_path, json)?;
+        println!("\nResults saved to: {}", output_path.display());
+    }
+
+    Ok(())
+}
+
+fn is_agent_running() -> bool {
+    Command::new("pgrep")
+        .args(["-f", "mqdb agent"])
+        .output()
+        .is_ok_and(|o| !o.stdout.is_empty())
+}
+
+fn start_agent_for_bench(
+    exe: &std::path::Path,
+    db: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(db)?;
+    let log_file = std::fs::File::create(format!("{db}/mqdb.log"))?;
+
+    Command::new(exe)
+        .args([
+            "agent",
+            "start",
+            "--db",
+            db,
+            "--bind",
+            "127.0.0.1:1883",
+            "--anonymous",
+        ])
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    Ok(())
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation
+)]
+async fn run_pubsub_benchmark(
+    conn: &ConnectionArgs,
+    publishers: usize,
+    subscribers: usize,
+    duration: u64,
+    size: usize,
+    _qos: u8,
+) -> Result<DevBenchResult, Box<dyn std::error::Error>> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let metrics = Arc::new(BenchMetrics::default());
+    let running = Arc::new(AtomicBool::new(true));
+
+    println!(
+        "\nRunning pub/sub benchmark: {publishers} pubs, {subscribers} subs, {duration}s, {size} bytes"
+    );
+
+    let mut sub_handles = Vec::new();
+    for sub_id in 0..subscribers {
+        let conn = conn.clone();
+        let metrics = Arc::clone(&metrics);
+        let running = Arc::clone(&running);
+
+        let handle = tokio::spawn(async move {
+            let client_id = format!("dev-bench-sub-{sub_id}");
+            let client = MqttClient::new(&client_id);
+            if client.connect(&conn.broker).await.is_err() {
+                return;
+            }
+
+            let metrics_clone = Arc::clone(&metrics);
+            let _ = client
+                .subscribe("bench/test", move |msg| {
+                    let payload = &msg.payload;
+                    if payload.len() >= 8
+                        && let Ok(bytes) = payload[0..8].try_into()
+                    {
+                        let sent_ns = u64::from_be_bytes(bytes);
+                        let recv_time = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_nanos() as u64;
+                        if recv_time > sent_ns {
+                            metrics_clone.record_latency(recv_time - sent_ns);
+                        }
+                    }
+                    metrics_clone
+                        .messages_received
+                        .fetch_add(1, Ordering::Relaxed);
+                })
+                .await;
+
+            while running.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = client.disconnect().await;
+        });
+        sub_handles.push(handle);
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let start_time = Instant::now();
+    let measure_duration = Duration::from_secs(duration);
+
+    let mut pub_handles = Vec::new();
+    for pub_id in 0..publishers {
+        let conn = conn.clone();
+        let metrics = Arc::clone(&metrics);
+        let running = Arc::clone(&running);
+
+        let handle = tokio::spawn(async move {
+            let client_id = format!("dev-bench-pub-{pub_id}");
+            let client = MqttClient::new(&client_id);
+            if client.connect(&conn.broker).await.is_err() {
+                return;
+            }
+
+            while running.load(Ordering::Relaxed) {
+                let mut payload = vec![0u8; size];
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos() as u64;
+                payload[0..8].copy_from_slice(&now.to_be_bytes());
+
+                let _ = client.publish("bench/test", payload).await;
+                metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+            }
+
+            let _ = client.disconnect().await;
+        });
+        pub_handles.push(handle);
+    }
+
+    tokio::time::sleep(measure_duration).await;
+
+    running.store(false, Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for handle in pub_handles {
+        handle.abort();
+    }
+    for handle in sub_handles {
+        handle.abort();
+    }
+
+    let elapsed = start_time.elapsed();
+    let sent = metrics.messages_sent.load(Ordering::Relaxed);
+    let throughput = sent as f64 / elapsed.as_secs_f64();
+    let p50 = metrics.calculate_percentile(50.0) / 1000;
+    let p95 = metrics.calculate_percentile(95.0) / 1000;
+    let p99 = metrics.calculate_percentile(99.0) / 1000;
+
+    Ok(DevBenchResult {
+        scenario: "pubsub".to_string(),
+        timestamp: chrono_timestamp(),
+        throughput,
+        latency_p50_us: p50,
+        latency_p95_us: p95,
+        latency_p99_us: p99,
+        config: serde_json::json!({
+            "publishers": publishers,
+            "subscribers": subscribers,
+            "duration_secs": duration,
+            "size": size
+        }),
+    })
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+async fn run_db_benchmark(
+    conn: &ConnectionArgs,
+    operations: u64,
+    concurrency: usize,
+    op: &str,
+) -> Result<DevBenchResult, Box<dyn std::error::Error>> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    println!("\nRunning DB benchmark: {operations} ops, {concurrency} concurrency, op={op}");
+
+    let metrics = Arc::new(BenchMetrics::default());
+    let ops_per_client = operations / concurrency.max(1) as u64;
+
+    let start_time = Instant::now();
+
+    let mut handles = Vec::new();
+    for client_id_num in 0..concurrency {
+        let conn = conn.clone();
+        let metrics = Arc::clone(&metrics);
+        let op = op.to_string();
+
+        let handle = tokio::spawn(async move {
+            let client_id = format!("dev-bench-db-{client_id_num}");
+            let client = MqttClient::new(&client_id);
+            if client.connect(&conn.broker).await.is_err() {
+                return;
+            }
+
+            for i in 0..ops_per_client {
+                let op_start = Instant::now();
+                let entity = "dev_bench_entity";
+                let id = format!("{client_id_num}-{i}");
+
+                let result = match op.as_str() {
+                    "insert" | "mixed" => {
+                        let data = serde_json::json!({"field": "value", "num": i});
+                        db_create(&client, entity, &data).await
+                    }
+                    "get" => db_read(&client, entity, &id).await,
+                    _ => Ok(serde_json::Value::Null),
+                };
+
+                if result.is_ok() {
+                    metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
+                    metrics.record_latency(op_start.elapsed().as_nanos() as u64);
+                } else {
+                    metrics.errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            let _ = client.disconnect().await;
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    let elapsed = start_time.elapsed();
+    let completed = metrics.messages_sent.load(Ordering::Relaxed);
+    let throughput = completed as f64 / elapsed.as_secs_f64();
+    let p50 = metrics.calculate_percentile(50.0) / 1000;
+    let p95 = metrics.calculate_percentile(95.0) / 1000;
+    let p99 = metrics.calculate_percentile(99.0) / 1000;
+
+    Ok(DevBenchResult {
+        scenario: "db".to_string(),
+        timestamp: chrono_timestamp(),
+        throughput,
+        latency_p50_us: p50,
+        latency_p95_us: p95,
+        latency_p99_us: p99,
+        config: serde_json::json!({
+            "operations": operations,
+            "concurrency": concurrency,
+            "op": op
+        }),
+    })
+}
+
+async fn db_create(
+    client: &MqttClient,
+    entity: &str,
+    data: &serde_json::Value,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let response_topic = format!("resp/{}", uuid::Uuid::new_v4());
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+
+    client
+        .subscribe(&response_topic, move |msg| {
+            let _ = tx.try_send(msg.payload.clone());
+        })
+        .await?;
+
+    let opts = PublishOptions {
+        properties: PublishProperties {
+            response_topic: Some(response_topic.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let topic = format!("$DB/{entity}");
+    let payload = serde_json::to_vec(data)?;
+    client.publish_with_options(&topic, payload, opts).await?;
+
+    match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+        Ok(Some(payload)) => Ok(serde_json::from_slice(&payload)?),
+        _ => Err("timeout".into()),
+    }
+}
+
+async fn db_read(
+    client: &MqttClient,
+    entity: &str,
+    id: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let response_topic = format!("resp/{}", uuid::Uuid::new_v4());
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+
+    client
+        .subscribe(&response_topic, move |msg| {
+            let _ = tx.try_send(msg.payload.clone());
+        })
+        .await?;
+
+    let opts = PublishOptions {
+        properties: PublishProperties {
+            response_topic: Some(response_topic.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let topic = format!("$DB/{entity}/{id}");
+    client
+        .publish_with_options(&topic, Vec::new(), opts)
+        .await?;
+
+    match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+        Ok(Some(payload)) => Ok(serde_json::from_slice(&payload)?),
+        _ => Err("timeout".into()),
+    }
+}
+
+fn chrono_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    format!("{now}")
+}
+
+fn print_bench_result(result: &DevBenchResult) {
+    println!("\n┌───────────────────────────────────────────┐");
+    println!(
+        "│        DEV BENCH RESULTS ({:>6})        │",
+        result.scenario.to_uppercase()
+    );
+    println!("├───────────────────────────────────────────┤");
+    println!("│ Throughput:       {:>16.0} ops/s │", result.throughput);
+    println!("├───────────────────────────────────────────┤");
+    println!("│ Latency p50:        {:>17} µs │", result.latency_p50_us);
+    println!("│ Latency p95:        {:>17} µs │", result.latency_p95_us);
+    println!("│ Latency p99:        {:>17} µs │", result.latency_p99_us);
+    println!("└───────────────────────────────────────────┘");
+}
+
+#[allow(clippy::cast_possible_wrap)]
+fn compare_with_baseline(
+    current: &DevBenchResult,
+    baseline_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let baseline_json = std::fs::read_to_string(baseline_path)?;
+    let baseline: DevBenchResult = serde_json::from_str(&baseline_json)?;
+
+    let throughput_delta = (current.throughput - baseline.throughput) / baseline.throughput * 100.0;
+    let p50_delta = current.latency_p50_us as i64 - baseline.latency_p50_us as i64;
+    let p95_delta = current.latency_p95_us as i64 - baseline.latency_p95_us as i64;
+    let p99_delta = current.latency_p99_us as i64 - baseline.latency_p99_us as i64;
+
+    println!("\n┌───────────────────────────────────────────┐");
+    println!("│           COMPARISON TO BASELINE          │");
+    println!("├───────────────────────────────────────────┤");
+    println!("│ Throughput:          {throughput_delta:>+16.1}%  │");
+    println!("│ Latency p50:         {p50_delta:>+16} µs │");
+    println!("│ Latency p95:         {p95_delta:>+16} µs │");
+    println!("│ Latency p99:         {p99_delta:>+16} µs │");
+    println!("└───────────────────────────────────────────┘");
+
+    Ok(())
+}
+
+fn build_bench_args(scenario: &DevBenchScenario) -> Vec<String> {
+    match scenario {
+        DevBenchScenario::Pubsub {
+            publishers,
+            subscribers,
+            duration,
+            size,
+            qos,
+        } => vec![
+            "bench".to_string(),
+            "pubsub".to_string(),
+            "--publishers".to_string(),
+            publishers.to_string(),
+            "--subscribers".to_string(),
+            subscribers.to_string(),
+            "--duration".to_string(),
+            duration.to_string(),
+            "--size".to_string(),
+            size.to_string(),
+            "--qos".to_string(),
+            qos.to_string(),
+        ],
+        DevBenchScenario::Db {
+            operations,
+            concurrency,
+            op,
+        } => vec![
+            "bench".to_string(),
+            "db".to_string(),
+            "--operations".to_string(),
+            operations.to_string(),
+            "--concurrency".to_string(),
+            concurrency.to_string(),
+            "--op".to_string(),
+            op.clone(),
+        ],
+    }
+}
+
+fn profile_with_samply(
+    _exe: &std::path::Path,
+    db: &str,
+    output_path: &std::path::Path,
+    bench_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nBuilding with profiling profile (full DWARF symbols)...");
+    let build_status = Command::new("cargo")
+        .args(["build", "--profile=profiling"])
+        .status()?;
+    if !build_status.success() {
+        return Err("Failed to build with profiling profile".into());
+    }
+
+    let cwd = std::env::current_dir()?;
+    let profiling_exe = cwd.join("target/profiling/mqdb");
+    let symbol_dir = cwd.join("target/profiling");
+    println!("Starting agent under samply profiler...");
+
+    let mut samply = Command::new("samply")
+        .args([
+            "record",
+            "--save-only",
+            "--unstable-presymbolicate",
+            "--symbol-dir",
+            symbol_dir.to_str().unwrap_or("."),
+            "-o",
+            output_path.to_str().unwrap_or("profile"),
+            "--",
+        ])
+        .arg(&profiling_exe)
+        .args([
+            "agent",
+            "start",
+            "--db",
+            db,
+            "--bind",
+            "127.0.0.1:1883",
+            "--anonymous",
+        ])
+        .spawn()?;
+
+    std::thread::sleep(Duration::from_secs(3));
+
+    println!("\nRunning benchmark...");
+    let bench_status = Command::new(&profiling_exe).args(bench_args).status()?;
+    if !bench_status.success() {
+        println!("Benchmark failed with status: {bench_status}");
+    }
+
+    println!("\nStopping agent to save profile...");
+    let _ = Command::new("pkill")
+        .args(["-INT", "-f", "mqdb agent start"])
+        .status();
+
+    match samply.wait() {
+        Ok(status) => println!("Samply exited with: {status}"),
+        Err(e) => println!("Warning: Failed to wait for samply: {e}"),
+    }
+
+    println!("\nProfile saved: {}", output_path.display());
+    println!("Load with: samply load {}", output_path.display());
+    Ok(())
+}
+
+fn profile_with_flamegraph(
+    exe: &std::path::Path,
+    db: &str,
+    output_path: &std::path::Path,
+    bench_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nBuilding with profiling profile...");
+    let build_status = Command::new("cargo")
+        .args(["build", "--profile=profiling"])
+        .status()?;
+    if !build_status.success() {
+        return Err("Failed to build with profiling profile".into());
+    }
+
+    println!("Starting agent under flamegraph profiler...\n");
+
+    let mut flamegraph = Command::new("cargo")
+        .args([
+            "flamegraph",
+            "--profile=profiling",
+            "-o",
+            output_path.to_str().unwrap_or("flamegraph.svg"),
+            "--",
+            "agent",
+            "start",
+            "--db",
+            db,
+            "--bind",
+            "127.0.0.1:1883",
+            "--anonymous",
+        ])
+        .spawn()?;
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    println!("Running benchmark...");
+    let _ = Command::new(exe).args(bench_args).status();
+
+    println!("\nStopping agent to save flamegraph...");
+    let _ = Command::new("pkill")
+        .args(["-INT", "-f", "mqdb agent start"])
+        .status();
+
+    match flamegraph.wait() {
+        Ok(status) => println!("Flamegraph exited with: {status}"),
+        Err(e) => println!("Warning: Failed to wait for flamegraph: {e}"),
+    }
+
+    println!("\nFlamegraph saved: {}", output_path.display());
+    Ok(())
+}
+
+fn profile_with_sample(
+    _exe: &std::path::Path,
+    db: &str,
+    output_path: &std::path::Path,
+    bench_args: &[String],
+    duration: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nBuilding with profiling profile (full DWARF symbols)...");
+    let build_status = Command::new("cargo")
+        .args(["build", "--profile=profiling"])
+        .status()?;
+    if !build_status.success() {
+        return Err("Failed to build with profiling profile".into());
+    }
+
+    let cwd = std::env::current_dir()?;
+    let profiling_exe = cwd.join("target/profiling/mqdb");
+
+    println!("Starting agent...");
+    let mut agent = Command::new(&profiling_exe)
+        .args([
+            "agent",
+            "start",
+            "--db",
+            db,
+            "--bind",
+            "127.0.0.1:1883",
+            "--anonymous",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    let agent_pid = agent.id();
+    println!("Agent started with PID: {agent_pid}");
+
+    println!("\nRunning benchmark in background...");
+    let mut bench = Command::new(&profiling_exe)
+        .args(bench_args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    println!("Sampling for {duration} seconds...");
+    let sample_output = output_path.with_extension("txt");
+    let sample_status = Command::new("sample")
+        .args([
+            &agent_pid.to_string(),
+            &duration.to_string(),
+            "-f",
+            sample_output.to_str().unwrap_or("profile.txt"),
+        ])
+        .status()?;
+
+    if !sample_status.success() {
+        println!("Warning: sample command failed with status: {sample_status}");
+    }
+
+    println!("\nStopping benchmark and agent...");
+    let _ = bench.kill();
+    let _ = agent.kill();
+    let _ = bench.wait();
+    let _ = agent.wait();
+
+    println!("\nProfile saved: {}", sample_output.display());
+
+    if sample_output.exists() {
+        println!("\nGenerating analysis report...\n");
+        analyze_sample_output(&sample_output)?;
+    }
+
+    Ok(())
+}
+
+fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::io::BufRead;
+
+    let file = std::fs::File::open(filepath)?;
+    let reader = std::io::BufReader::new(file);
+
+    let mut inclusive: HashMap<String, u64> = HashMap::new();
+    let mut exclusive: HashMap<String, u64> = HashMap::new();
+    let mut thread_totals: Vec<u64> = Vec::new();
+    let mut call_graph_lines: Vec<(usize, u64, String)> = Vec::new();
+    let mut in_call_graph = false;
+
+    let thread_re = regex::Regex::new(r"^\s*(\d+)\s+Thread_\d+")?;
+    let call_re = regex::Regex::new(r"^(\s*[+!|:\s]*)(\d+)\s+(.+?)\s+\(in\s+([^)]+)\)")?;
+
+    for line in reader.lines() {
+        let line = line?;
+
+        if line.contains("Call graph:") {
+            in_call_graph = true;
+            continue;
+        }
+
+        if in_call_graph && line.trim().starts_with("Total number") {
+            break;
+        }
+
+        if let Some(caps) = thread_re.captures(&line) {
+            if let Ok(count) = caps[1].parse::<u64>() {
+                thread_totals.push(count);
+            }
+            continue;
+        }
+
+        if !in_call_graph {
+            continue;
+        }
+
+        if let Some(caps) = call_re.captures(&line) {
+            let prefix = &caps[1];
+            let count: u64 = caps[2].parse().unwrap_or(0);
+            let func_name = demangle_rust_symbol(&caps[3]);
+            let library = &caps[4];
+
+            let key = format!("{func_name} [{library}]");
+            let depth = prefix.replace(' ', "").len();
+
+            call_graph_lines.push((depth, count, key.clone()));
+            let entry = inclusive.entry(key).or_insert(0);
+            *entry = (*entry).max(count);
+        }
+    }
+
+    for i in 0..call_graph_lines.len() {
+        let (depth, count, ref key) = call_graph_lines[i];
+        let mut is_leaf = true;
+
+        for j in (i + 1)..call_graph_lines.len() {
+            let (next_depth, _, _) = call_graph_lines[j];
+            if next_depth <= depth {
+                break;
+            }
+            if next_depth > depth {
+                is_leaf = false;
+                break;
+            }
+        }
+
+        if is_leaf {
+            *exclusive.entry(key.clone()).or_insert(0) += count;
+        }
+    }
+
+    let total_samples = thread_totals.iter().max().copied().unwrap_or(1);
+    let total_excl: u64 = exclusive.values().sum();
+
+    println!("================================================================================");
+    println!("MQDB PROFILE ANALYSIS REPORT");
+    println!("================================================================================");
+    println!("\nTotal samples (per thread): {total_samples}");
+    println!("Total exclusive samples: {total_excl}");
+
+    fn is_waiting(f: &str) -> bool {
+        f.contains("__psynch_cvwait") || f.contains("__psynch_mutexwait")
+    }
+    fn is_io_wait(f: &str) -> bool {
+        f.contains("kevent")
+    }
+    fn is_network_io(f: &str) -> bool {
+        f.contains("__sendto") || f.contains("__recvfrom")
+    }
+    fn is_mqdb(f: &str) -> bool {
+        f.contains("[mqdb]") && f.contains("mqdb::")
+    }
+    fn is_mqtt5(f: &str) -> bool {
+        f.contains("[mqdb]") && f.contains("mqtt5::")
+    }
+    fn is_allocation(f: &str) -> bool {
+        f.contains("malloc") || f.contains("free") || f.contains("_xzm_")
+    }
+    fn is_sync(f: &str) -> bool {
+        f.contains("pthread_mutex") || f.contains("pthread_cond") || f.contains("parking_lot::")
+    }
+    fn is_channel(f: &str) -> bool {
+        f.contains("flume::")
+    }
+
+    let categories: &[(&str, fn(&str) -> bool)] = &[
+        ("WAITING", is_waiting),
+        ("IO_WAIT", is_io_wait),
+        ("NETWORK_IO", is_network_io),
+        ("MQDB", is_mqdb),
+        ("MQTT5", is_mqtt5),
+        ("ALLOCATION", is_allocation),
+        ("SYNC", is_sync),
+        ("CHANNEL", is_channel),
+    ];
+
+    println!("\n--------------------------------------------------------------------------------");
+    println!("EXCLUSIVE TIME BY CATEGORY");
+    println!("--------------------------------------------------------------------------------\n");
+
+    for (cat_name, filter) in categories {
+        let cat_total: u64 = exclusive
+            .iter()
+            .filter(|(k, _)| filter(k))
+            .map(|(_, v)| v)
+            .sum();
+        if cat_total > 0 {
+            let pct = (cat_total as f64 / total_excl as f64) * 100.0;
+            println!("{cat_name:15} {cat_total:8} samples ({pct:5.1}%)");
+        }
+    }
+
+    println!("\n--------------------------------------------------------------------------------");
+    println!("TOP MQTT5/MQDB FUNCTIONS (by inclusive time)");
+    println!("--------------------------------------------------------------------------------\n");
+
+    let mut mqtt_funcs: Vec<_> = inclusive
+        .iter()
+        .filter(|(k, v)| {
+            (k.contains("mqtt5::") || k.contains("mqdb::"))
+                && !k.to_lowercase().contains("main")
+                && **v > total_samples / 100
+        })
+        .collect();
+    mqtt_funcs.sort_by(|a, b| b.1.cmp(a.1));
+
+    for (func, count) in mqtt_funcs.iter().take(12) {
+        let pct = (**count as f64 / total_samples as f64) * 100.0;
+        let short = if func.len() > 70 { &func[..70] } else { func };
+        println!("{count:6} ({pct:5.2}%) {short}");
+    }
+
+    let waiting: u64 = exclusive
+        .iter()
+        .filter(|(k, _)| {
+            k.contains("__psynch_cvwait")
+                || k.contains("__psynch_mutexwait")
+                || k.contains("kevent")
+        })
+        .map(|(_, v)| v)
+        .sum();
+    let active = total_excl.saturating_sub(waiting);
+
+    println!("\n--------------------------------------------------------------------------------");
+    println!("SUMMARY");
+    println!("--------------------------------------------------------------------------------");
+    println!(
+        "\nActive work: {active} samples ({:.1}%)",
+        (active as f64 / total_excl as f64) * 100.0
+    );
+    println!(
+        "Waiting/idle: {waiting} samples ({:.1}%)",
+        (waiting as f64 / total_excl as f64) * 100.0
+    );
+
+    if active < total_excl / 10 {
+        println!("\n[INFO] System is mostly idle - try longer benchmark or more clients");
+    }
+
+    println!("\n================================================================================");
+
+    Ok(())
+}
+
+fn demangle_rust_symbol(name: &str) -> String {
+    let mut s = name.to_string();
+    s = s.replace("::$u7b$$u7b$closure$u7d$$u7d$", "::{{closure}}");
+    s = s.replace("$LT$", "<");
+    s = s.replace("$GT$", ">");
+    s = s.replace("$u20$", " ");
+    if let Some(pos) = s.rfind("::h")
+        && s.len() - pos == 19
+        && s[pos + 3..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        s.truncate(pos);
+    }
+    s
+}
+
+fn cmd_dev_profile(
+    scenario: &DevBenchScenario,
+    tool: &str,
+    duration: u64,
+    output: Option<PathBuf>,
+    db: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+
+    if is_agent_running() {
+        println!("Killing existing agent for profiling...");
+        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    std::fs::create_dir_all(db)?;
+
+    let timestamp = chrono_timestamp();
+    let output_path = output.unwrap_or_else(|| {
+        let dir = PathBuf::from(".claude/profiles");
+        let _ = std::fs::create_dir_all(&dir);
+        match tool {
+            "flamegraph" => dir.join(format!("profile_{timestamp}.svg")),
+            _ => dir.join(format!("profile_{timestamp}")),
+        }
+    });
+
+    println!("Profiling with {tool}...");
+    println!("Output will be saved to: {}", output_path.display());
+
+    let bench_args = build_bench_args(scenario);
+
+    match tool {
+        "samply" => profile_with_samply(&exe, db, &output_path, &bench_args)?,
+        "flamegraph" => profile_with_flamegraph(&exe, db, &output_path, &bench_args)?,
+        "sample" => profile_with_sample(&exe, db, &output_path, &bench_args, duration)?,
+        _ => {
+            return Err(format!(
+                "Unknown profiling tool: {tool}. Use 'sample', 'samply', or 'flamegraph'"
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_dev_baseline(action: DevBaselineAction) -> Result<(), Box<dyn std::error::Error>> {
+    let baselines_dir = PathBuf::from(".claude/benchmarks/baselines");
+
+    match action {
+        DevBaselineAction::Save { name, scenario } => {
+            std::fs::create_dir_all(&baselines_dir)?;
+
+            let scenario_name = match &scenario {
+                DevBenchScenario::Pubsub { .. } => "pubsub",
+                DevBenchScenario::Db { .. } => "db",
+            };
+
+            let filename = format!("{scenario_name}_{name}.json");
+            let path = baselines_dir.join(&filename);
+
+            println!("To save baseline, first run benchmark with --output:");
+            println!(
+                "  mqdb dev bench {scenario_name} --output {}",
+                path.display()
+            );
+        }
+        DevBaselineAction::List => {
+            if !baselines_dir.exists() {
+                println!("No baselines saved yet.");
+                println!("Create with: mqdb dev baseline save <name> pubsub|db");
+                return Ok(());
+            }
+
+            println!("Saved baselines:");
+            for entry in std::fs::read_dir(&baselines_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "json")
+                    && let Some(name) = path.file_stem()
+                {
+                    println!("  {}", name.to_string_lossy());
+                }
+            }
+        }
+        DevBaselineAction::Compare { name, scenario } => {
+            let scenario_name = match &scenario {
+                DevBenchScenario::Pubsub { .. } => "pubsub",
+                DevBenchScenario::Db { .. } => "db",
+            };
+
+            let filename = format!("{scenario_name}_{name}.json");
+            let path = baselines_dir.join(&filename);
+
+            if !path.exists() {
+                return Err(format!("Baseline not found: {}", path.display()).into());
+            }
+
+            println!("To compare against baseline, run benchmark with --baseline:");
+            println!(
+                "  mqdb dev bench {scenario_name} --baseline {}",
+                path.display()
+            );
+        }
     }
 
     Ok(())

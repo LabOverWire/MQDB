@@ -213,6 +213,13 @@ impl HeartbeatManager {
     }
 
     #[must_use]
+    pub fn has_alive_peers(&self) -> bool {
+        self.nodes
+            .values()
+            .any(|state| state.status == NodeStatus::Alive)
+    }
+
+    #[must_use]
     pub fn dead_nodes(&self) -> Vec<NodeId> {
         self.nodes
             .iter()
