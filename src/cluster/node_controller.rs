@@ -181,6 +181,14 @@ impl<T: ClusterTransport> NodeController<T> {
             .is_some_and(|s| s.role() == ReplicaRole::Primary)
     }
 
+    #[must_use]
+    pub fn can_serve_reads(&self, partition: PartitionId) -> bool {
+        if self.is_local_partition(partition) {
+            return true;
+        }
+        self.partition_map.replicas(partition).contains(&self.node_id)
+    }
+
     /// Pick a local partition for creating new entities (round-robin).
     ///
     /// # Panics

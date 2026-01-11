@@ -180,7 +180,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        if !controller.is_local_partition(partition) {
+        if !controller.can_serve_reads(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
@@ -388,7 +388,7 @@ impl DbRequestHandler {
             return FkValidateResponse::create(FkValidateStatus::Error, "").to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.can_serve_reads(partition) {
             return FkValidateResponse::create(FkValidateStatus::Error, request.request_id_str())
                 .to_be_bytes();
         }
@@ -480,11 +480,11 @@ impl DbRequestHandler {
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
         let partition = data_partition(entity, id);
-        let is_local = controller.is_local_partition(partition);
+        let can_serve = controller.can_serve_reads(partition);
 
-        tracing::debug!(?partition, is_local, entity, id, "handle_json_read");
+        tracing::debug!(?partition, can_serve, entity, id, "handle_json_read");
 
-        if !is_local {
+        if !can_serve {
             let forwarded = controller
                 .forward_json_db_request(
                     partition,
