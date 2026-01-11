@@ -474,6 +474,7 @@ impl ClusteredAgent {
         let mut partitions_initialized = false;
 
         let mut tick_interval = interval(Duration::from_millis(1));
+        let mut raft_tick_interval = interval(Duration::from_millis(10));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
@@ -580,14 +581,6 @@ impl ClusteredAgent {
                             let _ = raft.propose_partition_update(cmd).await;
                         }
                         partitions_initialized = true;
-                    }
-
-                    let leader_proposals = raft.tick(now).await;
-                    if !leader_proposals.is_empty() {
-                        info!(
-                            proposals = leader_proposals.len(),
-                            "new Raft leader proposed partition reassignments"
-                        );
                     }
 
                     let raft_partition_map = raft.partition_map().clone();
@@ -742,6 +735,11 @@ impl ClusteredAgent {
                         }
                         stores.subscriptions.mark_reconciliation(now);
                     }
+                }
+                _ = raft_tick_interval.tick() => {
+                    let now = current_time_ms();
+                    let mut raft = self.raft.write().await;
+                    let _ = raft.tick(now).await;
                 }
                 Some(req) = admin_rx.recv() => {
                     self.handle_admin_request(&admin_client, req).await;
