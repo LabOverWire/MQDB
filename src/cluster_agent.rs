@@ -746,6 +746,10 @@ impl ClusteredAgent {
                 Some(req) = admin_rx.recv() => {
                     self.handle_admin_request(&admin_client, req).await;
                 }
+                Some(msg) = transport.recv_async() => {
+                    let mut ctrl = self.controller.write().await;
+                    ctrl.handle_inbound_message(msg).await;
+                }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
                     break;
