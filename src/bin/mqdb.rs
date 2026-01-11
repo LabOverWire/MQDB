@@ -497,6 +497,10 @@ enum ClusterAction {
             help = "Disable store persistence (data will not survive restarts)"
         )]
         no_persist_stores: bool,
+        #[arg(long, default_value = "periodic", help = "Durability mode for stores: immediate (fsync every write), periodic (fsync periodically), none (no fsync). Raft always uses immediate.")]
+        durability: DurabilityArg,
+        #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
+        durability_ms: u64,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -617,6 +621,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quic_key,
                 no_quic,
                 no_persist_stores,
+                durability,
+                durability_ms,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -630,6 +636,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     quic_key,
                     no_quic,
                     no_persist_stores,
+                    durability,
+                    durability_ms,
                 }))
                 .await?;
             }
@@ -993,13 +1001,24 @@ struct ClusterStartArgs {
     quic_key: Option<PathBuf>,
     no_quic: bool,
     no_persist_stores: bool,
+    durability: DurabilityArg,
+    durability_ms: u64,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use mqdb::config::DurabilityMode;
+
     let peer_configs = parse_peer_configs(&args.peers)?;
+
+    let stores_durability = match args.durability {
+        DurabilityArg::Immediate => DurabilityMode::Immediate,
+        DurabilityArg::Periodic => DurabilityMode::PeriodicMs(args.durability_ms),
+        DurabilityArg::None => DurabilityMode::None,
+    };
 
     let mut config = ClusterConfig::new(args.node_id, args.db_path, peer_configs);
     config = config.with_bind_address(args.bind);
+    config = config.with_stores_durability(stores_durability);
 
     if let Some(name) = args.node_name {
         config = config.with_node_name(name);

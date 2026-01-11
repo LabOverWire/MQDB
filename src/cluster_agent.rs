@@ -48,6 +48,7 @@ pub struct ClusterConfig {
     pub bind_address: SocketAddr,
     pub db_path: PathBuf,
     pub persist_stores: bool,
+    pub stores_durability: DurabilityMode,
     pub peers: Vec<PeerConfig>,
     pub password_file: Option<PathBuf>,
     pub acl_file: Option<PathBuf>,
@@ -68,6 +69,7 @@ impl ClusterConfig {
             bind_address: "0.0.0.0:1883".parse().expect("valid default address"),
             db_path,
             persist_stores: true,
+            stores_durability: DurabilityMode::PeriodicMs(10),
             peers,
             password_file: None,
             acl_file: None,
@@ -105,6 +107,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_persist_stores(mut self, persist: bool) -> Self {
         self.persist_stores = persist;
+        self
+    }
+
+    #[must_use]
+    pub fn with_stores_durability(mut self, mode: DurabilityMode) -> Self {
+        self.stores_durability = mode;
         self
     }
 
@@ -164,7 +172,7 @@ impl ClusteredAgent {
         let stores_backend: Option<Arc<dyn StorageBackend>> = if config.persist_stores {
             let stores_path = config.db_path.join("stores");
             Some(Arc::new(
-                FjallBackend::open(&stores_path, DurabilityMode::Immediate).map_err(|e| {
+                FjallBackend::open(&stores_path, config.stores_durability).map_err(|e| {
                     format!(
                         "failed to open stores storage at {}: {e}",
                         stores_path.display()
@@ -465,7 +473,7 @@ impl ClusteredAgent {
 
         let mut partitions_initialized = false;
 
-        let mut tick_interval = interval(Duration::from_millis(100));
+        let mut tick_interval = interval(Duration::from_millis(1));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));

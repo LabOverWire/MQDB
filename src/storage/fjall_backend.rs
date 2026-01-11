@@ -83,8 +83,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn flush(&self) -> Result<()> {
-        self.db.persist(PersistMode::SyncAll)?;
-        Ok(())
+        self.sync_if_needed()
     }
 }
 
