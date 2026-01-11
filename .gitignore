@@ -8,3 +8,4 @@ pkg/
 docs/
 .idea/
 test_certs/
+.playwright-mcp/
