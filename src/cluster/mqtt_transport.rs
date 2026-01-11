@@ -17,7 +17,7 @@ use mqtt5::client::MqttClient;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Notify;
 
 const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
 const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
@@ -36,7 +36,7 @@ pub struct MqttTransport {
     forward_client: MqttClient,
     state: Arc<Mutex<MqttTransportState>>,
     message_tx: mpsc::UnboundedSender<InboundMessage>,
-    message_rx: Arc<TokioMutex<mpsc::UnboundedReceiver<InboundMessage>>>,
+    message_notify: Arc<Notify>,
 }
 
 impl std::fmt::Debug for MqttTransport {
@@ -48,6 +48,8 @@ impl std::fmt::Debug for MqttTransport {
 }
 
 impl MqttTransport {
+    /// # Panics
+    /// The spawned message receiver task panics if the state mutex is poisoned.
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
         let client_id = format!("mqdb-node-{}", node_id.get());
@@ -56,12 +58,26 @@ impl MqttTransport {
         let forward_client_id = format!("mqdb-forward-{}", node_id.get());
         let forward_client = MqttClient::new(&forward_client_id);
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
 
         let state = Arc::new(Mutex::new(MqttTransportState {
             inbox: VecDeque::new(),
             connected: false,
         }));
+
+        let notify = Arc::new(Notify::new());
+
+        let state_clone = state.clone();
+        let notify_clone = notify.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = rx.recv().await {
+                {
+                    let mut s = state_clone.lock().unwrap();
+                    s.inbox.push_back(msg);
+                }
+                notify_clone.notify_one();
+            }
+        });
 
         Self {
             node_id,
@@ -69,21 +85,12 @@ impl MqttTransport {
             forward_client,
             state,
             message_tx: tx,
-            message_rx: Arc::new(TokioMutex::new(rx)),
+            message_notify: notify,
         }
     }
 
-    /// # Panics
-    /// Panics if the state mutex is poisoned.
-    pub async fn recv_async(&self) -> Option<InboundMessage> {
-        {
-            let mut state = self.state.lock().unwrap();
-            if let Some(msg) = state.inbox.pop_front() {
-                return Some(msg);
-            }
-        }
-        let mut rx = self.message_rx.lock().await;
-        rx.recv().await
+    pub async fn wait_for_message(&self) {
+        self.message_notify.notified().await;
     }
 
     #[must_use]
@@ -653,17 +660,8 @@ impl ClusterTransport for MqttTransport {
     }
 
     fn recv(&self) -> Option<InboundMessage> {
-        {
-            let mut state = self.state.lock().unwrap();
-            if let Some(msg) = state.inbox.pop_front() {
-                return Some(msg);
-            }
-        }
-        if let Ok(mut rx) = self.message_rx.try_lock() {
-            rx.try_recv().ok()
-        } else {
-            None
-        }
+        let mut state = self.state.lock().unwrap();
+        state.inbox.pop_front()
     }
 
     fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {

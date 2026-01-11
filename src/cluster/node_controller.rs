@@ -386,10 +386,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub async fn handle_inbound_message(&mut self, msg: InboundMessage) {
-        self.handle_message(msg).await;
-    }
-
     pub fn drain_raft_messages(&mut self) -> impl Iterator<Item = RaftMessage> + '_ {
         self.raft_messages.drain(..)
     }
