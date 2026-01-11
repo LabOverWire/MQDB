@@ -22,6 +22,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pending_draining_nodes: HashSet<NodeId>,
     processed_draining_nodes: HashSet<NodeId>,
     pending_new_nodes: HashSet<NodeId>,
+    processed_new_nodes: HashSet<NodeId>,
     was_leader: bool,
     pending_partition_proposals: usize,
 }
@@ -38,6 +39,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_draining_nodes: HashSet::new(),
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
+            processed_new_nodes: HashSet::new(),
             was_leader: false,
             pending_partition_proposals: 0,
         }
@@ -63,6 +65,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_draining_nodes: HashSet::new(),
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
+            processed_new_nodes: HashSet::new(),
             was_leader: false,
             pending_partition_proposals: 0,
         };
@@ -123,11 +126,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             tracing::info!("became Raft leader, processing pending nodes");
             let mut indices = self.process_pending_dead_nodes().await;
             indices.extend(self.process_pending_draining_nodes().await);
-            indices.extend(self.process_pending_new_nodes().await);
+            if self.partitions_initialized() {
+                indices.extend(self.process_pending_new_nodes().await);
+            }
             return indices;
         }
 
-        if is_leader && self.pending_partition_proposals == 0 && !self.pending_new_nodes.is_empty()
+        if is_leader
+            && self.pending_partition_proposals == 0
+            && !self.pending_new_nodes.is_empty()
+            && self.partitions_initialized()
         {
             tracing::info!(
                 pending_nodes = self.pending_new_nodes.len(),
@@ -160,8 +168,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Vec::new();
         }
 
+        for node in &pending {
+            self.processed_new_nodes.insert(*node);
+        }
+
         tracing::info!(
-            count = pending.len(),
+            ?pending,
             "processing pending new nodes for rebalance"
         );
         self.trigger_rebalance_for_new_node().await
@@ -362,6 +374,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         &self.cluster_members
     }
 
+    pub fn set_pending_partition_proposals(&mut self, count: usize) {
+        self.pending_partition_proposals = count;
+    }
+
     /// # Errors
     /// Returns `TransportError` if the message cannot be sent.
     pub async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
@@ -389,11 +405,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
-        if self.pending_dead_nodes.remove(&node) {
-            tracing::debug!(?node, "removed node from pending dead nodes (now alive)");
-        }
-        if self.processed_dead_nodes.remove(&node) {
-            tracing::debug!(?node, "removed node from processed dead nodes (now alive)");
+        let was_dead = self.pending_dead_nodes.remove(&node)
+            || self.processed_dead_nodes.remove(&node);
+        if was_dead {
+            tracing::debug!(?node, "node came back from dead state");
+            self.processed_new_nodes.remove(&node);
         }
 
         let is_new_member = !self.cluster_members.contains(&node);
@@ -405,27 +421,36 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         let node_has_partitions = self.node_has_partitions(node);
         let partitions_initialized = self.partitions_initialized();
-        let needs_rebalance = is_new_member && !node_has_partitions && partitions_initialized;
+        let not_yet_processed = !self.processed_new_nodes.contains(&node);
+
+        if !node_has_partitions && !partitions_initialized && not_yet_processed {
+            self.pending_new_nodes.insert(node);
+            tracing::debug!(?node, "partitions not initialized yet, queuing node for later");
+            return Vec::new();
+        }
+
+        let needs_rebalance = !node_has_partitions && partitions_initialized && not_yet_processed;
 
         if !self.is_leader() {
             if needs_rebalance {
-                tracing::info!(?node, "not leader, queuing new node for later rebalance");
+                tracing::info!(?node, "not leader, queuing node for later rebalance");
                 self.pending_new_nodes.insert(node);
             }
             return Vec::new();
         }
 
         if needs_rebalance {
+            self.processed_new_nodes.insert(node);
             if self.pending_partition_proposals > 0 {
                 tracing::info!(
                     ?node,
                     pending = self.pending_partition_proposals,
-                    "new node joined but rebalance in progress, queuing for later"
+                    "node needs partitions but rebalance in progress, queuing for later"
                 );
                 self.pending_new_nodes.insert(node);
                 return Vec::new();
             }
-            tracing::info!(?node, "new node joined, triggering rebalance");
+            tracing::info!(?node, "node has no partitions, triggering rebalance");
             return self.trigger_rebalance_for_new_node().await;
         }
 
@@ -460,7 +485,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         false
     }
 
-    fn partitions_initialized(&self) -> bool {
+    pub fn partitions_initialized(&self) -> bool {
         PartitionId::all().any(|p| self.partition_map.primary(p).is_some())
     }
 

@@ -557,30 +557,58 @@ impl ClusteredAgent {
                     }
 
                     if raft.is_leader() && !partitions_initialized {
-                        info!("Raft leader initializing partition assignments");
-                        let node_count = all_nodes.len();
+                        const BATCH_SIZE: usize = 8;
 
-                        for partition in PartitionId::all() {
-                            let partition_num = partition.get() as usize;
-                            let primary_idx = partition_num % node_count;
-                            let replica_idx = (partition_num + 1) % node_count;
+                        let mut cluster_nodes: Vec<NodeId> =
+                            raft.cluster_members().to_vec();
+                        cluster_nodes.sort_by_key(|n| n.get());
 
-                            let primary = all_nodes[primary_idx];
-                            let replicas = if node_count > 1 {
-                                vec![all_nodes[replica_idx]]
-                            } else {
-                                vec![]
-                            };
-
-                            let cmd = crate::cluster::raft::RaftCommand::update_partition(
-                                partition,
-                                primary,
-                                &replicas,
-                                Epoch::new(1),
+                        let min_nodes = all_nodes.len().max(2);
+                        if cluster_nodes.len() >= min_nodes {
+                            info!(
+                                ?cluster_nodes,
+                                "Raft leader initializing partition assignments"
                             );
-                            let _ = raft.propose_partition_update(cmd).await;
+                            let node_count = cluster_nodes.len();
+                            let mut proposal_count = 0usize;
+
+                            for partition in PartitionId::all() {
+                                let partition_num = partition.get() as usize;
+                                let primary_idx = partition_num % node_count;
+                                let replica_idx = (partition_num + 1) % node_count;
+
+                                let primary = cluster_nodes[primary_idx];
+                                let replicas = if node_count > 1 {
+                                    vec![cluster_nodes[replica_idx]]
+                                } else {
+                                    vec![]
+                                };
+
+                                let cmd = crate::cluster::raft::RaftCommand::update_partition(
+                                    partition,
+                                    primary,
+                                    &replicas,
+                                    Epoch::new(1),
+                                );
+                                let _ = raft.propose_partition_update(cmd).await;
+                                proposal_count += 1;
+
+                                if proposal_count.is_multiple_of(BATCH_SIZE) {
+                                    let _ = raft.tick(current_time_ms()).await;
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                            raft.set_pending_partition_proposals(NUM_PARTITIONS as usize);
+                            partitions_initialized = true;
                         }
-                        partitions_initialized = true;
+                    }
+
+                    let leader_proposals = raft.tick(now).await;
+                    if !leader_proposals.is_empty() {
+                        info!(
+                            proposals = leader_proposals.len(),
+                            "new Raft leader proposed partition reassignments"
+                        );
                     }
 
                     let raft_partition_map = raft.partition_map().clone();
