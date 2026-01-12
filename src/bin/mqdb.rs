@@ -371,12 +371,20 @@ enum BenchAction {
         size: usize,
         #[arg(long, default_value = "0", help = "MQTT QoS level (0, 1, or 2)")]
         qos: u8,
-        #[arg(long, default_value = "bench/test", help = "Topic pattern")]
+        #[arg(long, default_value = "bench/test", help = "Topic base pattern")]
         topic: String,
+        #[arg(long, default_value = "1", help = "Number of topics to spread load across")]
+        topics: usize,
+        #[arg(long, help = "Use wildcard subscription (topic/#) instead of individual subscriptions")]
+        wildcard: bool,
         #[arg(long, default_value = "1", help = "Warmup duration in seconds")]
         warmup: u64,
         #[command(flatten)]
         conn: ConnectionArgs,
+        #[arg(long, help = "Broker for publishers (for cross-node testing)")]
+        pub_broker: Option<String>,
+        #[arg(long, help = "Broker for subscribers (for cross-node testing)")]
+        sub_broker: Option<String>,
         #[arg(long, default_value = "table", help = "Output format")]
         format: OutputFormat,
     },
@@ -408,6 +416,8 @@ enum BenchAction {
         cleanup: bool,
         #[arg(long, default_value = "0", help = "Seed records before benchmark (for get/update/delete ops)")]
         seed: u64,
+        #[arg(long, help = "Disable latency tracking for pure throughput measurement")]
+        no_latency: bool,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "table", help = "Output format")]
@@ -893,8 +903,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 size,
                 qos,
                 topic,
+                topics,
+                wildcard,
                 warmup,
                 conn,
+                pub_broker,
+                sub_broker,
                 format,
             } => {
                 Box::pin(cmd_bench_pubsub(BenchPubsubArgs {
@@ -904,8 +918,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     size,
                     qos,
                     topic,
+                    topics,
+                    wildcard,
                     warmup,
                     conn,
+                    pub_broker,
+                    sub_broker,
                     format,
                 }))
                 .await?;
@@ -920,6 +938,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 warmup,
                 cleanup,
                 seed,
+                no_latency,
                 conn,
                 format,
             } => {
@@ -933,6 +952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     warmup: warmup.unwrap_or(0),
                     cleanup,
                     seed,
+                    no_latency,
                     conn,
                     format,
                 }))
@@ -2880,8 +2900,12 @@ struct BenchPubsubArgs {
     size: usize,
     qos: u8,
     topic: String,
+    topics: usize,
+    wildcard: bool,
     warmup: u64,
     conn: ConnectionArgs,
+    pub_broker: Option<String>,
+    sub_broker: Option<String>,
     format: OutputFormat,
 }
 
@@ -2928,22 +2952,61 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 
-    wait_for_broker_ready(&args.conn, 30).await?;
+    let sub_broker = args.sub_broker.as_ref().unwrap_or(&args.conn.broker);
+    let pub_broker = args.pub_broker.as_ref().unwrap_or(&args.conn.broker);
+    let is_cross_node = sub_broker != pub_broker;
+
+    let sub_conn = ConnectionArgs {
+        broker: sub_broker.clone(),
+        user: args.conn.user.clone(),
+        pass: args.conn.pass.clone(),
+        timeout: args.conn.timeout,
+    };
+    wait_for_broker_ready(&sub_conn, 30).await?;
+
+    if is_cross_node {
+        let pub_conn = ConnectionArgs {
+            broker: pub_broker.clone(),
+            user: args.conn.user.clone(),
+            pass: args.conn.pass.clone(),
+            timeout: args.conn.timeout,
+        };
+        wait_for_broker_ready(&pub_conn, 30).await?;
+    }
 
     let metrics = Arc::new(BenchMetrics::default());
     let running = Arc::new(AtomicBool::new(true));
 
-    println!(
-        "Benchmark: {} publishers, {} subscribers, {}s duration ({}s warmup), {} byte payload, QoS {}",
-        args.publishers, args.subscribers, args.duration, args.warmup, args.size, args.qos
-    );
+    let topics_str = if args.topics > 1 {
+        let sub_mode = if args.wildcard { "wildcard" } else { "individual" };
+        format!(", {} topics ({})", args.topics, sub_mode)
+    } else {
+        String::new()
+    };
+
+    if is_cross_node {
+        println!(
+            "Benchmark (cross-node): {} publishers @ {}, {} subscribers @ {}, {}s duration ({}s warmup), {} byte payload, QoS {}{}",
+            args.publishers, pub_broker, args.subscribers, sub_broker, args.duration, args.warmup, args.size, args.qos, topics_str
+        );
+    } else {
+        println!(
+            "Benchmark: {} publishers, {} subscribers, {}s duration ({}s warmup), {} byte payload, QoS {}{}",
+            args.publishers, args.subscribers, args.duration, args.warmup, args.size, args.qos, topics_str
+        );
+    }
 
     let mut sub_handles = Vec::new();
     let mut pub_handles = Vec::new();
 
+    let use_wildcard = args.wildcard;
+    let topic_count = args.topics;
+    let topic_base = args.topic.clone();
+
     for sub_id in 0..args.subscribers {
+        let broker = sub_broker.clone();
         let conn = args.conn.clone();
-        let topic = args.topic.clone();
+        let topic_base = topic_base.clone();
         let metrics = Arc::clone(&metrics);
         let running = Arc::clone(&running);
 
@@ -2960,22 +3023,54 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                 opts
             };
 
-            if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
+            if let Err(e) = Box::pin(client.connect_with_options(&broker, opts)).await {
                 eprintln!("Subscriber {sub_id} connect failed: {e}");
                 return;
             }
 
-            let metrics_clone = Arc::clone(&metrics);
-            if let Err(e) = client
-                .subscribe(&topic, move |_| {
-                    metrics_clone
-                        .messages_received
-                        .fetch_add(1, Ordering::Relaxed);
-                })
-                .await
-            {
-                eprintln!("Subscriber {sub_id} subscribe failed: {e}");
-                return;
+            if use_wildcard && topic_count > 1 {
+                let wildcard_topic = format!("{topic_base}/#");
+                let metrics_clone = Arc::clone(&metrics);
+                if let Err(e) = client
+                    .subscribe(&wildcard_topic, move |_| {
+                        metrics_clone
+                            .messages_received
+                            .fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await
+                {
+                    eprintln!("Subscriber {sub_id} wildcard subscribe failed: {e}");
+                    return;
+                }
+            } else if topic_count > 1 {
+                for i in 0..topic_count {
+                    let topic = format!("{topic_base}/{i}");
+                    let metrics_clone = Arc::clone(&metrics);
+                    if let Err(e) = client
+                        .subscribe(&topic, move |_| {
+                            metrics_clone
+                                .messages_received
+                                .fetch_add(1, Ordering::Relaxed);
+                        })
+                        .await
+                    {
+                        eprintln!("Subscriber {sub_id} subscribe to {topic} failed: {e}");
+                        return;
+                    }
+                }
+            } else {
+                let metrics_clone = Arc::clone(&metrics);
+                if let Err(e) = client
+                    .subscribe(&topic_base, move |_| {
+                        metrics_clone
+                            .messages_received
+                            .fetch_add(1, Ordering::Relaxed);
+                    })
+                    .await
+                {
+                    eprintln!("Subscriber {sub_id} subscribe failed: {e}");
+                    return;
+                }
             }
 
             while running.load(Ordering::Relaxed) {
@@ -2994,8 +3089,9 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
     let measure_duration = Duration::from_secs(args.duration);
 
     for pub_id in 0..args.publishers {
+        let broker = pub_broker.clone();
         let conn = args.conn.clone();
-        let topic = args.topic.clone();
+        let topic_base = topic_base.clone();
         let metrics = Arc::clone(&metrics);
         let running = Arc::clone(&running);
         let payload = Arc::clone(&payload);
@@ -3013,15 +3109,22 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
                 opts
             };
 
-            if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
+            if let Err(e) = Box::pin(client.connect_with_options(&broker, opts)).await {
                 eprintln!("Publisher {pub_id} connect failed: {e}");
                 return;
             }
 
+            let mut topic_idx: usize = 0;
             while running.load(Ordering::Relaxed) {
+                let topic = if topic_count > 1 {
+                    format!("{}/{}", topic_base, topic_idx % topic_count)
+                } else {
+                    topic_base.clone()
+                };
                 if client.publish(&topic, payload.to_vec()).await.is_ok() {
                     metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 }
+                topic_idx = topic_idx.wrapping_add(1);
             }
 
             let _ = client.disconnect().await;
@@ -3123,6 +3226,7 @@ struct BenchDbArgs {
     warmup: u64,
     cleanup: bool,
     seed: u64,
+    no_latency: bool,
     conn: ConnectionArgs,
     format: OutputFormat,
 }
@@ -3228,9 +3332,14 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
     })?;
 
     let record_size_approx = args.fields * (args.field_size + 20);
+    let latency_mode = if args.no_latency {
+        " (throughput only)"
+    } else {
+        ""
+    };
     println!(
-        "DB Benchmark: {} ops, {} concurrent, op={:?}, ~{} bytes/record",
-        args.operations, args.concurrency, op, record_size_approx
+        "DB Benchmark: {} ops, {} concurrent, op={:?}, ~{} bytes/record{}",
+        args.operations, args.concurrency, op, record_size_approx, latency_mode
     );
 
     let metrics = Arc::new(DbBenchMetrics::default());
@@ -3303,6 +3412,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
         let id_counter = Arc::clone(&id_counter);
         let fields = args.fields;
         let field_size = args.field_size;
+        let no_latency = args.no_latency;
 
         let handle = tokio::spawn(async move {
             let client_name = format!("bench-db-{client_id}");
@@ -3334,7 +3444,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                     op
                 };
 
-                let op_start = Instant::now();
+                let op_start = if no_latency { None } else { Some(Instant::now()) };
                 let success = match current_op {
                     DbOp::Insert => {
                         let id = id_counter.fetch_add(1, Ordering::Relaxed);
@@ -3600,11 +3710,12 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                     DbOp::Mixed => unreachable!(),
                 };
 
-                let latency_ns = op_start.elapsed().as_nanos() as u64;
-
                 if !is_warmup {
                     if success {
-                        metrics.record_latency(latency_ns);
+                        if let Some(start) = op_start {
+                            let latency_ns = start.elapsed().as_nanos() as u64;
+                            metrics.record_latency(latency_ns);
+                        }
                         match current_op {
                             DbOp::Insert => metrics.inserts.fetch_add(1, Ordering::Relaxed),
                             DbOp::Get => metrics.gets.fetch_add(1, Ordering::Relaxed),
