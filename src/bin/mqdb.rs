@@ -3358,12 +3358,17 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
             let topic = format!("$DB/{}/create", args.entity);
             let response_topic = format!("bench-db-seeder/resp/{}", uuid::Uuid::new_v4());
 
-            let (tx, mut rx) = mpsc::channel::<bool>(1);
+            let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
             let tx_clone = tx.clone();
             client
                 .subscribe(&response_topic, move |msg| {
-                    let success = msg.payload.iter().any(|&b| b == b'"' || b == b'{');
-                    let _ = tx_clone.try_send(success);
+                    let actual_id = serde_json::from_slice::<Value>(&msg.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("id").and_then(|id| id.as_str().map(String::from))
+                                .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
+                        });
+                    let _ = tx_clone.try_send(actual_id);
                 })
                 .await?;
 
@@ -3378,15 +3383,14 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                 .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
                 .await?;
 
-            if tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            if let Some(actual_id) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
                 .await
                 .ok()
                 .flatten()
-                .unwrap_or(false)
-                && let Ok(mut ids) = inserted_ids.lock()
-            {
-                ids.push(format!("{id}"));
-            }
+                .flatten()
+                && let Ok(mut ids) = inserted_ids.lock() {
+                    ids.push(actual_id);
+                }
             let _ = client.unsubscribe(&response_topic).await;
 
             if (i + 1) % 1000 == 0 {
@@ -3453,12 +3457,17 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         let response_topic =
                             format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                        let (tx, mut rx) = mpsc::channel::<bool>(1);
+                        let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
                         let tx_clone = tx.clone();
                         if client
                             .subscribe(&response_topic, move |msg| {
-                                let success = msg.payload.iter().any(|&b| b == b'"' || b == b'{');
-                                let _ = tx_clone.try_send(success);
+                                let actual_id = serde_json::from_slice::<Value>(&msg.payload)
+                                    .ok()
+                                    .and_then(|v| {
+                                        v.get("id").and_then(|id| id.as_str().map(String::from))
+                                            .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
+                                    });
+                                let _ = tx_clone.try_send(actual_id);
                             })
                             .await
                             .is_err()
@@ -3483,17 +3492,18 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             {
                                 false
                             } else {
-                                let result =
-                                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                                        .await
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(false);
-                                if result && let Ok(mut ids) = inserted_ids.lock() {
-                                    ids.push(format!("{id}"));
-                                }
+                                let actual_id = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .flatten();
+                                let success = actual_id.is_some();
+                                if let Some(actual_id) = actual_id
+                                    && let Ok(mut ids) = inserted_ids.lock() {
+                                        ids.push(actual_id);
+                                    }
                                 let _ = client.unsubscribe(&response_topic).await;
-                                result
+                                success
                             }
                         }
                     }

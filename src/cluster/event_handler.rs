@@ -389,18 +389,26 @@ impl BrokerEventHandler for ClusterEventHandler {
                             client_partition,
                             qos,
                         );
-                        let broadcast = TopicSubscriptionBroadcast::subscribe(
-                            topic,
-                            client_id,
-                            client_partition,
-                            qos,
-                        );
-                        let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                        let _ = ctrl.transport().broadcast(msg).await;
-                        debug!(
-                            topic,
-                            client_id, "broadcast topic subscription to cluster"
-                        );
+                        let is_response_topic = topic.contains("/resp/");
+                        if !is_response_topic {
+                            let broadcast = TopicSubscriptionBroadcast::subscribe(
+                                topic,
+                                client_id,
+                                client_partition,
+                                qos,
+                            );
+                            let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                            let _ = ctrl.transport().broadcast(msg).await;
+                            debug!(
+                                topic,
+                                client_id, "broadcast topic subscription to cluster"
+                            );
+                        } else {
+                            trace!(
+                                topic,
+                                client_id, "skipping broadcast for response topic"
+                            );
+                        }
                     }
                 }
             }
@@ -497,13 +505,21 @@ impl BrokerEventHandler for ClusterEventHandler {
                     }
                 } else {
                     let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                    let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
-                    let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                    let _ = ctrl.transport().broadcast(msg).await;
-                    debug!(
-                        topic,
-                        client_id, "broadcast topic unsubscription to cluster"
-                    );
+                    let is_response_topic = topic.contains("/resp/");
+                    if !is_response_topic {
+                        let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
+                        let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                        let _ = ctrl.transport().broadcast(msg).await;
+                        debug!(
+                            topic,
+                            client_id, "broadcast topic unsubscription to cluster"
+                        );
+                    } else {
+                        trace!(
+                            topic,
+                            client_id, "skipping broadcast for response topic unsubscribe"
+                        );
+                    }
                 }
             }
         })
@@ -791,9 +807,12 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                 }
             } else {
                 let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
-                let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                let _ = ctrl.transport().broadcast(msg).await;
+                let is_response_topic = topic.contains("/resp/");
+                if !is_response_topic {
+                    let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
+                    let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                    let _ = ctrl.transport().broadcast(msg).await;
+                }
             }
 
             let result = ctrl
