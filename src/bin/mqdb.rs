@@ -2779,8 +2779,11 @@ fn cmd_dev_start_cluster(
             &db_path,
         ]);
 
-        if node_id > 1 {
-            cmd.args(["--peers", "1@127.0.0.1:1883"]);
+        let peers: Vec<String> = (1..node_id)
+            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+            .collect();
+        if !peers.is_empty() {
+            cmd.args(["--peers", &peers.join(",")]);
         }
 
         if !no_quic && quic_cert.exists() && quic_key.exists() {
