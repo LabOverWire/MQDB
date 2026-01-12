@@ -73,3 +73,6 @@ debug = 2
 lto = false
 codegen-units = 1
 split-debuginfo = "packed"
+
+[patch.crates-io]
+mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }

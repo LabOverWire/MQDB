@@ -1551,6 +1551,7 @@ impl WildcardBroadcast {
 pub struct TopicSubscriptionBroadcast {
     version: u8,
     operation: u8,
+    timestamp_ms: u64,
     topic_len: u16,
     #[FromField(topic_len)]
     topic: Vec<u8>,
@@ -1562,7 +1563,7 @@ pub struct TopicSubscriptionBroadcast {
 }
 
 impl TopicSubscriptionBroadcast {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -1572,9 +1573,13 @@ impl TopicSubscriptionBroadcast {
         client_partition: PartitionId,
         qos: u8,
     ) -> Self {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Subscribe as u8,
+            timestamp_ms,
             topic_len: topic.len() as u16,
             topic: topic.as_bytes().to_vec(),
             client_id_len: client_id.len() as u8,
@@ -1587,9 +1592,13 @@ impl TopicSubscriptionBroadcast {
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn unsubscribe(topic: &str, client_id: &str) -> Self {
+        let timestamp_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Unsubscribe as u8,
+            timestamp_ms,
             topic_len: topic.len() as u16,
             topic: topic.as_bytes().to_vec(),
             client_id_len: client_id.len() as u8,

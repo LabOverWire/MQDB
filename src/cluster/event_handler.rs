@@ -43,6 +43,14 @@ impl ClusterEventHandler {
     pub fn synced_retained_topics(&self) -> Arc<RwLock<HashSet<String>>> {
         Arc::clone(&self.synced_retained_topics)
     }
+
+    async fn broadcast_topic_subscription(
+        ctrl: &NodeController<MqttTransport>,
+        broadcast: TopicSubscriptionBroadcast,
+    ) {
+        let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+        let _ = ctrl.transport().broadcast(msg).await;
+    }
 }
 
 impl BrokerEventHandler for ClusterEventHandler {
@@ -405,8 +413,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 client_partition,
                                 qos,
                             );
-                            let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                            let _ = ctrl.transport().broadcast(msg).await;
+                            Self::broadcast_topic_subscription(&ctrl, broadcast).await;
                             debug!(
                                 topic,
                                 client_id, "broadcast topic subscription to cluster"
@@ -517,8 +524,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                         );
                     } else {
                         let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
-                        let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                        let _ = ctrl.transport().broadcast(msg).await;
+                        Self::broadcast_topic_subscription(&ctrl, broadcast).await;
                         debug!(
                             topic,
                             client_id, "broadcast topic unsubscription to cluster"
@@ -815,8 +821,7 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                     topic.starts_with("resp/") || topic.contains("/resp/");
                 if !is_response_topic {
                     let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
-                    let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
-                    let _ = ctrl.transport().broadcast(msg).await;
+                    ClusterEventHandler::broadcast_topic_subscription(ctrl, broadcast).await;
                 }
             }
 
