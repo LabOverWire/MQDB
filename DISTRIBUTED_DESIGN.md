@@ -675,6 +675,7 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | 54 | `JsonDbRequest` | JSON database operation request |
 | 55 | `JsonDbResponse` | JSON database operation response |
 | 60 | `WildcardBroadcast` | Wildcard subscription broadcast |
+| 61 | `TopicSubscriptionBroadcast` | Individual topic subscription broadcast |
 | 70 | `PartitionUpdate` | Partition assignment change |
 | 80 | `UniqueReserveRequest` | Reserve unique constraint value |
 | 81 | `UniqueReserveResponse` | Unique reservation response |
@@ -1558,6 +1559,36 @@ On wildcard subscribe (`src/cluster/event_handler.rs:299-323`):
 2. Create `WildcardBroadcast::subscribe(...)` message
 3. `transport.broadcast(msg)` to ALL nodes
 4. Each node applies to local trie
+
+### 14.6 TopicSubscriptionBroadcast Message
+
+Message type code: **61**
+
+`src/cluster/protocol.rs`:
+
+```rust
+pub struct TopicSubscriptionBroadcast {
+    version: u8,
+    operation: u8,        // 0=Subscribe, 1=Unsubscribe
+    topic_len: u16,
+    topic: Vec<u8>,
+    client_id_len: u8,
+    client_id: Vec<u8>,
+    client_partition: u16,
+    qos: u8,
+}
+```
+
+### 14.7 Topic Subscription Broadcast Flow
+
+On individual topic subscribe (`src/cluster/event_handler.rs`):
+
+1. Store locally in TopicIndex via `topics.subscribe()`
+2. Create `TopicSubscriptionBroadcast::subscribe(...)` message
+3. `transport.broadcast(msg)` to ALL nodes
+4. Each node applies to local TopicIndex
+
+This mirrors the wildcard subscription flow. Individual topic subscriptions must be broadcast to all nodes for cross-node pub/sub routing to work.
 
 ---
 
