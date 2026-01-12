@@ -7,7 +7,7 @@ use crate::cluster::session::session_partition;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
     ForwardTarget, ForwardedPublish, LwtPublisher, MqttTransport, NodeController, NodeId,
-    PublishRouter, SubscriptionType, WildcardBroadcast,
+    PublishRouter, SubscriptionType, TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use bebytes::BeBytes;
 use mqtt5::QoS;
@@ -383,15 +383,24 @@ impl BrokerEventHandler for ClusterEventHandler {
                             ?client_partition,
                             "adding topic subscription"
                         );
-                        let (_entry, writes) = ctrl.stores_mut().subscribe_topic_replicated(
+                        let _ = ctrl.stores_mut().topics.subscribe(
                             topic,
                             client_id,
                             client_partition,
                             qos,
                         );
-                        if let Some(write) = writes.into_iter().next() {
-                            ctrl.write_or_forward(write).await;
-                        }
+                        let broadcast = TopicSubscriptionBroadcast::subscribe(
+                            topic,
+                            client_id,
+                            client_partition,
+                            qos,
+                        );
+                        let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                        let _ = ctrl.transport().broadcast(msg).await;
+                        debug!(
+                            topic,
+                            client_id, "broadcast topic subscription to cluster"
+                        );
                     }
                 }
             }
@@ -487,14 +496,14 @@ impl BrokerEventHandler for ClusterEventHandler {
                         );
                     }
                 } else {
-                    let result = ctrl
-                        .stores_mut()
-                        .unsubscribe_topic_replicated(topic, client_id);
-                    if let Ok((_entry, writes)) = result
-                        && let Some(write) = writes.into_iter().next()
-                    {
-                        ctrl.write_or_forward(write).await;
-                    }
+                    let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
+                    let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
+                    let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                    let _ = ctrl.transport().broadcast(msg).await;
+                    debug!(
+                        topic,
+                        client_id, "broadcast topic unsubscription to cluster"
+                    );
                 }
             }
         })
@@ -781,14 +790,10 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                     let _ = ctrl.transport().broadcast(msg).await;
                 }
             } else {
-                let result = ctrl
-                    .stores_mut()
-                    .unsubscribe_topic_replicated(topic, client_id);
-                if let Ok((_entry, writes)) = result
-                    && let Some(write) = writes.into_iter().next()
-                {
-                    ctrl.write_or_forward(write).await;
-                }
+                let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
+                let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
+                let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                let _ = ctrl.transport().broadcast(msg).await;
             }
 
             let result = ctrl

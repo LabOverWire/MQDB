@@ -6,9 +6,9 @@ use mqdb::cluster::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
     ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, JsonDbRequest,
     JsonDbResponse, NodeId, PartitionId, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest, TransportError,
-    UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest, UniqueReleaseResponse,
-    UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest, TopicSubscriptionBroadcast,
+    TransportError, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -119,6 +119,9 @@ impl SimulatedTransport {
                 buf.extend_from_slice(&response.to_bytes());
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
+            ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
             }
             ClusterMessage::PartitionUpdate(update) => {
@@ -260,6 +263,10 @@ impl SimulatedTransport {
             60 => {
                 let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::WildcardBroadcast(broadcast))
+            }
+            61 => {
+                let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::TopicSubscriptionBroadcast(broadcast))
             }
             70 => {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(payload).ok()?;

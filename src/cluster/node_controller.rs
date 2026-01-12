@@ -520,6 +520,9 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::WildcardBroadcast(ref broadcast) => {
                 self.handle_wildcard_broadcast(msg.from, broadcast);
             }
+            ClusterMessage::TopicSubscriptionBroadcast(ref broadcast) => {
+                self.handle_topic_subscription_broadcast(msg.from, broadcast);
+            }
             ClusterMessage::PartitionUpdate(ref update) => {
                 if let (Some(partition), Some(primary)) = (
                     PartitionId::new(u16::from(update.partition)),
@@ -629,6 +632,58 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             None => {
                 tracing::warn!("unknown wildcard broadcast operation");
+            }
+        }
+    }
+
+    fn handle_topic_subscription_broadcast(
+        &mut self,
+        from: NodeId,
+        broadcast: &super::protocol::TopicSubscriptionBroadcast,
+    ) {
+        let topic = broadcast.topic_str();
+        let client_id = broadcast.client_id_str();
+
+        match broadcast.operation() {
+            Some(super::protocol::WildcardOp::Subscribe) => {
+                if let Some(client_partition) = broadcast.client_partition() {
+                    let result = self.stores.topics.subscribe(
+                        topic,
+                        client_id,
+                        client_partition,
+                        broadcast.qos(),
+                    );
+                    match result {
+                        Ok(()) => {
+                            tracing::debug!(
+                                topic,
+                                client_id,
+                                from = from.get(),
+                                "applied topic subscription from broadcast"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic,
+                                client_id,
+                                ?e,
+                                "failed to apply topic subscription from broadcast"
+                            );
+                        }
+                    }
+                }
+            }
+            Some(super::protocol::WildcardOp::Unsubscribe) => {
+                let _ = self.stores.topics.unsubscribe(topic, client_id);
+                tracing::debug!(
+                    topic,
+                    client_id,
+                    from = from.get(),
+                    "applied topic unsubscription from broadcast"
+                );
+            }
+            None => {
+                tracing::warn!("unknown topic subscription broadcast operation");
             }
         }
     }

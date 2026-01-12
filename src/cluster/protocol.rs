@@ -1547,6 +1547,84 @@ impl WildcardBroadcast {
     }
 }
 
+#[derive(Debug, Clone, BeBytes)]
+pub struct TopicSubscriptionBroadcast {
+    version: u8,
+    operation: u8,
+    topic_len: u16,
+    #[FromField(topic_len)]
+    topic: Vec<u8>,
+    client_id_len: u8,
+    #[FromField(client_id_len)]
+    client_id: Vec<u8>,
+    client_partition: u16,
+    qos: u8,
+}
+
+impl TopicSubscriptionBroadcast {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn subscribe(
+        topic: &str,
+        client_id: &str,
+        client_partition: PartitionId,
+        qos: u8,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            operation: WildcardOp::Subscribe as u8,
+            topic_len: topic.len() as u16,
+            topic: topic.as_bytes().to_vec(),
+            client_id_len: client_id.len() as u8,
+            client_id: client_id.as_bytes().to_vec(),
+            client_partition: client_partition.get(),
+            qos,
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn unsubscribe(topic: &str, client_id: &str) -> Self {
+        Self {
+            version: Self::VERSION,
+            operation: WildcardOp::Unsubscribe as u8,
+            topic_len: topic.len() as u16,
+            topic: topic.as_bytes().to_vec(),
+            client_id_len: client_id.len() as u8,
+            client_id: client_id.as_bytes().to_vec(),
+            client_partition: 0,
+            qos: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<WildcardOp> {
+        WildcardOp::from_u8(self.operation)
+    }
+
+    #[must_use]
+    pub fn topic_str(&self) -> &str {
+        std::str::from_utf8(&self.topic).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn client_id_str(&self) -> &str {
+        std::str::from_utf8(&self.client_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn client_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.client_partition)
+    }
+
+    #[must_use]
+    pub fn qos(&self) -> u8 {
+        self.qos
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UniqueReserveStatus {

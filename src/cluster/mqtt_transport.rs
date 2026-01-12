@@ -1,8 +1,9 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
     Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -345,6 +346,10 @@ impl MqttTransport {
                 let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
                 ClusterMessage::WildcardBroadcast(broadcast)
             }
+            61 => {
+                let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(data).ok()?;
+                ClusterMessage::TopicSubscriptionBroadcast(broadcast)
+            }
             70 => {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
                 ClusterMessage::PartitionUpdate(update)
@@ -470,6 +475,9 @@ impl MqttTransport {
                 buf.extend_from_slice(&response.to_bytes());
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
+            ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
             }
             ClusterMessage::PartitionUpdate(update) => {
@@ -760,6 +768,9 @@ mod tests {
                 buf.extend_from_slice(&response.to_bytes());
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
+                buf.extend_from_slice(&broadcast.to_be_bytes());
+            }
+            ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 buf.extend_from_slice(&broadcast.to_be_bytes());
             }
             ClusterMessage::PartitionUpdate(update) => {

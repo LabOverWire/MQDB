@@ -2,7 +2,7 @@ use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
     ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, ForwardTarget, ForwardedPublish,
     LwtPublisher, MqttTransport, NUM_PARTITIONS, NodeController, NodeId, PartitionId,
-    PublishRouter, RaftMessage, TransportConfig, WildcardBroadcast,
+    PublishRouter, RaftMessage, TopicSubscriptionBroadcast, TransportConfig, WildcardBroadcast,
 };
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
@@ -1260,14 +1260,10 @@ async fn clear_expired_session_subscriptions(
                     let _ = ctrl.transport().broadcast(msg).await;
                 }
             } else {
-                let result = ctrl
-                    .stores_mut()
-                    .unsubscribe_topic_replicated(topic, client_id);
-                if let Ok((_entry, writes)) = result
-                    && let Some(write) = writes.into_iter().next()
-                {
-                    ctrl.write_or_forward(write).await;
-                }
+                let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
+                let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
+                let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
+                let _ = ctrl.transport().broadcast(msg).await;
             }
 
             let result = ctrl

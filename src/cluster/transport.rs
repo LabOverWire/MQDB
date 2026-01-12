@@ -1,8 +1,9 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
     Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -42,6 +43,7 @@ pub enum ClusterMessage {
     BatchReadRequest(BatchReadRequest),
     BatchReadResponse(BatchReadResponse),
     WildcardBroadcast(WildcardBroadcast),
+    TopicSubscriptionBroadcast(TopicSubscriptionBroadcast),
     PartitionUpdate(PartitionUpdate),
     JsonDbRequest {
         partition: PartitionId,
@@ -81,6 +83,7 @@ impl ClusterMessage {
             Self::BatchReadRequest(_) => 52,
             Self::BatchReadResponse(_) => 53,
             Self::WildcardBroadcast(_) => 60,
+            Self::TopicSubscriptionBroadcast(_) => 61,
             Self::PartitionUpdate(_) => 70,
             Self::JsonDbRequest { .. } => 54,
             Self::JsonDbResponse(_) => 55,
@@ -117,6 +120,7 @@ impl ClusterMessage {
             Self::BatchReadRequest(_) => "BatchReadRequest",
             Self::BatchReadResponse(_) => "BatchReadResponse",
             Self::WildcardBroadcast(_) => "WildcardBroadcast",
+            Self::TopicSubscriptionBroadcast(_) => "TopicSubscriptionBroadcast",
             Self::PartitionUpdate(_) => "PartitionUpdate",
             Self::JsonDbRequest { .. } => "JsonDbRequest",
             Self::JsonDbResponse(_) => "JsonDbResponse",
