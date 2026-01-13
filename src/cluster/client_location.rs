@@ -7,6 +7,7 @@ use std::sync::RwLock;
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct ClientLocationEntry {
     pub version: u8,
+    pub timestamp_ms: u64,
     pub client_id_len: u16,
     #[FromField(client_id_len)]
     pub client_id: Vec<u8>,
@@ -17,9 +18,15 @@ impl ClientLocationEntry {
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(client_id: &str, connected_node: NodeId) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let client_bytes = client_id.as_bytes().to_vec();
         Self {
-            version: 1,
+            version: 2,
+            timestamp_ms,
             client_id_len: client_bytes.len() as u16,
             client_id: client_bytes,
             connected_node: connected_node.get(),
