@@ -66,6 +66,7 @@ pub fn compute_incremental_assignments(
 
     let mut reassignments = redistribute_primaries(current, all_nodes, rf);
     add_missing_replicas(current, all_nodes, rf, &mut reassignments);
+    redistribute_replicas(current, all_nodes, rf, &mut reassignments);
 
     reassignments
 }
@@ -78,19 +79,20 @@ fn redistribute_primaries(
     let node_count = all_nodes.len();
     let ideal_per_node = NUM_PARTITIONS as usize / node_count;
     let remainder = NUM_PARTITIONS as usize % node_count;
+    let underweight_threshold = ideal_per_node / 2;
 
     let mut primary_counts: Vec<(NodeId, usize)> = all_nodes
         .iter()
         .map(|n| (*n, current.primary_count(*n)))
         .collect();
 
-    let nodes_with_zero: Vec<NodeId> = primary_counts
+    let underweight_nodes: Vec<NodeId> = primary_counts
         .iter()
-        .filter(|(_, count)| *count == 0)
+        .filter(|(_, count)| *count <= underweight_threshold)
         .map(|(n, _)| *n)
         .collect();
 
-    if nodes_with_zero.is_empty() {
+    if underweight_nodes.is_empty() {
         return Vec::new();
     }
 
@@ -101,12 +103,12 @@ fn redistribute_primaries(
         .copied()
         .collect();
 
-    let partitions_to_move = nodes_with_zero.len() * ideal_per_node;
+    let partitions_to_move = underweight_nodes.len() * ideal_per_node;
     let mut moved = 0;
     let mut target_idx = 0;
 
     for (overloaded_node, count) in &overloaded {
-        if moved >= partitions_to_move || target_idx >= nodes_with_zero.len() {
+        if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
             break;
         }
 
@@ -114,7 +116,7 @@ fn redistribute_primaries(
         let mut moved_from_node = 0;
 
         for partition in PartitionId::all() {
-            if moved >= partitions_to_move || target_idx >= nodes_with_zero.len() {
+            if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
                 break;
             }
             if moved_from_node >= excess {
@@ -126,7 +128,7 @@ fn redistribute_primaries(
                 continue;
             }
 
-            let target_node = nodes_with_zero[target_idx];
+            let target_node = underweight_nodes[target_idx];
             let new_epoch = Epoch::new(assignment.epoch.get() + 1);
 
             let mut new_replicas: Vec<NodeId> = assignment
@@ -213,6 +215,113 @@ fn add_missing_replicas(
                 new_replicas,
                 new_epoch: Epoch::new(assignment.epoch.get() + 1),
             });
+        }
+    }
+}
+
+fn redistribute_replicas(
+    current: &PartitionMap,
+    all_nodes: &[NodeId],
+    rf: usize,
+    reassignments: &mut Vec<PartitionReassignment>,
+) {
+    let node_count = all_nodes.len();
+    if node_count < 2 || rf < 2 {
+        return;
+    }
+
+    let reassigned: std::collections::HashSet<u16> =
+        reassignments.iter().map(|r| r.partition.get()).collect();
+
+    let ideal_per_node = NUM_PARTITIONS as usize / node_count;
+    let underweight_threshold = ideal_per_node / 2;
+
+    let mut replica_counts: Vec<(NodeId, usize)> = all_nodes
+        .iter()
+        .map(|n| (*n, current.replica_count(*n)))
+        .collect();
+
+    let underweight_nodes: Vec<NodeId> = replica_counts
+        .iter()
+        .filter(|(_, count)| *count <= underweight_threshold)
+        .map(|(n, _)| *n)
+        .collect();
+
+    if underweight_nodes.is_empty() {
+        return;
+    }
+
+    let overloaded: Vec<(NodeId, usize)> = replica_counts
+        .iter()
+        .filter(|(_, count)| *count > ideal_per_node)
+        .copied()
+        .collect();
+
+    let partitions_to_move = underweight_nodes.len() * ideal_per_node;
+    let mut moved = 0;
+    let mut target_idx = 0;
+
+    for (overloaded_node, count) in &overloaded {
+        if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
+            break;
+        }
+
+        let excess = count.saturating_sub(ideal_per_node);
+        let mut moved_from_node = 0;
+
+        for partition in PartitionId::all() {
+            if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
+                break;
+            }
+            if moved_from_node >= excess {
+                break;
+            }
+            if reassigned.contains(&partition.get()) {
+                continue;
+            }
+
+            let assignment = current.get(partition);
+            let Some(primary) = assignment.primary else {
+                continue;
+            };
+
+            if !assignment.replicas.contains(overloaded_node) {
+                continue;
+            }
+
+            let target_node = underweight_nodes[target_idx];
+            if target_node == primary {
+                continue;
+            }
+
+            let new_replicas: Vec<NodeId> = assignment
+                .replicas
+                .iter()
+                .map(|r| if *r == *overloaded_node { target_node } else { *r })
+                .collect();
+
+            let new_epoch = Epoch::new(assignment.epoch.get() + 1);
+
+            reassignments.push(PartitionReassignment {
+                partition,
+                old_primary: Some(primary),
+                new_primary: primary,
+                old_replicas: assignment.replicas.clone(),
+                new_replicas,
+                new_epoch,
+            });
+
+            moved += 1;
+            moved_from_node += 1;
+
+            for (node, c) in &mut replica_counts {
+                if *node == target_node {
+                    *c += 1;
+                    if *c >= ideal_per_node {
+                        target_idx += 1;
+                    }
+                }
+            }
         }
     }
 }
@@ -473,5 +582,39 @@ mod tests {
                 r.partition.get()
             );
         }
+    }
+
+    #[test]
+    fn redistribute_replicas_to_new_node() {
+        let initial_nodes = vec![node(1), node(2)];
+        let config = RebalanceConfig::default();
+        let map = compute_balanced_assignments(&initial_nodes, &config, Epoch::ZERO);
+
+        assert_eq!(map.primary_count(node(1)), 32);
+        assert_eq!(map.primary_count(node(2)), 32);
+        assert_eq!(map.replica_count(node(1)), 32);
+        assert_eq!(map.replica_count(node(2)), 32);
+        assert_eq!(map.replica_count(node(3)), 0);
+
+        let all_nodes = vec![node(1), node(2), node(3)];
+        let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
+
+        let mut node3_primaries = 0;
+        let mut node3_replicas = 0;
+        let mut temp_map = map.clone();
+        for r in &reassignments {
+            temp_map.set(r.partition, r.to_assignment());
+        }
+        for p in PartitionId::all() {
+            if temp_map.primary(p) == Some(node(3)) {
+                node3_primaries += 1;
+            }
+            if temp_map.replicas(p).contains(&node(3)) {
+                node3_replicas += 1;
+            }
+        }
+
+        assert!(node3_primaries >= 20, "expected ~21 primaries, got {node3_primaries}");
+        assert!(node3_replicas >= 20, "expected ~21 replicas, got {node3_replicas}");
     }
 }
