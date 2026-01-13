@@ -1464,6 +1464,7 @@ impl WildcardOp {
 pub struct WildcardBroadcast {
     version: u8,
     operation: u8,
+    timestamp_ms: u64,
     pattern_len: u16,
     #[FromField(pattern_len)]
     pattern: Vec<u8>,
@@ -1476,7 +1477,7 @@ pub struct WildcardBroadcast {
 }
 
 impl WildcardBroadcast {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -1487,9 +1488,15 @@ impl WildcardBroadcast {
         qos: u8,
         subscription_type: u8,
     ) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Subscribe as u8,
+            timestamp_ms,
             pattern_len: pattern.len() as u16,
             pattern: pattern.as_bytes().to_vec(),
             client_id_len: client_id.len() as u8,
@@ -1503,9 +1510,15 @@ impl WildcardBroadcast {
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn unsubscribe(pattern: &str, client_id: &str) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Unsubscribe as u8,
+            timestamp_ms,
             pattern_len: pattern.len() as u16,
             pattern: pattern.as_bytes().to_vec(),
             client_id_len: client_id.len() as u8,
