@@ -1,9 +1,29 @@
 mod simulation;
 
+use mqdb::cluster::raft::RaftConfig;
 use mqdb::cluster::{
     Epoch, NodeController, NodeId, Operation, PartitionAssignment, PartitionId, PartitionMap,
     PartitionRole, ReplicationWrite, TransportConfig,
 };
+use simulation::transport::SimulatedTransport;
+
+fn test_raft_config() -> RaftConfig {
+    RaftConfig {
+        election_timeout_min_ms: 150,
+        election_timeout_max_ms: 300,
+        heartbeat_interval_ms: 50,
+    }
+}
+
+fn create_test_controller(
+    node_id: NodeId,
+    transport: SimulatedTransport,
+    config: TransportConfig,
+) -> NodeController<SimulatedTransport> {
+    let (tx_raft_messages, _rx_raft_messages) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_raft_events, _rx_raft_events) = tokio::sync::mpsc::unbounded_channel();
+    NodeController::new(node_id, transport, config, tx_raft_messages, tx_raft_events)
+}
 
 #[tokio::test]
 async fn partition_assignment_determinism() {
@@ -158,8 +178,8 @@ async fn two_node_replication() {
     t2.register_peer(node1_id);
 
     let config = TransportConfig::default();
-    let mut ctrl1 = NodeController::new(node1_id, t1, config);
-    let mut ctrl2 = NodeController::new(node2_id, t2, config);
+    let mut ctrl1 = create_test_controller(node1_id, t1, config);
+    let mut ctrl2 = create_test_controller(node2_id, t2, config);
 
     let partition = PartitionId::new(0).unwrap();
 
@@ -214,8 +234,8 @@ async fn heartbeat_detection() {
         ack_timeout_ms: 50,
     };
 
-    let mut ctrl1 = NodeController::new(node1_id, t1, config);
-    let mut ctrl2 = NodeController::new(node2_id, t2, config);
+    let mut ctrl1 = create_test_controller(node1_id, t1, config);
+    let mut ctrl2 = create_test_controller(node2_id, t2, config);
 
     ctrl1.register_peer(node2_id);
     ctrl2.register_peer(node1_id);
@@ -245,17 +265,17 @@ async fn heartbeat_detection() {
 
 #[tokio::test]
 async fn raft_leader_election_three_nodes() {
-    use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
+    use mqdb::cluster::raft::{RaftNode, RaftOutput, RaftRole};
 
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
 
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut n1 = RaftNode::create(node1, config);
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut n2 = RaftNode::create(node2, config);
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut n3 = RaftNode::create(node3, config);
 
     n1.add_peer(node2);
@@ -300,15 +320,15 @@ async fn raft_leader_election_three_nodes() {
 
 #[tokio::test]
 async fn raft_step_down_on_higher_term() {
-    use mqdb::cluster::raft::{AppendEntriesRequest, RaftConfig, RaftNode, RaftOutput, RaftRole};
+    use mqdb::cluster::raft::{AppendEntriesRequest, RaftNode, RaftOutput, RaftRole};
 
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
 
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut n1 = RaftNode::create(node1, config);
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut n2 = RaftNode::create(node2, config);
 
     n1.add_peer(node2);
@@ -335,16 +355,16 @@ async fn raft_step_down_on_higher_term() {
 
 #[tokio::test]
 async fn raft_partition_map_updates() {
-    use mqdb::cluster::raft::{RaftCommand, RaftConfig, RaftNode, RaftOutput, RaftRole};
+    use mqdb::cluster::raft::{RaftCommand, RaftNode, RaftOutput, RaftRole};
     use mqdb::cluster::{PartitionAssignment, PartitionMap};
 
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
 
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut leader = RaftNode::create(node1, config);
-    let config = RaftConfig::default();
+    let config = test_raft_config();
     let mut follower = RaftNode::create(node2, config);
 
     leader.add_peer(node2);

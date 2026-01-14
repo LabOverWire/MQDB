@@ -273,6 +273,12 @@ enum DevAction {
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
+        #[arg(
+            long,
+            value_name = "TYPE",
+            help = "Topology: partial (default), circular, or full"
+        )]
+        topology: Option<String>,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {
@@ -511,6 +517,8 @@ enum ClusterAction {
         durability: DurabilityArg,
         #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
         durability_ms: u64,
+        #[arg(long, help = "Use outgoing-only bridge direction (for full mesh topology)")]
+        bridge_out: bool,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -633,6 +641,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 no_persist_stores,
                 durability,
                 durability_ms,
+                bridge_out,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -648,6 +657,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     no_persist_stores,
                     durability,
                     durability_ms,
+                    bridge_out,
                 }))
                 .await?;
             }
@@ -871,8 +881,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quic_key,
                 no_quic,
                 db_prefix,
+                topology,
             } => {
-                cmd_dev_start_cluster(nodes, clean, &quic_cert, &quic_key, no_quic, &db_prefix)?;
+                cmd_dev_start_cluster(
+                    nodes,
+                    clean,
+                    &quic_cert,
+                    &quic_key,
+                    no_quic,
+                    &db_prefix,
+                    topology.as_deref(),
+                )?;
             }
             DevAction::Bench {
                 scenario,
@@ -1023,6 +1042,7 @@ struct ClusterStartArgs {
     no_persist_stores: bool,
     durability: DurabilityArg,
     durability_ms: u64,
+    bridge_out: bool,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1057,6 +1077,9 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     }
     if args.no_persist_stores {
         config = config.with_persist_stores(false);
+    }
+    if args.bridge_out {
+        config = config.with_bridge_out_only(true);
     }
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
@@ -2755,6 +2778,7 @@ fn cmd_dev_start_cluster(
     quic_key: &std::path::Path,
     no_quic: bool,
     db_prefix: &str,
+    topology: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -2762,6 +2786,9 @@ fn cmd_dev_start_cluster(
     }
 
     let exe = std::env::current_exe()?;
+
+    let topology_name = topology.unwrap_or("partial");
+    println!("Using {topology_name} mesh topology");
 
     for node_id in 1..=nodes {
         let port = 1882 + u16::from(node_id);
@@ -2779,11 +2806,32 @@ fn cmd_dev_start_cluster(
             &db_path,
         ]);
 
-        let peers: Vec<String> = (1..node_id)
-            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-            .collect();
+        let peers: Vec<String> = match topology_name {
+            "full" => (1..=nodes)
+                .filter(|&n| n != node_id)
+                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+                .collect(),
+            "circular" => {
+                let next_node = if node_id == nodes { 1 } else { node_id + 1 };
+                vec![format!(
+                    "{}@127.0.0.1:{}",
+                    next_node,
+                    1882 + u16::from(next_node)
+                )]
+            }
+            "upper" => ((node_id + 1)..=nodes)
+                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+                .collect(),
+            _ => (1..node_id)
+                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+                .collect(),
+        };
         if !peers.is_empty() {
             cmd.args(["--peers", &peers.join(",")]);
+        }
+
+        if topology_name == "full" {
+            cmd.arg("--bridge-out");
         }
 
         if !no_quic && quic_cert.exists() && quic_key.exists() {

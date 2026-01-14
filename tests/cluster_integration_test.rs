@@ -3,12 +3,21 @@ mod simulation;
 use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 use mqdb::cluster::{
     ClusterTransport, Epoch, NodeController, NodeId, NodeStatus, Operation, PartitionAssignment,
-    PartitionId, PartitionMap, PublishRouter, Qos2Store, ReplicationWrite, RetainedStore,
-    SessionStore, SubscriptionCache, TopicIndex, TransportConfig, WildcardStore, session_partition,
-    topic_partition,
+    PartitionId, PartitionMap, PublishRouter, Qos2Store, RaftEvent, RaftMessage, ReplicationWrite,
+    RetainedStore, SessionStore, SubscriptionCache, TopicIndex, TransportConfig, WildcardStore,
+    session_partition, topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
+use tokio::sync::mpsc;
+
+fn test_raft_config() -> RaftConfig {
+    RaftConfig {
+        election_timeout_min_ms: 150,
+        election_timeout_max_ms: 300,
+        heartbeat_interval_ms: 50,
+    }
+}
 
 struct TestNode {
     id: NodeId,
@@ -20,6 +29,9 @@ struct TestNode {
     retained: RetainedStore,
     subscriptions: SubscriptionCache,
     qos2: Qos2Store,
+    rx_raft_events: mpsc::UnboundedReceiver<RaftEvent>,
+    #[allow(dead_code)]
+    rx_raft_messages: mpsc::UnboundedReceiver<RaftMessage>,
 }
 
 struct TestCluster {
@@ -56,7 +68,10 @@ impl TestCluster {
                 heartbeat_timeout_ms: 500,
                 ack_timeout_ms: 50,
             };
-            let mut controller = NodeController::new(node_id, transport.clone(), config);
+            let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
+            let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+            let mut controller =
+                NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
 
             for &peer_id in &node_ids {
                 if peer_id != node_id {
@@ -64,7 +79,7 @@ impl TestCluster {
                 }
             }
 
-            let raft_config = RaftConfig::default();
+            let raft_config = test_raft_config();
             let mut raft = RaftNode::create(node_id, raft_config);
 
             for &peer_id in &node_ids {
@@ -83,6 +98,8 @@ impl TestCluster {
                 retained: RetainedStore::new(node_id),
                 subscriptions: SubscriptionCache::new(node_id),
                 qos2: Qos2Store::new(node_id),
+                rx_raft_events,
+                rx_raft_messages,
             });
         }
 
@@ -203,13 +220,16 @@ impl TestCluster {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         };
-        let mut controller = NodeController::new(node_id, transport.clone(), config);
+        let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
+        let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+        let mut controller =
+            NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
 
         for &peer_id in &peer_ids {
             controller.register_peer(peer_id);
         }
 
-        let raft_config = RaftConfig::default();
+        let raft_config = test_raft_config();
         let mut raft = RaftNode::create(node_id, raft_config);
 
         for &peer_id in &peer_ids {
@@ -217,6 +237,8 @@ impl TestCluster {
         }
 
         let node_count = self.nodes.len();
+        let new_rx_events = rx_raft_events;
+        let new_rx_messages = rx_raft_messages;
         let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
         let mut partition_map = PartitionMap::new();
         for i in 0..64 {
@@ -245,6 +267,8 @@ impl TestCluster {
             retained: RetainedStore::new(node_id),
             subscriptions: SubscriptionCache::new(node_id),
             qos2: Qos2Store::new(node_id),
+            rx_raft_events: new_rx_events,
+            rx_raft_messages: new_rx_messages,
         };
     }
 }
@@ -2396,10 +2420,16 @@ async fn drain_notification_triggers_partition_reassignment() {
         node.controller.process_messages().await;
     }
 
-    let draining_nodes: Vec<_> = cluster.nodes[0].controller.drain_draining_nodes().collect();
+    let mut found_drain = false;
+    while let Ok(event) = cluster.nodes[0].rx_raft_events.try_recv() {
+        if matches!(event, RaftEvent::DrainNotification(n) if n == draining_node_id) {
+            found_drain = true;
+            break;
+        }
+    }
 
     assert!(
-        draining_nodes.contains(&draining_node_id),
+        found_drain,
         "Node 1 should have received drain notification for node 3"
     );
 }
@@ -2416,7 +2446,7 @@ async fn raft_state_persisted_and_recovered() {
 
     {
         let mut node =
-            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
+            RaftNode::create_with_storage(node_id, test_raft_config(), backend.clone()).unwrap();
 
         node.add_peer(peer_id);
 
@@ -2432,7 +2462,7 @@ async fn raft_state_persisted_and_recovered() {
 
     {
         let node =
-            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
+            RaftNode::create_with_storage(node_id, test_raft_config(), backend.clone()).unwrap();
 
         assert_eq!(node.current_term(), 1);
         assert_eq!(node.role(), RaftRole::Follower);
@@ -2451,7 +2481,7 @@ async fn raft_log_persisted_and_recovered() {
 
     {
         let mut node =
-            RaftNode::create_with_storage(node_id, RaftConfig::default(), backend.clone()).unwrap();
+            RaftNode::create_with_storage(node_id, test_raft_config(), backend.clone()).unwrap();
 
         node.add_peer(peer_id);
 

@@ -18,9 +18,9 @@ pub struct RaftConfig {
 impl Default for RaftConfig {
     fn default() -> Self {
         Self {
-            election_timeout_min_ms: 150,
-            election_timeout_max_ms: 300,
-            heartbeat_interval_ms: 50,
+            election_timeout_min_ms: 3000,
+            election_timeout_max_ms: 5000,
+            heartbeat_interval_ms: 500,
         }
     }
 }
@@ -446,9 +446,17 @@ impl RaftNode {
 mod tests {
     use super::*;
 
+    fn test_config() -> RaftConfig {
+        RaftConfig {
+            election_timeout_min_ms: 150,
+            election_timeout_max_ms: 300,
+            heartbeat_interval_ms: 50,
+        }
+    }
+
     fn make_node(id: u16) -> RaftNode {
         let node_id = NodeId::validated(id).unwrap();
-        RaftNode::create(node_id, RaftConfig::default())
+        RaftNode::create(node_id, test_config())
     }
 
     #[test]

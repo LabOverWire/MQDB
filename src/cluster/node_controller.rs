@@ -26,9 +26,10 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
 use crate::storage::StorageBackend;
 use bebytes::BeBytes;
+use super::raft_task::RaftEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -74,10 +75,9 @@ pub struct NodeController<T: ClusterTransport> {
     write_log: PartitionWriteLog,
     forward_dedup: HashSet<u64>,
     forward_dedup_order: VecDeque<u64>,
-    raft_messages: VecDeque<RaftMessage>,
-    partition_updates: VecDeque<super::raft::PartitionUpdate>,
-    dead_nodes: VecDeque<NodeId>,
-    draining_nodes: VecDeque<NodeId>,
+    tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
+    tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+    dead_nodes_for_session_update: VecDeque<NodeId>,
     migration_manager: MigrationManager,
     pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
@@ -102,8 +102,14 @@ impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
 
 impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
-    pub fn new(node_id: NodeId, transport: T, config: TransportConfig) -> Self {
-        Self::new_with_storage(node_id, transport, config, None)
+    pub fn new(
+        node_id: NodeId,
+        transport: T,
+        config: TransportConfig,
+        tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
+        tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+    ) -> Self {
+        Self::new_with_storage(node_id, transport, config, None, tx_raft_messages, tx_raft_events)
     }
 
     #[must_use]
@@ -112,6 +118,8 @@ impl<T: ClusterTransport> NodeController<T> {
         transport: T,
         config: TransportConfig,
         storage: Option<Arc<dyn StorageBackend>>,
+        tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
+        tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
     ) -> Self {
         Self {
             node_id,
@@ -125,10 +133,9 @@ impl<T: ClusterTransport> NodeController<T> {
             write_log: PartitionWriteLog::new(),
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
-            raft_messages: VecDeque::new(),
-            partition_updates: VecDeque::new(),
-            dead_nodes: VecDeque::new(),
-            draining_nodes: VecDeque::new(),
+            tx_raft_messages,
+            tx_raft_events,
+            dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             pending_snapshots: HashMap::new(),
             outgoing_snapshots: HashMap::new(),
@@ -365,7 +372,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn handle_node_death(&mut self, dead_node: NodeId) {
         tracing::warn!(?dead_node, "node death detected");
-        self.dead_nodes.push_back(dead_node);
+        let _ = self.tx_raft_events.send(RaftEvent::NodeDead(dead_node));
+        self.dead_nodes_for_session_update.push_back(dead_node);
 
         for partition in super::PartitionId::all() {
             let assignment = self.partition_map.get(partition);
@@ -394,22 +402,8 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub fn drain_raft_messages(&mut self) -> impl Iterator<Item = RaftMessage> + '_ {
-        self.raft_messages.drain(..)
-    }
-
-    pub fn drain_partition_updates(
-        &mut self,
-    ) -> impl Iterator<Item = super::raft::PartitionUpdate> + '_ {
-        self.partition_updates.drain(..)
-    }
-
-    pub fn drain_dead_nodes(&mut self) -> impl Iterator<Item = NodeId> + '_ {
-        self.dead_nodes.drain(..)
-    }
-
-    pub fn drain_draining_nodes(&mut self) -> impl Iterator<Item = NodeId> + '_ {
-        self.draining_nodes.drain(..)
+    pub fn drain_dead_nodes_for_session_update(&mut self) -> impl Iterator<Item = NodeId> + '_ {
+        self.dead_nodes_for_session_update.drain(..)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -434,33 +428,31 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");
-                self.draining_nodes.push_back(node_id);
+                let _ = self.tx_raft_events.send(RaftEvent::DrainNotification(node_id));
             }
             ClusterMessage::RequestVote(req) => {
-                self.raft_messages.push_back(RaftMessage::RequestVote {
+                let _ = self.tx_raft_messages.send(RaftMessage::RequestVote {
                     from: msg.from,
                     request: req,
                 });
             }
             ClusterMessage::RequestVoteResponse(resp) => {
-                self.raft_messages
-                    .push_back(RaftMessage::RequestVoteResponse {
-                        from: msg.from,
-                        response: resp,
-                    });
+                let _ = self.tx_raft_messages.send(RaftMessage::RequestVoteResponse {
+                    from: msg.from,
+                    response: resp,
+                });
             }
             ClusterMessage::AppendEntries(req) => {
-                self.raft_messages.push_back(RaftMessage::AppendEntries {
+                let _ = self.tx_raft_messages.send(RaftMessage::AppendEntries {
                     from: msg.from,
                     request: req,
                 });
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
-                self.raft_messages
-                    .push_back(RaftMessage::AppendEntriesResponse {
-                        from: msg.from,
-                        response: resp,
-                    });
+                let _ = self.tx_raft_messages.send(RaftMessage::AppendEntriesResponse {
+                    from: msg.from,
+                    response: resp,
+                });
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -543,7 +535,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.partition_map.apply_update(update);
                 self.heartbeat.partition_map_mut().apply_update(update);
-                self.partition_updates.push_back(*update);
+                let _ = self.tx_raft_events.send(RaftEvent::ExternalUpdate(*update));
                 tracing::info!(
                     partition = update.partition,
                     primary = update.primary,
@@ -2497,7 +2489,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.partition_map.primary(partition) == Some(self.node_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
     pub async fn forward_json_db_request(
         &self,
         partition: PartitionId,
@@ -2508,6 +2500,9 @@ impl<T: ClusterTransport> NodeController<T> {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> bool {
+        let start = std::time::Instant::now();
+        let node_id = self.node_id.get();
+
         let Some(primary) = self.partition_map.primary(partition) else {
             tracing::warn!(?partition, "cannot forward JSON request: no primary known");
             return false;
@@ -2535,18 +2530,24 @@ impl<T: ClusterTransport> NodeController<T> {
         let msg = ClusterMessage::JsonDbRequest { partition, request };
         if let Err(e) = self.transport.send(primary, msg).await {
             tracing::warn!(
-                ?partition,
+                node = node_id,
+                partition = partition.get(),
                 primary = primary.get(),
+                elapsed_us = start.elapsed().as_micros() as u64,
                 ?e,
-                "failed to forward JSON request"
+                "forward_json_request_failed"
             );
             return false;
         }
 
-        tracing::debug!(
-            ?partition,
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
             primary = primary.get(),
-            "forwarded JSON request to partition primary"
+            elapsed_us = start.elapsed().as_micros() as u64,
+            ?op,
+            entity,
+            "forward_json_request_sent"
         );
         true
     }
@@ -3158,6 +3159,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
+        let (tx_raft_messages, _rx_raft_messages) = mpsc::unbounded_channel();
+        let (tx_raft_events, _rx_raft_events) = mpsc::unbounded_channel();
+        NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
+    }
+
     #[derive(Debug)]
     struct MockTransport {
         node_id: NodeId,
@@ -3241,7 +3248,7 @@ mod tests {
     fn become_primary_and_replicate() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3257,7 +3264,7 @@ mod tests {
         let node3 = NodeId::validated(3).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3288,7 +3295,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         ctrl.register_peer(node2);
         assert_eq!(ctrl.node_status(node2), NodeStatus::Unknown);
@@ -3307,7 +3314,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_replica(partition, Epoch::new(1), 0);
@@ -3340,7 +3347,7 @@ mod tests {
     async fn create_session_quorum_requires_primary() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let result = ctrl.create_session_quorum("client1").await;
         assert!(matches!(result, Err(ReplicationError::NotPrimary)));
@@ -3350,7 +3357,7 @@ mod tests {
     async fn create_session_quorum_succeeds_as_primary() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = session_partition("client1");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3367,7 +3374,7 @@ mod tests {
         let node3 = NodeId::validated(3).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3396,7 +3403,7 @@ mod tests {
     fn subscribe_wildcard_broadcast_creates_64_writes() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         let writes = ctrl
@@ -3417,7 +3424,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         let mut map = PartitionMap::default();
@@ -3457,7 +3464,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = session_partition("quorum-test-client");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3502,7 +3509,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3543,7 +3550,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3579,7 +3586,7 @@ mod tests {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let consumer_id = "test-consumer";
         let consumer_partition = session_partition(consumer_id);
@@ -3619,7 +3626,7 @@ mod tests {
 
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3659,7 +3666,7 @@ mod tests {
 
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let ctrl = create_test_controller(node1, transport);
 
         let partition = PartitionId::new(0).unwrap();
 
@@ -3685,7 +3692,7 @@ mod tests {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = crate::cluster::db::data_partition("users", "123");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3724,7 +3731,7 @@ mod tests {
     async fn db_create_fails_if_exists() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = crate::cluster::db::data_partition("users", "456");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3740,7 +3747,7 @@ mod tests {
     async fn db_update_modifies_existing_entity() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = crate::cluster::db::data_partition("users", "789");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3761,7 +3768,7 @@ mod tests {
     async fn db_delete_removes_entity() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = crate::cluster::db::data_partition("users", "del1");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3777,7 +3784,7 @@ mod tests {
     async fn db_upsert_creates_or_updates() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         let partition = crate::cluster::db::data_partition("products", "p1");
         ctrl.become_primary(partition, Epoch::new(1));
@@ -3798,7 +3805,7 @@ mod tests {
     async fn db_list_returns_all_entities_of_type() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         for i in 0..3 {
             let id = format!("item{i}");
@@ -3821,7 +3828,7 @@ mod tests {
         let node3 = NodeId::validated(3).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         ctrl.heartbeat
             .receive_heartbeat(node2, &super::super::Heartbeat::create(node2, 0), 0);
@@ -3846,7 +3853,7 @@ mod tests {
     async fn schema_register_duplicate_fails() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         ctrl.schema_register("users", b"{}").await.unwrap();
         let result = ctrl.schema_register("users", b"{}").await;
@@ -3861,7 +3868,7 @@ mod tests {
     async fn schema_update_increments_version() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         ctrl.schema_register("users", b"{v1}").await.unwrap();
         let updated = ctrl.schema_update("users", b"{v2}").await.unwrap();
@@ -3873,7 +3880,7 @@ mod tests {
     async fn schema_get_and_list() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         ctrl.schema_register("users", b"{}").await.unwrap();
         ctrl.schema_register("orders", b"{}").await.unwrap();
@@ -3887,7 +3894,7 @@ mod tests {
     async fn schema_is_valid_for_write_checks_active_state() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
 
         assert!(!ctrl.schema_is_valid_for_write("users"));
         ctrl.schema_register("users", b"{}").await.unwrap();

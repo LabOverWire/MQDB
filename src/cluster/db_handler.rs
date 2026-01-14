@@ -406,12 +406,16 @@ impl DbRequestHandler {
         FkValidateResponse::create(status, request.request_id_str()).to_be_bytes()
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         payload: &[u8],
     ) -> Vec<u8> {
+        let start = std::time::Instant::now();
+        let node_id = controller.node_id().get();
+
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
@@ -419,8 +423,23 @@ impl DbRequestHandler {
 
         let partition = controller.pick_partition_for_create();
         let id = self.generate_id_for_partition(entity, partition, payload);
+        let is_local = controller.is_local_partition(partition);
 
-        if !controller.is_local_partition(partition) {
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            is_local,
+            entity,
+            "json_create_start"
+        );
+
+        if !is_local {
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                elapsed_us = start.elapsed().as_micros() as u64,
+                "json_create_not_local"
+            );
             return Self::json_error(503, "partition not local, forwarding not yet implemented");
         }
 
@@ -443,7 +462,7 @@ impl DbRequestHandler {
             );
         }
 
-        match controller.db_create(entity, &id, &data_bytes, now_ms).await {
+        let result = match controller.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
                 controller
                     .commit_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
@@ -468,9 +487,19 @@ impl DbRequestHandler {
                     .await;
                 Self::json_error(500, "internal error")
             }
-        }
+        };
+
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            elapsed_us = start.elapsed().as_micros() as u64,
+            "json_create_complete"
+        );
+
+        result
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_read<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -479,10 +508,18 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
+        let start = std::time::Instant::now();
         let partition = data_partition(entity, id);
         let can_serve = controller.can_serve_reads(partition);
+        let node_id = controller.node_id().get();
 
-        tracing::debug!(?partition, can_serve, entity, id, "handle_json_read");
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            can_serve,
+            entity,
+            "json_read_start"
+        );
 
         if !can_serve {
             let forwarded = controller
@@ -497,15 +534,28 @@ impl DbRequestHandler {
                 )
                 .await;
             if forwarded {
+                tracing::info!(
+                    node = node_id,
+                    partition = partition.get(),
+                    elapsed_us = start.elapsed().as_micros() as u64,
+                    forwarded = true,
+                    "json_read_forwarded"
+                );
                 return None;
             }
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                elapsed_us = start.elapsed().as_micros() as u64,
+                "json_read_forward_failed"
+            );
             return Some(Self::json_error(
                 503,
                 "partition not local and forwarding failed",
             ));
         }
 
-        match controller.db_get(entity, id) {
+        let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
                 let result = json!({
@@ -520,9 +570,20 @@ impl DbRequestHandler {
                 404,
                 &format!("entity not found: {entity} id={id}"),
             )),
-        }
+        };
+
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            elapsed_us = start.elapsed().as_micros() as u64,
+            forwarded = false,
+            "json_read_complete"
+        );
+
+        result
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -532,14 +593,26 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
+        let start = std::time::Instant::now();
+        let node_id = controller.node_id().get();
+
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
 
         let partition = data_partition(entity, id);
+        let is_local = controller.is_local_partition(partition);
 
-        if !controller.is_local_partition(partition) {
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            is_local,
+            entity,
+            "json_update_start"
+        );
+
+        if !is_local {
             let forwarded = controller
                 .forward_json_db_request(
                     partition,
@@ -552,8 +625,20 @@ impl DbRequestHandler {
                 )
                 .await;
             if forwarded {
+                tracing::info!(
+                    node = node_id,
+                    partition = partition.get(),
+                    elapsed_us = start.elapsed().as_micros() as u64,
+                    "json_update_forwarded"
+                );
                 return None;
             }
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                elapsed_us = start.elapsed().as_micros() as u64,
+                "json_update_forward_failed"
+            );
             return Some(Self::json_error(
                 503,
                 "partition not local and forwarding failed",
@@ -587,7 +672,7 @@ impl DbRequestHandler {
         )
         .unwrap_or(u64::MAX);
 
-        match controller.db_update(entity, id, &data_bytes, now_ms).await {
+        let result = match controller.db_update(entity, id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
                 let result = json!({
                     "status": "ok",
@@ -602,7 +687,17 @@ impl DbRequestHandler {
                 &format!("entity not found: {entity} id={id}"),
             )),
             Err(_) => Some(Self::json_error(500, "internal error")),
-        }
+        };
+
+        tracing::info!(
+            node = node_id,
+            partition = partition.get(),
+            elapsed_us = start.elapsed().as_micros() as u64,
+            forwarded = false,
+            "json_update_complete"
+        );
+
+        result
     }
 
     async fn handle_json_delete<T: ClusterTransport>(
@@ -757,6 +852,13 @@ mod tests {
     use crate::cluster::{Epoch, PartitionMap};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+
+    fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
+        let (tx_raft_messages, _rx_raft_messages) = mpsc::unbounded_channel();
+        let (tx_raft_events, _rx_raft_events) = mpsc::unbounded_channel();
+        NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
+    }
 
     #[derive(Debug)]
     struct MockTransport {
@@ -828,7 +930,7 @@ mod tests {
     fn setup_controller_with_partition(partition: PartitionId) -> NodeController<MockTransport> {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut ctrl = NodeController::new(node1, transport, TransportConfig::default());
+        let mut ctrl = create_test_controller(node1, transport);
         ctrl.become_primary(partition, Epoch::new(1));
 
         let mut map = PartitionMap::default();

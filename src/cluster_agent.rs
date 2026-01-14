@@ -1,8 +1,9 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
-    ClusterEventHandler, ClusterMessage, ClusterTransport, Epoch, ForwardTarget, ForwardedPublish,
-    LwtPublisher, MqttTransport, NUM_PARTITIONS, NodeController, NodeId, PartitionId,
-    PublishRouter, RaftMessage, TopicSubscriptionBroadcast, TransportConfig, WildcardBroadcast,
+    ClusterEventHandler, ClusterMessage, ClusterTransport, ForwardTarget, ForwardedPublish,
+    LwtPublisher, MqttTransport, NUM_PARTITIONS, NodeController, NodeId, PartitionId, PartitionMap,
+    PublishRouter, RaftAdminCommand, RaftEvent, RaftStatus, RaftTask, TopicSubscriptionBroadcast,
+    TransportConfig, WildcardBroadcast,
 };
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
@@ -19,7 +20,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -56,6 +57,7 @@ pub struct ClusterConfig {
     pub quic_insecure: bool,
     pub quic_cert_file: Option<PathBuf>,
     pub quic_key_file: Option<PathBuf>,
+    pub bridge_out_only: bool,
 }
 
 impl ClusterConfig {
@@ -77,6 +79,7 @@ impl ClusterConfig {
             quic_insecure: true,
             quic_cert_file: None,
             quic_key_file: None,
+            bridge_out_only: false,
         }
     }
 
@@ -134,6 +137,12 @@ impl ClusterConfig {
         self.quic_key_file = Some(key_file);
         self
     }
+
+    #[must_use]
+    pub fn with_bridge_out_only(mut self, out_only: bool) -> Self {
+        self.bridge_out_only = out_only;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -147,7 +156,16 @@ pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
-    raft: Arc<RwLock<RaftCoordinator<MqttTransport>>>,
+    raft: Option<RaftCoordinator<MqttTransport>>,
+    rx_raft_messages: Option<mpsc::UnboundedReceiver<crate::cluster::RaftMessage>>,
+    rx_raft_events: Option<mpsc::UnboundedReceiver<RaftEvent>>,
+    rx_raft_admin: Option<mpsc::UnboundedReceiver<RaftAdminCommand>>,
+    tx_raft_admin: mpsc::UnboundedSender<RaftAdminCommand>,
+    tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+    tx_partition_map: Option<watch::Sender<PartitionMap>>,
+    tx_raft_status: Option<watch::Sender<RaftStatus>>,
+    rx_partition_map: watch::Receiver<PartitionMap>,
+    rx_raft_status: watch::Receiver<RaftStatus>,
     shutdown_tx: broadcast::Sender<()>,
     bind_address: SocketAddr,
     db_path: PathBuf,
@@ -158,6 +176,7 @@ pub struct ClusteredAgent {
     quic_insecure: bool,
     quic_cert_file: Option<PathBuf>,
     quic_key_file: Option<PathBuf>,
+    bridge_out_only: bool,
 }
 
 impl ClusteredAgent {
@@ -183,6 +202,13 @@ impl ClusteredAgent {
             None
         };
 
+        let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
+        let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+        let tx_raft_events_clone = tx_raft_events.clone();
+        let (tx_raft_admin, rx_raft_admin) = mpsc::unbounded_channel();
+        let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
+        let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
+
         let transport = MqttTransport::new(node_id);
         let transport_config = TransportConfig::default();
         let controller = NodeController::new_with_storage(
@@ -190,6 +216,8 @@ impl ClusteredAgent {
             transport.clone(),
             transport_config,
             stores_backend,
+            tx_raft_messages,
+            tx_raft_events,
         );
 
         if controller.stores().has_persistence() {
@@ -236,7 +264,16 @@ impl ClusteredAgent {
             node_id,
             node_name: config.node_name,
             controller: Arc::new(RwLock::new(controller)),
-            raft: Arc::new(RwLock::new(raft)),
+            raft: Some(raft),
+            rx_raft_messages: Some(rx_raft_messages),
+            rx_raft_events: Some(rx_raft_events),
+            rx_raft_admin: Some(rx_raft_admin),
+            tx_raft_admin,
+            tx_raft_events: tx_raft_events_clone,
+            tx_partition_map: Some(tx_partition_map),
+            tx_raft_status: Some(tx_raft_status),
+            rx_partition_map,
+            rx_raft_status,
             shutdown_tx,
             bind_address: config.bind_address,
             db_path: config.db_path,
@@ -247,18 +284,25 @@ impl ClusteredAgent {
             quic_insecure: config.quic_insecure,
             quic_cert_file: config.quic_cert_file,
             quic_key_file: config.quic_key_file,
+            bridge_out_only: config.bridge_out_only,
         })
     }
 
     fn create_bridge_configs(&self) -> Vec<BridgeConfig> {
+        let direction = if self.bridge_out_only {
+            BridgeDirection::Out
+        } else {
+            BridgeDirection::Both
+        };
+
         self.peers
             .iter()
             .map(|peer| {
                 let bridge_name = format!("bridge-to-node-{}", peer.node_id);
                 let mut config = BridgeConfig::new(&bridge_name, &peer.address)
-                    .add_topic("_mqdb/cluster/#", BridgeDirection::Both, QoS::AtLeastOnce)
-                    .add_topic("_mqdb/forward/#", BridgeDirection::Both, QoS::AtLeastOnce)
-                    .add_topic("_mqdb/repl/#", BridgeDirection::Both, QoS::AtLeastOnce);
+                    .add_topic("_mqdb/cluster/#", direction, QoS::AtLeastOnce)
+                    .add_topic("_mqdb/forward/#", direction, QoS::AtLeastOnce)
+                    .add_topic("_mqdb/repl/#", direction, QoS::AtLeastOnce);
                 config.client_id = format!("{}-to-node-{}", self.node_name, peer.node_id);
                 config.clean_start = false;
                 config.try_private = true;
@@ -448,18 +492,6 @@ impl ClusteredAgent {
 
         info!("subscribed to admin topics");
 
-        {
-            let mut ctrl = self.controller.write().await;
-            let mut raft = self.raft.write().await;
-            for peer in &self.peers {
-                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
-                    ctrl.register_peer(peer_node_id);
-                    raft.add_peer(peer_node_id);
-                    info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
-                }
-            }
-        }
-
         let all_nodes: Vec<NodeId> = {
             let mut nodes: Vec<NodeId> = self
                 .peers
@@ -471,10 +503,34 @@ impl ClusteredAgent {
             nodes
         };
 
-        let mut partitions_initialized = false;
+        let mut raft = self.raft.take().expect("raft already taken");
+        {
+            let mut ctrl = self.controller.write().await;
+            for peer in &self.peers {
+                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                    ctrl.register_peer(peer_node_id);
+                    raft.add_peer(peer_node_id);
+                    info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
+                }
+            }
+        }
+
+        let raft_task = RaftTask::new(
+            raft,
+            self.rx_raft_messages.take().expect("rx_raft_messages already taken"),
+            self.rx_raft_events.take().expect("rx_raft_events already taken"),
+            self.rx_raft_admin.take().expect("rx_raft_admin already taken"),
+            self.tx_partition_map.take().expect("tx_partition_map already taken"),
+            self.tx_raft_status.take().expect("tx_raft_status already taken"),
+            self.shutdown_tx.subscribe(),
+            all_nodes,
+        );
+        tokio::spawn(async move {
+            raft_task.run().await;
+        });
+        info!("spawned Raft task");
 
         let mut tick_interval = interval(Duration::from_millis(1));
-        let mut raft_tick_interval = interval(Duration::from_millis(10));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
@@ -491,128 +547,15 @@ impl ClusteredAgent {
                     ctrl.tick(now).await;
                     ctrl.process_messages().await;
 
-                    let raft_msgs: Vec<RaftMessage> = ctrl.drain_raft_messages().collect();
-                    let partition_updates: Vec<_> = ctrl.drain_partition_updates().collect();
-                    let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes().collect();
-                    let draining_nodes: Vec<NodeId> = ctrl.drain_draining_nodes().collect();
                     let alive_nodes: Vec<NodeId> = ctrl.alive_nodes();
+                    let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
                     drop(ctrl);
 
-                    let mut raft = self.raft.write().await;
-
-                    for update in &partition_updates {
-                        raft.apply_external_update(update);
-                    }
-
                     for alive_node in alive_nodes {
-                        let rebalance_proposals = raft.handle_node_alive(alive_node).await;
-                        if !rebalance_proposals.is_empty() {
-                            info!(
-                                ?alive_node,
-                                count = rebalance_proposals.len(),
-                                "triggered rebalance for new node"
-                            );
-                        }
+                        let _ = self.tx_raft_events.send(RaftEvent::NodeAlive(alive_node));
                     }
 
-                    for msg in raft_msgs {
-                        match msg {
-                            RaftMessage::RequestVote { from, request } => {
-                                let response = raft.handle_request_vote(from, request, now).await;
-                                let _ = raft.send(from, crate::cluster::ClusterMessage::RequestVoteResponse(response)).await;
-                            }
-                            RaftMessage::RequestVoteResponse { from, response } => {
-                                raft.handle_request_vote_response(from, response).await;
-                            }
-                            RaftMessage::AppendEntries { from, request } => {
-                                let response = raft.handle_append_entries(from, request, now).await;
-                                let _ = raft.send(from, crate::cluster::ClusterMessage::AppendEntriesResponse(response)).await;
-                            }
-                            RaftMessage::AppendEntriesResponse { from, response } => {
-                                raft.handle_append_entries_response(from, response).await;
-                            }
-                        }
-                    }
-
-                    for dead_node in &dead_nodes {
-                        let proposed = raft.handle_node_death(*dead_node).await;
-                        if !proposed.is_empty() {
-                            info!(
-                                ?dead_node,
-                                proposals = proposed.len(),
-                                "Raft leader proposing partition reassignments"
-                            );
-                        }
-                    }
-
-                    for draining_node in draining_nodes {
-                        let proposed = raft.handle_drain_notification(draining_node).await;
-                        if !proposed.is_empty() {
-                            info!(
-                                ?draining_node,
-                                proposals = proposed.len(),
-                                "Raft leader proposing partition reassignments for draining node"
-                            );
-                        }
-                    }
-
-                    if raft.is_leader() && !partitions_initialized {
-                        const BATCH_SIZE: usize = 8;
-
-                        let mut cluster_nodes: Vec<NodeId> =
-                            raft.cluster_members().to_vec();
-                        cluster_nodes.sort_by_key(|n| n.get());
-
-                        let min_nodes = all_nodes.len().max(2);
-                        if cluster_nodes.len() >= min_nodes {
-                            info!(
-                                ?cluster_nodes,
-                                "Raft leader initializing partition assignments"
-                            );
-                            let node_count = cluster_nodes.len();
-                            let mut proposal_count = 0usize;
-
-                            for partition in PartitionId::all() {
-                                let partition_num = partition.get() as usize;
-                                let primary_idx = partition_num % node_count;
-                                let replica_idx = (partition_num + 1) % node_count;
-
-                                let primary = cluster_nodes[primary_idx];
-                                let replicas = if node_count > 1 {
-                                    vec![cluster_nodes[replica_idx]]
-                                } else {
-                                    vec![]
-                                };
-
-                                let cmd = crate::cluster::raft::RaftCommand::update_partition(
-                                    partition,
-                                    primary,
-                                    &replicas,
-                                    Epoch::new(1),
-                                );
-                                let _ = raft.propose_partition_update(cmd).await;
-                                proposal_count += 1;
-
-                                if proposal_count.is_multiple_of(BATCH_SIZE) {
-                                    let _ = raft.tick(current_time_ms()).await;
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                            raft.set_pending_partition_proposals(NUM_PARTITIONS as usize);
-                            partitions_initialized = true;
-                        }
-                    }
-
-                    let leader_proposals = raft.tick(now).await;
-                    if !leader_proposals.is_empty() {
-                        info!(
-                            proposals = leader_proposals.len(),
-                            "new Raft leader proposed partition reassignments"
-                        );
-                    }
-
-                    let raft_partition_map = raft.partition_map().clone();
-                    drop(raft);
+                    let raft_partition_map = self.rx_partition_map.borrow().clone();
 
                     let mut ctrl = self.controller.write().await;
                     let current_map = ctrl.partition_map().clone();
@@ -764,11 +707,6 @@ impl ClusteredAgent {
                         stores.subscriptions.mark_reconciliation(now);
                     }
                 }
-                _ = raft_tick_interval.tick() => {
-                    let now = current_time_ms();
-                    let mut raft = self.raft.write().await;
-                    let _ = raft.tick(now).await;
-                }
                 Some(req) = admin_rx.recv() => {
                     self.handle_admin_request(&admin_client, req).await;
                 }
@@ -845,7 +783,7 @@ impl ClusteredAgent {
 
     async fn build_status_response(&self) -> Response {
         let ctrl = self.controller.read().await;
-        let raft = self.raft.read().await;
+        let raft_status = self.rx_raft_status.borrow().clone();
 
         let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
 
@@ -869,8 +807,8 @@ impl ClusteredAgent {
         Response::ok(json!({
             "node_id": self.node_id.get(),
             "node_name": self.node_name,
-            "is_raft_leader": raft.is_leader(),
-            "raft_term": raft.current_term(),
+            "is_raft_leader": raft_status.is_leader,
+            "raft_term": raft_status.current_term,
             "alive_nodes": alive_nodes,
             "partition_count": NUM_PARTITIONS,
             "partitions": partitions
@@ -878,17 +816,23 @@ impl ClusteredAgent {
     }
 
     async fn handle_rebalance_request(&self) -> Response {
-        let mut raft = self.raft.write().await;
+        let raft_status = self.rx_raft_status.borrow().clone();
 
-        if !raft.is_leader() {
+        if !raft_status.is_leader {
             return Response::error(ErrorCode::Forbidden, "not the Raft leader");
         }
 
-        let proposals = raft.force_rebalance().await;
+        let (tx, rx) = oneshot::channel();
+        if self.tx_raft_admin.send(RaftAdminCommand::ForceRebalance(tx)).is_err() {
+            return Response::error(ErrorCode::Internal, "raft task not available");
+        }
 
-        Response::ok(json!({
-            "proposed_changes": proposals.len()
-        }))
+        match rx.await {
+            Ok(proposals) => Response::ok(json!({
+                "proposed_changes": proposals
+            })),
+            Err(_) => Response::error(ErrorCode::Internal, "failed to get rebalance response"),
+        }
     }
 
     async fn handle_schema_set(&self, entity: &str, payload: &[u8]) -> Response {
@@ -1103,10 +1047,10 @@ impl ClusteredAgent {
 
     async fn build_health_response(&self) -> Response {
         let ctrl = self.controller.read().await;
-        let raft = self.raft.read().await;
+        let raft_status = self.rx_raft_status.borrow().clone();
 
-        let is_leader = raft.is_leader();
-        let leader_exists = is_leader || raft.leader_id().is_some();
+        let is_leader = raft_status.is_leader;
+        let leader_exists = is_leader || raft_status.leader_id.is_some();
         let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
 
         let mut partitions_ready = 0u16;
@@ -1132,7 +1076,7 @@ impl ClusteredAgent {
             "details": {
                 "node_id": self.node_id.get(),
                 "is_leader": is_leader,
-                "raft_term": raft.current_term(),
+                "raft_term": raft_status.current_term,
                 "partitions_ready": partitions_ready,
                 "partitions_total": NUM_PARTITIONS,
                 "alive_nodes": alive_nodes

@@ -27,6 +27,7 @@ mod qos2_store;
 mod query_coordinator;
 mod quorum;
 pub mod raft;
+mod raft_task;
 mod rebalance_coordinator;
 mod rebalancer;
 mod replication;
@@ -90,6 +91,7 @@ pub use qos2_store::{
 };
 pub use query_coordinator::{QueryCoordinator, QueryResult};
 pub use quorum::{PendingWrites, QuorumResult, QuorumTracker};
+pub use raft_task::{RaftAdminCommand, RaftEvent, RaftStatus, RaftTask};
 pub use rebalance_coordinator::{
     RebalanceAck, RebalanceCommit, RebalanceCoordinator, RebalanceError, RebalanceProposal,
     RebalanceState,

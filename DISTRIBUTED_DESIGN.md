@@ -448,7 +448,50 @@ Each node creates N-1 outbound bridges (one per peer). Messages flow bidirection
 
 **QUIC stream caching** (`quic_stream_manager.rs`): With `DataPerTopic` strategy, streams are cached per topic for reuse. When cache reaches 100 streams (hardcoded default), LRU eviction closes the oldest stream. This is a **performance optimization**, not a limit—unlimited topics are supported, they just share cached streams via eviction.
 
+**Bridge Overhead Trade-off**: Each bridge creates bidirectional MQTT connections that share the broker's event loop with client connections. More bridges enable direct routing (e.g., Node 2 → Node 3) but degrade local DB performance:
+
+| Bridge Sessions | Typical Slowdown |
+|-----------------|------------------|
+| 0 (leader node) | baseline |
+| 2 (1 peer) | ~1.8x |
+| 4 (2 peers) | ~8-9x |
+
+For performance-critical deployments, consider star topology (all nodes bridge to leader only) at the cost of no direct follower-to-follower routes.
+
 **Key Files**: `transport.rs:83-113`, `mqtt_transport.rs:19-21`, `cluster_agent.rs:172-201`
+
+**Bridge Loop Prevention**: When a remote bridge publishes TO the local broker, the router must NOT forward that message back to other bridges. Without this check, messages amplify exponentially:
+
+1. Node 1 publishes heartbeat
+2. Bridge publishes to Node 2 (as client `node-1-to-node-2`)
+3. Node 2's router would forward to Node 3's bridge
+4. Node 3's router would forward back to Node 1's bridge
+5. Infinite loop
+
+The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `cluster_agent.rs:262`) and skips bridge forwarding for messages from bridge clients. See `mqtt5/src/broker/router.rs`.
+
+**Topology Options** (`mqdb dev start-cluster --topology`):
+
+| Topology | Description | Bridges (3 nodes) |
+|----------|-------------|-------------------|
+| `partial` (default) | To lower-numbered nodes | N1:0, N2:1, N3:2 |
+| `upper` | To higher-numbered nodes | N1:2, N2:1, N3:0 |
+| `circular` | Ring (N→N+1→1) | N1:1, N2:1, N3:1 |
+| `full` | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
+
+**Full mesh** now works with `BridgeDirection::Out` (enabled via `--bridge-out` flag). Each bridge only sends outgoing messages, preventing amplification while maintaining full connectivity.
+
+**Circular mesh is NOT viable**: Ring topology can't support Raft consensus - messages can only relay in one direction, but Raft requires bidirectional communication between all nodes.
+
+**Topology Performance** (3-node cluster, DB insert benchmark):
+
+| Topology | Avg Throughput | Recommendation |
+|----------|---------------|----------------|
+| `upper` | 3,074 ops/s | **Best for throughput** |
+| `partial` | 1,184 ops/s | Simple setup |
+| `full` | 1,046 ops/s | Maximum redundancy |
+
+Key finding: **outgoing bridge count is the dominant performance factor**. Nodes with 0 outgoing bridges achieve ~4x throughput of nodes with 2 outgoing bridges. Upper mesh naturally places the highest-performing node (N3 with 0 outgoing) as the primary data handler.
 
 ### A6.5 Admin Request Handlers
 

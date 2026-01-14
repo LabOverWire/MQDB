@@ -779,11 +779,19 @@ mod tests {
         async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
     }
 
+    fn test_config() -> RaftConfig {
+        RaftConfig {
+            election_timeout_min_ms: 150,
+            election_timeout_max_ms: 300,
+            heartbeat_interval_ms: 50,
+        }
+    }
+
     #[test]
     fn coordinator_creates_as_follower() {
         let node_id = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node_id);
-        let coord = RaftCoordinator::new(node_id, transport, RaftConfig::default());
+        let coord = RaftCoordinator::new(node_id, transport, test_config());
 
         assert!(!coord.is_leader());
         assert!(coord.leader_id().is_none());
@@ -797,8 +805,8 @@ mod tests {
         let transport1 = MockTransport::new(node1);
         let transport2 = MockTransport::new(node2);
 
-        let mut coord1 = RaftCoordinator::new(node1, transport1, RaftConfig::default());
-        let mut coord2 = RaftCoordinator::new(node2, transport2, RaftConfig::default());
+        let mut coord1 = RaftCoordinator::new(node1, transport1, test_config());
+        let mut coord2 = RaftCoordinator::new(node2, transport2, test_config());
 
         coord1.add_peer(node2);
         coord2.add_peer(node1);
@@ -827,8 +835,8 @@ mod tests {
         let transport1 = MockTransport::new(node1);
         let transport2 = MockTransport::new(node2);
 
-        let mut coord1 = RaftCoordinator::new(node1, transport1, RaftConfig::default());
-        let mut coord2 = RaftCoordinator::new(node2, transport2, RaftConfig::default());
+        let mut coord1 = RaftCoordinator::new(node1, transport1, test_config());
+        let mut coord2 = RaftCoordinator::new(node2, transport2, test_config());
 
         coord1.add_peer(node2);
         coord2.add_peer(node1);
@@ -891,7 +899,7 @@ mod tests {
     async fn coordinator_rejects_propose_when_not_leader() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = MockTransport::new(node1);
-        let mut coord = RaftCoordinator::new(node1, transport, RaftConfig::default());
+        let mut coord = RaftCoordinator::new(node1, transport, test_config());
 
         let partition = PartitionId::new(0).unwrap();
         let cmd = RaftCommand::update_partition(partition, node1, &[], Epoch::new(1));
@@ -909,8 +917,8 @@ mod tests {
         let transport1 = MockTransport::new(node1);
         let transport2 = MockTransport::new(node2);
 
-        let mut coord1 = RaftCoordinator::new(node1, transport1, RaftConfig::default());
-        let mut coord2 = RaftCoordinator::new(node2, transport2, RaftConfig::default());
+        let mut coord1 = RaftCoordinator::new(node1, transport1, test_config());
+        let mut coord2 = RaftCoordinator::new(node2, transport2, test_config());
 
         coord1.add_peer(node2);
         coord1.add_peer(node3);
@@ -962,7 +970,7 @@ mod tests {
         let node2 = NodeId::validated(2).unwrap();
 
         let transport = MockTransport::new(node1);
-        let mut coord = RaftCoordinator::new(node1, transport, RaftConfig::default());
+        let mut coord = RaftCoordinator::new(node1, transport, test_config());
         coord.add_peer(node2);
 
         let indices = coord.handle_node_death(node2).await;

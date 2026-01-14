@@ -10,6 +10,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+fn create_test_controller(
+    node_id: NodeId,
+    transport: MqttTransport,
+    config: TransportConfig,
+) -> NodeController<MqttTransport> {
+    let (tx_raft_messages, _rx_raft_messages) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_raft_events, _rx_raft_events) = tokio::sync::mpsc::unbounded_channel();
+    NodeController::new(node_id, transport, config, tx_raft_messages, tx_raft_events)
+}
+
 async fn start_broker_and_wait(port: u16) {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let storage_config = StorageConfig {
@@ -134,8 +144,8 @@ async fn mqtt_two_node_replication() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let config = TransportConfig::default();
-    let mut ctrl1 = NodeController::new(node1_id, t1, config);
-    let mut ctrl2 = NodeController::new(node2_id, t2, config);
+    let mut ctrl1 = create_test_controller(node1_id, t1, config);
+    let mut ctrl2 = create_test_controller(node2_id, t2, config);
 
     let partition = PartitionId::new(0).unwrap();
 
