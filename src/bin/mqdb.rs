@@ -272,6 +272,8 @@ enum DevAction {
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
+        #[arg(long, default_value = "127.0.0.1", help = "Host to bind (use 0.0.0.0 for external access)")]
+        bind_host: String,
         #[arg(
             long,
             value_name = "TYPE",
@@ -427,6 +429,10 @@ enum BenchAction {
         seed: u64,
         #[arg(long, help = "Disable latency tracking for pure throughput measurement")]
         no_latency: bool,
+        #[arg(long, help = "Use async pipelined mode (subscribe once, fire all ops, collect responses)")]
+        r#async: bool,
+        #[arg(long, help = "Duration in seconds (async mode only, overrides --operations)")]
+        duration: Option<u64>,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "table", help = "Output format")]
@@ -888,6 +894,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quic_key,
                 no_quic,
                 db_prefix,
+                bind_host,
                 topology,
                 bridge_out,
                 no_bridge_out,
@@ -899,6 +906,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &quic_key,
                     no_quic,
                     &db_prefix,
+                    &bind_host,
                     topology.as_deref(),
                     bridge_out,
                     no_bridge_out,
@@ -969,6 +977,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cleanup,
                 seed,
                 no_latency,
+                r#async,
+                duration,
                 conn,
                 format,
             } => {
@@ -983,6 +993,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cleanup,
                     seed,
                     no_latency,
+                    async_mode: r#async,
+                    duration,
                     conn,
                     format,
                 }))
@@ -2792,6 +2804,7 @@ fn cmd_dev_start_cluster(
     quic_key: &std::path::Path,
     no_quic: bool,
     db_prefix: &str,
+    bind_host: &str,
     topology: Option<&str>,
     bridge_out: bool,
     no_bridge_out: bool,
@@ -2804,7 +2817,7 @@ fn cmd_dev_start_cluster(
     let exe = std::env::current_exe()?;
 
     let topology_name = topology.unwrap_or("partial");
-    println!("Using {topology_name} mesh topology");
+    println!("Using {topology_name} mesh topology (bind: {bind_host})");
 
     for node_id in 1..=nodes {
         let port = 1882 + u16::from(node_id);
@@ -2817,7 +2830,7 @@ fn cmd_dev_start_cluster(
             "--node-id",
             &node_id.to_string(),
             "--bind",
-            &format!("127.0.0.1:{port}"),
+            &format!("{bind_host}:{port}"),
             "--db",
             &db_path,
         ]);
@@ -3286,6 +3299,8 @@ struct BenchDbArgs {
     cleanup: bool,
     seed: u64,
     no_latency: bool,
+    async_mode: bool,
+    duration: Option<u64>,
     conn: ConnectionArgs,
     format: OutputFormat,
 }
@@ -3372,6 +3387,145 @@ fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
     Value::Object(record)
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+async fn cmd_bench_db_async(
+    args: &BenchDbArgs,
+    op: DbOp,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    if op != DbOp::Insert {
+        return Err("Async mode currently only supports insert operations".into());
+    }
+
+    let record_size_approx = args.fields * (args.field_size + 20);
+    let duration_secs = args.duration.unwrap_or(10);
+
+    println!(
+        "DB Benchmark (ASYNC): {}s duration, op={:?}, ~{} bytes/record",
+        duration_secs, op, record_size_approx
+    );
+
+    let client_id = format!("bench-db-async-{}", uuid::Uuid::new_v4());
+    let client = MqttClient::new(client_id.clone());
+    client.connect(&args.conn.broker).await?;
+
+    let response_count = Arc::new(AtomicU64::new(0));
+    let error_count = Arc::new(AtomicU64::new(0));
+    let response_count_clone = Arc::clone(&response_count);
+    let error_count_clone = Arc::clone(&error_count);
+
+    let response_topic = format!("{client_id}/responses/#");
+    client
+        .subscribe(&response_topic, move |msg| {
+            if let Ok(v) = serde_json::from_slice::<Value>(&msg.payload) {
+                if v.get("status").and_then(Value::as_str) == Some("ok") {
+                    response_count_clone.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    error_count_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                error_count_clone.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .await?;
+
+    println!("Running for {duration_secs} seconds...");
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let published_count = Arc::new(AtomicU64::new(0));
+
+    let stop_clone = Arc::clone(&stop_flag);
+    let published_clone = Arc::clone(&published_count);
+    let client_clone = client.clone();
+    let entity = args.entity.clone();
+    let fields = args.fields;
+    let field_size = args.field_size;
+    let client_id_clone = client_id.clone();
+
+    let publisher_handle = tokio::spawn(async move {
+        let mut i = 0u64;
+        while !stop_clone.load(Ordering::Relaxed) {
+            let record = generate_record(fields, field_size, i);
+            let topic = format!("$DB/{entity}/create");
+            let correlation_id = format!("{i}");
+            let individual_response = format!("{client_id_clone}/responses/{correlation_id}");
+
+            let opts = PublishOptions {
+                properties: PublishProperties {
+                    response_topic: Some(individual_response),
+                    correlation_data: Some(correlation_id.into_bytes()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            if client_clone
+                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                .await
+                .is_ok()
+            {
+                published_clone.fetch_add(1, Ordering::Relaxed);
+            }
+            i += 1;
+        }
+    });
+
+    let start_time = Instant::now();
+    tokio::time::sleep(Duration::from_secs(duration_secs)).await;
+    stop_flag.store(true, Ordering::Relaxed);
+
+    let _ = publisher_handle.await;
+
+    let published = published_count.load(Ordering::Relaxed);
+    println!("Published {published} operations, waiting for responses...");
+
+    let wait_timeout = Duration::from_secs(10);
+    let wait_start = Instant::now();
+    loop {
+        let received = response_count.load(Ordering::Relaxed);
+        let errors = error_count.load(Ordering::Relaxed);
+        let total = received + errors;
+
+        if total >= published {
+            break;
+        }
+
+        if wait_start.elapsed() > wait_timeout {
+            println!(
+                "Timeout: {}/{} responses received",
+                received, published
+            );
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let total_elapsed = start_time.elapsed();
+    let received = response_count.load(Ordering::Relaxed);
+    let errors = error_count.load(Ordering::Relaxed);
+
+    let _ = client.unsubscribe(&response_topic).await;
+    let _ = client.disconnect().await;
+
+    let throughput = received as f64 / total_elapsed.as_secs_f64();
+
+    println!("\n┌───────────────────────────────────────────┐");
+    println!("│           DB Benchmark Results            │");
+    println!("├───────────────────────────────────────────┤");
+    println!("│ Mode:                              ASYNC  │");
+    println!("│ Duration:              {:>10.2} s      │", total_elapsed.as_secs_f64());
+    println!("│ Published:             {:>10}         │", published);
+    println!("│ Successful:            {:>10}         │", received);
+    println!("│ Errors:                {:>10}         │", errors);
+    println!("│ Throughput:            {:>10.0} ops/s  │", throughput);
+    println!("└───────────────────────────────────────────┘");
+
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
@@ -3389,6 +3543,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
             args.op
         )
     })?;
+
+    if args.async_mode {
+        return cmd_bench_db_async(&args, op).await;
+    }
 
     let record_size_approx = args.fields * (args.field_size + 20);
     let latency_mode = if args.no_latency {
