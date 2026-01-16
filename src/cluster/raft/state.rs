@@ -215,6 +215,11 @@ impl RaftState {
     }
 
     #[must_use]
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
+    #[must_use]
     pub fn last_log_term(&self) -> u64 {
         self.log.last().map_or(0, |e| e.term)
     }
@@ -412,6 +417,9 @@ impl RaftState {
             return;
         }
 
+        let start = std::time::Instant::now();
+        let iterations = self.last_log_index().saturating_sub(self.commit_index);
+
         for n in (self.commit_index + 1)..=self.last_log_index() {
             let Some(term_at_n) = self.log_term_at(n) else {
                 continue;
@@ -427,10 +435,23 @@ impl RaftState {
                 self.commit_index = n;
             }
         }
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 100 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                log_len = self.log.len(),
+                iterations = iterations,
+                "slow try_advance_commit_index"
+            );
+        }
     }
 
     #[must_use]
     pub fn pending_commands(&mut self) -> Vec<RaftCommand> {
+        let start = std::time::Instant::now();
+        let pending_count = self.commit_index.saturating_sub(self.last_applied);
+
         let mut commands = Vec::new();
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
@@ -440,6 +461,18 @@ impl RaftState {
                 commands.push(cmd);
             }
         }
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 100 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                log_len = self.log.len(),
+                pending_count = pending_count,
+                commands_found = commands.len(),
+                "slow pending_commands"
+            );
+        }
+
         commands
     }
 

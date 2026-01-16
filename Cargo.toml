@@ -15,7 +15,7 @@ bebytes = { version = "3.0", features = ["bytes"] }
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
 comfy-table = { version = "7.2", optional = true }
 fjall = { version = "3.0", optional = true }
-mqtt5 = { version = "0.18", optional = true }
+mqtt5 = { version = "0.19", optional = true }
 tokio = { version = "1.49", features = ["full"], optional = true }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -78,3 +78,4 @@ split-debuginfo = "packed"
 
 [patch.crates-io]
 mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }
+mqtt5-protocol = { path = "../mqtt-lib/crates/mqtt5-protocol" }

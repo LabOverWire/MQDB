@@ -1086,11 +1086,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn replicate_write_async(
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
     ) -> Result<u64, ReplicationError> {
+        let start = std::time::Instant::now();
         let partition = write.partition;
 
         let state = self
@@ -1103,6 +1105,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let sequence = state.advance_sequence();
+        let t_state = start.elapsed().as_micros() as u64;
 
         let write_msg = ReplicationWrite::new(
             partition,
@@ -1116,7 +1119,10 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.write_log
             .append(partition, sequence, write_msg.clone());
+        let t_writelog = start.elapsed().as_micros() as u64;
+
         let _ = self.stores.apply_write(&write_msg);
+        let t_apply = start.elapsed().as_micros() as u64;
 
         for &replica in replicas {
             let _ = self
@@ -1124,6 +1130,17 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
+        let t_send = start.elapsed().as_micros() as u64;
+
+        tracing::info!(
+            node = self.node_id.get(),
+            t_state,
+            t_writelog,
+            t_apply,
+            t_send,
+            replica_count = replicas.len(),
+            "replicate_write_async_timing"
+        );
 
         Ok(sequence)
     }

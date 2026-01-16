@@ -167,6 +167,18 @@ impl SubscriptionCache {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
+    pub fn len(&self) -> usize {
+        self.snapshots.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
     pub fn needs_reconciliation(&self, now: u64) -> bool {
         let last = *self.last_reconciliation.read().unwrap();
         now.saturating_sub(last) >= SUBSCRIPTION_RECONCILIATION_INTERVAL_MS

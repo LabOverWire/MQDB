@@ -100,6 +100,18 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entities.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
     /// Returns `AlreadyExists` if the entity already exists.
@@ -110,13 +122,26 @@ impl DbDataStore {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<DbEntity, DbDataStoreError> {
+        let start = std::time::Instant::now();
         let key = format!("{entity}/{id}");
         let mut entities = self.entities.write().unwrap();
+        let lock_time = start.elapsed();
+
         if entities.contains_key(&key) {
             return Err(DbDataStoreError::AlreadyExists);
         }
         let db_entity = DbEntity::create(entity, id, data, timestamp_ms);
         entities.insert(key, db_entity.clone());
+
+        let total_time = start.elapsed();
+        if total_time.as_micros() > 100 {
+            tracing::warn!(
+                total_us = total_time.as_micros(),
+                lock_us = lock_time.as_micros(),
+                store_size = entities.len(),
+                "slow DbDataStore::create"
+            );
+        }
         Ok(db_entity)
     }
 

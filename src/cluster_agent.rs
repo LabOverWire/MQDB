@@ -403,7 +403,6 @@ impl ClusteredAgent {
                     .map_err(|e| format!("failed to load password file: {e}"))?;
                 auth_provider
                     .add_user(svc_user.clone(), &svc_pass)
-                    .await
                     .map_err(|e| format!("failed to add service user: {e}"))?;
                 broker_config.auth_config.allow_anonymous = false;
                 (
@@ -865,11 +864,20 @@ impl ClusteredAgent {
             }));
         }
 
+        let stores = ctrl.stores();
         Response::ok(json!({
             "node_id": self.node_id.get(),
             "node_name": self.node_name,
             "is_raft_leader": raft_status.is_leader,
             "raft_term": raft_status.current_term,
+            "raft_log_len": raft_status.log_len,
+            "raft_commit_index": raft_status.commit_index,
+            "raft_last_applied": raft_status.last_applied,
+            "raft_last_log_index": raft_status.last_log_index,
+            "store_subscriptions": stores.subscriptions.len(),
+            "store_topics": stores.topics.len(),
+            "store_client_locations": stores.client_locations.len(),
+            "store_db_data": stores.db_data.len(),
             "alive_nodes": alive_nodes,
             "partition_count": NUM_PARTITIONS,
             "partitions": partitions

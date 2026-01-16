@@ -103,6 +103,22 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         &self.partition_map
     }
 
+    pub fn commit_index(&self) -> u64 {
+        self.node.commit_index()
+    }
+
+    pub fn last_applied(&self) -> u64 {
+        self.node.last_applied()
+    }
+
+    pub fn last_log_index(&self) -> u64 {
+        self.node.last_log_index()
+    }
+
+    pub fn log_len(&self) -> usize {
+        self.node.log_len()
+    }
+
     pub fn apply_external_update(&mut self, update: &PartitionUpdate) {
         self.partition_map.apply_update(update);
     }

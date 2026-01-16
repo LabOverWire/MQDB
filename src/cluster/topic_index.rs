@@ -149,6 +149,18 @@ impl TopicIndex {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
     /// This function currently always succeeds.

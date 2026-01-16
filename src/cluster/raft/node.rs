@@ -132,6 +132,26 @@ impl RaftNode {
         self.state.peers()
     }
 
+    #[must_use]
+    pub fn commit_index(&self) -> u64 {
+        self.state.commit_index()
+    }
+
+    #[must_use]
+    pub fn last_applied(&self) -> u64 {
+        self.state.last_applied()
+    }
+
+    #[must_use]
+    pub fn last_log_index(&self) -> u64 {
+        self.state.last_log_index()
+    }
+
+    #[must_use]
+    pub fn log_len(&self) -> usize {
+        self.state.log_len()
+    }
+
     fn next_random(&mut self) -> u64 {
         self.random_seed = self
             .random_seed

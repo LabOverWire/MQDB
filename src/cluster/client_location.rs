@@ -78,6 +78,17 @@ impl ClientLocationStore {
         }
     }
 
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     #[allow(clippy::missing_panics_doc)]
     pub fn set(&self, client_id: &str, node: NodeId) {
         self.entries

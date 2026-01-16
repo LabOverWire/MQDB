@@ -22,6 +22,10 @@ pub struct RaftStatus {
     pub is_leader: bool,
     pub current_term: u64,
     pub leader_id: Option<NodeId>,
+    pub log_len: usize,
+    pub commit_index: u64,
+    pub last_applied: u64,
+    pub last_log_index: u64,
 }
 
 #[derive(Debug)]
@@ -133,6 +137,10 @@ impl<T: ClusterTransport> RaftTask<T> {
             is_leader: self.raft.is_leader(),
             current_term: self.raft.current_term(),
             leader_id: self.raft.leader_id(),
+            log_len: self.raft.log_len(),
+            commit_index: self.raft.commit_index(),
+            last_applied: self.raft.last_applied(),
+            last_log_index: self.raft.last_log_index(),
         });
     }
 

@@ -348,7 +348,7 @@ impl MqdbAgent {
                     let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
                     let svc_pass = uuid::Uuid::new_v4().to_string();
                     let auth_provider = PasswordAuthProvider::from_file(path).await?;
-                    auth_provider.add_user(svc_user.clone(), &svc_pass).await?;
+                    auth_provider.add_user(svc_user.clone(), &svc_pass)?;
                     (
                         Some(svc_user),
                         Some(svc_pass),
