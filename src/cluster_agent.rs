@@ -583,7 +583,7 @@ impl ClusteredAgent {
         });
         info!("spawned Raft task");
 
-        let mut tick_interval = interval(Duration::from_millis(1));
+        let mut tick_interval = interval(Duration::from_millis(10));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
@@ -596,13 +596,19 @@ impl ClusteredAgent {
             tokio::select! {
                 _ = tick_interval.tick() => {
                     let now = current_time_ms();
-                    let mut ctrl = self.controller.write().await;
-                    ctrl.tick(now).await;
-                    ctrl.process_messages().await;
+                    let (tick_output, alive_nodes, dead_nodes) = {
+                        let mut ctrl = self.controller.write().await;
+                        let output = ctrl.tick(now);
+                        ctrl.process_messages().await;
+                        let alive = ctrl.alive_nodes();
+                        let dead: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
+                        (output, alive, dead)
+                    };
 
-                    let alive_nodes: Vec<NodeId> = ctrl.alive_nodes();
-                    let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
-                    drop(ctrl);
+                    {
+                        let ctrl = self.controller.read().await;
+                        ctrl.send_tick_output(tick_output).await;
+                    }
 
                     for alive_node in alive_nodes {
                         let _ = self.tx_raft_events.send(RaftEvent::NodeAlive(alive_node));

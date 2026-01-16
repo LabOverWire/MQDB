@@ -72,7 +72,7 @@ pub use migration::{
 #[cfg(feature = "native")]
 pub use mqtt_transport::MqttTransport;
 pub use node::NodeId;
-pub use node_controller::{NodeController, RaftMessage};
+pub use node_controller::{NodeController, RaftMessage, TickOutput};
 pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key};
 pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};

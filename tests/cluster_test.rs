@@ -253,13 +253,13 @@ async fn heartbeat_detection() {
     ctrl1.update_partition_map(partition_map.clone());
     ctrl2.update_partition_map(partition_map);
 
-    ctrl1.tick(0).await;
+    { let output = ctrl1.tick(0); ctrl1.send_tick_output(output).await; }
     clock.advance_ms(5);
     ctrl2.process_messages().await;
 
     assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Alive);
 
-    ctrl2.tick(600).await;
+    { let output = ctrl2.tick(600); ctrl2.send_tick_output(output).await; }
     assert_eq!(ctrl2.node_status(node1_id), NodeStatus::Dead);
 }
 

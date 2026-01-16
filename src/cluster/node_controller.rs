@@ -34,6 +34,13 @@ use tokio::sync::oneshot;
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
 
+#[derive(Default)]
+pub struct TickOutput {
+    pub heartbeat: Option<ClusterMessage>,
+    pub catchup_requests: Vec<(NodeId, ClusterMessage)>,
+    pub local_publishes: Vec<(String, Vec<u8>)>,
+}
+
 pub struct PendingScatterRequest {
     pub expected_count: usize,
     pub received: Vec<serde_json::Value>,
@@ -258,12 +265,12 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
-    pub async fn tick(&mut self, now: u64) {
+    pub fn tick(&mut self, now: u64) -> TickOutput {
         self.current_time = now;
+        let mut output = TickOutput::default();
 
         if self.heartbeat.should_send(now) {
-            let hb = self.heartbeat.create_heartbeat(now);
-            let _ = self.transport.broadcast(hb).await;
+            output.heartbeat = Some(self.heartbeat.create_heartbeat(now));
         }
 
         let dead = self.heartbeat.check_timeouts(now);
@@ -271,11 +278,24 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_node_death(node);
         }
 
-        self.initiate_catchup_requests(now).await;
-        self.cleanup_stale_scatter_requests(now).await;
+        self.collect_catchup_requests(now, &mut output);
+        self.collect_stale_scatter_responses(now, &mut output);
+        output
     }
 
-    async fn cleanup_stale_scatter_requests(&mut self, now: u64) {
+    pub async fn send_tick_output(&self, output: TickOutput) {
+        if let Some(hb) = output.heartbeat {
+            let _ = self.transport.broadcast(hb).await;
+        }
+        for (target, msg) in output.catchup_requests {
+            let _ = self.transport.send(target, msg).await;
+        }
+        for (topic, payload) in output.local_publishes {
+            self.transport.queue_local_publish(topic, payload, 0).await;
+        }
+    }
+
+    fn collect_stale_scatter_responses(&mut self, now: u64, output: &mut TickOutput) {
         const SCATTER_TIMEOUT_MS: u64 = 10_000;
         let stale_threshold = now.saturating_sub(SCATTER_TIMEOUT_MS);
 
@@ -326,14 +346,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
                 let payload = serde_json::to_vec(&result).unwrap_or_default();
 
-                self.transport
-                    .queue_local_publish(pending.client_response_topic, payload, 0)
-                    .await;
+                output.local_publishes.push((pending.client_response_topic, payload));
             }
         }
     }
 
-    async fn initiate_catchup_requests(&mut self, now: u64) {
+    fn collect_catchup_requests(&mut self, now: u64, output: &mut TickOutput) {
         for (&partition_id, state) in &mut self.replicas {
             if !state.needs_catchup_request(now) {
                 continue;
@@ -361,10 +379,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
 
             let req = CatchupRequest::create(partition, from_seq, to_seq, self.node_id);
-            let _ = self
-                .transport
-                .send(primary, ClusterMessage::CatchupRequest(req))
-                .await;
+            output.catchup_requests.push((primary, ClusterMessage::CatchupRequest(req)));
 
             state.mark_catchup_requested(now);
         }
