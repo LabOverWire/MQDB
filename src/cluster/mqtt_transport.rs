@@ -590,6 +590,7 @@ impl ClusterTransport for MqttTransport {
     }
 
     async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+        let start = std::time::Instant::now();
         if !self.connected.load(Ordering::SeqCst) {
             return Err(TransportError::NotConnected);
         }
@@ -597,6 +598,8 @@ impl ClusterTransport for MqttTransport {
         let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
         let msg_type = message.type_name();
+        let payload_len = payload.len();
+        let t_serialize = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let qos = match &message {
             ClusterMessage::ForwardedPublish(fwd) => match fwd.qos {
@@ -623,6 +626,18 @@ impl ClusterTransport for MqttTransport {
             .publish_qos(&topic, payload, qos)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
+        let t_publish = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+
+        if msg_type == "Write" {
+            tracing::info!(
+                node = self.node_id.get(),
+                to = to.get(),
+                t_serialize,
+                t_publish,
+                payload_len,
+                "transport_send_timing"
+            );
+        }
 
         Ok(())
     }

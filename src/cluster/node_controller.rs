@@ -698,6 +698,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     async fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
+        let start = std::time::Instant::now();
         let partition = write.partition;
 
         tracing::debug!(
@@ -710,6 +711,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let ack = if let Some(state) = self.replicas.get_mut(&partition.get()) {
             let ack = state.handle_write(write);
+            let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             tracing::debug!(
                 ?partition,
                 sequence = write.sequence,
@@ -730,8 +732,18 @@ impl<T: ClusterTransport> NodeController<T> {
                     );
                     self.sync_retained_to_broker(write).await;
                 }
+                let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                 self.write_log
                     .append(partition, write.sequence, write.clone());
+                let t_log = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                tracing::info!(
+                    node = self.node_id.get(),
+                    from = from.get(),
+                    t_state,
+                    t_apply,
+                    t_log,
+                    "replica_handle_write_timing"
+                );
             }
             ack
         } else {
@@ -1086,7 +1098,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
-    #[allow(clippy::cast_possible_truncation)]
     pub async fn replicate_write_async(
         &mut self,
         write: ReplicationWrite,
@@ -1105,7 +1116,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let sequence = state.advance_sequence();
-        let t_state = start.elapsed().as_micros() as u64;
+        let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let write_msg = ReplicationWrite::new(
             partition,
@@ -1119,10 +1130,10 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let t_writelog = start.elapsed().as_micros() as u64;
+        let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let _ = self.stores.apply_write(&write_msg);
-        let t_apply = start.elapsed().as_micros() as u64;
+        let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         for &replica in replicas {
             let _ = self
@@ -1130,7 +1141,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
-        let t_send = start.elapsed().as_micros() as u64;
+        let t_send = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         tracing::info!(
             node = self.node_id.get(),
@@ -1145,7 +1156,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(sequence)
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
         let start = std::time::Instant::now();
         let partition = write.partition;
@@ -1178,9 +1188,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if self.is_local_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-            let t_lookup = start.elapsed().as_micros() as u64;
+            let t_lookup = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             let _ = self.replicate_write_async(write, &replicas).await;
-            let t_replicate = start.elapsed().as_micros() as u64;
+            let t_replicate = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             tracing::info!(
                 node = self.node_id.get(),
                 ?partition,
@@ -1215,7 +1225,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if the entity already exists.
-    #[allow(clippy::cast_possible_truncation)]
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -1227,9 +1236,9 @@ impl<T: ClusterTransport> NodeController<T> {
         let (db_entity, write) =
             self.stores
                 .db_create_replicated(entity_type, id, data, timestamp_ms)?;
-        let t_store = start.elapsed().as_micros() as u64;
+        let t_store = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         self.write_or_forward(write).await;
-        let t_forward = start.elapsed().as_micros() as u64;
+        let t_forward = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         tracing::info!(
             node = self.node_id.get(),
             t_store,
