@@ -607,9 +607,10 @@ impl ClusterTransport for MqttTransport {
                 1 => QoS::AtLeastOnce,
                 _ => QoS::ExactlyOnce,
             },
-            ClusterMessage::RequestVote(_) | ClusterMessage::RequestVoteResponse(_) => {
-                QoS::AtMostOnce
-            }
+            ClusterMessage::RequestVote(_)
+            | ClusterMessage::RequestVoteResponse(_)
+            | ClusterMessage::Write(_)
+            | ClusterMessage::Ack(_) => QoS::AtMostOnce,
             _ => QoS::AtLeastOnce,
         };
 
