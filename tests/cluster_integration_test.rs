@@ -9,7 +9,6 @@ use mqdb::cluster::{
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
-use tokio::sync::mpsc;
 
 fn test_raft_config() -> RaftConfig {
     RaftConfig {
@@ -29,9 +28,9 @@ struct TestNode {
     retained: RetainedStore,
     subscriptions: SubscriptionCache,
     qos2: Qos2Store,
-    rx_raft_events: mpsc::UnboundedReceiver<RaftEvent>,
+    rx_raft_events: flume::Receiver<RaftEvent>,
     #[allow(dead_code)]
-    rx_raft_messages: mpsc::UnboundedReceiver<RaftMessage>,
+    rx_raft_messages: flume::Receiver<RaftMessage>,
 }
 
 struct TestCluster {
@@ -68,8 +67,8 @@ impl TestCluster {
                 heartbeat_timeout_ms: 500,
                 ack_timeout_ms: 50,
             };
-            let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
-            let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+            let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+            let (tx_raft_events, rx_raft_events) = flume::unbounded();
             let mut controller =
                 NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
 
@@ -220,8 +219,8 @@ impl TestCluster {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         };
-        let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
-        let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+        let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+        let (tx_raft_events, rx_raft_events) = flume::unbounded();
         let mut controller =
             NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
 

@@ -8,8 +8,6 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
-
 async fn mqtt_request_response(
     client: &MqttClient,
     topic: &str,
@@ -17,7 +15,7 @@ async fn mqtt_request_response(
     timeout_ms: u64,
 ) -> Option<Value> {
     let response_topic = format!("test-response/{}", uuid::Uuid::new_v4());
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(1);
 
     client
         .subscribe(&response_topic, move |msg| {
@@ -41,8 +39,8 @@ async fn mqtt_request_response(
         .await
         .ok()?;
 
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv()).await {
-        Ok(Some(data)) => serde_json::from_slice(&data).ok(),
+    match tokio::time::timeout(Duration::from_millis(timeout_ms), rx.recv_async()).await {
+        Ok(Ok(data)) => serde_json::from_slice(&data).ok(),
         _ => None,
     }
 }

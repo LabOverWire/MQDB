@@ -1,5 +1,13 @@
 use super::state::LogEntry;
 use bebytes::BeBytes;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[allow(clippy::cast_possible_truncation)]
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes)]
 pub struct RequestVoteRequest {
@@ -7,12 +15,13 @@ pub struct RequestVoteRequest {
     pub candidate_id: u16,
     pub last_log_index: u64,
     pub last_log_term: u64,
+    pub timestamp_ms: u64,
 }
 
 impl RequestVoteRequest {
     #[must_use]
     pub fn create(term: u64, candidate_id: u16, last_log_index: u64, last_log_term: u64) -> Self {
-        Self::new(term, candidate_id, last_log_index, last_log_term)
+        Self::new(term, candidate_id, last_log_index, last_log_term, current_timestamp_ms())
     }
 }
 
@@ -20,17 +29,18 @@ impl RequestVoteRequest {
 pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: u8,
+    pub timestamp_ms: u64,
 }
 
 impl RequestVoteResponse {
     #[must_use]
     pub fn granted(term: u64) -> Self {
-        Self::new(term, 1)
+        Self::new(term, 1, current_timestamp_ms())
     }
 
     #[must_use]
     pub fn rejected(term: u64) -> Self {
-        Self::new(term, 0)
+        Self::new(term, 0, current_timestamp_ms())
     }
 
     #[must_use]
@@ -47,6 +57,7 @@ pub struct AppendEntriesHeader {
     pub prev_log_term: u64,
     pub leader_commit: u64,
     pub entry_count: u32,
+    pub timestamp_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +118,7 @@ impl AppendEntriesRequest {
             self.prev_log_term,
             self.leader_commit,
             self.entries.len() as u32,
+            current_timestamp_ms(),
         );
         let mut buf = header.to_be_bytes();
 
@@ -163,17 +175,18 @@ pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: u8,
     pub match_index: u64,
+    pub timestamp_ms: u64,
 }
 
 impl AppendEntriesResponse {
     #[must_use]
     pub fn success(term: u64, match_index: u64) -> Self {
-        Self::new(term, 1, match_index)
+        Self::new(term, 1, match_index, current_timestamp_ms())
     }
 
     #[must_use]
     pub fn failure(term: u64) -> Self {
-        Self::new(term, 0, 0)
+        Self::new(term, 0, 0, current_timestamp_ms())
     }
 
     #[must_use]

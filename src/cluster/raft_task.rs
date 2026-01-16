@@ -2,7 +2,7 @@ use crate::cluster::raft::{RaftCommand, RaftCoordinator};
 use crate::cluster::transport::ClusterTransport;
 use crate::cluster::{ClusterMessage, Epoch, NodeId, PartitionId, PartitionMap, NUM_PARTITIONS};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::interval;
 use tracing::info;
 
@@ -38,9 +38,9 @@ pub enum RaftAdminCommand {
 
 pub struct RaftTask<T: ClusterTransport> {
     raft: RaftCoordinator<T>,
-    rx_messages: mpsc::UnboundedReceiver<RaftMessage>,
-    rx_events: mpsc::UnboundedReceiver<RaftEvent>,
-    rx_admin: mpsc::UnboundedReceiver<RaftAdminCommand>,
+    rx_messages: flume::Receiver<RaftMessage>,
+    rx_events: flume::Receiver<RaftEvent>,
+    rx_admin: flume::Receiver<RaftAdminCommand>,
     tx_partition_map: watch::Sender<PartitionMap>,
     tx_status: watch::Sender<RaftStatus>,
     shutdown_rx: broadcast::Receiver<()>,
@@ -52,9 +52,9 @@ impl<T: ClusterTransport> RaftTask<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         raft: RaftCoordinator<T>,
-        rx_messages: mpsc::UnboundedReceiver<RaftMessage>,
-        rx_events: mpsc::UnboundedReceiver<RaftEvent>,
-        rx_admin: mpsc::UnboundedReceiver<RaftAdminCommand>,
+        rx_messages: flume::Receiver<RaftMessage>,
+        rx_events: flume::Receiver<RaftEvent>,
+        rx_admin: flume::Receiver<RaftAdminCommand>,
         tx_partition_map: watch::Sender<PartitionMap>,
         tx_status: watch::Sender<RaftStatus>,
         shutdown_rx: broadcast::Receiver<()>,
@@ -87,13 +87,13 @@ impl<T: ClusterTransport> RaftTask<T> {
                 _ = tick_interval.tick() => {
                     self.handle_tick().await;
                 }
-                Some(msg) = self.rx_messages.recv() => {
+                Ok(msg) = self.rx_messages.recv_async() => {
                     self.handle_raft_message(msg).await;
                 }
-                Some(event) = self.rx_events.recv() => {
+                Ok(event) = self.rx_events.recv_async() => {
                     self.handle_event(event).await;
                 }
-                Some(cmd) = self.rx_admin.recv() => {
+                Ok(cmd) = self.rx_admin.recv_async() => {
                     self.handle_admin_command(cmd).await;
                 }
             }

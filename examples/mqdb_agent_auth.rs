@@ -4,7 +4,6 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::info;
 
 #[tokio::main]
@@ -70,7 +69,7 @@ async fn test_user(
     Box::pin(client.connect_with_options("127.0.0.1:1884", options)).await?;
     info!("{username} connected successfully");
 
-    let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
+    let (response_tx, response_rx) = flume::bounded::<String>(32);
     let callback_tx = response_tx.clone();
     client
         .subscribe(&format!("{username}/responses"), move |msg| {
@@ -96,7 +95,7 @@ async fn test_user(
             )
             .await?;
 
-        if let Some(response) = response_rx.recv().await {
+        if let Ok(response) = response_rx.recv_async().await {
             let parsed: serde_json::Value = serde_json::from_str(&response)?;
             let status = parsed["status"].as_str().unwrap_or("unknown");
             info!("{username} -> $DB/{entity}/create: {status}");
@@ -116,7 +115,7 @@ async fn test_read_only_user(username: &str) -> Result<(), Box<dyn std::error::E
     Box::pin(client.connect_with_options("127.0.0.1:1884", options)).await?;
     info!("{username} connected successfully");
 
-    let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
+    let (response_tx, response_rx) = flume::bounded::<String>(32);
     let callback_tx = response_tx.clone();
     client
         .subscribe(&format!("{username}/responses"), move |msg| {
@@ -140,7 +139,7 @@ async fn test_read_only_user(username: &str) -> Result<(), Box<dyn std::error::E
         )
         .await?;
 
-    if let Some(response) = response_rx.recv().await {
+    if let Ok(response) = response_rx.recv_async().await {
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         let status = parsed["status"].as_str().unwrap_or("unknown");
         info!("{username} -> $DB/users/list: {status}");

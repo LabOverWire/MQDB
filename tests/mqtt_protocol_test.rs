@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
 
 async fn start_test_broker(port: u16) -> TempDir {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -47,7 +46,7 @@ async fn test_subscribe_unsubscribe_flow() {
         .await
         .unwrap();
 
-    let (tx, mut rx) = mpsc::channel::<String>(10);
+    let (tx, rx) = flume::bounded::<String>(10);
 
     client
         .subscribe("test/topic", move |msg| {
@@ -64,7 +63,7 @@ async fn test_subscribe_unsubscribe_flow() {
         .await
         .unwrap();
 
-    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
         .await
         .expect("should receive within timeout")
         .expect("should have message");
@@ -80,10 +79,10 @@ async fn test_subscribe_unsubscribe_flow() {
         .await
         .unwrap();
 
-    let result = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+    let result = tokio::time::timeout(Duration::from_millis(300), rx.recv_async()).await;
     let no_message = match result {
-        Err(_) | Ok(None) => true,
-        Ok(Some(_)) => false,
+        Err(_) | Ok(Err(_)) => true,
+        Ok(Ok(_)) => false,
     };
     assert!(no_message, "should not receive after unsubscribe");
 
@@ -107,7 +106,7 @@ async fn test_qos1_delivery() {
         .await
         .unwrap();
 
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(10);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(10);
 
     subscriber
         .subscribe("test/qos1", move |msg| {
@@ -123,7 +122,7 @@ async fn test_qos1_delivery() {
         .await
         .unwrap();
 
-    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
         .await
         .expect("should receive within timeout")
         .expect("should have message");
@@ -160,7 +159,7 @@ async fn test_retained_message() {
         .await
         .unwrap();
 
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(10);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(10);
 
     subscriber
         .subscribe("test/retained", move |msg| {
@@ -169,7 +168,7 @@ async fn test_retained_message() {
         .await
         .unwrap();
 
-    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
         .await
         .expect("new subscriber should receive retained message")
         .expect("should have message");

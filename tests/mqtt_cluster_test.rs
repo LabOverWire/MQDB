@@ -15,8 +15,8 @@ fn create_test_controller(
     transport: MqttTransport,
     config: TransportConfig,
 ) -> NodeController<MqttTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = tokio::sync::mpsc::unbounded_channel();
-    let (tx_raft_events, _rx_raft_events) = tokio::sync::mpsc::unbounded_channel();
+    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
     NodeController::new(node_id, transport, config, tx_raft_messages, tx_raft_events)
 }
 

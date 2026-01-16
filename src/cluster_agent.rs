@@ -10,7 +10,7 @@ use crate::storage::FjallBackend;
 use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
-use mqtt5::broker::config::{QuicConfig, StorageBackend, StorageConfig};
+use mqtt5::broker::config::{ClusterListenerConfig, QuicConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{RwLock, broadcast, oneshot, watch};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
@@ -43,10 +43,12 @@ impl PeerConfig {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct ClusterConfig {
     pub node_id: u16,
     pub node_name: String,
     pub bind_address: SocketAddr,
+    pub cluster_port_offset: u16,
     pub db_path: PathBuf,
     pub persist_stores: bool,
     pub stores_durability: DurabilityMode,
@@ -69,6 +71,7 @@ impl ClusterConfig {
             node_id,
             node_name: format!("node-{node_id}"),
             bind_address: "0.0.0.0:1883".parse().expect("valid default address"),
+            cluster_port_offset: 100,
             db_path,
             persist_stores: true,
             stores_durability: DurabilityMode::PeriodicMs(10),
@@ -81,6 +84,11 @@ impl ClusterConfig {
             quic_key_file: None,
             bridge_out_only: false,
         }
+    }
+
+    #[must_use]
+    pub fn cluster_port(&self) -> u16 {
+        self.bind_address.port() + self.cluster_port_offset
     }
 
     #[must_use]
@@ -143,6 +151,12 @@ impl ClusterConfig {
         self.bridge_out_only = out_only;
         self
     }
+
+    #[must_use]
+    pub fn with_cluster_port_offset(mut self, offset: u16) -> Self {
+        self.cluster_port_offset = offset;
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -157,11 +171,11 @@ pub struct ClusteredAgent {
     node_name: String,
     controller: Arc<RwLock<NodeController<MqttTransport>>>,
     raft: Option<RaftCoordinator<MqttTransport>>,
-    rx_raft_messages: Option<mpsc::UnboundedReceiver<crate::cluster::RaftMessage>>,
-    rx_raft_events: Option<mpsc::UnboundedReceiver<RaftEvent>>,
-    rx_raft_admin: Option<mpsc::UnboundedReceiver<RaftAdminCommand>>,
-    tx_raft_admin: mpsc::UnboundedSender<RaftAdminCommand>,
-    tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+    rx_raft_messages: Option<flume::Receiver<crate::cluster::RaftMessage>>,
+    rx_raft_events: Option<flume::Receiver<RaftEvent>>,
+    rx_raft_admin: Option<flume::Receiver<RaftAdminCommand>>,
+    tx_raft_admin: flume::Sender<RaftAdminCommand>,
+    tx_raft_events: flume::Sender<RaftEvent>,
     tx_partition_map: Option<watch::Sender<PartitionMap>>,
     tx_raft_status: Option<watch::Sender<RaftStatus>>,
     rx_partition_map: watch::Receiver<PartitionMap>,
@@ -177,6 +191,7 @@ pub struct ClusteredAgent {
     quic_cert_file: Option<PathBuf>,
     quic_key_file: Option<PathBuf>,
     bridge_out_only: bool,
+    cluster_port_offset: u16,
 }
 
 impl ClusteredAgent {
@@ -202,10 +217,10 @@ impl ClusteredAgent {
             None
         };
 
-        let (tx_raft_messages, rx_raft_messages) = mpsc::unbounded_channel();
-        let (tx_raft_events, rx_raft_events) = mpsc::unbounded_channel();
+        let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+        let (tx_raft_events, rx_raft_events) = flume::unbounded();
         let tx_raft_events_clone = tx_raft_events.clone();
-        let (tx_raft_admin, rx_raft_admin) = mpsc::unbounded_channel();
+        let (tx_raft_admin, rx_raft_admin) = flume::unbounded();
         let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
         let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
 
@@ -285,7 +300,13 @@ impl ClusteredAgent {
             quic_cert_file: config.quic_cert_file,
             quic_key_file: config.quic_key_file,
             bridge_out_only: config.bridge_out_only,
+            cluster_port_offset: config.cluster_port_offset,
         })
+    }
+
+    #[must_use]
+    fn cluster_port(&self) -> u16 {
+        self.bind_address.port() + self.cluster_port_offset
     }
 
     fn create_bridge_configs(&self) -> Vec<BridgeConfig> {
@@ -298,8 +319,18 @@ impl ClusteredAgent {
         self.peers
             .iter()
             .map(|peer| {
+                let peer_addr: SocketAddr = peer
+                    .address
+                    .parse()
+                    .expect("peer address should be valid");
+                let cluster_addr = format!(
+                    "{}:{}",
+                    peer_addr.ip(),
+                    peer_addr.port() + self.cluster_port_offset
+                );
+
                 let bridge_name = format!("bridge-to-node-{}", peer.node_id);
-                let mut config = BridgeConfig::new(&bridge_name, &peer.address)
+                let mut config = BridgeConfig::new(&bridge_name, &cluster_addr)
                     .add_topic("_mqdb/cluster/#", direction, QoS::AtLeastOnce)
                     .add_topic("_mqdb/forward/#", direction, QoS::AtLeastOnce)
                     .add_topic("_mqdb/repl/#", direction, QoS::AtLeastOnce);
@@ -325,6 +356,9 @@ impl ClusteredAgent {
 
     /// # Errors
     /// Returns an error if broker startup or transport connection fails.
+    ///
+    /// # Panics
+    /// Panics if the cluster listener address cannot be parsed (should never happen with valid bind address).
     #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event_handler = Arc::new(ClusterEventHandler::new(
@@ -398,6 +432,23 @@ impl ClusteredAgent {
             }
         }
 
+        let cluster_addr: SocketAddr = format!(
+            "{}:{}",
+            self.bind_address.ip(),
+            self.cluster_port()
+        )
+        .parse()
+        .expect("valid cluster address");
+
+        let cluster_listener =
+            if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
+                ClusterListenerConfig::quic(vec![cluster_addr], cert_file.clone(), key_file.clone())
+            } else {
+                ClusterListenerConfig::new(vec![cluster_addr])
+            };
+        broker_config = broker_config.with_cluster_listener(cluster_listener);
+        info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
+
         let mut broker = if let Some(provider) = custom_auth_provider {
             MqttBroker::with_config(broker_config)
                 .await?
@@ -443,7 +494,7 @@ impl ClusteredAgent {
         .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
 
-        let (admin_tx, mut admin_rx) = mpsc::channel::<AdminRequest>(32);
+        let (admin_tx, admin_rx) = flume::bounded::<AdminRequest>(32);
         let admin_client = transport.client().clone();
         admin_client
             .subscribe("$SYS/mqdb/cluster/#", {
@@ -561,6 +612,7 @@ impl ClusteredAgent {
                     let current_map = ctrl.partition_map().clone();
                     let mut became_primary = false;
                     if current_map != raft_partition_map {
+                        let mut changes = 0u32;
                         for partition in PartitionId::all() {
                             let new_assignment = raft_partition_map.get(partition);
                             let old_assignment = current_map.get(partition);
@@ -577,6 +629,10 @@ impl ClusteredAgent {
                                     }
                                 } else if is_replica {
                                     ctrl.become_replica(partition, new_assignment.epoch, 0);
+                                }
+                                changes += 1;
+                                if changes.is_multiple_of(8) {
+                                    tokio::task::yield_now().await;
                                 }
                             }
                         }
@@ -606,6 +662,7 @@ impl ClusteredAgent {
                                 "marking sessions disconnected due to node death"
                             );
                             let now = current_time_ms();
+                            let mut session_count = 0u32;
                             for session in affected_sessions {
                                 let client_id = session.client_id_str();
                                 let result = ctrl.stores_mut().update_session_replicated(
@@ -614,6 +671,10 @@ impl ClusteredAgent {
                                 );
                                 if let Ok((_session, write)) = result {
                                     ctrl.write_or_forward(write).await;
+                                }
+                                session_count += 1;
+                                if session_count.is_multiple_of(8) {
+                                    tokio::task::yield_now().await;
                                 }
                             }
                         }
@@ -707,7 +768,7 @@ impl ClusteredAgent {
                         stores.subscriptions.mark_reconciliation(now);
                     }
                 }
-                Some(req) = admin_rx.recv() => {
+                Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
                 }
                 () = transport.wait_for_message() => {

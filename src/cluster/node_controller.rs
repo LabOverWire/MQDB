@@ -29,7 +29,7 @@ use bebytes::BeBytes;
 use super::raft_task::RaftEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -75,8 +75,8 @@ pub struct NodeController<T: ClusterTransport> {
     write_log: PartitionWriteLog,
     forward_dedup: HashSet<u64>,
     forward_dedup_order: VecDeque<u64>,
-    tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
-    tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+    tx_raft_messages: flume::Sender<RaftMessage>,
+    tx_raft_events: flume::Sender<RaftEvent>,
     dead_nodes_for_session_update: VecDeque<NodeId>,
     migration_manager: MigrationManager,
     pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
@@ -106,8 +106,8 @@ impl<T: ClusterTransport> NodeController<T> {
         node_id: NodeId,
         transport: T,
         config: TransportConfig,
-        tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
-        tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+        tx_raft_messages: flume::Sender<RaftMessage>,
+        tx_raft_events: flume::Sender<RaftEvent>,
     ) -> Self {
         Self::new_with_storage(node_id, transport, config, None, tx_raft_messages, tx_raft_events)
     }
@@ -118,8 +118,8 @@ impl<T: ClusterTransport> NodeController<T> {
         transport: T,
         config: TransportConfig,
         storage: Option<Arc<dyn StorageBackend>>,
-        tx_raft_messages: mpsc::UnboundedSender<RaftMessage>,
-        tx_raft_events: mpsc::UnboundedSender<RaftEvent>,
+        tx_raft_messages: flume::Sender<RaftMessage>,
+        tx_raft_events: flume::Sender<RaftEvent>,
     ) -> Self {
         Self {
             node_id,
@@ -396,9 +396,26 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn process_messages(&mut self) {
+        const BATCH_SIZE: u32 = 8;
+        let start = std::time::Instant::now();
+        let mut count = 0u32;
         while let Some(msg) = self.transport.recv() {
             self.handle_message(msg).await;
+            count += 1;
+            if count.is_multiple_of(BATCH_SIZE) {
+                tokio::task::yield_now().await;
+            }
+        }
+        if count > 0 {
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            tracing::info!(
+                node = self.node_id.get(),
+                msg_count = count,
+                elapsed_us,
+                "process_messages_timing"
+            );
         }
     }
 
@@ -1111,7 +1128,9 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(sequence)
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
+        let start = std::time::Instant::now();
         let partition = write.partition;
 
         let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
@@ -1141,13 +1160,18 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if self.is_local_partition(partition) {
-            tracing::debug!(
-                ?partition,
-                entity = ?write.entity,
-                "write_or_forward: local partition, replicating"
-            );
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
+            let t_lookup = start.elapsed().as_micros() as u64;
             let _ = self.replicate_write_async(write, &replicas).await;
+            let t_replicate = start.elapsed().as_micros() as u64;
+            tracing::info!(
+                node = self.node_id.get(),
+                ?partition,
+                replica_count = replicas.len(),
+                t_lookup,
+                t_replicate,
+                "write_or_forward_timing"
+            );
         } else if let Some(primary) = self
             .partition_map
             .primary(partition)
@@ -1174,6 +1198,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if the entity already exists.
+    #[allow(clippy::cast_possible_truncation)]
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -1181,10 +1206,19 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let start = std::time::Instant::now();
         let (db_entity, write) =
             self.stores
                 .db_create_replicated(entity_type, id, data, timestamp_ms)?;
+        let t_store = start.elapsed().as_micros() as u64;
         self.write_or_forward(write).await;
+        let t_forward = start.elapsed().as_micros() as u64;
+        tracing::info!(
+            node = self.node_id.get(),
+            t_store,
+            t_forward,
+            "db_create_timing"
+        );
         Ok(db_entity)
     }
 
@@ -3160,8 +3194,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
-        let (tx_raft_messages, _rx_raft_messages) = mpsc::unbounded_channel();
-        let (tx_raft_events, _rx_raft_events) = mpsc::unbounded_channel();
+        let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+        let (tx_raft_events, _rx_raft_events) = flume::unbounded();
         NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
     }
 

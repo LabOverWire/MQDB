@@ -16,27 +16,23 @@ use bebytes::BeBytes;
 use mqtt5::QoS;
 use mqtt5::client::MqttClient;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
 
 const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
 const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
 const FORWARD_TOPIC_PREFIX: &str = "_mqdb/forward";
 
-#[derive(Debug)]
-struct MqttTransportState {
-    inbox: VecDeque<InboundMessage>,
-    connected: bool,
-}
-
 #[derive(Clone)]
 pub struct MqttTransport {
     node_id: NodeId,
     client: MqttClient,
     forward_client: MqttClient,
-    state: Arc<Mutex<MqttTransportState>>,
-    message_tx: mpsc::UnboundedSender<InboundMessage>,
+    inbox_tx: flume::Sender<InboundMessage>,
+    inbox_rx: flume::Receiver<InboundMessage>,
+    requeue_buffer: Arc<Mutex<VecDeque<InboundMessage>>>,
+    connected: Arc<AtomicBool>,
     message_notify: Arc<Notify>,
 }
 
@@ -49,8 +45,6 @@ impl std::fmt::Debug for MqttTransport {
 }
 
 impl MqttTransport {
-    /// # Panics
-    /// The spawned message receiver task panics if the state mutex is poisoned.
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
         let client_id = format!("mqdb-node-{}", node_id.get());
@@ -59,34 +53,17 @@ impl MqttTransport {
         let forward_client_id = format!("mqdb-forward-{}", node_id.get());
         let forward_client = MqttClient::new(&forward_client_id);
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
-
-        let state = Arc::new(Mutex::new(MqttTransportState {
-            inbox: VecDeque::new(),
-            connected: false,
-        }));
-
-        let notify = Arc::new(Notify::new());
-
-        let state_clone = state.clone();
-        let notify_clone = notify.clone();
-        tokio::spawn(async move {
-            while let Some(msg) = rx.recv().await {
-                {
-                    let mut s = state_clone.lock().unwrap();
-                    s.inbox.push_back(msg);
-                }
-                notify_clone.notify_one();
-            }
-        });
+        let (tx, rx) = flume::unbounded();
 
         Self {
             node_id,
             client,
             forward_client,
-            state,
-            message_tx: tx,
-            message_notify: notify,
+            inbox_tx: tx,
+            inbox_rx: rx,
+            requeue_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            connected: Arc::new(AtomicBool::new(false)),
+            message_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -148,10 +125,7 @@ impl MqttTransport {
                 .map_err(|e| TransportError::SendFailed(e.to_string()))?;
         }
 
-        {
-            let mut state = self.state.lock().unwrap();
-            state.connected = true;
-        }
+        self.connected.store(true, Ordering::SeqCst);
 
         self.subscribe_to_cluster_topics().await?;
         Ok(())
@@ -163,15 +137,18 @@ impl MqttTransport {
         let heartbeat_topic = format!("{CLUSTER_TOPIC_PREFIX}/heartbeat/+");
         let replication_topic = format!("{REPLICATION_TOPIC_PREFIX}/+/+");
 
-        let tx = self.message_tx.clone();
+        let tx = self.inbox_tx.clone();
+        let notify = self.message_notify.clone();
         let node_id = self.node_id;
 
         self.client
             .subscribe(&node_topic, {
                 let tx = tx.clone();
+                let notify = notify.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
                         let _ = tx.send(inbound);
+                        notify.notify_one();
                     }
                 }
             })
@@ -181,9 +158,11 @@ impl MqttTransport {
         self.client
             .subscribe(&broadcast_topic, {
                 let tx = tx.clone();
+                let notify = notify.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
                         let _ = tx.send(inbound);
+                        notify.notify_one();
                     }
                 }
             })
@@ -193,9 +172,11 @@ impl MqttTransport {
         self.client
             .subscribe(&heartbeat_topic, {
                 let tx = tx.clone();
+                let notify = notify.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
                         let _ = tx.send(inbound);
+                        notify.notify_one();
                     }
                 }
             })
@@ -205,9 +186,11 @@ impl MqttTransport {
         self.client
             .subscribe(&replication_topic, {
                 let tx = tx.clone();
+                let notify = notify.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
                         let _ = tx.send(inbound);
+                        notify.notify_one();
                     }
                 }
             })
@@ -218,9 +201,11 @@ impl MqttTransport {
         self.client
             .subscribe(&forward_topic, {
                 let tx = tx.clone();
+                let notify = notify.clone();
                 move |msg| {
                     if let Some(inbound) = Self::parse_message(&msg.payload, node_id) {
                         let _ = tx.send(inbound);
+                        notify.notify_one();
                     }
                 }
             })
@@ -594,8 +579,7 @@ impl MqttTransport {
 
         let _ = self.forward_client.disconnect().await;
 
-        let mut state = self.state.lock().unwrap();
-        state.connected = false;
+        self.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -606,16 +590,25 @@ impl ClusterTransport for MqttTransport {
     }
 
     async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
-        {
-            let state = self.state.lock().unwrap();
-            if !state.connected {
-                return Err(TransportError::NotConnected);
-            }
+        if !self.connected.load(Ordering::SeqCst) {
+            return Err(TransportError::NotConnected);
         }
 
         let topic = format!("{}/nodes/{}", CLUSTER_TOPIC_PREFIX, to.get());
         let payload = self.serialize_message(&message);
         let msg_type = message.type_name();
+
+        let qos = match &message {
+            ClusterMessage::ForwardedPublish(fwd) => match fwd.qos {
+                0 => QoS::AtMostOnce,
+                1 => QoS::AtLeastOnce,
+                _ => QoS::ExactlyOnce,
+            },
+            ClusterMessage::RequestVote(_) | ClusterMessage::RequestVoteResponse(_) => {
+                QoS::AtMostOnce
+            }
+            _ => QoS::AtLeastOnce,
+        };
 
         tracing::debug!(
             from = self.node_id.get(),
@@ -627,7 +620,7 @@ impl ClusterTransport for MqttTransport {
         );
 
         self.client
-            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .publish_qos(&topic, payload, qos)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
@@ -635,11 +628,8 @@ impl ClusterTransport for MqttTransport {
     }
 
     async fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
-        {
-            let state = self.state.lock().unwrap();
-            if !state.connected {
-                return Err(TransportError::NotConnected);
-            }
+        if !self.connected.load(Ordering::SeqCst) {
+            return Err(TransportError::NotConnected);
         }
 
         let topic = match &message {
@@ -651,8 +641,13 @@ impl ClusterTransport for MqttTransport {
 
         let payload = self.serialize_message(&message);
 
+        let qos = match &message {
+            ClusterMessage::Heartbeat(_) => QoS::AtMostOnce,
+            _ => QoS::AtLeastOnce,
+        };
+
         self.client
-            .publish_qos(&topic, payload, QoS::AtLeastOnce)
+            .publish_qos(&topic, payload, qos)
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
 
@@ -668,8 +663,12 @@ impl ClusterTransport for MqttTransport {
     }
 
     fn recv(&self) -> Option<InboundMessage> {
-        let mut state = self.state.lock().unwrap();
-        state.inbox.pop_front()
+        if let Ok(mut requeue) = self.requeue_buffer.try_lock()
+            && let Some(msg) = requeue.pop_front()
+        {
+            return Some(msg);
+        }
+        self.inbox_rx.try_recv().ok()
     }
 
     fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
@@ -677,8 +676,9 @@ impl ClusterTransport for MqttTransport {
     }
 
     fn requeue(&self, msg: InboundMessage) {
-        let mut state = self.state.lock().unwrap();
-        state.inbox.push_front(msg);
+        if let Ok(mut requeue) = self.requeue_buffer.lock() {
+            requeue.push_front(msg);
+        }
     }
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, _qos: u8) {

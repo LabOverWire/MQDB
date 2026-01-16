@@ -476,22 +476,108 @@ The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `c
 |----------|-------------|-------------------|
 | `partial` (default) | To lower-numbered nodes | N1:0, N2:1, N3:2 |
 | `upper` | To higher-numbered nodes | N1:2, N2:1, N3:0 |
-| `circular` | Ring (N→N+1→1) | N1:1, N2:1, N3:1 |
 | `full` | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
 
-**Full mesh** now works with `BridgeDirection::Out` (enabled via `--bridge-out` flag). Each bridge only sends outgoing messages, preventing amplification while maintaining full connectivity.
+**Bridge Direction Semantics**:
 
-**Circular mesh is NOT viable**: Ring topology can't support Raft consensus - messages can only relay in one direction, but Raft requires bidirectional communication between all nodes.
+| Direction | Behavior | Use Case |
+|-----------|----------|----------|
+| `Out` | Local publishes forwarded to remote | Full mesh (prevents amplification) |
+| `In` | Subscribes to remote, forwards to local | Not viable alone (no one sends) |
+| `Both` | Bidirectional forwarding | Asymmetric topologies (partial/upper) |
 
-**Topology Performance** (3-node cluster, DB insert benchmark):
+A bridge is an MQTT client connection from local→remote:
+- `Out`: Forward local publishes to remote broker
+- `In`: Subscribe to remote topics, inject into local router
+- `Both`: Both behaviors
 
-| Topology | Avg Throughput | Recommendation |
-|----------|---------------|----------------|
-| `upper` | 3,074 ops/s | **Best for throughput** |
-| `partial` | 1,184 ops/s | Simple setup |
-| `full` | 1,046 ops/s | Maximum redundancy |
+**Direction Constraints by Topology**:
 
-Key finding: **outgoing bridge count is the dominant performance factor**. Nodes with 0 outgoing bridges achieve ~4x throughput of nodes with 2 outgoing bridges. Upper mesh naturally places the highest-performing node (N3 with 0 outgoing) as the primary data handler.
+| Topology | Current Direction | Why |
+|----------|-------------------|-----|
+| `partial` | `Both` | Single bridge per node must handle bidirectional traffic |
+| `upper` | `Both` | Same as partial - asymmetric needs bidirectional per bridge |
+| `full` | `Out` | Each node has bridges to all others; `Out`+`Out` = bidirectional |
+
+**Why `In` alone doesn't work**:
+- `In` only receives, never publishes
+- If all bridges use `In`, no node sends heartbeats/Raft/data
+- Cluster communication requires at least one `Out` or `Both` per direction
+
+**Could we test `In`?** Only in combination:
+- Node A: bridge to B with `Out` (A sends to B)
+- Node B: bridge to A with `In` (B receives from A)
+- This is redundant - A's `Out` bridge already delivers to B
+
+**`--bridge-out` Flag Testing Results:**
+
+| Topology | `--bridge-out` | Result |
+|----------|----------------|--------|
+| partial | ✗ | Broken - N1 has no bridges, can't send back |
+| upper | ✗ | Broken - unidirectional message flow breaks Raft |
+| full | ✓ | Works - symmetric topology, paired Out bridges = bidirectional |
+
+The `--bridge-out` flag is available via `mqdb dev start-cluster --bridge-out` but **only valid for `full` topology**. Asymmetric topologies require `Both` direction because each bridge must handle bidirectional traffic.
+
+**`--no-bridge-out` Flag Testing Results** (forces `Both` direction on full mesh):
+
+| Topology | `--no-bridge-out` | Result |
+|----------|-------------------|--------|
+| full | ✗ | Broken - message amplification causes channel overflow |
+
+Errors observed: `Channel send failed - message may be dropped` flooding all nodes. Cluster becomes unresponsive (health checks timeout, `partitions_ready=0`).
+
+**Conclusion**: Full mesh topology **MUST** use `Out` direction (default). The `--no-bridge-out` flag exists only to demonstrate why `Both` direction fails on symmetric topologies.
+
+**Full mesh** works with `BridgeDirection::Out` (default for full topology). Each bridge only sends outgoing messages, preventing amplification while maintaining full connectivity.
+
+**Topology Performance** (3-node cluster, full benchmark matrix):
+
+**Agent Mode (Standalone Baseline)** (Benchmark run: 2026-01-14):
+| Operation | Throughput |
+|-----------|------------|
+| insert | 6,222 ops/s |
+| get | 9,362 ops/s |
+| update | 6,455 ops/s |
+| list | 1,082 ops/s |
+| delete | 8,593 ops/s |
+| pubsub | 154,913 msg/s |
+
+**Partial Mesh** (node connects to lower-numbered nodes):
+| Node | Peers | insert | get | update | list | delete | pubsub |
+|------|-------|--------|-----|--------|------|--------|--------|
+| 1 | 0 | 2,762 | 4,362 | 3,075 | 22 | 3,241 | 146,608 |
+| 2 | 1 | 2,605 | 2,498 | 1,422 | 10 | 1,331 | 10,384 |
+| 3 | 1 | 1,424 | 1,815 | 985 | 7 | 997 | 7,568 |
+
+**Upper Mesh** (node connects to higher-numbered nodes):
+| Node | Peers | insert | get | update | list | delete | pubsub |
+|------|-------|--------|-----|--------|------|--------|--------|
+| 1 | 2 | 2,054 | 1,616 | 1,094 | 21 | 795 | 5,006 |
+| 2 | 1 | 1,331 | 1,523 | 946 | 4 | 1,475 | 14,535 |
+| 3 | 0 | 1,147 | 1,694 | 1,036 | 3 | 1,276 | 147,515 |
+
+**Full Mesh** (every node connects to all others, `--bridge-out`):
+| Node | Peers | insert | get | update | list | delete | pubsub |
+|------|-------|--------|-----|--------|------|--------|--------|
+| 1 | 2 | 2,469 | 1,917 | 1,397 | 17 | 939 | 4,938 |
+| 2 | 2 | 1,406 | 1,710 | 1,199 | 10 | 965 | 7,240 |
+| 3 | 2 | 699 | 884 | 559 | 7 | 635 | 6,453 |
+
+**⚠️ Issue 11.16: Full Mesh Raft Flapping**
+
+Full mesh topology experiences Raft leader flapping (every 4-5s) due to unreliable heartbeat delivery with Out direction bridges. Investigation found:
+- Heartbeats are SENT by leader (confirmed in logs)
+- Heartbeats are NOT RECEIVED by followers consistently
+- Election timeout (3-5s) expires, triggering new elections
+
+Use **partial** or **upper** topology for production until this is resolved.
+
+**Key Findings**:
+- **0 peers = best pubsub**: Nodes with 0 bridge connections achieve 146-154k msg/s vs 5-15k for nodes with peers
+- **Bridge overhead dominates**: Each additional peer connection reduces throughput significantly
+- **Agent mode is fastest**: No replication overhead, 6-9k DB ops/s, 155k pubsub msg/s
+- **Full mesh unstable**: Raft flapping makes it unsuitable for production (Issue 11.16)
 
 ### A6.5 Admin Request Handlers
 

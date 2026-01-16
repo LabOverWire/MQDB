@@ -74,6 +74,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "arc-swap"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51d03449bb8ca2cc2ef70869af31463d1ae5ccc8fa3e334b307203fbf815207e"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1142,11 +1151,13 @@ dependencies = [
 name = "mqdb"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bebytes",
  "clap",
  "comfy-table",
  "crc32fast",
  "fjall",
+ "flume",
  "glob",
  "mqtt5",
  "opentelemetry",
@@ -1164,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.18.2"
+version = "0.18.3"
 dependencies = [
  "argon2",
  "base64",
@@ -1186,6 +1197,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parking_lot",
  "quinn",
  "rand",
  "regex",

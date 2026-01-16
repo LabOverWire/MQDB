@@ -420,16 +420,20 @@ impl DbRequestHandler {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
         };
+        let t_parse = start.elapsed().as_micros() as u64;
 
         let partition = controller.pick_partition_for_create();
         let id = self.generate_id_for_partition(entity, partition, payload);
         let is_local = controller.is_local_partition(partition);
+        let t_partition = start.elapsed().as_micros() as u64;
 
-        tracing::info!(
+        tracing::debug!(
             node = node_id,
             partition = partition.get(),
             is_local,
             entity,
+            t_parse,
+            t_partition,
             "json_create_start"
         );
 
@@ -450,6 +454,7 @@ impl DbRequestHandler {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(u64::MAX);
+        let t_serialize = start.elapsed().as_micros() as u64;
 
         let request_id = uuid::Uuid::new_v4().to_string();
         if let Err(conflict_field) = controller
@@ -461,19 +466,38 @@ impl DbRequestHandler {
                 &format!("unique constraint violation on field '{conflict_field}'"),
             );
         }
+        let t_constraint = start.elapsed().as_micros() as u64;
 
-        let result = match controller.db_create(entity, &id, &data_bytes, now_ms).await {
+        match controller.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
+                let t_db_create = start.elapsed().as_micros() as u64;
                 controller
                     .commit_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
                     .await;
-                let result = json!({
+                let t_commit = start.elapsed().as_micros() as u64;
+                let json_result = json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
                     "entity": entity,
                     "data": data
                 });
-                serde_json::to_vec(&result).unwrap_or_default()
+                let response = serde_json::to_vec(&json_result).unwrap_or_default();
+                let t_response = start.elapsed().as_micros() as u64;
+
+                tracing::info!(
+                    node = node_id,
+                    partition = partition.get(),
+                    t_parse,
+                    t_partition,
+                    t_serialize,
+                    t_constraint,
+                    t_db_create,
+                    t_commit,
+                    t_response,
+                    "json_create_timing"
+                );
+
+                response
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
                 controller
@@ -487,16 +511,7 @@ impl DbRequestHandler {
                     .await;
                 Self::json_error(500, "internal error")
             }
-        };
-
-        tracing::info!(
-            node = node_id,
-            partition = partition.get(),
-            elapsed_us = start.elapsed().as_micros() as u64,
-            "json_create_complete"
-        );
-
-        result
+        }
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -852,11 +867,10 @@ mod tests {
     use crate::cluster::{Epoch, PartitionMap};
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::mpsc;
 
     fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
-        let (tx_raft_messages, _rx_raft_messages) = mpsc::unbounded_channel();
-        let (tx_raft_events, _rx_raft_events) = mpsc::unbounded_channel();
+        let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+        let (tx_raft_events, _rx_raft_events) = flume::unbounded();
         NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
     }
 

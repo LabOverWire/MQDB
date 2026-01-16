@@ -78,94 +78,68 @@ fn redistribute_primaries(
 ) -> Vec<PartitionReassignment> {
     let node_count = all_nodes.len();
     let ideal_per_node = NUM_PARTITIONS as usize / node_count;
-    let remainder = NUM_PARTITIONS as usize % node_count;
-    let underweight_threshold = ideal_per_node / 2;
+    let max_per_node = ideal_per_node + 1;
 
-    let mut primary_counts: Vec<(NodeId, usize)> = all_nodes
+    let mut primary_counts: std::collections::HashMap<NodeId, usize> = all_nodes
         .iter()
         .map(|n| (*n, current.primary_count(*n)))
         .collect();
 
-    let underweight_nodes: Vec<NodeId> = primary_counts
-        .iter()
-        .filter(|(_, count)| *count <= underweight_threshold)
-        .map(|(n, _)| *n)
-        .collect();
-
-    if underweight_nodes.is_empty() {
-        return Vec::new();
-    }
-
     let mut reassignments = Vec::new();
-    let overloaded: Vec<(NodeId, usize)> = primary_counts
-        .iter()
-        .filter(|(_, count)| *count > ideal_per_node + usize::from(remainder > 0))
-        .copied()
-        .collect();
 
-    let partitions_to_move = underweight_nodes.len() * ideal_per_node;
-    let mut moved = 0;
-    let mut target_idx = 0;
+    for partition in PartitionId::all() {
+        let assignment = current.get(partition);
+        let Some(current_primary) = assignment.primary else {
+            continue;
+        };
 
-    for (overloaded_node, count) in &overloaded {
-        if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
-            break;
+        let current_count = *primary_counts.get(&current_primary).unwrap_or(&0);
+
+        let target_node = all_nodes
+            .iter()
+            .filter(|&&n| n != current_primary)
+            .min_by_key(|n| primary_counts.get(n).unwrap_or(&0))
+            .copied();
+
+        let Some(target) = target_node else {
+            continue;
+        };
+
+        let target_count = *primary_counts.get(&target).unwrap_or(&0);
+
+        let should_move = current_count > max_per_node
+            || (current_count > ideal_per_node && target_count < ideal_per_node);
+
+        if !should_move {
+            continue;
         }
 
-        let excess = count.saturating_sub(ideal_per_node);
-        let mut moved_from_node = 0;
+        let new_epoch = Epoch::new(assignment.epoch.get() + 1);
 
-        for partition in PartitionId::all() {
-            if moved >= partitions_to_move || target_idx >= underweight_nodes.len() {
-                break;
-            }
-            if moved_from_node >= excess {
-                break;
-            }
+        let mut new_replicas: Vec<NodeId> = assignment
+            .replicas
+            .iter()
+            .filter(|r| **r != target)
+            .copied()
+            .collect();
 
-            let assignment = current.get(partition);
-            if assignment.primary != Some(*overloaded_node) {
-                continue;
-            }
-
-            let target_node = underweight_nodes[target_idx];
-            let new_epoch = Epoch::new(assignment.epoch.get() + 1);
-
-            let mut new_replicas: Vec<NodeId> = assignment
-                .replicas
-                .iter()
-                .filter(|r| **r != target_node)
-                .copied()
-                .collect();
-
-            if !new_replicas.contains(overloaded_node) && new_replicas.len() < rf.saturating_sub(1)
-            {
-                new_replicas.push(*overloaded_node);
-            }
-
-            new_replicas.truncate(rf.saturating_sub(1));
-
-            reassignments.push(PartitionReassignment {
-                partition,
-                old_primary: assignment.primary,
-                new_primary: target_node,
-                old_replicas: assignment.replicas.clone(),
-                new_replicas,
-                new_epoch,
-            });
-
-            moved += 1;
-            moved_from_node += 1;
-
-            for (node, c) in &mut primary_counts {
-                if *node == target_node {
-                    *c += 1;
-                    if *c >= ideal_per_node {
-                        target_idx += 1;
-                    }
-                }
-            }
+        if !new_replicas.contains(&current_primary) && new_replicas.len() < rf.saturating_sub(1) {
+            new_replicas.push(current_primary);
         }
+
+        new_replicas.truncate(rf.saturating_sub(1));
+
+        reassignments.push(PartitionReassignment {
+            partition,
+            old_primary: assignment.primary,
+            new_primary: target,
+            old_replicas: assignment.replicas.clone(),
+            new_replicas,
+            new_epoch,
+        });
+
+        *primary_counts.get_mut(&current_primary).unwrap() -= 1;
+        *primary_counts.get_mut(&target).unwrap() += 1;
     }
 
     reassignments

@@ -562,7 +562,10 @@ impl BrokerEventHandler for ClusterEventHandler {
 
             if event.topic.starts_with("$DB/") {
                 debug!(topic = %event.topic, "handling $DB/ request");
+                let start = std::time::Instant::now();
                 let mut ctrl = self.controller.write().await;
+                #[allow(clippy::cast_possible_truncation)]
+                let t_lock = start.elapsed().as_micros() as u64;
                 if let Some(response) = self
                     .db_handler
                     .handle_publish(
@@ -574,9 +577,20 @@ impl BrokerEventHandler for ClusterEventHandler {
                     )
                     .await
                 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let t_handle = start.elapsed().as_micros() as u64;
                     ctrl.transport()
                         .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
                         .await;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let t_queue = start.elapsed().as_micros() as u64;
+                    tracing::info!(
+                        node = node_id.get(),
+                        t_lock,
+                        t_handle,
+                        t_queue,
+                        "db_event_timing"
+                    );
                 }
                 return;
             }

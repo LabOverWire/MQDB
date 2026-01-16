@@ -12,7 +12,6 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -276,9 +275,13 @@ enum DevAction {
         #[arg(
             long,
             value_name = "TYPE",
-            help = "Topology: partial (default), circular, or full"
+            help = "Topology: partial (default), upper, or full"
         )]
         topology: Option<String>,
+        #[arg(long, help = "Use Out-only bridge direction (default: Both for partial/upper, Out for full)")]
+        bridge_out: bool,
+        #[arg(long, help = "Use Both bridge direction even for full topology (may cause amplification)")]
+        no_bridge_out: bool,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {
@@ -519,6 +522,8 @@ enum ClusterAction {
         durability_ms: u64,
         #[arg(long, help = "Use outgoing-only bridge direction (for full mesh topology)")]
         bridge_out: bool,
+        #[arg(long, default_value = "100", help = "Port offset for cluster listener (bridges connect to main_port + offset)")]
+        cluster_port_offset: u16,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -642,6 +647,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durability,
                 durability_ms,
                 bridge_out,
+                cluster_port_offset,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -658,6 +664,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     durability,
                     durability_ms,
                     bridge_out,
+                    cluster_port_offset,
                 }))
                 .await?;
             }
@@ -882,6 +889,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 no_quic,
                 db_prefix,
                 topology,
+                bridge_out,
+                no_bridge_out,
             } => {
                 cmd_dev_start_cluster(
                     nodes,
@@ -891,6 +900,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     no_quic,
                     &db_prefix,
                     topology.as_deref(),
+                    bridge_out,
+                    no_bridge_out,
                 )?;
             }
             DevAction::Bench {
@@ -1043,6 +1054,7 @@ struct ClusterStartArgs {
     durability: DurabilityArg,
     durability_ms: u64,
     bridge_out: bool,
+    cluster_port_offset: u16,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1081,6 +1093,7 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     if args.bridge_out {
         config = config.with_bridge_out_only(true);
     }
+    config = config.with_cluster_port_offset(args.cluster_port_offset);
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
     Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
@@ -1384,7 +1397,7 @@ async fn cmd_watch(
     let client = Box::pin(connect_client(&conn)).await?;
     let topic = format!("$DB/{entity}/events/#");
 
-    let (tx, mut rx) = mpsc::channel::<Value>(100);
+    let (tx, rx) = flume::bounded::<Value>(100);
 
     client
         .subscribe(&topic, move |msg| {
@@ -1396,7 +1409,7 @@ async fn cmd_watch(
 
     eprintln!("Watching {entity} events (Ctrl+C to stop)...");
 
-    while let Some(event) = rx.recv().await {
+    while let Ok(event) = rx.recv_async().await {
         output_response(&event, &format);
     }
 
@@ -1573,7 +1586,7 @@ async fn execute_request(
     let client = Box::pin(connect_client(conn)).await?;
 
     let response_topic = format!("mqdb-cli/responses/{}", uuid::Uuid::new_v4());
-    let (tx, mut rx) = mpsc::channel::<Value>(1);
+    let (tx, rx) = flume::bounded::<Value>(1);
 
     client
         .subscribe(&response_topic, move |msg| {
@@ -1596,10 +1609,10 @@ async fn execute_request(
         .await?;
 
     let timeout = Duration::from_secs(conn.timeout);
-    let response = tokio::time::timeout(timeout, rx.recv())
+    let response = tokio::time::timeout(timeout, rx.recv_async())
         .await
         .map_err(|_| "Request timed out")?
-        .ok_or("No response received")?;
+        .map_err(|_| "No response received")?;
 
     client.disconnect().await?;
 
@@ -1818,7 +1831,7 @@ async fn cmd_subscribe(
         };
 
         let client = Box::pin(connect_client(&conn)).await?;
-        let (tx, mut rx) = mpsc::channel::<Value>(100);
+        let (tx, rx) = flume::bounded::<Value>(100);
 
         client
             .subscribe(&event_pattern, move |msg| {
@@ -1855,8 +1868,8 @@ async fn cmd_subscribe(
 
         while !shutdown.load(Ordering::SeqCst) {
             tokio::select! {
-                event = rx.recv() => {
-                    if let Some(event) = event {
+                event = rx.recv_async() => {
+                    if let Ok(event) = event {
                         output_response(&event, &format);
                     }
                 }
@@ -1908,7 +1921,7 @@ async fn execute_db_request(
     let client = Box::pin(connect_client(conn)).await?;
 
     let response_topic = format!("$DB/_resp/mqdb-cli-{}", uuid::Uuid::new_v4());
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(1);
 
     client
         .subscribe(&response_topic, move |msg| {
@@ -1927,10 +1940,10 @@ async fn execute_db_request(
     client.publish_with_options(topic, payload, opts).await?;
 
     let timeout = Duration::from_secs(conn.timeout);
-    let response_bytes = tokio::time::timeout(timeout, rx.recv())
+    let response_bytes = tokio::time::timeout(timeout, rx.recv_async())
         .await
         .map_err(|_| "Request timed out")?
-        .ok_or("No response received")?;
+        .map_err(|_| "No response received")?;
 
     client.disconnect().await?;
 
@@ -2771,6 +2784,7 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
     }
 }
 
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn cmd_dev_start_cluster(
     nodes: u8,
     clean: bool,
@@ -2779,6 +2793,8 @@ fn cmd_dev_start_cluster(
     no_quic: bool,
     db_prefix: &str,
     topology: Option<&str>,
+    bridge_out: bool,
+    no_bridge_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -2811,14 +2827,6 @@ fn cmd_dev_start_cluster(
                 .filter(|&n| n != node_id)
                 .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
                 .collect(),
-            "circular" => {
-                let next_node = if node_id == nodes { 1 } else { node_id + 1 };
-                vec![format!(
-                    "{}@127.0.0.1:{}",
-                    next_node,
-                    1882 + u16::from(next_node)
-                )]
-            }
             "upper" => ((node_id + 1)..=nodes)
                 .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
                 .collect(),
@@ -2830,7 +2838,7 @@ fn cmd_dev_start_cluster(
             cmd.args(["--peers", &peers.join(",")]);
         }
 
-        if topology_name == "full" {
+        if !no_bridge_out && (bridge_out || topology_name == "full") {
             cmd.arg("--bridge-out");
         }
 
@@ -2899,7 +2907,7 @@ async fn wait_for_broker_ready(
 
         if connected {
             let response_topic = format!("bench-ready/{}", uuid::Uuid::new_v4());
-            let (payload_tx, mut payload_rx) = mpsc::channel::<Vec<u8>>(1);
+            let (payload_tx, payload_rx) = flume::bounded::<Vec<u8>>(1);
 
             let sub_ok = client
                 .subscribe(&response_topic, move |msg| {
@@ -2921,8 +2929,8 @@ async fn wait_for_broker_ready(
                     .publish_with_options("$DB/_health", b"{}".to_vec(), opts)
                     .await;
 
-                if let Ok(Some(payload)) =
-                    tokio::time::timeout(Duration::from_secs(2), payload_rx.recv()).await
+                if let Ok(Ok(payload)) =
+                    tokio::time::timeout(Duration::from_secs(2), payload_rx.recv_async()).await
                     && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&payload)
                     && json
                         .get("data")
@@ -3409,7 +3417,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
             let topic = format!("$DB/{}/create", args.entity);
             let response_topic = format!("bench-db-seeder/resp/{}", uuid::Uuid::new_v4());
 
-            let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
+            let (tx, rx) = flume::bounded::<Option<String>>(1);
             let tx_clone = tx.clone();
             client
                 .subscribe(&response_topic, move |msg| {
@@ -3434,10 +3442,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                 .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
                 .await?;
 
-            if let Some(actual_id) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            if let Some(actual_id) = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                 .await
                 .ok()
-                .flatten()
+                .and_then(Result::ok)
                 .flatten()
                 && let Ok(mut ids) = inserted_ids.lock() {
                     ids.push(actual_id);
@@ -3508,7 +3516,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         let response_topic =
                             format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                        let (tx, mut rx) = mpsc::channel::<Option<String>>(1);
+                        let (tx, rx) = flume::bounded::<Option<String>>(1);
                         let tx_clone = tx.clone();
                         if client
                             .subscribe(&response_topic, move |msg| {
@@ -3543,10 +3551,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             {
                                 false
                             } else {
-                                let actual_id = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                let actual_id = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                                     .await
                                     .ok()
-                                    .flatten()
+                                    .and_then(Result::ok)
                                     .flatten();
                                 let success = actual_id.is_some();
                                 if let Some(actual_id) = actual_id
@@ -3574,7 +3582,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             let response_topic =
                                 format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let (tx, rx) = flume::bounded::<bool>(1);
                             let tx_clone = tx.clone();
                             if client
                                 .subscribe(&response_topic, move |_msg| {
@@ -3600,10 +3608,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                     false
                                 } else {
                                     let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                                             .await
                                             .ok()
-                                            .flatten()
+                                            .and_then(Result::ok)
                                             .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
@@ -3630,7 +3638,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             let response_topic =
                                 format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let (tx, rx) = flume::bounded::<bool>(1);
                             let tx_clone = tx.clone();
                             if client
                                 .subscribe(&response_topic, move |_msg| {
@@ -3660,10 +3668,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                     false
                                 } else {
                                     let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                                             .await
                                             .ok()
-                                            .flatten()
+                                            .and_then(Result::ok)
                                             .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
@@ -3683,7 +3691,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             let response_topic =
                                 format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                            let (tx, mut rx) = mpsc::channel::<bool>(1);
+                            let (tx, rx) = flume::bounded::<bool>(1);
                             let tx_clone = tx.clone();
                             if client
                                 .subscribe(&response_topic, move |_msg| {
@@ -3709,10 +3717,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                     false
                                 } else {
                                     let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                                             .await
                                             .ok()
-                                            .flatten()
+                                            .and_then(Result::ok)
                                             .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
@@ -3727,7 +3735,7 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                         let response_topic =
                             format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
 
-                        let (tx, mut rx) = mpsc::channel::<bool>(1);
+                        let (tx, rx) = flume::bounded::<bool>(1);
                         let tx_clone = tx.clone();
                         if client
                             .subscribe(&response_topic, move |_msg| {
@@ -3758,10 +3766,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 false
                             } else {
                                 let result =
-                                    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                                    tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
                                         .await
                                         .ok()
-                                        .flatten()
+                                        .and_then(Result::ok)
                                         .unwrap_or(false);
                                 let _ = client.unsubscribe(&response_topic).await;
                                 result
@@ -4205,7 +4213,7 @@ async fn db_create(
     data: &serde_json::Value,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let response_topic = format!("resp/{}", uuid::Uuid::new_v4());
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(1);
 
     client
         .subscribe(&response_topic, move |msg| {
@@ -4225,8 +4233,8 @@ async fn db_create(
     let payload = serde_json::to_vec(data)?;
     client.publish_with_options(&topic, payload, opts).await?;
 
-    match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-        Ok(Some(payload)) => Ok(serde_json::from_slice(&payload)?),
+    match tokio::time::timeout(Duration::from_secs(5), rx.recv_async()).await {
+        Ok(Ok(payload)) => Ok(serde_json::from_slice(&payload)?),
         _ => Err("timeout".into()),
     }
 }
@@ -4237,7 +4245,7 @@ async fn db_read(
     id: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let response_topic = format!("resp/{}", uuid::Uuid::new_v4());
-    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(1);
+    let (tx, rx) = flume::bounded::<Vec<u8>>(1);
 
     client
         .subscribe(&response_topic, move |msg| {
@@ -4258,8 +4266,8 @@ async fn db_read(
         .publish_with_options(&topic, Vec::new(), opts)
         .await?;
 
-    match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
-        Ok(Some(payload)) => Ok(serde_json::from_slice(&payload)?),
+    match tokio::time::timeout(Duration::from_secs(5), rx.recv_async()).await {
+        Ok(Ok(payload)) => Ok(serde_json::from_slice(&payload)?),
         _ => Err("timeout".into()),
     }
 }
