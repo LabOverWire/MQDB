@@ -5,6 +5,7 @@ use mqdb::cluster::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteReq
 use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::QoS;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -431,6 +432,8 @@ enum BenchAction {
         no_latency: bool,
         #[arg(long, help = "Use async pipelined mode (subscribe once, fire all ops, collect responses)")]
         r#async: bool,
+        #[arg(long, default_value = "1", help = "MQTT QoS level (0, 1, or 2) for async mode. QoS 1 recommended for reliability")]
+        qos: u8,
         #[arg(long, help = "Duration in seconds (async mode only, overrides --operations)")]
         duration: Option<u64>,
         #[command(flatten)]
@@ -595,6 +598,8 @@ struct ConnectionArgs {
     pass: Option<String>,
     #[arg(long, default_value = "30")]
     timeout: u64,
+    #[arg(long, help = "Skip TLS certificate verification (for self-signed certs)")]
+    insecure: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -978,6 +983,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 seed,
                 no_latency,
                 r#async,
+                qos,
                 duration,
                 conn,
                 format,
@@ -994,6 +1000,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     seed,
                     no_latency,
                     async_mode: r#async,
+                    qos,
                     duration,
                     conn,
                     format,
@@ -2909,6 +2916,9 @@ async fn wait_for_broker_ready(
 
         let client_id = format!("bench-ready-{}", uuid::Uuid::new_v4());
         let client = MqttClient::new(&client_id);
+        if conn.insecure {
+            client.set_insecure_tls(true).await;
+        }
         let connected = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
             let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
             Box::pin(client.connect_with_options(&conn.broker, opts))
@@ -3033,6 +3043,7 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
         user: args.conn.user.clone(),
         pass: args.conn.pass.clone(),
         timeout: args.conn.timeout,
+        insecure: args.conn.insecure,
     };
     wait_for_broker_ready(&sub_conn, 30).await?;
 
@@ -3042,6 +3053,7 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
             user: args.conn.user.clone(),
             pass: args.conn.pass.clone(),
             timeout: args.conn.timeout,
+            insecure: args.conn.insecure,
         };
         wait_for_broker_ready(&pub_conn, 30).await?;
     }
@@ -3300,6 +3312,7 @@ struct BenchDbArgs {
     seed: u64,
     no_latency: bool,
     async_mode: bool,
+    qos: u8,
     duration: Option<u64>,
     conn: ConnectionArgs,
     format: OutputFormat,
@@ -3387,7 +3400,19 @@ fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
     Value::Object(record)
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+const RAMP_INITIAL_RATE: u64 = 250;
+const RAMP_STEP: u64 = 250;
+const RAMP_INTERVAL_MS: u64 = 2000;
+const RAMP_THRESHOLD: f64 = 0.90;
+const OVERLOAD_STEPS: u32 = 2;
+const STABILIZATION_SECS: u64 = 3;
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
 async fn cmd_bench_db_async(
     args: &BenchDbArgs,
     op: DbOp,
@@ -3400,15 +3425,22 @@ async fn cmd_bench_db_async(
     }
 
     let record_size_approx = args.fields * (args.field_size + 20);
-    let duration_secs = args.duration.unwrap_or(10);
+    let duration_secs = args.duration.unwrap_or(30);
 
+    let qos_str = match args.qos {
+        0 => "QoS 0",
+        1 => "QoS 1",
+        _ => "QoS 2",
+    };
     println!(
-        "DB Benchmark (ASYNC): {}s duration, op={:?}, ~{} bytes/record",
-        duration_secs, op, record_size_approx
+        "DB Benchmark (ASYNC): {duration_secs}s duration, op={op:?}, ~{record_size_approx} bytes/record, {qos_str}"
     );
 
     let client_id = format!("bench-db-async-{}", uuid::Uuid::new_v4());
     let client = MqttClient::new(client_id.clone());
+    if args.conn.insecure {
+        client.set_insecure_tls(true).await;
+    }
     client.connect(&args.conn.broker).await?;
 
     let response_count = Arc::new(AtomicU64::new(0));
@@ -3431,51 +3463,148 @@ async fn cmd_bench_db_async(
         })
         .await?;
 
-    println!("Running for {duration_secs} seconds...");
+    println!("Ramping up from {RAMP_INITIAL_RATE} ops/s...");
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let published_count = Arc::new(AtomicU64::new(0));
+    let target_rate = Arc::new(AtomicU64::new(RAMP_INITIAL_RATE));
 
     let stop_clone = Arc::clone(&stop_flag);
     let published_clone = Arc::clone(&published_count);
+    let target_rate_clone = Arc::clone(&target_rate);
     let client_clone = client.clone();
     let entity = args.entity.clone();
     let fields = args.fields;
     let field_size = args.field_size;
     let client_id_clone = client_id.clone();
+    let qos = args.qos;
 
     let publisher_handle = tokio::spawn(async move {
         let mut i = 0u64;
+        let mut interval_start = Instant::now();
+        let mut ops_this_interval = 0u64;
+
         while !stop_clone.load(Ordering::Relaxed) {
-            let record = generate_record(fields, field_size, i);
-            let topic = format!("$DB/{entity}/create");
-            let correlation_id = format!("{i}");
-            let individual_response = format!("{client_id_clone}/responses/{correlation_id}");
+            let current_rate = target_rate_clone.load(Ordering::Relaxed);
+            let interval_elapsed = interval_start.elapsed().as_secs_f64();
+            let expected_ops = (current_rate as f64 * interval_elapsed) as u64;
 
-            let opts = PublishOptions {
-                properties: PublishProperties {
-                    response_topic: Some(individual_response),
-                    correlation_data: Some(correlation_id.into_bytes()),
+            if ops_this_interval < expected_ops {
+                let record = generate_record(fields, field_size, i);
+                let topic = format!("$DB/{entity}/create");
+                let correlation_id = format!("{i}");
+                let individual_response =
+                    format!("{client_id_clone}/responses/{correlation_id}");
+
+                let qos_level = match qos {
+                    0 => QoS::AtMostOnce,
+                    1 => QoS::AtLeastOnce,
+                    _ => QoS::ExactlyOnce,
+                };
+                let opts = PublishOptions {
+                    qos: qos_level,
+                    properties: PublishProperties {
+                        response_topic: Some(individual_response),
+                        correlation_data: Some(correlation_id.into_bytes()),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            };
+                };
 
-            if client_clone
-                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
-                .await
-                .is_ok()
-            {
-                published_clone.fetch_add(1, Ordering::Relaxed);
+                if client_clone
+                    .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                    .await
+                    .is_ok()
+                {
+                    published_clone.fetch_add(1, Ordering::Relaxed);
+                    ops_this_interval += 1;
+                }
+                i += 1;
+            } else {
+                tokio::time::sleep(Duration::from_micros(100)).await;
             }
-            i += 1;
+
+            if interval_elapsed >= 1.0 {
+                interval_start = Instant::now();
+                ops_this_interval = 0;
+            }
         }
     });
 
     let start_time = Instant::now();
-    tokio::time::sleep(Duration::from_secs(duration_secs)).await;
-    stop_flag.store(true, Ordering::Relaxed);
+    let mut last_response_count = 0u64;
+    let mut current_rate = RAMP_INITIAL_RATE;
+    let mut saturation_rate: Option<f64> = None;
+    let mut overload_remaining = 0u32;
+    let mut peak_rate = 0u64;
+    let backlog_threshold_secs = 2.0;
 
+    while start_time.elapsed().as_secs() < duration_secs {
+        tokio::time::sleep(Duration::from_millis(RAMP_INTERVAL_MS)).await;
+
+        let current_published = published_count.load(Ordering::Relaxed);
+        let current_responses = response_count.load(Ordering::Relaxed);
+        let backlog = current_published.saturating_sub(current_responses);
+        let interval_responses = current_responses.saturating_sub(last_response_count);
+        let interval_throughput =
+            interval_responses as f64 / (RAMP_INTERVAL_MS as f64 / 1000.0);
+        let backlog_limit = (current_rate as f64 * backlog_threshold_secs) as u64;
+
+        let phase = if saturation_rate.is_none() {
+            "ramp"
+        } else if overload_remaining > 0 {
+            "overload"
+        } else {
+            "stable"
+        };
+        println!(
+            "  [{phase}] Rate: {current_rate} target, {interval_throughput:.0} actual, backlog: {backlog}"
+        );
+
+        if saturation_rate.is_none() {
+            let throughput_ok = interval_throughput >= current_rate as f64 * RAMP_THRESHOLD;
+            let backlog_ok = backlog < backlog_limit;
+
+            if throughput_ok && backlog_ok {
+                current_rate += RAMP_STEP;
+                target_rate.store(current_rate, Ordering::Relaxed);
+            } else {
+                let reason = if throughput_ok {
+                    "backlog growth"
+                } else {
+                    "throughput drop"
+                };
+                saturation_rate = Some(interval_throughput);
+                println!("Saturation detected ({reason}) at {interval_throughput:.0} ops/s");
+                overload_remaining = OVERLOAD_STEPS;
+                current_rate += RAMP_STEP;
+                target_rate.store(current_rate, Ordering::Relaxed);
+                println!("Entering overload phase at {current_rate} ops/s...");
+            }
+        } else if overload_remaining > 0 {
+            overload_remaining -= 1;
+            if overload_remaining > 0 {
+                current_rate += RAMP_STEP;
+                target_rate.store(current_rate, Ordering::Relaxed);
+            } else {
+                peak_rate = current_rate;
+                let stable_rate = saturation_rate.unwrap_or(interval_throughput) as u64;
+                println!(
+                    "Overload complete (peak {peak_rate}), stabilizing at {stable_rate} ops/s..."
+                );
+                target_rate.store(stable_rate, Ordering::Relaxed);
+            }
+        }
+
+        last_response_count = current_responses;
+
+        if saturation_rate.is_some() && overload_remaining == 0 {
+            tokio::time::sleep(Duration::from_secs(STABILIZATION_SECS)).await;
+            break;
+        }
+    }
+
+    stop_flag.store(true, Ordering::Relaxed);
     let _ = publisher_handle.await;
 
     let published = published_count.load(Ordering::Relaxed);
@@ -3493,10 +3622,7 @@ async fn cmd_bench_db_async(
         }
 
         if wait_start.elapsed() > wait_timeout {
-            println!(
-                "Timeout: {}/{} responses received",
-                received, published
-            );
+            println!("Timeout: {received}/{published} responses received");
             break;
         }
 
@@ -3511,16 +3637,22 @@ async fn cmd_bench_db_async(
     let _ = client.disconnect().await;
 
     let throughput = received as f64 / total_elapsed.as_secs_f64();
+    let saturation_display = saturation_rate.unwrap_or(throughput);
+    let duration = total_elapsed.as_secs_f64();
 
     println!("\n┌───────────────────────────────────────────┐");
     println!("│           DB Benchmark Results            │");
     println!("├───────────────────────────────────────────┤");
     println!("│ Mode:                              ASYNC  │");
-    println!("│ Duration:              {:>10.2} s      │", total_elapsed.as_secs_f64());
-    println!("│ Published:             {:>10}         │", published);
-    println!("│ Successful:            {:>10}         │", received);
-    println!("│ Errors:                {:>10}         │", errors);
-    println!("│ Throughput:            {:>10.0} ops/s  │", throughput);
+    println!("│ Duration:              {duration:>10.2} s      │");
+    println!("│ Published:             {published:>10}         │");
+    println!("│ Successful:            {received:>10}         │");
+    println!("│ Errors:                {errors:>10}         │");
+    println!("│ Saturation Point:      {saturation_display:>10.0} ops/s  │");
+    if peak_rate > 0 {
+        println!("│ Peak Rate Tested:      {peak_rate:>10} ops/s  │");
+    }
+    println!("│ Throughput:            {throughput:>10.0} ops/s  │");
     println!("└───────────────────────────────────────────┘");
 
     Ok(())
@@ -4075,6 +4207,7 @@ async fn cmd_dev_bench(
         user: None,
         pass: None,
         timeout: 30,
+        insecure: false,
     };
 
     if !is_agent_running() {
