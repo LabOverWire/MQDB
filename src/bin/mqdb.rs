@@ -485,6 +485,10 @@ enum AgentAction {
         durability: DurabilityArg,
         #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
         durability_ms: u64,
+        #[arg(long, help = "Path to QUIC/TLS certificate file (PEM format)")]
+        quic_cert: Option<PathBuf>,
+        #[arg(long, help = "Path to QUIC/TLS private key file (PEM format)")]
+        quic_key: Option<PathBuf>,
     },
     Status {
         #[command(flatten)]
@@ -635,8 +639,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 anonymous,
                 durability,
                 durability_ms,
+                quic_cert,
+                quic_key,
             } => {
-                cmd_agent_start(bind, db, passwd, acl, anonymous, durability, durability_ms).await?;
+                cmd_agent_start(AgentStartArgs {
+                    bind,
+                    db_path: db,
+                    passwd,
+                    acl,
+                    anonymous,
+                    durability,
+                    durability_ms,
+                    quic_cert,
+                    quic_key,
+                })
+                .await?;
             }
             AgentAction::Status { conn } => {
                 Box::pin(cmd_agent_status(conn)).await?;
@@ -1013,7 +1030,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn cmd_agent_start(
+struct AgentStartArgs {
     bind: SocketAddr,
     db_path: PathBuf,
     passwd: Option<PathBuf>,
@@ -1021,28 +1038,35 @@ async fn cmd_agent_start(
     anonymous: bool,
     durability: DurabilityArg,
     durability_ms: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
+    quic_cert: Option<PathBuf>,
+    quic_key: Option<PathBuf>,
+}
+
+async fn cmd_agent_start(args: AgentStartArgs) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb::config::{DatabaseConfig, DurabilityMode};
 
-    let durability_mode = match durability {
+    let durability_mode = match args.durability {
         DurabilityArg::Immediate => DurabilityMode::Immediate,
-        DurabilityArg::Periodic => DurabilityMode::PeriodicMs(durability_ms),
+        DurabilityArg::Periodic => DurabilityMode::PeriodicMs(args.durability_ms),
         DurabilityArg::None => DurabilityMode::None,
     };
 
-    let config = DatabaseConfig::new(&db_path).with_durability(durability_mode);
+    let config = DatabaseConfig::new(&args.db_path).with_durability(durability_mode);
     let db = Database::open_with_config(config).await?;
 
-    let mut agent = MqdbAgent::new(db).with_bind_address(bind);
+    let mut agent = MqdbAgent::new(db).with_bind_address(args.bind);
 
-    if let Some(passwd_file) = passwd {
+    if let Some(passwd_file) = args.passwd {
         agent = agent.with_password_file(passwd_file);
     }
-    if let Some(acl_file) = acl {
+    if let Some(acl_file) = args.acl {
         agent = agent.with_acl_file(acl_file);
     }
-    if !anonymous {
+    if !args.anonymous {
         agent = agent.with_anonymous(false);
+    }
+    if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
+        agent = agent.with_quic_certs(cert, key);
     }
 
     let agent = Arc::new(agent);

@@ -1,4 +1,5 @@
 use crate::{Database, Request, Response};
+use mqtt5::broker::config::QuicConfig;
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
@@ -260,6 +261,8 @@ pub struct MqdbAgent {
     service_username: Option<String>,
     service_password: Option<String>,
     backup_dir: PathBuf,
+    quic_cert_file: Option<PathBuf>,
+    quic_key_file: Option<PathBuf>,
 }
 
 impl MqdbAgent {
@@ -279,6 +282,8 @@ impl MqdbAgent {
             service_username: None,
             service_password: None,
             backup_dir,
+            quic_cert_file: None,
+            quic_key_file: None,
         }
     }
 
@@ -316,6 +321,13 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_backup_dir(mut self, path: PathBuf) -> Self {
         self.backup_dir = path;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quic_certs(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
+        self.quic_cert_file = Some(cert_file);
+        self.quic_key_file = Some(key_file);
         self
     }
 
@@ -369,6 +381,13 @@ impl MqdbAgent {
                     None,
                 )
             };
+
+        if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
+            let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
+                .with_bind_address(self.bind_address);
+            config = config.with_quic(quic_config);
+            info!(quic_bind = %self.bind_address, "QUIC listener configured");
+        }
 
         let mut broker = if let Some(provider) = custom_auth_provider {
             MqttBroker::with_config(config)

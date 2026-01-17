@@ -125,9 +125,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bebytes"
-version = "3.0.1"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801a1451dde19a5265545b0b11b28df6ea8a180f0ee2d4a178df6ac62d8bf185"
+checksum = "a0744ac5eda5faeefe357188ae1bd09fd66e0cebb9f0efce6b75a0a3b07e64b7"
 dependencies = [
  "bebytes_derive",
  "bytes",
@@ -135,9 +135,9 @@ dependencies = [
 
 [[package]]
 name = "bebytes_derive"
-version = "3.0.1"
+version = "3.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f938e01c37898c26cac8d2117d8c74eb444e9bc8f6fe315587b8d1ead6311b44"
+checksum = "acaaf2736dbed61ad3df2fb005cbbea3962dac4898788c90db4ef687fed13cda"
 dependencies = [
  "proc-macro2",
  "quote",
