@@ -330,8 +330,10 @@ impl ClusteredAgent {
                 );
 
                 let bridge_name = format!("bridge-to-node-{}", peer.node_id);
+                let local_node_topic = format!("_mqdb/cluster/nodes/{}", self.node_id.get());
                 let peer_node_topic = format!("_mqdb/cluster/nodes/{}", peer.node_id);
                 let mut config = BridgeConfig::new(&bridge_name, &cluster_addr)
+                    .add_topic(&local_node_topic, direction, QoS::AtLeastOnce)
                     .add_topic(&peer_node_topic, direction, QoS::AtLeastOnce)
                     .add_topic("_mqdb/cluster/broadcast", direction, QoS::AtLeastOnce)
                     .add_topic("_mqdb/cluster/heartbeat/+", direction, QoS::AtLeastOnce)

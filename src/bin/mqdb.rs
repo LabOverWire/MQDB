@@ -3444,8 +3444,8 @@ async fn cmd_bench_db_async(
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Instant;
 
-    if op != DbOp::Insert {
-        return Err("Async mode currently only supports insert operations".into());
+    if op == DbOp::Mixed {
+        return Err("Async mode does not support mixed operations".into());
     }
 
     let record_size_approx = args.fields * (args.field_size + 20);
@@ -3466,6 +3466,61 @@ async fn cmd_bench_db_async(
         client.set_insecure_tls(true).await;
     }
     client.connect(&args.conn.broker).await?;
+
+    let seeded_ids: Arc<Vec<String>> = if matches!(op, DbOp::Get | DbOp::Update | DbOp::Delete) {
+        let seed_count = args.seed.max(1000);
+        println!("Seeding {seed_count} records for {op:?} benchmark...");
+        let mut ids = Vec::with_capacity(seed_count as usize);
+        for i in 0..seed_count {
+            let record = generate_record(args.fields, args.field_size, i);
+            let topic = format!("$DB/{}/create", args.entity);
+            let response_topic = format!("{client_id}/seed/{i}");
+
+            let (tx, rx) = flume::bounded::<Option<String>>(1);
+            let tx_clone = tx.clone();
+            client
+                .subscribe(&response_topic, move |msg| {
+                    let actual_id = serde_json::from_slice::<Value>(&msg.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("id")
+                                .and_then(|id| id.as_str().map(String::from))
+                                .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
+                        });
+                    let _ = tx_clone.try_send(actual_id);
+                })
+                .await?;
+
+            let opts = PublishOptions {
+                properties: PublishProperties {
+                    response_topic: Some(response_topic.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            client
+                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                .await?;
+
+            if let Some(actual_id) = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+            {
+                ids.push(actual_id);
+            }
+            let _ = client.unsubscribe(&response_topic).await;
+
+            if (i + 1) % 500 == 0 {
+                println!("  Seeded {} records...", i + 1);
+            }
+        }
+        println!("Seeding complete. {} records ready.", ids.len());
+        Arc::new(ids)
+    } else {
+        Arc::new(Vec::new())
+    };
 
     let response_count = Arc::new(AtomicU64::new(0));
     let error_count = Arc::new(AtomicU64::new(0));
@@ -3492,16 +3547,19 @@ async fn cmd_bench_db_async(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let published_count = Arc::new(AtomicU64::new(0));
     let target_rate = Arc::new(AtomicU64::new(RAMP_INITIAL_RATE));
+    let delete_index = Arc::new(AtomicU64::new(0));
 
     let stop_clone = Arc::clone(&stop_flag);
     let published_clone = Arc::clone(&published_count);
     let target_rate_clone = Arc::clone(&target_rate);
+    let delete_index_clone = Arc::clone(&delete_index);
     let client_clone = client.clone();
     let entity = args.entity.clone();
     let fields = args.fields;
     let field_size = args.field_size;
     let client_id_clone = client_id.clone();
     let qos = args.qos;
+    let seeded_ids_clone = Arc::clone(&seeded_ids);
 
     let publisher_handle = tokio::spawn(async move {
         let mut i = 0u64;
@@ -3514,8 +3572,53 @@ async fn cmd_bench_db_async(
             let expected_ops = (current_rate as f64 * interval_elapsed) as u64;
 
             if ops_this_interval < expected_ops {
-                let record = generate_record(fields, field_size, i);
-                let topic = format!("$DB/{entity}/create");
+                let (topic, payload) = match op {
+                    DbOp::Insert => {
+                        let record = generate_record(fields, field_size, i);
+                        (
+                            format!("$DB/{entity}/create"),
+                            serde_json::to_vec(&record).unwrap(),
+                        )
+                    }
+                    DbOp::Get => {
+                        if seeded_ids_clone.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+                        let id = &seeded_ids_clone[i as usize % seeded_ids_clone.len()];
+                        (format!("$DB/{entity}/{id}"), b"{}".to_vec())
+                    }
+                    DbOp::Update => {
+                        if seeded_ids_clone.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+                        let id = &seeded_ids_clone[i as usize % seeded_ids_clone.len()];
+                        let record = generate_record(fields, field_size, i);
+                        (
+                            format!("$DB/{entity}/{id}/update"),
+                            serde_json::to_vec(&record).unwrap(),
+                        )
+                    }
+                    DbOp::Delete => {
+                        if seeded_ids_clone.is_empty() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            continue;
+                        }
+                        let idx = delete_index_clone.fetch_add(1, Ordering::Relaxed) as usize;
+                        if idx >= seeded_ids_clone.len() {
+                            break;
+                        }
+                        let id = &seeded_ids_clone[idx];
+                        (format!("$DB/{entity}/{id}/delete"), b"{}".to_vec())
+                    }
+                    DbOp::List => (
+                        format!("$DB/{entity}/list"),
+                        serde_json::to_vec(&json!({"limit": 10})).unwrap(),
+                    ),
+                    DbOp::Mixed => unreachable!(),
+                };
+
                 let correlation_id = format!("{i}");
                 let individual_response =
                     format!("{client_id_clone}/responses/{correlation_id}");
@@ -3536,7 +3639,7 @@ async fn cmd_bench_db_async(
                 };
 
                 if client_clone
-                    .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
+                    .publish_with_options(&topic, payload, opts)
                     .await
                     .is_ok()
                 {

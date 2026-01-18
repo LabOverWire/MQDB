@@ -4,10 +4,11 @@ use super::rpc::{
 };
 use super::state::{PartitionUpdate, RaftCommand};
 use crate::cluster::rebalancer::{
-    RebalanceConfig, compute_incremental_assignments, compute_removal_assignments,
+    PartitionReassignment, RebalanceConfig, compute_balanced_assignments,
+    compute_incremental_assignments, compute_removal_assignments,
 };
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
-use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionRole};
+use crate::cluster::{Epoch, NodeId, PartitionId, PartitionMap, PartitionRole};
 use crate::storage::StorageBackend;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -144,6 +145,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             indices.extend(self.process_pending_draining_nodes().await);
             if self.partitions_initialized() {
                 indices.extend(self.process_pending_new_nodes().await);
+            } else {
+                indices.extend(self.trigger_rebalance_internal().await);
             }
             return indices;
         }
@@ -511,8 +514,27 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     async fn trigger_rebalance_internal(&mut self) -> Vec<u64> {
         let config = RebalanceConfig::default();
-        let reassignments =
-            compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config);
+
+        let reassignments = if self.partitions_initialized() {
+            compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config)
+        } else {
+            tracing::info!("initializing partitions for fresh cluster");
+            let new_map =
+                compute_balanced_assignments(&self.cluster_members, &config, Epoch::ZERO);
+            PartitionId::all()
+                .filter_map(|p| {
+                    let assignment = new_map.get(p);
+                    assignment.primary.map(|primary| PartitionReassignment {
+                        partition: p,
+                        old_primary: None,
+                        new_primary: primary,
+                        old_replicas: Vec::new(),
+                        new_replicas: assignment.replicas.clone(),
+                        new_epoch: assignment.epoch,
+                    })
+                })
+                .collect()
+        };
 
         if reassignments.is_empty() {
             tracing::debug!("no partition reassignments needed");
