@@ -1159,6 +1159,7 @@ dependencies = [
  "fjall",
  "flume",
  "glob",
+ "js-sys",
  "mqtt5",
  "opentelemetry",
  "quinn",
@@ -1174,11 +1175,14 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
 name = "mqtt5"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "argon2",
  "base64",
@@ -1225,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "bebytes",
  "bytes",

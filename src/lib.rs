@@ -7,11 +7,15 @@ pub mod error;
 pub mod events;
 pub mod index;
 pub mod keys;
+pub mod protocol;
 pub mod relationship;
 pub mod schema;
 pub mod storage;
 pub mod subscription;
 pub mod types;
+
+#[cfg(any(feature = "native", feature = "wasm"))]
+pub mod runtime;
 
 #[cfg(feature = "native")]
 pub mod agent;
@@ -67,6 +71,8 @@ pub use session::{ClientSession, EventRouter, SessionManager};
 pub use subscription::SubscriptionRegistry;
 pub use subscription::{Subscription, SubscriptionMode, match_pattern, match_wildcard};
 pub use transport::{ErrorCode, ErrorResponse, Request, Response};
+
+pub use protocol::{build_request, parse_admin_topic, parse_db_topic, AdminOperation, DbOperation};
 
 pub use cluster::{
     Epoch, NUM_PARTITIONS, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole,

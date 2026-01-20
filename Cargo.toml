@@ -41,6 +41,12 @@ native = [
     "dep:rustls",
     "dep:rustls-pemfile",
 ]
+wasm = [
+    "dep:web-time",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+]
 opentelemetry = [
     "mqtt5/opentelemetry",
     "dep:opentelemetry",
@@ -64,6 +70,10 @@ required-features = ["native"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { version = "1.18.1", features = ["v4", "js"] }
+web-time = { version = "1.1", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", features = ["Window"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.23.0"
