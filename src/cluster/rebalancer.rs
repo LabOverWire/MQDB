@@ -271,7 +271,13 @@ fn redistribute_replicas(
             let new_replicas: Vec<NodeId> = assignment
                 .replicas
                 .iter()
-                .map(|r| if *r == *overloaded_node { target_node } else { *r })
+                .map(|r| {
+                    if *r == *overloaded_node {
+                        target_node
+                    } else {
+                        *r
+                    }
+                })
                 .collect();
 
             let new_epoch = Epoch::new(assignment.epoch.get() + 1);
@@ -588,7 +594,13 @@ mod tests {
             }
         }
 
-        assert!(node3_primaries >= 20, "expected ~21 primaries, got {node3_primaries}");
-        assert!(node3_replicas >= 20, "expected ~21 replicas, got {node3_replicas}");
+        assert!(
+            node3_primaries >= 20,
+            "expected ~21 primaries, got {node3_primaries}"
+        );
+        assert!(
+            node3_replicas >= 20,
+            "expected ~21 replicas, got {node3_replicas}"
+        );
     }
 }

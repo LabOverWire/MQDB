@@ -561,7 +561,10 @@ impl Database {
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
         let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
-            (self.list_with_early_pagination(&entity_name, pagination.as_ref())?, true)
+            (
+                self.list_with_early_pagination(&entity_name, pagination.as_ref())?,
+                true,
+            )
         } else if filters.is_empty() {
             (self.scan_all_entities(&entity_name)?, false)
         } else {
@@ -580,12 +583,16 @@ impl Database {
 
         if !includes.is_empty() {
             for entity in &mut paginated {
-                self.load_includes(entity, &entity_name, &includes, 0).await?;
+                self.load_includes(entity, &entity_name, &includes, 0)
+                    .await?;
             }
         }
 
         Ok(if let Some(ref fields) = projection {
-            paginated.into_iter().map(|e| Self::project_fields(e, fields)).collect()
+            paginated
+                .into_iter()
+                .map(|e| Self::project_fields(e, fields))
+                .collect()
         } else {
             paginated
         })
@@ -597,7 +604,10 @@ impl Database {
         pagination: Option<&Pagination>,
     ) -> Result<Vec<Value>> {
         let requested_limit = pagination.map_or(usize::MAX, |p| p.limit);
-        let limit = self.config.max_list_results.map_or(requested_limit, |max| requested_limit.min(max));
+        let limit = self
+            .config
+            .max_list_results
+            .map_or(requested_limit, |max| requested_limit.min(max));
         let offset = pagination.map_or(0, |p| p.offset);
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
@@ -626,7 +636,12 @@ impl Database {
             && filter.op == FilterOp::Eq
         {
             let value_bytes = keys::encode_value_for_index(&filter.value)?;
-            let ids = index_manager.lookup_by_field(&self.storage, entity_name, &filter.field, &value_bytes)?;
+            let ids = index_manager.lookup_by_field(
+                &self.storage,
+                entity_name,
+                &filter.field,
+                &value_bytes,
+            )?;
             if !ids.is_empty() {
                 return self.list_from_index_ids(entity_name, &ids, filters).await;
             }
@@ -642,14 +657,21 @@ impl Database {
     ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
         for id in ids {
-            match self.read(entity_name.to_string(), id.clone(), vec![], None).await {
+            match self
+                .read(entity_name.to_string(), id.clone(), vec![], None)
+                .await
+            {
                 Ok(entity_data) => {
                     if Self::matches_filters(&entity_data, filters) {
                         results.push(entity_data);
                     }
                 }
                 Err(Error::NotFound { .. }) => {
-                    tracing::warn!("index pointed to non-existent entity: {}/{}", entity_name, id);
+                    tracing::warn!(
+                        "index pointed to non-existent entity: {}/{}",
+                        entity_name,
+                        id
+                    );
                 }
                 Err(e) => return Err(e),
             }

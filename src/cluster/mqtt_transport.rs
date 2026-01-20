@@ -72,8 +72,18 @@ impl MqttTransport {
     }
 
     #[must_use]
+    pub fn inbox_rx(&self) -> flume::Receiver<InboundMessage> {
+        self.inbox_rx.clone()
+    }
+
+    #[must_use]
     pub fn client(&self) -> &MqttClient {
         &self.client
+    }
+
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.inbox_rx.len()
     }
 
     /// # Errors
@@ -689,6 +699,10 @@ impl ClusterTransport for MqttTransport {
 
     fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
         self.recv()
+    }
+
+    fn pending_count(&self) -> usize {
+        self.inbox_rx.len()
     }
 
     fn requeue(&self, msg: InboundMessage) {

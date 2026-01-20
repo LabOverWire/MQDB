@@ -141,7 +141,7 @@ pub struct InboundMessage {
     pub received_at: u64,
 }
 
-pub trait ClusterTransport: Send + Sync + Debug {
+pub trait ClusterTransport: Send + Sync + Debug + Clone {
     fn local_node(&self) -> NodeId;
 
     fn send(
@@ -162,6 +162,8 @@ pub trait ClusterTransport: Send + Sync + Debug {
     ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
     fn recv(&self) -> Option<InboundMessage>;
+
+    fn pending_count(&self) -> usize;
 
     fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage>;
 

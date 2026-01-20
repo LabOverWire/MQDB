@@ -1,6 +1,6 @@
 use crate::cluster::raft::{RaftCommand, RaftCoordinator};
 use crate::cluster::transport::ClusterTransport;
-use crate::cluster::{ClusterMessage, Epoch, NodeId, PartitionId, PartitionMap, NUM_PARTITIONS};
+use crate::cluster::{ClusterMessage, Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::interval;
@@ -132,7 +132,9 @@ impl<T: ClusterTransport> RaftTask<T> {
             );
         }
 
-        let _ = self.tx_partition_map.send(self.raft.partition_map().clone());
+        let _ = self
+            .tx_partition_map
+            .send(self.raft.partition_map().clone());
         let _ = self.tx_status.send(RaftStatus {
             is_leader: self.raft.is_leader(),
             current_term: self.raft.current_term(),
@@ -221,7 +223,10 @@ impl<T: ClusterTransport> RaftTask<T> {
             return;
         }
 
-        info!(?cluster_nodes, "Raft leader initializing partition assignments");
+        info!(
+            ?cluster_nodes,
+            "Raft leader initializing partition assignments"
+        );
         let node_count = cluster_nodes.len();
         let mut proposal_count = 0usize;
 

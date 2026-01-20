@@ -444,7 +444,32 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 | `--quic-cert` | TLS certificate for QUIC transport |
 | `--quic-key` | TLS private key for QUIC transport |
 | `--no-quic` | Disable QUIC (use MQTT bridges only) |
+| `--direct-quic` | Use raw QUIC streams instead of MQTT bridges (recommended) |
 | `--no-persist-stores` | Disable store persistence (data lost on restart) |
+
+### Cluster Transport Options
+
+MQDB supports two transport modes for inter-node cluster communication:
+
+**MQTT Bridges (default):** Routes cluster traffic through MQTT pub/sub. Simple but can cause contention with client traffic on busy nodes.
+
+**Direct QUIC (`--direct-quic`):** Uses raw QUIC streams for cluster communication, bypassing the MQTT broker entirely. Recommended for production workloads.
+
+```bash
+# Start cluster with direct QUIC transport (recommended)
+mqdb dev start-cluster --nodes 3 --clean --direct-quic
+```
+
+**Performance comparison (DB insert throughput):**
+
+| Topology | Transport | Node 1 | Node 2 | Node 3 |
+|----------|-----------|--------|--------|--------|
+| Partial Mesh | MQTT Bridges | 2,902 ops/s | 3,343 ops/s | 1,456 ops/s |
+| Partial Mesh | Direct QUIC | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
+| Full Mesh | MQTT Bridges | 3,001 ops/s | 3,309 ops/s | 1,596 ops/s |
+| Full Mesh | Direct QUIC | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
+
+Direct QUIC provides 1.2-2.5x throughput improvement, with the biggest gains on nodes that would otherwise have heavy MQTT bridge traffic.
 
 ### Data Persistence
 

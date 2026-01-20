@@ -154,7 +154,6 @@ impl VirtualNetwork {
         delivered
     }
 
-    #[allow(dead_code)]
     pub fn pending_count(&self, node_id: u16) -> usize {
         let state = self.state.lock().unwrap();
         state.inboxes.get(&node_id).map_or(0, VecDeque::len)

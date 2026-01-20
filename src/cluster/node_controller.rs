@@ -15,6 +15,7 @@ use super::quorum::{PendingWrites, QuorumResult, QuorumTracker};
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
+use super::raft_task::RaftEvent;
 use super::replication::{ReplicaRole, ReplicaState};
 use super::retained_store::RetainedMessage;
 use super::snapshot::{
@@ -26,7 +27,6 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, session_partition};
 use crate::storage::StorageBackend;
 use bebytes::BeBytes;
-use super::raft_task::RaftEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -116,7 +116,14 @@ impl<T: ClusterTransport> NodeController<T> {
         tx_raft_messages: flume::Sender<RaftMessage>,
         tx_raft_events: flume::Sender<RaftEvent>,
     ) -> Self {
-        Self::new_with_storage(node_id, transport, config, None, tx_raft_messages, tx_raft_events)
+        Self::new_with_storage(
+            node_id,
+            transport,
+            config,
+            None,
+            tx_raft_messages,
+            tx_raft_events,
+        )
     }
 
     #[must_use]
@@ -200,7 +207,9 @@ impl<T: ClusterTransport> NodeController<T> {
         if self.is_local_partition(partition) {
             return true;
         }
-        self.partition_map.replicas(partition).contains(&self.node_id)
+        self.partition_map
+            .replicas(partition)
+            .contains(&self.node_id)
     }
 
     /// Pick a local partition for creating new entities (round-robin).
@@ -346,7 +355,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
                 let payload = serde_json::to_vec(&result).unwrap_or_default();
 
-                output.local_publishes.push((pending.client_response_topic, payload));
+                output
+                    .local_publishes
+                    .push((pending.client_response_topic, payload));
             }
         }
     }
@@ -379,7 +390,9 @@ impl<T: ClusterTransport> NodeController<T> {
             );
 
             let req = CatchupRequest::create(partition, from_seq, to_seq, self.node_id);
-            output.catchup_requests.push((primary, ClusterMessage::CatchupRequest(req)));
+            output
+                .catchup_requests
+                .push((primary, ClusterMessage::CatchupRequest(req)));
 
             state.mark_catchup_requested(now);
         }
@@ -414,9 +427,26 @@ impl<T: ClusterTransport> NodeController<T> {
     #[allow(clippy::cast_possible_truncation)]
     pub async fn process_messages(&mut self) {
         const BATCH_SIZE: u32 = 8;
+        let queue_depth_start = self.transport.pending_count();
         let start = std::time::Instant::now();
         let mut count = 0u32;
+        let mut heartbeat_count = 0u32;
+        let mut write_count = 0u32;
+        let mut ack_count = 0u32;
+        let mut raft_count = 0u32;
+        let mut other_count = 0u32;
+
         while let Some(msg) = self.transport.recv() {
+            match &msg.message {
+                ClusterMessage::Heartbeat(_) => heartbeat_count += 1,
+                ClusterMessage::Write(_) | ClusterMessage::WriteRequest(_) => write_count += 1,
+                ClusterMessage::Ack(_) => ack_count += 1,
+                ClusterMessage::RequestVote(_)
+                | ClusterMessage::RequestVoteResponse(_)
+                | ClusterMessage::AppendEntries(_)
+                | ClusterMessage::AppendEntriesResponse(_) => raft_count += 1,
+                _ => other_count += 1,
+            }
             self.handle_message(msg).await;
             count += 1;
             if count.is_multiple_of(BATCH_SIZE) {
@@ -428,6 +458,12 @@ impl<T: ClusterTransport> NodeController<T> {
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
+                queue_depth_start,
+                heartbeat_count,
+                write_count,
+                ack_count,
+                raft_count,
+                other_count,
                 elapsed_us,
                 "process_messages_timing"
             );
@@ -436,6 +472,188 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub fn drain_dead_nodes_for_session_update(&mut self) -> impl Iterator<Item = NodeId> + '_ {
         self.dead_nodes_for_session_update.drain(..)
+    }
+
+    pub fn apply_dead_nodes(&mut self, dead_nodes: &[NodeId]) {
+        for &node in dead_nodes {
+            self.heartbeat.handle_death_notice(node);
+            self.handle_node_death(node);
+        }
+    }
+
+    pub fn apply_heartbeat_updates(
+        &mut self,
+        updates: &[super::message_processor::HeartbeatUpdate],
+    ) {
+        for update in updates {
+            self.heartbeat
+                .receive_heartbeat(update.from, &update.heartbeat, update.received_at);
+        }
+    }
+
+    #[allow(clippy::too_many_lines, clippy::match_same_arms)]
+    pub async fn handle_filtered_message(&mut self, msg: InboundMessage) {
+        match msg.message {
+            ClusterMessage::Heartbeat(_)
+            | ClusterMessage::RequestVote(_)
+            | ClusterMessage::RequestVoteResponse(_)
+            | ClusterMessage::AppendEntries(_)
+            | ClusterMessage::AppendEntriesResponse(_) => {}
+
+            ClusterMessage::Write(ref write) => {
+                self.handle_write(msg.from, write).await;
+            }
+            ClusterMessage::WriteRequest(write) => {
+                self.handle_write_request(msg.from, write).await;
+            }
+            ClusterMessage::Ack(ack) => {
+                self.handle_ack(ack).await;
+            }
+            ClusterMessage::DeathNotice { node_id } => {
+                self.heartbeat.handle_death_notice(node_id);
+                self.handle_node_death(node_id);
+            }
+            ClusterMessage::DrainNotification { node_id } => {
+                tracing::info!(?node_id, "received drain notification");
+                let _ = self
+                    .tx_raft_events
+                    .send(RaftEvent::DrainNotification(node_id));
+            }
+            ClusterMessage::CatchupRequest(req) => {
+                self.handle_catchup_request(
+                    msg.from,
+                    req.partition(),
+                    req.from_sequence(),
+                    req.to_sequence(),
+                )
+                .await;
+            }
+            ClusterMessage::CatchupResponse(resp) => {
+                self.handle_catchup_response(resp).await;
+            }
+            ClusterMessage::ForwardedPublish(ref fwd) => {
+                self.handle_forwarded_publish_no_dedup(msg.from, fwd).await;
+            }
+            ClusterMessage::SnapshotRequest(ref req) => {
+                self.handle_snapshot_request(msg.from, req).await;
+            }
+            ClusterMessage::SnapshotChunk(ref chunk) => {
+                self.handle_snapshot_chunk(msg.from, chunk).await;
+            }
+            ClusterMessage::SnapshotComplete(ref complete) => {
+                self.handle_snapshot_complete(msg.from, complete);
+            }
+            ClusterMessage::QueryRequest {
+                partition,
+                ref request,
+            } => {
+                let response = self.handle_query_request(partition, request);
+                let response_msg = ClusterMessage::QueryResponse(response);
+                let _ = self.transport.send(msg.from, response_msg).await;
+            }
+            ClusterMessage::QueryResponse(ref response) => {
+                if self
+                    .pending_retained_queries
+                    .contains_key(&response.query_id)
+                {
+                    let results = Self::parse_retained_query_response(response);
+                    self.complete_retained_query(response.query_id, results);
+                } else if let Some(result) =
+                    self.query_coordinator.receive_response(response.clone())
+                {
+                    tracing::debug!(
+                        query_id = result.query_id,
+                        partial = result.partial,
+                        "query completed"
+                    );
+                }
+            }
+            ClusterMessage::BatchReadRequest(ref request) => {
+                let response = self.handle_batch_read_request(request);
+                let response_msg = ClusterMessage::BatchReadResponse(response);
+                let _ = self.transport.send(msg.from, response_msg).await;
+            }
+            ClusterMessage::BatchReadResponse(_) => {}
+            ClusterMessage::WildcardBroadcast(ref broadcast) => {
+                self.handle_wildcard_broadcast(msg.from, broadcast);
+            }
+            ClusterMessage::TopicSubscriptionBroadcast(ref broadcast) => {
+                self.handle_topic_subscription_broadcast(msg.from, broadcast);
+            }
+            ClusterMessage::PartitionUpdate(ref update) => {
+                if let (Some(partition), Some(primary)) = (
+                    PartitionId::new(u16::from(update.partition)),
+                    NodeId::validated(update.primary),
+                ) {
+                    let epoch = Epoch::new(u64::from(update.epoch));
+
+                    if primary == self.node_id {
+                        self.become_primary(partition, epoch);
+                    } else if NodeId::validated(update.replica1) == Some(self.node_id)
+                        || NodeId::validated(update.replica2) == Some(self.node_id)
+                    {
+                        self.become_replica(partition, epoch, 0);
+                    } else {
+                        self.step_down(partition);
+                    }
+                }
+
+                self.partition_map.apply_update(update);
+                self.heartbeat.partition_map_mut().apply_update(update);
+                let _ = self.tx_raft_events.send(RaftEvent::ExternalUpdate(*update));
+                tracing::info!(
+                    partition = update.partition,
+                    primary = update.primary,
+                    "received partition update from cluster"
+                );
+            }
+            ClusterMessage::JsonDbRequest {
+                partition,
+                ref request,
+            } => {
+                self.handle_json_db_request(msg.from, partition, request)
+                    .await;
+            }
+            ClusterMessage::JsonDbResponse(ref response) => {
+                self.handle_json_db_response(response).await;
+            }
+            ClusterMessage::UniqueReserveRequest(ref req) => {
+                self.handle_unique_reserve_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueReserveResponse(ref resp) => {
+                self.handle_unique_reserve_response(resp);
+            }
+            ClusterMessage::UniqueCommitRequest(ref req) => {
+                self.handle_unique_commit_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueCommitResponse(ref resp) => {
+                self.handle_unique_commit_response(resp);
+            }
+            ClusterMessage::UniqueReleaseRequest(ref req) => {
+                self.handle_unique_release_request(msg.from, req).await;
+            }
+            ClusterMessage::UniqueReleaseResponse(ref resp) => {
+                self.handle_unique_release_response(resp);
+            }
+        }
+    }
+
+    async fn handle_forwarded_publish_no_dedup(&mut self, from: NodeId, fwd: &ForwardedPublish) {
+        tracing::debug!(
+            local_node = ?self.node_id,
+            origin = ?fwd.origin_node,
+            topic = %fwd.topic,
+            qos = fwd.qos,
+            retain = fwd.retain,
+            payload_len = fwd.payload.len(),
+            target_count = fwd.targets.len(),
+            ?from,
+            "received forwarded publish (processor mode)"
+        );
+
+        self.transport
+            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .await;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -460,7 +678,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");
-                let _ = self.tx_raft_events.send(RaftEvent::DrainNotification(node_id));
+                let _ = self
+                    .tx_raft_events
+                    .send(RaftEvent::DrainNotification(node_id));
             }
             ClusterMessage::RequestVote(req) => {
                 let _ = self.tx_raft_messages.send(RaftMessage::RequestVote {
@@ -469,10 +689,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
             ClusterMessage::RequestVoteResponse(resp) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::RequestVoteResponse {
-                    from: msg.from,
-                    response: resp,
-                });
+                let _ = self
+                    .tx_raft_messages
+                    .send(RaftMessage::RequestVoteResponse {
+                        from: msg.from,
+                        response: resp,
+                    });
             }
             ClusterMessage::AppendEntries(req) => {
                 let _ = self.tx_raft_messages.send(RaftMessage::AppendEntries {
@@ -481,10 +703,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::AppendEntriesResponse {
-                    from: msg.from,
-                    response: resp,
-                });
+                let _ = self
+                    .tx_raft_messages
+                    .send(RaftMessage::AppendEntriesResponse {
+                        from: msg.from,
+                        response: resp,
+                    });
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -3234,13 +3458,22 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
+    fn create_test_controller(
+        node_id: NodeId,
+        transport: MockTransport,
+    ) -> NodeController<MockTransport> {
         let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
         let (tx_raft_events, _rx_raft_events) = flume::unbounded();
-        NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
+        NodeController::new(
+            node_id,
+            transport,
+            TransportConfig::default(),
+            tx_raft_messages,
+            tx_raft_events,
+        )
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct MockTransport {
         node_id: NodeId,
         inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
@@ -3308,6 +3541,10 @@ mod tests {
 
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             self.inbox.lock().unwrap().pop_front()
+        }
+
+        fn pending_count(&self) -> usize {
+            self.inbox.lock().unwrap().len()
         }
 
         fn requeue(&self, msg: InboundMessage) {

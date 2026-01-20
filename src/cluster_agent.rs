@@ -1,15 +1,16 @@
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
-    ClusterEventHandler, ClusterMessage, ClusterTransport, ForwardTarget, ForwardedPublish,
-    LwtPublisher, MqttTransport, NUM_PARTITIONS, NodeController, NodeId, PartitionId, PartitionMap,
-    PublishRouter, RaftAdminCommand, RaftEvent, RaftStatus, RaftTask, TopicSubscriptionBroadcast,
-    TransportConfig, WildcardBroadcast,
+    ClusterEventHandler, ClusterMessage, ClusterTransport, DedicatedExecutor, ForwardTarget,
+    ForwardedPublish, InboundMessage, LwtPublisher, MessageProcessor, MqttTransport,
+    NUM_PARTITIONS, NodeController, NodeId, PartitionId, PartitionMap, ProcessingBatch,
+    PublishRouter, QuicDirectTransport, RaftAdminCommand, RaftEvent, RaftStatus, RaftTask,
+    TopicSubscriptionBroadcast, TransportConfig, WildcardBroadcast,
 };
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
 use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
-use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeProtocol};
+use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{ClusterListenerConfig, QuicConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
@@ -60,6 +61,7 @@ pub struct ClusterConfig {
     pub quic_cert_file: Option<PathBuf>,
     pub quic_key_file: Option<PathBuf>,
     pub bridge_out_only: bool,
+    pub use_direct_quic: bool,
 }
 
 impl ClusterConfig {
@@ -83,6 +85,7 @@ impl ClusterConfig {
             quic_cert_file: None,
             quic_key_file: None,
             bridge_out_only: false,
+            use_direct_quic: false,
         }
     }
 
@@ -157,6 +160,119 @@ impl ClusterConfig {
         self.cluster_port_offset = offset;
         self
     }
+
+    #[must_use]
+    pub fn with_direct_quic(mut self, use_direct_quic: bool) -> Self {
+        self.use_direct_quic = use_direct_quic;
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ClusterTransportKind {
+    Mqtt(MqttTransport),
+    Quic(QuicDirectTransport),
+}
+
+impl ClusterTransportKind {
+    #[must_use]
+    pub fn as_mqtt(&self) -> Option<&MqttTransport> {
+        match self {
+            Self::Mqtt(t) => Some(t),
+            Self::Quic(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_quic(&self) -> Option<&QuicDirectTransport> {
+        match self {
+            Self::Mqtt(_) => None,
+            Self::Quic(t) => Some(t),
+        }
+    }
+}
+
+impl ClusterTransport for ClusterTransportKind {
+    fn local_node(&self) -> NodeId {
+        match self {
+            Self::Mqtt(t) => t.local_node(),
+            Self::Quic(t) => t.local_node(),
+        }
+    }
+
+    async fn send(
+        &self,
+        to: NodeId,
+        message: ClusterMessage,
+    ) -> Result<(), crate::cluster::TransportError> {
+        match self {
+            Self::Mqtt(t) => t.send(to, message).await,
+            Self::Quic(t) => t.send(to, message).await,
+        }
+    }
+
+    async fn broadcast(
+        &self,
+        message: ClusterMessage,
+    ) -> Result<(), crate::cluster::TransportError> {
+        match self {
+            Self::Mqtt(t) => t.broadcast(message).await,
+            Self::Quic(t) => t.broadcast(message).await,
+        }
+    }
+
+    async fn send_to_partition_primary(
+        &self,
+        partition: PartitionId,
+        message: ClusterMessage,
+    ) -> Result<(), crate::cluster::TransportError> {
+        match self {
+            Self::Mqtt(t) => t.send_to_partition_primary(partition, message).await,
+            Self::Quic(t) => t.send_to_partition_primary(partition, message).await,
+        }
+    }
+
+    fn recv(&self) -> Option<InboundMessage> {
+        match self {
+            Self::Mqtt(t) => t.recv(),
+            Self::Quic(t) => t.recv(),
+        }
+    }
+
+    fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage> {
+        match self {
+            Self::Mqtt(t) => t.try_recv_timeout(timeout_ms),
+            Self::Quic(t) => t.try_recv_timeout(timeout_ms),
+        }
+    }
+
+    fn pending_count(&self) -> usize {
+        match self {
+            Self::Mqtt(t) => t.pending_count(),
+            Self::Quic(t) => t.pending_count(),
+        }
+    }
+
+    fn requeue(&self, msg: InboundMessage) {
+        match self {
+            Self::Mqtt(t) => t.requeue(msg),
+            Self::Quic(t) => t.requeue(msg),
+        }
+    }
+
+    async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        match self {
+            Self::Mqtt(t) => t.queue_local_publish(topic, payload, qos).await,
+            Self::Quic(t) => t.queue_local_publish(topic, payload, qos).await,
+        }
+    }
+
+    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        match self {
+            Self::Mqtt(t) => t.queue_local_publish_retained(topic, payload, qos).await,
+            Self::Quic(t) => t.queue_local_publish_retained(topic, payload, qos).await,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -166,15 +282,17 @@ struct AdminRequest {
     payload: Vec<u8>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
-    controller: Arc<RwLock<NodeController<MqttTransport>>>,
-    raft: Option<RaftCoordinator<MqttTransport>>,
+    controller: Arc<RwLock<NodeController<ClusterTransportKind>>>,
+    raft: Option<RaftCoordinator<ClusterTransportKind>>,
     rx_raft_messages: Option<flume::Receiver<crate::cluster::RaftMessage>>,
     rx_raft_events: Option<flume::Receiver<RaftEvent>>,
     rx_raft_admin: Option<flume::Receiver<RaftAdminCommand>>,
     tx_raft_admin: flume::Sender<RaftAdminCommand>,
+    #[allow(dead_code)]
     tx_raft_events: flume::Sender<RaftEvent>,
     tx_partition_map: Option<watch::Sender<PartitionMap>>,
     tx_raft_status: Option<watch::Sender<RaftStatus>>,
@@ -192,11 +310,19 @@ pub struct ClusteredAgent {
     quic_key_file: Option<PathBuf>,
     bridge_out_only: bool,
     cluster_port_offset: u16,
+    bridge_executor: Option<DedicatedExecutor>,
+    #[allow(dead_code)]
+    processor_executor: Option<DedicatedExecutor>,
+    tx_tick: Option<flume::Sender<u64>>,
+    rx_main_queue: Option<flume::Receiver<InboundMessage>>,
+    rx_batch: Option<flume::Receiver<ProcessingBatch>>,
+    use_direct_quic: bool,
 }
 
 impl ClusteredAgent {
     /// # Errors
     /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: ClusterConfig) -> Result<Self, String> {
         use crate::storage::StorageBackend;
 
@@ -220,11 +346,21 @@ impl ClusteredAgent {
         let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
         let (tx_raft_events, rx_raft_events) = flume::unbounded();
         let tx_raft_events_clone = tx_raft_events.clone();
+        let tx_raft_messages_for_processor = tx_raft_messages.clone();
+        let tx_raft_events_for_processor = tx_raft_events.clone();
         let (tx_raft_admin, rx_raft_admin) = flume::unbounded();
         let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
         let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
 
-        let transport = MqttTransport::new(node_id);
+        let (transport, transport_inbox_rx) = if config.use_direct_quic {
+            let quic_transport = QuicDirectTransport::new(node_id);
+            let inbox_rx = quic_transport.inbox_rx();
+            (ClusterTransportKind::Quic(quic_transport), inbox_rx)
+        } else {
+            let mqtt_transport = MqttTransport::new(node_id);
+            let inbox_rx = mqtt_transport.inbox_rx();
+            (ClusterTransportKind::Mqtt(mqtt_transport), inbox_rx)
+        };
         let transport_config = TransportConfig::default();
         let controller = NodeController::new_with_storage(
             node_id,
@@ -275,6 +411,32 @@ impl ClusteredAgent {
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
+        let (tx_tick, rx_tick) = flume::bounded(1);
+        let (tx_main_queue, rx_main_queue) = flume::bounded(4096);
+        let (tx_batch, rx_batch) = flume::bounded(16);
+
+        let mut processor = MessageProcessor::new(
+            node_id,
+            transport_config,
+            tx_raft_messages_for_processor,
+            tx_raft_events_for_processor,
+            tx_main_queue,
+            transport_inbox_rx,
+            rx_tick,
+        );
+
+        for peer in &config.peers {
+            if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                processor.register_peer(peer_node_id);
+            }
+        }
+
+        let processor_executor = DedicatedExecutor::new("msg-processor", 2);
+        processor_executor.handle().spawn(async move {
+            processor.run(tx_batch).await;
+        });
+        info!("started message processor on dedicated executor");
+
         Ok(Self {
             node_id,
             node_name: config.node_name,
@@ -297,10 +459,16 @@ impl ClusteredAgent {
             acl_file: config.acl_file,
             use_quic: config.use_quic,
             quic_insecure: config.quic_insecure,
-            quic_cert_file: config.quic_cert_file,
-            quic_key_file: config.quic_key_file,
+            quic_cert_file: config.quic_cert_file.clone(),
+            quic_key_file: config.quic_key_file.clone(),
             bridge_out_only: config.bridge_out_only,
             cluster_port_offset: config.cluster_port_offset,
+            bridge_executor: None,
+            processor_executor: Some(processor_executor),
+            tx_tick: Some(tx_tick),
+            rx_main_queue: Some(rx_main_queue),
+            rx_batch: Some(rx_batch),
+            use_direct_quic: config.use_direct_quic,
         })
     }
 
@@ -319,10 +487,8 @@ impl ClusteredAgent {
         self.peers
             .iter()
             .map(|peer| {
-                let peer_addr: SocketAddr = peer
-                    .address
-                    .parse()
-                    .expect("peer address should be valid");
+                let peer_addr: SocketAddr =
+                    peer.address.parse().expect("peer address should be valid");
                 let cluster_addr = format!(
                     "{}:{}",
                     peer_addr.ip(),
@@ -382,6 +548,23 @@ impl ClusteredAgent {
             ..Default::default()
         };
 
+        let (bridge_configs, use_external_bridge_manager) = if self.use_direct_quic {
+            (vec![], false)
+        } else {
+            if !self.peers.is_empty() && self.bridge_executor.is_none() {
+                let worker_threads = (self.peers.len() + 1).clamp(2, 8);
+                self.bridge_executor = Some(DedicatedExecutor::new("bridge-io", worker_threads));
+                info!(
+                    workers = worker_threads,
+                    bridges = self.peers.len(),
+                    "created dedicated bridge executor"
+                );
+            }
+            let configs = self.create_bridge_configs();
+            let use_external = self.bridge_executor.is_some() && !configs.is_empty();
+            (configs, use_external)
+        };
+
         let mut broker_config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
@@ -393,7 +576,11 @@ impl ClusteredAgent {
             subscription_identifier_available: true,
             shared_subscription_available: true,
             topic_alias_maximum: 100,
-            bridges: self.create_bridge_configs(),
+            bridges: if use_external_bridge_manager {
+                vec![]
+            } else {
+                bridge_configs.clone()
+            },
             ..Default::default()
         }
         .with_storage(storage_config)
@@ -436,22 +623,22 @@ impl ClusteredAgent {
             }
         }
 
-        let cluster_addr: SocketAddr = format!(
-            "{}:{}",
-            self.bind_address.ip(),
-            self.cluster_port()
-        )
-        .parse()
-        .expect("valid cluster address");
+        let cluster_addr: SocketAddr =
+            format!("{}:{}", self.bind_address.ip(), self.cluster_port())
+                .parse()
+                .expect("valid cluster address");
 
-        let cluster_listener =
-            if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
+        if !self.use_direct_quic {
+            let cluster_listener = if let (Some(cert_file), Some(key_file)) =
+                (&self.quic_cert_file, &self.quic_key_file)
+            {
                 ClusterListenerConfig::quic(vec![cluster_addr], cert_file.clone(), key_file.clone())
             } else {
                 ClusterListenerConfig::new(vec![cluster_addr])
             };
-        broker_config = broker_config.with_cluster_listener(cluster_listener);
-        info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
+            broker_config = broker_config.with_cluster_listener(cluster_listener);
+            info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
+        }
 
         let mut broker = if let Some(provider) = custom_auth_provider {
             MqttBroker::with_config(broker_config)
@@ -462,6 +649,12 @@ impl ClusteredAgent {
         };
         let mut ready_rx = broker.ready_receiver();
 
+        let router = if use_external_bridge_manager {
+            Some(broker.router())
+        } else {
+            None
+        };
+
         let broker_handle = tokio::spawn(async move {
             let _ = broker.run().await;
         });
@@ -469,6 +662,27 @@ impl ClusteredAgent {
         info!("waiting for broker ready signal");
         let _ = ready_rx.changed().await;
         info!("broker ready signal received");
+
+        let _bridge_manager =
+            if let (Some(router), Some(executor)) = (router, &self.bridge_executor) {
+                let manager = Arc::new(BridgeManager::with_runtime(
+                    router.clone(),
+                    executor.handle(),
+                ));
+                router.set_bridge_manager(manager.clone()).await;
+                for config in &bridge_configs {
+                    if let Err(e) = manager.add_bridge(config.clone()) {
+                        warn!(bridge = %config.name, error = %e, "failed to add bridge");
+                    }
+                }
+                info!(
+                    bridges = bridge_configs.len(),
+                    "started bridges on dedicated executor"
+                );
+                Some(manager)
+            } else {
+                None
+            };
 
         info!(
             node_id = self.node_id.get(),
@@ -484,22 +698,89 @@ impl ClusteredAgent {
             self.bind_address.ip()
         };
         let broker_addr = format!("{}:{}", connect_ip, self.bind_address.port());
-        info!(broker_addr = %broker_addr, "connecting transport to local broker");
+
         let transport = {
             let ctrl = self.controller.read().await;
             ctrl.transport().clone()
         };
-        Box::pin(transport.connect_with_credentials(
-            &broker_addr,
-            service_username.as_deref(),
-            service_password.as_deref(),
-        ))
-        .await
-        .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
-        info!("transport connected to local broker");
+
+        let admin_client = if self.use_direct_quic {
+            let quic_transport = transport.as_quic().expect("expected QUIC transport");
+            let cluster_addr: SocketAddr =
+                format!("{}:{}", self.bind_address.ip(), self.cluster_port())
+                    .parse()
+                    .expect("valid cluster address");
+
+            let (cert_file, key_file) = match (&self.quic_cert_file, &self.quic_key_file) {
+                (Some(c), Some(k)) => (c.clone(), k.clone()),
+                _ => return Err("QUIC cert and key files required for direct QUIC mode".into()),
+            };
+
+            quic_transport
+                .bind(cluster_addr, &cert_file, &key_file)
+                .await
+                .map_err(|e| format!("failed to bind QUIC transport: {e}"))?;
+            info!(addr = %cluster_addr, "QUIC direct transport bound");
+
+            for peer in &self.peers {
+                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                    let peer_addr: SocketAddr = match peer.address.parse() {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            warn!(peer = peer_node_id.get(), address = %peer.address, error = %e, "invalid peer address");
+                            continue;
+                        }
+                    };
+                    let peer_cluster_addr: SocketAddr = format!(
+                        "{}:{}",
+                        peer_addr.ip(),
+                        peer_addr.port() + self.cluster_port_offset
+                    )
+                    .parse()
+                    .expect("valid peer cluster address");
+                    if let Err(e) = quic_transport
+                        .connect_to_peer(peer_node_id, peer_cluster_addr)
+                        .await
+                    {
+                        warn!(peer = peer_node_id.get(), addr = %peer_cluster_addr, error = %e, "failed to connect to peer via QUIC");
+                    } else {
+                        info!(peer = peer_node_id.get(), addr = %peer_cluster_addr, "connected to peer via QUIC");
+                    }
+                }
+            }
+
+            info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");
+            let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());
+            let admin_mqtt_client = mqtt5::MqttClient::new(&admin_client_id);
+            if let (Some(user), Some(pass)) = (&service_username, &service_password) {
+                let options =
+                    mqtt5::types::ConnectOptions::new(&admin_client_id).with_credentials(user, pass);
+                Box::pin(admin_mqtt_client.connect_with_options(&broker_addr, options))
+                    .await
+                    .map_err(|e| format!("failed to connect admin client: {e}"))?;
+            } else {
+                admin_mqtt_client
+                    .connect(&broker_addr)
+                    .await
+                    .map_err(|e| format!("failed to connect admin client: {e}"))?;
+            }
+            info!("admin MQTT client connected");
+            admin_mqtt_client
+        } else {
+            let mqtt_transport = transport.as_mqtt().expect("expected MQTT transport");
+            info!(broker_addr = %broker_addr, "connecting transport to local broker");
+            Box::pin(mqtt_transport.connect_with_credentials(
+                &broker_addr,
+                service_username.as_deref(),
+                service_password.as_deref(),
+            ))
+            .await
+            .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
+            info!("transport connected to local broker");
+            mqtt_transport.client().clone()
+        };
 
         let (admin_tx, admin_rx) = flume::bounded::<AdminRequest>(32);
-        let admin_client = transport.client().clone();
         admin_client
             .subscribe("$SYS/mqdb/cluster/#", {
                 let tx = admin_tx.clone();
@@ -572,11 +853,21 @@ impl ClusteredAgent {
 
         let raft_task = RaftTask::new(
             raft,
-            self.rx_raft_messages.take().expect("rx_raft_messages already taken"),
-            self.rx_raft_events.take().expect("rx_raft_events already taken"),
-            self.rx_raft_admin.take().expect("rx_raft_admin already taken"),
-            self.tx_partition_map.take().expect("tx_partition_map already taken"),
-            self.tx_raft_status.take().expect("tx_raft_status already taken"),
+            self.rx_raft_messages
+                .take()
+                .expect("rx_raft_messages already taken"),
+            self.rx_raft_events
+                .take()
+                .expect("rx_raft_events already taken"),
+            self.rx_raft_admin
+                .take()
+                .expect("rx_raft_admin already taken"),
+            self.tx_partition_map
+                .take()
+                .expect("tx_partition_map already taken"),
+            self.tx_raft_status
+                .take()
+                .expect("tx_raft_status already taken"),
             self.shutdown_tx.subscribe(),
             all_nodes,
         );
@@ -592,29 +883,29 @@ impl ClusteredAgent {
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+        let tx_tick = self.tx_tick.take().expect("tx_tick already taken");
+        let rx_main_queue = self
+            .rx_main_queue
+            .take()
+            .expect("rx_main_queue already taken");
+        let rx_batch = self.rx_batch.take().expect("rx_batch already taken");
+
+        let rx_local_publish = if self.use_direct_quic {
+            let ctrl = self.controller.read().await;
+            Some(ctrl.transport().as_quic().expect("expected QUIC").local_publish_rx())
+        } else {
+            None
+        };
+
         self.recover_pending_lwts().await;
 
         loop {
             tokio::select! {
+                biased;
+
                 _ = tick_interval.tick() => {
                     let now = current_time_ms();
-                    let (tick_output, alive_nodes, dead_nodes) = {
-                        let mut ctrl = self.controller.write().await;
-                        let output = ctrl.tick(now);
-                        ctrl.process_messages().await;
-                        let alive = ctrl.alive_nodes();
-                        let dead: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
-                        (output, alive, dead)
-                    };
-
-                    {
-                        let ctrl = self.controller.read().await;
-                        ctrl.send_tick_output(tick_output).await;
-                    }
-
-                    for alive_node in alive_nodes {
-                        let _ = self.tx_raft_events.send(RaftEvent::NodeAlive(alive_node));
-                    }
+                    let _ = tx_tick.try_send(now);
 
                     let raft_partition_map = self.rx_partition_map.borrow().clone();
 
@@ -663,30 +954,63 @@ impl ClusteredAgent {
                             );
                         }
                     }
-                    for dead_node in &dead_nodes {
-                        let affected_sessions = ctrl.stores().sessions.sessions_on_node(*dead_node);
-                        if !affected_sessions.is_empty() {
-                            info!(
-                                node = dead_node.get(),
-                                sessions = affected_sessions.len(),
-                                "marking sessions disconnected due to node death"
-                            );
-                            let now = current_time_ms();
-                            let mut session_count = 0u32;
-                            for session in affected_sessions {
-                                let client_id = session.client_id_str();
-                                let result = ctrl.stores_mut().update_session_replicated(
-                                    client_id,
-                                    |s| s.set_connected(false, *dead_node, now),
+                }
+
+                Ok(batch) = rx_batch.recv_async() => {
+                    if let Some(hb) = batch.heartbeat_to_send {
+                        let ctrl = self.controller.read().await;
+                        let _ = ctrl.transport().broadcast(hb).await;
+                    }
+
+                    if !batch.heartbeat_updates.is_empty() {
+                        let mut ctrl = self.controller.write().await;
+                        ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
+                    }
+
+                    if !batch.dead_nodes.is_empty() {
+                        let mut ctrl = self.controller.write().await;
+                        ctrl.apply_dead_nodes(&batch.dead_nodes);
+                        let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
+
+                        for dead_node in &dead_nodes {
+                            let affected_sessions = ctrl.stores().sessions.sessions_on_node(*dead_node);
+                            if !affected_sessions.is_empty() {
+                                info!(
+                                    node = dead_node.get(),
+                                    sessions = affected_sessions.len(),
+                                    "marking sessions disconnected due to node death"
                                 );
-                                if let Ok((_session, write)) = result {
-                                    ctrl.write_or_forward(write).await;
-                                }
-                                session_count += 1;
-                                if session_count.is_multiple_of(8) {
-                                    tokio::task::yield_now().await;
+                                let now = current_time_ms();
+                                let mut session_count = 0u32;
+                                for session in affected_sessions {
+                                    let client_id = session.client_id_str();
+                                    let result = ctrl.stores_mut().update_session_replicated(
+                                        client_id,
+                                        |s| s.set_connected(false, *dead_node, now),
+                                    );
+                                    if let Ok((_session, write)) = result {
+                                        ctrl.write_or_forward(write).await;
+                                    }
+                                    session_count += 1;
+                                    if session_count.is_multiple_of(8) {
+                                        tokio::task::yield_now().await;
+                                    }
                                 }
                             }
+                        }
+                    }
+                }
+
+                Ok(msg) = rx_main_queue.recv_async() => {
+                    const BATCH_SIZE: u32 = 8;
+                    let mut ctrl = self.controller.write().await;
+                    ctrl.handle_filtered_message(msg).await;
+                    let mut count = 1u32;
+                    while let Ok(msg) = rx_main_queue.try_recv() {
+                        ctrl.handle_filtered_message(msg).await;
+                        count += 1;
+                        if count.is_multiple_of(BATCH_SIZE) {
+                            tokio::task::yield_now().await;
                         }
                     }
                 }
@@ -781,9 +1105,24 @@ impl ClusteredAgent {
                 Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
                 }
-                () = transport.wait_for_message() => {
-                    let mut ctrl = self.controller.write().await;
-                    ctrl.process_messages().await;
+                Some(Ok(req)) = async {
+                    match &rx_local_publish {
+                        Some(rx) => Some(rx.recv_async().await),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let options = mqtt5::PublishOptions {
+                        qos: mqtt5::QoS::from(req.qos),
+                        retain: req.retain,
+                        ..Default::default()
+                    };
+                    if let Err(e) = admin_client.publish_with_options(
+                        &req.topic,
+                        req.payload,
+                        options,
+                    ).await {
+                        warn!(error = %e, topic = %req.topic, "failed to publish local request");
+                    }
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
@@ -903,7 +1242,11 @@ impl ClusteredAgent {
         }
 
         let (tx, rx) = oneshot::channel();
-        if self.tx_raft_admin.send(RaftAdminCommand::ForceRebalance(tx)).is_err() {
+        if self
+            .tx_raft_admin
+            .send(RaftAdminCommand::ForceRebalance(tx))
+            .is_err()
+        {
             return Response::error(ErrorCode::Internal, "raft task not available");
         }
 
@@ -1179,8 +1522,13 @@ impl ClusteredAgent {
     }
 
     #[must_use]
-    pub fn controller(&self) -> &Arc<RwLock<NodeController<MqttTransport>>> {
+    pub fn controller(&self) -> &Arc<RwLock<NodeController<ClusterTransportKind>>> {
         &self.controller
+    }
+
+    #[must_use]
+    pub fn bridge_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        self.bridge_executor.as_ref().map(DedicatedExecutor::handle)
     }
 
     async fn recover_pending_lwts(&self) {
@@ -1261,8 +1609,8 @@ fn current_time_ms() -> u64 {
         .map_or(0, |d| d.as_secs() * 1000 + u64::from(d.subsec_millis()))
 }
 
-async fn clear_expired_session_subscriptions(
-    ctrl: &mut NodeController<MqttTransport>,
+async fn clear_expired_session_subscriptions<T: ClusterTransport>(
+    ctrl: &mut NodeController<T>,
     client_id: &str,
 ) {
     let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);

@@ -4,6 +4,8 @@ pub mod db;
 mod db_handler;
 pub mod db_protocol;
 mod db_topic;
+#[cfg(feature = "native")]
+mod dedicated_executor;
 pub mod entity;
 mod epoch;
 #[cfg(feature = "native")]
@@ -12,9 +14,13 @@ mod heartbeat;
 mod idempotency_store;
 mod inflight_store;
 mod lwt;
+#[cfg(feature = "native")]
+mod message_processor;
 mod migration;
 #[cfg(feature = "native")]
 mod mqtt_transport;
+#[cfg(feature = "native")]
+mod quic_transport;
 mod node;
 mod node_controller;
 mod offset_store;
@@ -54,6 +60,8 @@ pub use db_protocol::{
     FkValidateStatus, IndexUpdateRequest,
 };
 pub use db_topic::{DbTopicOperation, ParsedDbTopic};
+#[cfg(feature = "native")]
+pub use dedicated_executor::DedicatedExecutor;
 pub use epoch::Epoch;
 #[cfg(feature = "native")]
 pub use event_handler::ClusterEventHandler;
@@ -66,11 +74,15 @@ pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inf
 pub use lwt::{
     LwtAction, LwtError, LwtPrepared, LwtPublisher, determine_lwt_action, generate_lwt_token,
 };
+#[cfg(feature = "native")]
+pub use message_processor::{HeartbeatUpdate, MessageProcessor, ProcessingBatch};
 pub use migration::{
     MigrationCheckpoint, MigrationError, MigrationManager, MigrationPhase, MigrationState,
 };
 #[cfg(feature = "native")]
 pub use mqtt_transport::MqttTransport;
+#[cfg(feature = "native")]
+pub use quic_transport::{LocalPublishRequest, QuicDirectTransport};
 pub use node::NodeId;
 pub use node_controller::{NodeController, RaftMessage, TickOutput};
 pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key};

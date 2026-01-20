@@ -1580,12 +1580,7 @@ impl TopicSubscriptionBroadcast {
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
-    pub fn subscribe(
-        topic: &str,
-        client_id: &str,
-        client_partition: PartitionId,
-        qos: u8,
-    ) -> Self {
+    pub fn subscribe(topic: &str, client_id: &str, client_partition: PartitionId, qos: u8) -> Self {
         let timestamp_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64);

@@ -868,13 +868,22 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    fn create_test_controller(node_id: NodeId, transport: MockTransport) -> NodeController<MockTransport> {
+    fn create_test_controller(
+        node_id: NodeId,
+        transport: MockTransport,
+    ) -> NodeController<MockTransport> {
         let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
         let (tx_raft_events, _rx_raft_events) = flume::unbounded();
-        NodeController::new(node_id, transport, TransportConfig::default(), tx_raft_messages, tx_raft_events)
+        NodeController::new(
+            node_id,
+            transport,
+            TransportConfig::default(),
+            tx_raft_messages,
+            tx_raft_events,
+        )
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct MockTransport {
         node_id: NodeId,
         inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
@@ -930,6 +939,10 @@ mod tests {
 
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             self.inbox.lock().unwrap().pop_front()
+        }
+
+        fn pending_count(&self) -> usize {
+            self.inbox.lock().unwrap().len()
         }
 
         fn requeue(&self, msg: InboundMessage) {

@@ -21,7 +21,13 @@ pub struct RequestVoteRequest {
 impl RequestVoteRequest {
     #[must_use]
     pub fn create(term: u64, candidate_id: u16, last_log_index: u64, last_log_term: u64) -> Self {
-        Self::new(term, candidate_id, last_log_index, last_log_term, current_timestamp_ms())
+        Self::new(
+            term,
+            candidate_id,
+            last_log_index,
+            last_log_term,
+            current_timestamp_ms(),
+        )
     }
 }
 

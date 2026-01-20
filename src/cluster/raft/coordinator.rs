@@ -191,10 +191,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             self.processed_new_nodes.insert(*node);
         }
 
-        tracing::info!(
-            ?pending,
-            "processing pending new nodes for rebalance"
-        );
+        tracing::info!(?pending, "processing pending new nodes for rebalance");
         self.trigger_rebalance_for_new_node().await
     }
 
@@ -424,8 +421,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
-        let was_dead = self.pending_dead_nodes.remove(&node)
-            || self.processed_dead_nodes.remove(&node);
+        let was_dead =
+            self.pending_dead_nodes.remove(&node) || self.processed_dead_nodes.remove(&node);
         if was_dead {
             tracing::debug!(?node, "node came back from dead state");
             self.processed_new_nodes.remove(&node);
@@ -444,7 +441,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if !node_has_partitions && !partitions_initialized && not_yet_processed {
             self.pending_new_nodes.insert(node);
-            tracing::debug!(?node, "partitions not initialized yet, queuing node for later");
+            tracing::debug!(
+                ?node,
+                "partitions not initialized yet, queuing node for later"
+            );
             return Vec::new();
         }
 
@@ -519,8 +519,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config)
         } else {
             tracing::info!("initializing partitions for fresh cluster");
-            let new_map =
-                compute_balanced_assignments(&self.cluster_members, &config, Epoch::ZERO);
+            let new_map = compute_balanced_assignments(&self.cluster_members, &config, Epoch::ZERO);
             PartitionId::all()
                 .filter_map(|p| {
                     let assignment = new_map.get(p);
@@ -756,7 +755,7 @@ mod tests {
     use crate::cluster::{Epoch, PartitionId};
     use std::sync::{Arc, Mutex};
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct MockTransport {
         node_id: NodeId,
         outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
@@ -808,6 +807,10 @@ mod tests {
 
         fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
             None
+        }
+
+        fn pending_count(&self) -> usize {
+            0
         }
 
         fn requeue(&self, _msg: InboundMessage) {}

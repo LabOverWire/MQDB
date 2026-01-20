@@ -6,8 +6,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::session::session_partition;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{
-    ForwardTarget, ForwardedPublish, LwtPublisher, MqttTransport, NodeController, NodeId,
-    PublishRouter, SubscriptionType, TopicSubscriptionBroadcast, WildcardBroadcast,
+    ForwardTarget, ForwardedPublish, LwtPublisher, NodeController, NodeId, PublishRouter,
+    SubscriptionType, TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use bebytes::BeBytes;
 use mqtt5::QoS;
@@ -22,15 +22,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, trace, warn};
 
-pub struct ClusterEventHandler {
+pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     node_id: NodeId,
-    controller: Arc<RwLock<NodeController<MqttTransport>>>,
+    controller: Arc<RwLock<NodeController<T>>>,
     synced_retained_topics: Arc<RwLock<HashSet<String>>>,
     db_handler: DbRequestHandler,
 }
 
-impl ClusterEventHandler {
-    pub fn new(node_id: NodeId, controller: Arc<RwLock<NodeController<MqttTransport>>>) -> Self {
+impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
+    pub fn new(node_id: NodeId, controller: Arc<RwLock<NodeController<T>>>) -> Self {
         Self {
             node_id,
             controller,
@@ -45,7 +45,7 @@ impl ClusterEventHandler {
     }
 
     async fn broadcast_topic_subscription(
-        ctrl: &NodeController<MqttTransport>,
+        ctrl: &NodeController<T>,
         broadcast: TopicSubscriptionBroadcast,
     ) {
         let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
@@ -53,7 +53,7 @@ impl ClusterEventHandler {
     }
 }
 
-impl BrokerEventHandler for ClusterEventHandler {
+impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T> {
     fn on_client_connect<'a>(
         &'a self,
         event: ClientConnectEvent,
@@ -338,8 +338,7 @@ impl BrokerEventHandler for ClusterEventHandler {
 
                     let qos = qos_to_u8(sub.qos);
                     let is_wildcard = topic.contains('+') || topic.contains('#');
-                    let is_response_topic =
-                        topic.starts_with("resp/") || topic.contains("/resp/");
+                    let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
 
                     if is_wildcard {
                         trace!(
@@ -402,10 +401,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                             qos,
                         );
                         if is_response_topic {
-                            trace!(
-                                topic,
-                                client_id, "skipping broadcast for response topic"
-                            );
+                            trace!(topic, client_id, "skipping broadcast for response topic");
                         } else {
                             let broadcast = TopicSubscriptionBroadcast::subscribe(
                                 topic,
@@ -414,10 +410,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                                 qos,
                             );
                             Self::broadcast_topic_subscription(&ctrl, broadcast).await;
-                            debug!(
-                                topic,
-                                client_id, "broadcast topic subscription to cluster"
-                            );
+                            debug!(topic, client_id, "broadcast topic subscription to cluster");
                         }
                     }
                 }
@@ -515,8 +508,7 @@ impl BrokerEventHandler for ClusterEventHandler {
                     }
                 } else {
                     let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                    let is_response_topic =
-                        topic.starts_with("resp/") || topic.contains("/resp/");
+                    let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
                     if is_response_topic {
                         trace!(
                             topic,
@@ -595,10 +587,11 @@ impl BrokerEventHandler for ClusterEventHandler {
                 return;
             }
 
-            let ctrl = match self.controller.try_read() {
-                Ok(guard) => guard,
-                Err(_) => self.controller.read().await,
+            let (ctrl, try_read_success) = match self.controller.try_read() {
+                Ok(guard) => (guard, true),
+                Err(_) => (self.controller.read().await, false),
             };
+            tracing::debug!(try_read_success, "publish_routing_lock");
             let topic = event.topic.as_ref();
 
             let wildcards = ctrl.stores().wildcards.match_topic(topic);
@@ -810,7 +803,10 @@ impl SubAckReasonCodeExt for mqtt5::broker::events::SubAckReasonCode {
     }
 }
 
-async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, client_id: &str) {
+async fn clear_client_subscriptions<T: ClusterTransport + 'static>(
+    ctrl: &mut NodeController<T>,
+    client_id: &str,
+) {
     let snapshot = ctrl.stores().subscriptions.get_snapshot(client_id);
     if let Some(snapshot) = snapshot {
         for entry in &snapshot.topics {
@@ -831,11 +827,10 @@ async fn clear_client_subscriptions(ctrl: &mut NodeController<MqttTransport>, cl
                 }
             } else {
                 let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                let is_response_topic =
-                    topic.starts_with("resp/") || topic.contains("/resp/");
+                let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
                 if !is_response_topic {
                     let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
-                    ClusterEventHandler::broadcast_topic_subscription(ctrl, broadcast).await;
+                    ClusterEventHandler::<T>::broadcast_topic_subscription(ctrl, broadcast).await;
                 }
             }
 

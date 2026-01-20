@@ -384,6 +384,10 @@ impl ClusterTransport for SimulatedTransport {
         self.recv()
     }
 
+    fn pending_count(&self) -> usize {
+        self.network.pending_count(self.node_id.get())
+    }
+
     fn requeue(&self, msg: InboundMessage) {
         let data = Self::serialize_message(&msg.message);
         self.network
