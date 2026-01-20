@@ -9,3 +9,4 @@ docs/
 .idea/
 test_certs/
 .playwright-mcp/
+benchmark_results/

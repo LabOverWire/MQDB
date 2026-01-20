@@ -2,16 +2,16 @@
 
 > **Living Document** - Updated iteratively with code verification.
 > Every claim has file:line references. When in doubt, verify against code.
-> Last verified: January 2026 (all milestones M1-M10 complete)
+> Last verified: January 2026 (all milestones M1-M10 complete, Direct QUIC transport added)
 
 ## Overview
 
-MQDB is a distributed MQTT broker with embedded database capabilities. The cluster uses MQTT bridges for inter-node communication and Raft consensus for partition management.
+MQDB is a distributed MQTT broker with embedded database capabilities. The cluster supports two transport modes: MQTT bridges (default) and Direct QUIC (`--direct-quic`), with Raft consensus for partition management.
 
 **Design Foundations** (specified before implementation):
 - **BeBytes crate** for all protocol encoding/decoding (custom, modifiable as needed)
 - **QUIC preferred** for inter-node transport (UDP port mirrors TCP port 1883)
-- **MQTT bridges** as the cluster communication substrate
+- **Two transport modes**: MQTT bridges (default) or Direct QUIC (bypasses broker, recommended for production)
 - **64 fixed partitions** (never changes)
 - **Replication Factor = 2** (primary + one replica)
 
@@ -49,6 +49,8 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 - TopicIndex (`_topic_index`) → maps topics to subscribers
 - WildcardStore (`_wildcards`) → holds wildcard subscription patterns
 - ClientLocationStore (`_client_loc`) → maps client_id to connected node
+- DB Schema (`_db_schema`) → schema definitions for entities
+- DB Constraint (`_db_constraint`) → constraint definitions
 
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
 
@@ -141,9 +143,9 @@ This amplification is fundamental to the design—without broadcast entities, pu
 
 ### A3.1 StoreManager: The Unified Coordinator
 
-The `StoreManager` coordinates 15 distinct stores behind a common interface:
+The `StoreManager` coordinates 17 distinct stores behind a common interface:
 
-**MQTT Stores (10)**:
+**MQTT Stores (11)**:
 - `sessions` - Client session lifecycle
 - `subscriptions` - Topic subscriptions per client
 - `retained` - Retained messages by topic
@@ -154,13 +156,15 @@ The `StoreManager` coordinates 15 distinct stores behind a common interface:
 - `inflight` - QoS 1 messages awaiting acknowledgment
 - `offsets` - Consumer group offsets
 - `idempotency` - Request deduplication tokens
+- `client_locations` - Client → connected node mapping
 
-**Database Stores (5)**:
+**Database Stores (6)**:
 - `db_data` - Entity records
 - `db_schema` - Entity schemas with constraints
 - `db_index` - Secondary indexes
 - `db_unique` - Unique constraint reservations
 - `db_fk` - Foreign key validation
+- `db_constraints` - Constraint definitions
 
 ### A3.2 The apply_write() Dispatcher
 
@@ -579,7 +583,156 @@ Use **partial** or **upper** topology for production until this is resolved.
 - **Agent mode is fastest**: No replication overhead, 6-9k DB ops/s, 155k pubsub msg/s
 - **Full mesh unstable**: Raft flapping makes it unsuitable for production (Issue 11.16)
 
-### A6.5 Admin Request Handlers
+### A6.5 Direct QUIC Transport (`--direct-quic`)
+
+The bridge overhead problem (A6.4) is caused by cluster traffic competing with client connections on the same MQTT broker event loop. The `--direct-quic` flag enables an alternative transport that bypasses MQTT bridges entirely.
+
+**Architecture**:
+```
+MQTT Bridges:     Node 1 → MQTT PUBLISH → Node 2 broker → subscription → inbox
+Direct QUIC:      Node 1 → QUIC stream → Node 2 listener → inbox (bypasses broker)
+```
+
+**Implementation** (`quic_transport.rs:40-423`):
+- `QuicDirectTransport` struct with QUIC endpoint, peer connection map, and message inbox
+- Each node runs a QUIC server accepting connections via `acceptor_task()`
+- Each node creates QUIC client connections to configured `--peers` via `connect_to_peer()`
+- Messages use length-prefixed framing: `[u32 length][u16 sender][u8 msg_type][payload]`
+- Same binary protocol as MQTT transport (heartbeats, Raft, replication)
+- TLS configuration reuses `--quic-cert` and `--quic-key` files with insecure client verification
+- `receiver_task()` runs for each connection, parsing incoming messages into `InboundMessage`
+
+**Key Data Structures**:
+```rust
+struct PeerConnection {
+    connection: Connection,
+    send_stream: tokio::sync::Mutex<SendStream>,
+}
+
+struct QuicDirectTransport {
+    node_id: NodeId,
+    endpoint: Arc<RwLock<Option<Endpoint>>>,
+    peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    inbox_tx: flume::Sender<InboundMessage>,
+    inbox_rx: flume::Receiver<InboundMessage>,
+    // ... other fields
+}
+```
+
+**Async Benchmark Performance** (saturation point, 3-node cluster, 2026-01-20):
+
+| Metric | Agent Mode | MQTT (range) | QUIC (mean) | QUIC Variance |
+|--------|------------|--------------|-------------|---------------|
+| Async Insert | 15,652 ops/s | 0-9,084 ops/s | 8,500 ops/s | 1.03x |
+| Async Get | 19,726 ops/s | 977-15,548 ops/s | 16,600 ops/s | 1.06x |
+| Async Update | 4,853 ops/s | 542-9,800 ops/s | 9,250 ops/s | 1.12x |
+
+**Per-Node Async Insert by Topology**:
+
+| Topology | Transport | N1 | N2 | N3 | Mean |
+|----------|-----------|------|------|------|------|
+| Partial | MQTT | 9,084 | 1,414 | 0* | 3,499 |
+| Partial | QUIC | 8,472 | 8,457 | 8,531 | 8,487 |
+| Upper | MQTT | 2,128 | 1,872 | 7,415 | 3,805 |
+| Upper | QUIC | 8,664 | 8,525 | 8,480 | 8,556 |
+| Full | MQTT | 2,116 | 1,196 | 1,757 | 1,690 |
+| Full | QUIC | 8,579 | 8,621 | 8,354 | 8,518 |
+
+*N3 Partial MQTT had connectivity issues
+
+**Key Benefits**:
+- **Uniform performance**: ~8,500 insert / ~16,500 get / ~9,000 update ops/s across ALL nodes
+- **Eliminates bridge penalty**: MQTT nodes with 2 bridges drop to 1,200-2,100 ops/s; QUIC stays at 8,500
+- **Variance reduction**: MQTT 10-18x variance between nodes; QUIC 1.03-1.12x variance
+- **Full mesh viable**: Full mesh with QUIC achieves same throughput as partial mesh (5x better than MQTT full mesh)
+- **No contention**: Cluster traffic doesn't compete with client MQTT connections
+
+**Usage**:
+```bash
+mqdb dev start-cluster --nodes 3 --clean --direct-quic
+
+# Or manually:
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/n1 \
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --direct-quic
+```
+
+**Key Files**: `quic_transport.rs`, `cluster_agent.rs` (transport selection)
+
+### A6.6 Message Processor
+
+The `MessageProcessor` (`message_processor.rs`) offloads message classification and heartbeat management from the main event loop, reducing latency for critical operations.
+
+**Purpose**:
+- Separate I/O-bound message reception from CPU-bound message processing
+- Handle heartbeat protocol independently from data operations
+- Route Raft messages to dedicated Raft task
+- Deduplicate forwarded publishes before they reach the main queue
+
+**Architecture** (`message_processor.rs:24-36`):
+```rust
+struct MessageProcessor {
+    node_id: NodeId,
+    heartbeat_manager: HeartbeatManager,
+    forward_dedup: HashSet<u64>,          // LRU dedup with 1000 capacity
+    pending_heartbeat_updates: Vec<HeartbeatUpdate>,
+    tx_raft_messages: flume::Sender<RaftMessage>,
+    tx_raft_events: flume::Sender<RaftEvent>,
+    tx_main_queue: flume::Sender<InboundMessage>,
+    rx_inbox: flume::Receiver<InboundMessage>,
+    rx_tick: flume::Receiver<u64>,
+}
+```
+
+**Message Routing**:
+| Message Type | Destination |
+|--------------|-------------|
+| Heartbeat | Heartbeat manager + pending updates |
+| RequestVote, AppendEntries | Raft task via `tx_raft_messages` |
+| ForwardedPublish | Main queue (after deduplication) |
+| All other messages | Main queue directly |
+
+**Processing Batch** (`ProcessingBatch`):
+On each tick, the processor returns a batch containing:
+- `heartbeat_updates`: All received heartbeats since last tick
+- `dead_nodes`: Nodes that exceeded heartbeat timeout
+- `heartbeat_to_send`: Outgoing heartbeat if interval elapsed
+- `forwarded_publishes`: Deduplicated publishes to deliver
+
+**Deduplication** (`message_processor.rs:170-202`):
+ForwardedPublish messages are fingerprinted by hash of (origin_node, timestamp_ms, topic, payload). The dedup cache holds 1000 entries with LRU eviction.
+
+### A6.7 Dedicated Executor
+
+The `DedicatedExecutor` (`dedicated_executor.rs`) provides an isolated Tokio runtime for CPU-intensive tasks that might block the main event loop.
+
+**Purpose**:
+- Prevent blocking operations from affecting MQTT message processing
+- Isolate Raft consensus and replication from client-facing operations
+- Provide predictable latency for time-sensitive cluster operations
+
+**Implementation** (`dedicated_executor.rs:6-78`):
+```rust
+struct DedicatedExecutor {
+    runtime: Arc<Runtime>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    name: String,
+}
+```
+
+**Configuration**:
+- Worker threads: 2-8 (clamped from input)
+- Thread name: `{name}-worker`
+- Main thread: `{name}-main` (blocks on shutdown signal)
+
+**Usage**:
+```rust
+let executor = DedicatedExecutor::new("raft", 4);
+let handle = executor.handle();
+handle.spawn(async { /* runs on dedicated runtime */ });
+executor.shutdown(); // graceful shutdown
+```
+
+### A6.8 Admin Request Handlers
 
 The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/cluster/#`:
 
@@ -663,13 +816,16 @@ mqdb cluster rebalance --broker 127.0.0.1:1883
 **NodeId** (`src/cluster/node.rs:4-72`):
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BeBytes)]
-pub struct NodeId(u16);
+pub struct NodeId {
+    id: u16,  // Named field, not tuple struct
+}
 
 impl NodeId {
     pub const INVALID: u16 = 0;
 
+    // new() is provided by BeBytes derive macro
     pub fn validated(id: u16) -> Option<Self> {
-        if id == Self::INVALID { None } else { Some(Self(id)) }
+        if id == Self::INVALID { None } else { Some(Self::new(id)) }
     }
 }
 ```
@@ -709,7 +865,7 @@ All cluster-managed data types (`src/cluster/entity.rs`):
 | `OFFSETS` | `"_offsets"` | Consumer offsets |
 | `IDEMPOTENCY` | `"_idemp"` | Idempotency tokens |
 | `DB_DATA` | `"_db_data"` | Database records |
-| `DB_SCHEMA` | `"_db_schema"` | Database schemas |
+| `DB_SCHEMA` | `"_db_schema"` | Database schemas (BROADCAST) |
 | `DB_INDEX` | `"_db_idx"` | Database indexes |
 | `DB_UNIQUE` | `"_db_unique"` | Database unique constraints |
 | `DB_FK` | `"_db_fk"` | Database foreign keys |
@@ -781,7 +937,7 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | Code | Type | Purpose |
 |------|------|---------|
 | 0 | `Heartbeat` | Node liveness and partition claims |
-| 1 | `DetailedHeartbeat` | Reserved (not currently used) |
+| 1 | `DetailedHeartbeat` | Reserved (defined in `protocol.rs` but unused in wire format) |
 | 2 | `DeathNotice` | Node declared dead |
 | 3 | `DrainNotification` | Node draining for shutdown |
 | 10 | `Write` | ReplicationWrite to replicas |
@@ -1391,6 +1547,74 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Fix Applied**: Added `pending_partition_proposals` counter in `RaftCoordinator` to track in-flight partition assignments. `trigger_rebalance()` now waits for pending proposals to be applied before computing new assignments.
 
+### 11.11 Individual Topic Subscriptions Not Propagating Cross-Node
+
+**Status**: FIXED
+
+**Symptom**: Subscribing to exact topics (non-wildcard) on Node 2 wasn't visible to publishers on Node 1.
+
+**Root Cause**: Only wildcard subscriptions were being broadcast to all nodes via `WildcardBroadcast`. Individual topic subscriptions only wrote to local TopicIndex.
+
+**Fix Applied**: Added `TopicSubscriptionBroadcast` message (type 61) that broadcasts individual topic subscriptions to all nodes, mirroring the wildcard subscription flow.
+
+### 11.12 High Message Loss in Cross-Node Pub/Sub Under Saturation
+
+**Status**: OPEN (Expected QoS 0 behavior)
+
+**Symptom**: ~40-60% message loss in cross-node pub/sub under high load.
+
+**Root Cause**: QoS 0 provides no delivery guarantees. Under saturation, messages are dropped when buffers fill. This is expected MQTT behavior for QoS 0.
+
+**Mitigation**: Use QoS 1 for reliable cross-node delivery.
+
+### 11.13 Cluster DB Slower Than Single-Node
+
+**Status**: ROOT CAUSE IDENTIFIED (see 11.15)
+
+**Symptom**: Cluster mode DB operations slower than agent mode.
+
+**Root Cause**: Bridge overhead - see Issue 11.15 for full analysis.
+
+### 11.14 Multi-Topic Cross-Node Pub/Sub Fails on Consecutive Runs
+
+**Status**: FIXED
+
+**Symptom**: Cross-node pub/sub with multiple topics failed on second run.
+
+**Root Cause**: ClientLocationEntry used client_id as only deduplication key. When same client reconnected, the entry was rejected as duplicate.
+
+**Fix Applied**: Added `timestamp_ms` field to ClientLocationEntry for proper deduplication.
+
+### 11.15 Bridge Overhead Degrades Follower Node DB Performance
+
+**Status**: DOCUMENTED (mitigated by Direct QUIC)
+
+**Symptom**: Nodes with 2+ bridge connections show 8-9x slowdown in DB operations.
+
+**Root Cause**: MQTT bridges share the broker's event loop with client connections. Each bridge creates bidirectional MQTT sessions that compete for processing time.
+
+**Mitigation**: Use `--direct-quic` transport which bypasses bridges entirely and provides uniform performance across all nodes (see A6.5).
+
+### 11.16 Raft Leader Flapping in Full-Mesh Topology
+
+**Status**: OPEN (MQTT bridges only)
+
+**Symptom**: Full mesh topology with MQTT bridges experiences Raft leader flapping every 4-5 seconds.
+
+**Root Cause**: With `BridgeDirection::Out` in full mesh, heartbeats are sent by leader but not reliably received by followers. Election timeout (3-5s) expires, triggering new elections.
+
+**Mitigation**: Use **partial** or **upper** topology with MQTT bridges, OR use `--direct-quic` transport.
+
+### 11.17 Single-Node Cluster Partition Initialization
+
+**Status**: FIXED
+
+**Symptom**: Single-node cluster sometimes failed to initialize partitions.
+
+**Root Cause**: `trigger_rebalance_internal()` wasn't called on leader election in single-node case.
+
+**Fix Applied**: Added `trigger_rebalance_internal()` call on leader election to ensure partitions are initialized.
+
 ---
 
 ## Part 12: Session Management
@@ -1986,6 +2210,9 @@ The following sections may need documentation:
 | `src/cluster/heartbeat.rs` | Heartbeat management, node status |
 | `src/cluster/partition_map.rs` | Partition assignments |
 | `src/cluster/mqtt_transport.rs` | MQTT-based cluster transport |
+| `src/cluster/quic_transport.rs` | Direct QUIC transport (bypasses MQTT bridges) |
+| `src/cluster/message_processor.rs` | Message classification and heartbeat offloading |
+| `src/cluster/dedicated_executor.rs` | Isolated Tokio runtime for blocking tasks |
 | `src/cluster/raft/coordinator.rs` | Raft consensus coordinator |
 | `src/cluster/raft/node.rs` | Raft node state machine |
 | `src/cluster/raft/state.rs` | Raft state and commands |
