@@ -69,8 +69,13 @@ impl TestCluster {
             };
             let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
             let (tx_raft_events, rx_raft_events) = flume::unbounded();
-            let mut controller =
-                NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
+            let mut controller = NodeController::new(
+                node_id,
+                transport.clone(),
+                config,
+                tx_raft_messages,
+                tx_raft_events,
+            );
 
             for &peer_id in &node_ids {
                 if peer_id != node_id {
@@ -140,7 +145,10 @@ impl TestCluster {
             }
         }
         for node in &mut self.nodes {
-            { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+            {
+                let output = node.controller.tick(0);
+                node.controller.send_tick_output(output).await;
+            }
         }
         self.advance_ms(5);
         for node in &mut self.nodes {
@@ -221,8 +229,13 @@ impl TestCluster {
         };
         let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
         let (tx_raft_events, rx_raft_events) = flume::unbounded();
-        let mut controller =
-            NodeController::new(node_id, transport.clone(), config, tx_raft_messages, tx_raft_events);
+        let mut controller = NodeController::new(
+            node_id,
+            transport.clone(),
+            config,
+            tx_raft_messages,
+            tx_raft_events,
+        );
 
         for &peer_id in &peer_ids {
             controller.register_peer(peer_id);
@@ -443,7 +456,10 @@ async fn node_failure_partition_reassignment() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    { let output = cluster.nodes[0].controller.tick(0); cluster.nodes[0].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[0].controller.tick(0);
+        cluster.nodes[0].controller.send_tick_output(output).await;
+    }
     cluster.advance_ms(5);
     cluster.nodes[1].controller.process_messages().await;
     cluster.nodes[2].controller.process_messages().await;
@@ -459,8 +475,14 @@ async fn node_failure_partition_reassignment() {
 
     cluster.partition_node(n1);
 
-    { let output = cluster.nodes[1].controller.tick(600); cluster.nodes[1].controller.send_tick_output(output).await; }
-    { let output = cluster.nodes[2].controller.tick(600); cluster.nodes[2].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[1].controller.tick(600);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+    }
+    {
+        let output = cluster.nodes[2].controller.tick(600);
+        cluster.nodes[2].controller.send_tick_output(output).await;
+    }
 
     assert_eq!(
         cluster.nodes[1].controller.node_status(n1),
@@ -625,7 +647,10 @@ async fn lwt_triggered_on_death() {
         .mark_disconnected("client-lwt", 1000)
         .unwrap();
 
-    { let output = cluster.nodes[0].controller.tick(0); cluster.nodes[0].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[0].controller.tick(0);
+        cluster.nodes[0].controller.send_tick_output(output).await;
+    }
     cluster.advance_ms(5);
     cluster.nodes[1].controller.process_messages().await;
 
@@ -635,7 +660,10 @@ async fn lwt_triggered_on_death() {
     );
 
     cluster.partition_node(n1);
-    { let output = cluster.nodes[1].controller.tick(600); cluster.nodes[1].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[1].controller.tick(600);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+    }
 
     assert_eq!(
         cluster.nodes[1].controller.node_status(n1),
@@ -824,7 +852,10 @@ async fn setup_five_node_partition_cluster() -> (TestCluster, PartitionId, [Node
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -841,7 +872,10 @@ async fn split_brain_prevented_on_partition() {
     cluster.partition_groups(&[n1, n2], &[n3, n4, n5]);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     assert_eq!(
@@ -957,7 +991,10 @@ async fn write_rejected_without_quorum() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -967,7 +1004,10 @@ async fn write_rejected_without_quorum() {
     cluster.partition_node(n1);
 
     cluster.advance_ms(600);
-    { let output = cluster.nodes[0].controller.tick(600); cluster.nodes[0].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[0].controller.tick(600);
+        cluster.nodes[0].controller.send_tick_output(output).await;
+    }
 
     let write = ReplicationWrite::new(
         partition,
@@ -991,7 +1031,10 @@ async fn write_rejected_without_quorum() {
         cluster.nodes[0].controller.process_messages().await;
 
         cluster.advance_ms(500);
-        { let output = cluster.nodes[0].controller.tick(1200); cluster.nodes[0].controller.send_tick_output(output).await; }
+        {
+            let output = cluster.nodes[0].controller.tick(1200);
+            cluster.nodes[0].controller.send_tick_output(output).await;
+        }
     }
 
     cluster.heal_node(n1);
@@ -1032,7 +1075,10 @@ async fn quorum_write_reaches_replicas() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1127,7 +1173,10 @@ async fn rebalance_preserves_sequence_continuity() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1170,7 +1219,10 @@ async fn rebalance_preserves_sequence_continuity() {
     cluster.partition_node(n1);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     cluster.nodes[1]
@@ -1236,7 +1288,10 @@ async fn epoch_prevents_stale_primary_writes() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1331,7 +1386,10 @@ async fn lwt_published_exactly_once() {
         .unwrap();
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1340,7 +1398,10 @@ async fn lwt_published_exactly_once() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    { let output = cluster.nodes[1].controller.tick(600); cluster.nodes[1].controller.send_tick_output(output).await; }
+    {
+        let output = cluster.nodes[1].controller.tick(600);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+    }
 
     assert_eq!(
         cluster.nodes[1].controller.node_status(n1),
@@ -1405,7 +1466,10 @@ async fn replica_catches_up_after_partition() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1492,7 +1556,10 @@ async fn subscriptions_consistent_during_rebalance() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1521,7 +1588,10 @@ async fn subscriptions_consistent_during_rebalance() {
     cluster.partition_node(n1);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     cluster.nodes[1]
@@ -1566,7 +1636,10 @@ async fn retained_message_survives_reassignment() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1587,7 +1660,10 @@ async fn retained_message_survives_reassignment() {
     cluster.partition_node(n1);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     cluster.nodes[1]
@@ -1639,7 +1715,10 @@ async fn session_takeover_race_prevented() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1796,7 +1875,10 @@ async fn qos2_state_survives_primary_failover() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1827,7 +1909,10 @@ async fn qos2_state_survives_primary_failover() {
     cluster.partition_node(cluster.nodes[0].id);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     cluster.nodes[1]
@@ -1891,7 +1976,10 @@ async fn node_crash_restart_rejoins_cluster() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1924,7 +2012,10 @@ async fn node_crash_restart_rejoins_cluster() {
     cluster.partition_node(n3);
     cluster.advance_ms(600);
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(600); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(600);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     assert_eq!(
@@ -1938,7 +2029,10 @@ async fn node_crash_restart_rejoins_cluster() {
     cluster.advance_ms(100);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(1700); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(1700);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -1998,7 +2092,10 @@ async fn snapshot_transfer_on_partition_migration() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2031,7 +2128,10 @@ async fn snapshot_transfer_on_partition_migration() {
     for _ in 0..20 {
         cluster.advance_ms(10);
         for node in &mut cluster.nodes {
-            { let output = node.controller.tick(cluster.runtime.clock().now()); node.controller.send_tick_output(output).await; }
+            {
+                let output = node.controller.tick(cluster.runtime.clock().now());
+                node.controller.send_tick_output(output).await;
+            }
             node.controller.process_messages().await;
         }
     }
@@ -2066,7 +2166,10 @@ async fn graceful_shutdown_drain() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2268,7 +2371,10 @@ async fn wildcard_broadcast_replication() {
     let client_partition = PartitionId::new(5).unwrap();
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2330,7 +2436,10 @@ async fn cross_node_wildcard_publish_routing() {
     let client_partition = session_partition("wildcard-subscriber");
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2395,7 +2504,10 @@ async fn drain_notification_triggers_partition_reassignment() {
     let mut cluster = TestCluster::new(3);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
 
     cluster.advance_ms(5);
@@ -2541,7 +2653,10 @@ async fn db_crud_replication_to_replicas() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2672,7 +2787,10 @@ async fn db_list_returns_entities_by_type() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2727,7 +2845,10 @@ async fn schema_broadcast_to_all_nodes() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2820,7 +2941,10 @@ async fn schema_update_increments_version() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2891,7 +3015,10 @@ async fn index_add_and_lookup() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2956,7 +3083,10 @@ async fn index_multiple_records_same_value() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -3169,6 +3299,7 @@ async fn unique_constraint_expires_after_ttl() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn fk_validation_request_lifecycle() {
     use mqdb::cluster::db::FkValidationRequest;
 
@@ -3190,7 +3321,10 @@ async fn fk_validation_request_lifecycle() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -3357,21 +3491,53 @@ async fn fk_validation_cleanup_expired() {
 }
 
 fn setup_lwt_test_sessions(cluster: &mut TestCluster, n1: NodeId, n2: NodeId) {
-    cluster.nodes[0].sessions.create_session("lwt-client").unwrap();
-    cluster.nodes[0].sessions.update("lwt-client", |s| {
-        s.set_will(1, false, "status/lwt-client", b"offline");
-        s.set_connected(true, n1, 0);
-    }).unwrap();
+    cluster.nodes[0]
+        .sessions
+        .create_session("lwt-client")
+        .unwrap();
+    cluster.nodes[0]
+        .sessions
+        .update("lwt-client", |s| {
+            s.set_will(1, false, "status/lwt-client", b"offline");
+            s.set_connected(true, n1, 0);
+        })
+        .unwrap();
 
-    cluster.nodes[1].sessions.create_session("subscriber-client").unwrap();
-    cluster.nodes[1].sessions.update("subscriber-client", |s| {
-        s.set_connected(true, n2, 0);
-    }).unwrap();
+    cluster.nodes[1]
+        .sessions
+        .create_session("subscriber-client")
+        .unwrap();
+    cluster.nodes[1]
+        .sessions
+        .update("subscriber-client", |s| {
+            s.set_connected(true, n2, 0);
+        })
+        .unwrap();
 
     let subscriber_partition = session_partition("subscriber-client");
-    cluster.nodes[0].topics.subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1).unwrap();
-    cluster.nodes[1].topics.subscribe("status/lwt-client", "subscriber-client", subscriber_partition, 1).unwrap();
-    cluster.nodes[0].controller.stores().client_locations.set("subscriber-client", n2);
+    cluster.nodes[0]
+        .topics
+        .subscribe(
+            "status/lwt-client",
+            "subscriber-client",
+            subscriber_partition,
+            1,
+        )
+        .unwrap();
+    cluster.nodes[1]
+        .topics
+        .subscribe(
+            "status/lwt-client",
+            "subscriber-client",
+            subscriber_partition,
+            1,
+        )
+        .unwrap();
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .client_locations
+        .set("subscriber-client", n2);
 }
 
 #[tokio::test]
@@ -3384,7 +3550,10 @@ async fn cross_node_lwt_routing() {
     let n2 = cluster.nodes[1].id;
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -3393,7 +3562,10 @@ async fn cross_node_lwt_routing() {
 
     setup_lwt_test_sessions(&mut cluster, n1, n2);
 
-    cluster.nodes[0].sessions.mark_disconnected("lwt-client", 1000).unwrap();
+    cluster.nodes[0]
+        .sessions
+        .mark_disconnected("lwt-client", 1000)
+        .unwrap();
 
     let publisher = LwtPublisher::new(&cluster.nodes[0].sessions);
     let prepared = publisher.prepare_lwt("lwt-client").unwrap().unwrap();
@@ -3401,7 +3573,11 @@ async fn cross_node_lwt_routing() {
     assert_eq!(prepared.payload, b"offline");
 
     let router = PublishRouter::new(&cluster.nodes[0].topics);
-    let wildcards = cluster.nodes[0].controller.stores().wildcards.match_topic(&prepared.topic);
+    let wildcards = cluster.nodes[0]
+        .controller
+        .stores()
+        .wildcards
+        .match_topic(&prepared.topic);
     let route = router.route_with_wildcards(&prepared.topic, &wildcards);
 
     assert_eq!(route.targets.len(), 1, "Should have one routing target");
@@ -3409,27 +3585,49 @@ async fn cross_node_lwt_routing() {
 
     let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
     for target in route.targets {
-        let connected_node = cluster.nodes[0].controller.stores().client_locations.get(&target.client_id);
+        let connected_node = cluster.nodes[0]
+            .controller
+            .stores()
+            .client_locations
+            .get(&target.client_id);
         if let Some(target_node) = connected_node
             && target_node != n1
         {
-            remote_nodes.entry(target_node).or_default().push(ForwardTarget::new(target.client_id, target.qos));
+            remote_nodes
+                .entry(target_node)
+                .or_default()
+                .push(ForwardTarget::new(target.client_id, target.qos));
         }
     }
 
-    assert!(remote_nodes.contains_key(&n2), "Should forward LWT to Node 2");
+    assert!(
+        remote_nodes.contains_key(&n2),
+        "Should forward LWT to Node 2"
+    );
     assert_eq!(remote_nodes[&n2].len(), 1);
     assert_eq!(remote_nodes[&n2][0].client_id, "subscriber-client");
 
-    let fwd = ForwardedPublish::new(n1, prepared.topic.clone(), prepared.qos, prepared.retain, prepared.payload.clone(), remote_nodes[&n2].clone());
+    let fwd = ForwardedPublish::new(
+        n1,
+        prepared.topic.clone(),
+        prepared.qos,
+        prepared.retain,
+        prepared.payload.clone(),
+        remote_nodes[&n2].clone(),
+    );
     assert_eq!(fwd.origin_node, n1);
     assert_eq!(fwd.topic, "status/lwt-client");
     assert_eq!(fwd.targets.len(), 1);
 
-    publisher.complete_lwt("lwt-client", prepared.token).unwrap();
+    publisher
+        .complete_lwt("lwt-client", prepared.token)
+        .unwrap();
 
     let session = cluster.nodes[0].sessions.get("lwt-client").unwrap();
-    assert!(session.lwt_published != 0, "LWT should be marked as published");
+    assert!(
+        session.lwt_published != 0,
+        "LWT should be marked as published"
+    );
 }
 
 #[tokio::test]
@@ -3640,7 +3838,10 @@ async fn unique_constraint_cross_node_message_flow() {
     }
 
     for node in &mut cluster.nodes {
-        { let output = node.controller.tick(0); node.controller.send_tick_output(output).await; }
+        {
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
+        }
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {

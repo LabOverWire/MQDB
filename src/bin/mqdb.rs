@@ -3,9 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mqdb::cluster::db::DbEntity;
 use mqdb::cluster::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
+use mqtt5::QoS;
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
-use mqtt5::QoS;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -273,7 +273,11 @@ enum DevAction {
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
-        #[arg(long, default_value = "127.0.0.1", help = "Host to bind (use 0.0.0.0 for external access)")]
+        #[arg(
+            long,
+            default_value = "127.0.0.1",
+            help = "Host to bind (use 0.0.0.0 for external access)"
+        )]
         bind_host: String,
         #[arg(
             long,
@@ -281,10 +285,21 @@ enum DevAction {
             help = "Topology: partial (default), upper, or full"
         )]
         topology: Option<String>,
-        #[arg(long, help = "Use Out-only bridge direction (default: Both for partial/upper, Out for full)")]
+        #[arg(
+            long,
+            help = "Use Out-only bridge direction (default: Both for partial/upper, Out for full)"
+        )]
         bridge_out: bool,
-        #[arg(long, help = "Use Both bridge direction even for full topology (may cause amplification)")]
+        #[arg(
+            long,
+            help = "Use Both bridge direction even for full topology (may cause amplification)"
+        )]
         no_bridge_out: bool,
+        #[arg(
+            long,
+            help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
+        )]
+        direct_quic: bool,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {
@@ -385,9 +400,16 @@ enum BenchAction {
         qos: u8,
         #[arg(long, default_value = "bench/test", help = "Topic base pattern")]
         topic: String,
-        #[arg(long, default_value = "1", help = "Number of topics to spread load across")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "Number of topics to spread load across"
+        )]
         topics: usize,
-        #[arg(long, help = "Use wildcard subscription (topic/#) instead of individual subscriptions")]
+        #[arg(
+            long,
+            help = "Use wildcard subscription (topic/#) instead of individual subscriptions"
+        )]
         wildcard: bool,
         #[arg(long, default_value = "1", help = "Warmup duration in seconds")]
         warmup: u64,
@@ -426,15 +448,32 @@ enum BenchAction {
         warmup: Option<u64>,
         #[arg(long, help = "Clean up test entity after benchmark")]
         cleanup: bool,
-        #[arg(long, default_value = "0", help = "Seed records before benchmark (for get/update/delete ops)")]
+        #[arg(
+            long,
+            default_value = "0",
+            help = "Seed records before benchmark (for get/update/delete ops)"
+        )]
         seed: u64,
-        #[arg(long, help = "Disable latency tracking for pure throughput measurement")]
+        #[arg(
+            long,
+            help = "Disable latency tracking for pure throughput measurement"
+        )]
         no_latency: bool,
-        #[arg(long, help = "Use async pipelined mode (subscribe once, fire all ops, collect responses)")]
+        #[arg(
+            long,
+            help = "Use async pipelined mode (subscribe once, fire all ops, collect responses)"
+        )]
         r#async: bool,
-        #[arg(long, default_value = "1", help = "MQTT QoS level (0, 1, or 2) for async mode. QoS 1 recommended for reliability")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "MQTT QoS level (0, 1, or 2) for async mode. QoS 1 recommended for reliability"
+        )]
         qos: u8,
-        #[arg(long, help = "Duration in seconds (async mode only, overrides --operations)")]
+        #[arg(
+            long,
+            help = "Duration in seconds (async mode only, overrides --operations)"
+        )]
         duration: Option<u64>,
         #[command(flatten)]
         conn: ConnectionArgs,
@@ -481,9 +520,17 @@ enum AgentAction {
         acl: Option<PathBuf>,
         #[arg(long)]
         anonymous: bool,
-        #[arg(long, default_value = "periodic", help = "Durability mode: immediate (fsync every write), periodic (fsync periodically), none (no fsync)")]
+        #[arg(
+            long,
+            default_value = "periodic",
+            help = "Durability mode: immediate (fsync every write), periodic (fsync periodically), none (no fsync)"
+        )]
         durability: DurabilityArg,
-        #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
+        #[arg(
+            long,
+            default_value = "10",
+            help = "Fsync interval in ms when using periodic durability"
+        )]
         durability_ms: u64,
         #[arg(long, help = "Path to QUIC/TLS certificate file (PEM format)")]
         quic_cert: Option<PathBuf>,
@@ -529,14 +576,34 @@ enum ClusterAction {
             help = "Disable store persistence (data will not survive restarts)"
         )]
         no_persist_stores: bool,
-        #[arg(long, default_value = "periodic", help = "Durability mode for stores: immediate (fsync every write), periodic (fsync periodically), none (no fsync). Raft always uses immediate.")]
+        #[arg(
+            long,
+            default_value = "periodic",
+            help = "Durability mode for stores: immediate (fsync every write), periodic (fsync periodically), none (no fsync). Raft always uses immediate."
+        )]
         durability: DurabilityArg,
-        #[arg(long, default_value = "10", help = "Fsync interval in ms when using periodic durability")]
+        #[arg(
+            long,
+            default_value = "10",
+            help = "Fsync interval in ms when using periodic durability"
+        )]
         durability_ms: u64,
-        #[arg(long, help = "Use outgoing-only bridge direction (for full mesh topology)")]
+        #[arg(
+            long,
+            help = "Use outgoing-only bridge direction (for full mesh topology)"
+        )]
         bridge_out: bool,
-        #[arg(long, default_value = "100", help = "Port offset for cluster listener (bridges connect to main_port + offset)")]
+        #[arg(
+            long,
+            default_value = "100",
+            help = "Port offset for cluster listener (bridges connect to main_port + offset)"
+        )]
         cluster_port_offset: u16,
+        #[arg(
+            long,
+            help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
+        )]
+        direct_quic: bool,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -602,7 +669,10 @@ struct ConnectionArgs {
     pass: Option<String>,
     #[arg(long, default_value = "30")]
     timeout: u64,
-    #[arg(long, help = "Skip TLS certificate verification (for self-signed certs)")]
+    #[arg(
+        long,
+        help = "Skip TLS certificate verification (for self-signed certs)"
+    )]
     insecure: bool,
 }
 
@@ -676,6 +746,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durability_ms,
                 bridge_out,
                 cluster_port_offset,
+                direct_quic,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -693,6 +764,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     durability_ms,
                     bridge_out,
                     cluster_port_offset,
+                    direct_quic,
                 }))
                 .await?;
             }
@@ -920,6 +992,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 topology,
                 bridge_out,
                 no_bridge_out,
+                direct_quic,
             } => {
                 cmd_dev_start_cluster(
                     nodes,
@@ -932,6 +1005,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     topology.as_deref(),
                     bridge_out,
                     no_bridge_out,
+                    direct_quic,
                 )?;
             }
             DevAction::Bench {
@@ -1082,6 +1156,7 @@ async fn cmd_agent_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct ClusterStartArgs {
     node_id: u16,
     node_name: Option<String>,
@@ -1098,6 +1173,7 @@ struct ClusterStartArgs {
     durability_ms: u64,
     bridge_out: bool,
     cluster_port_offset: u16,
+    direct_quic: bool,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1137,6 +1213,9 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
         config = config.with_bridge_out_only(true);
     }
     config = config.with_cluster_port_offset(args.cluster_port_offset);
+    if args.direct_quic {
+        config = config.with_direct_quic(true);
+    }
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
     Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
@@ -2839,6 +2918,7 @@ fn cmd_dev_start_cluster(
     topology: Option<&str>,
     bridge_out: bool,
     no_bridge_out: bool,
+    direct_quic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -2895,6 +2975,10 @@ fn cmd_dev_start_cluster(
             ]);
         }
 
+        if direct_quic {
+            cmd.arg("--direct-quic");
+        }
+
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
         cmd.env("RUST_LOG", &rust_log);
 
@@ -2903,9 +2987,15 @@ fn cmd_dev_start_cluster(
         cmd.stdout(log_file.try_clone()?);
         cmd.stderr(log_file);
 
+        let transport_mode = if direct_quic {
+            " (Direct QUIC)"
+        } else if no_quic {
+            " (TCP)"
+        } else {
+            " (MQTT bridges)"
+        };
         println!(
-            "Starting node {node_id} on port {port}{}...",
-            if no_quic { " (TCP)" } else { " (QUIC)" }
+            "Starting node {node_id} on port {port}{transport_mode}..."
         );
 
         cmd.spawn()?;
@@ -3086,7 +3176,11 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
     let running = Arc::new(AtomicBool::new(true));
 
     let topics_str = if args.topics > 1 {
-        let sub_mode = if args.wildcard { "wildcard" } else { "individual" };
+        let sub_mode = if args.wildcard {
+            "wildcard"
+        } else {
+            "individual"
+        };
         format!(", {} topics ({})", args.topics, sub_mode)
     } else {
         String::new()
@@ -3095,12 +3189,26 @@ async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::erro
     if is_cross_node {
         println!(
             "Benchmark (cross-node): {} publishers @ {}, {} subscribers @ {}, {}s duration ({}s warmup), {} byte payload, QoS {}{}",
-            args.publishers, pub_broker, args.subscribers, sub_broker, args.duration, args.warmup, args.size, args.qos, topics_str
+            args.publishers,
+            pub_broker,
+            args.subscribers,
+            sub_broker,
+            args.duration,
+            args.warmup,
+            args.size,
+            args.qos,
+            topics_str
         );
     } else {
         println!(
             "Benchmark: {} publishers, {} subscribers, {}s duration ({}s warmup), {} byte payload, QoS {}{}",
-            args.publishers, args.subscribers, args.duration, args.warmup, args.size, args.qos, topics_str
+            args.publishers,
+            args.subscribers,
+            args.duration,
+            args.warmup,
+            args.size,
+            args.qos,
+            topics_str
         );
     }
 
@@ -3424,10 +3532,12 @@ fn generate_record(fields: usize, field_size: usize, id: u64) -> Value {
     Value::Object(record)
 }
 
-const RAMP_INITIAL_RATE: u64 = 250;
-const RAMP_STEP: u64 = 250;
+const RAMP_INITIAL_RATE: u64 = 500;
+const RAMP_INITIAL_STEP_PCT: f64 = 0.50;
+const RAMP_MIN_STEP_PCT: f64 = 0.05;
 const RAMP_INTERVAL_MS: u64 = 2000;
-const RAMP_THRESHOLD: f64 = 0.90;
+const RAMP_THROUGHPUT_THRESHOLD: f64 = 0.90;
+const RAMP_LATENCY_SLOWDOWN_FACTOR: f64 = 1.5;
 const OVERLOAD_STEPS: u32 = 2;
 const STABILIZATION_SECS: u64 = 3;
 
@@ -3441,6 +3551,7 @@ async fn cmd_bench_db_async(
     args: &BenchDbArgs,
     op: DbOp,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Instant;
 
@@ -3474,19 +3585,22 @@ async fn cmd_bench_db_async(
         for i in 0..seed_count {
             let record = generate_record(args.fields, args.field_size, i);
             let topic = format!("$DB/{}/create", args.entity);
-            let response_topic = format!("{client_id}/seed/{i}");
+            let response_topic = format!("{client_id}/resp/{i}");
 
             let (tx, rx) = flume::bounded::<Option<String>>(1);
             let tx_clone = tx.clone();
             client
                 .subscribe(&response_topic, move |msg| {
-                    let actual_id = serde_json::from_slice::<Value>(&msg.payload)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("id")
-                                .and_then(|id| id.as_str().map(String::from))
-                                .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
-                        });
+                    let actual_id =
+                        serde_json::from_slice::<Value>(&msg.payload)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("id")
+                                    .and_then(|id| id.as_str().map(String::from))
+                                    .or_else(|| {
+                                        v.get("data")?.get("id")?.as_str().map(String::from)
+                                    })
+                            });
                     let _ = tx_clone.try_send(actual_id);
                 })
                 .await?;
@@ -3527,9 +3641,32 @@ async fn cmd_bench_db_async(
     let response_count_clone = Arc::clone(&response_count);
     let error_count_clone = Arc::clone(&error_count);
 
+    let pending_times: Arc<std::sync::Mutex<HashMap<u64, Instant>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::with_capacity(10000)));
+    let latencies: Arc<std::sync::Mutex<Vec<f64>>> =
+        Arc::new(std::sync::Mutex::new(Vec::with_capacity(100_000)));
+    let pending_times_resp = Arc::clone(&pending_times);
+    let latencies_resp = Arc::clone(&latencies);
+
     let response_topic = format!("{client_id}/responses/#");
     client
         .subscribe(&response_topic, move |msg| {
+            let corr_id = msg
+                .topic
+                .rsplit('/')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok());
+
+            if let Some(id) = corr_id
+                && let Ok(mut pending) = pending_times_resp.lock()
+                && let Some(sent_at) = pending.remove(&id)
+            {
+                let latency_ms = sent_at.elapsed().as_secs_f64() * 1000.0;
+                if let Ok(mut lats) = latencies_resp.lock() {
+                    lats.push(latency_ms);
+                }
+            }
+
             if let Ok(v) = serde_json::from_slice::<Value>(&msg.payload) {
                 if v.get("status").and_then(Value::as_str) == Some("ok") {
                     response_count_clone.fetch_add(1, Ordering::Relaxed);
@@ -3553,6 +3690,7 @@ async fn cmd_bench_db_async(
     let published_clone = Arc::clone(&published_count);
     let target_rate_clone = Arc::clone(&target_rate);
     let delete_index_clone = Arc::clone(&delete_index);
+    let pending_times_pub = Arc::clone(&pending_times);
     let client_clone = client.clone();
     let entity = args.entity.clone();
     let fields = args.fields;
@@ -3620,8 +3758,7 @@ async fn cmd_bench_db_async(
                 };
 
                 let correlation_id = format!("{i}");
-                let individual_response =
-                    format!("{client_id_clone}/responses/{correlation_id}");
+                let individual_response = format!("{client_id_clone}/responses/{correlation_id}");
 
                 let qos_level = match qos {
                     0 => QoS::AtMostOnce,
@@ -3637,6 +3774,10 @@ async fn cmd_bench_db_async(
                     },
                     ..Default::default()
                 };
+
+                if let Ok(mut pending) = pending_times_pub.lock() {
+                    pending.insert(i, Instant::now());
+                }
 
                 if client_clone
                     .publish_with_options(&topic, payload, opts)
@@ -3660,10 +3801,13 @@ async fn cmd_bench_db_async(
 
     let start_time = Instant::now();
     let mut last_response_count = 0u64;
+    let mut last_latency_count = 0usize;
     let mut current_rate = RAMP_INITIAL_RATE;
+    let mut current_step_pct = RAMP_INITIAL_STEP_PCT;
     let mut saturation_rate: Option<f64> = None;
     let mut overload_remaining = 0u32;
     let mut peak_rate = 0u64;
+    let mut baseline_latency: Option<f64> = None;
     let backlog_threshold_secs = 2.0;
 
     while start_time.elapsed().as_secs() < duration_secs {
@@ -3673,9 +3817,31 @@ async fn cmd_bench_db_async(
         let current_responses = response_count.load(Ordering::Relaxed);
         let backlog = current_published.saturating_sub(current_responses);
         let interval_responses = current_responses.saturating_sub(last_response_count);
-        let interval_throughput =
-            interval_responses as f64 / (RAMP_INTERVAL_MS as f64 / 1000.0);
+        let interval_throughput = interval_responses as f64 / (RAMP_INTERVAL_MS as f64 / 1000.0);
         let backlog_limit = (current_rate as f64 * backlog_threshold_secs) as u64;
+
+        let (interval_p50, interval_p95) = if let Ok(lats) = latencies.lock() {
+            let new_count = lats.len();
+            if new_count > last_latency_count {
+                let mut interval_lats: Vec<f64> =
+                    lats[last_latency_count..new_count].to_vec();
+                interval_lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let p50_idx = interval_lats.len() / 2;
+                let p95_idx = (interval_lats.len() as f64 * 0.95) as usize;
+                let p50 = interval_lats.get(p50_idx).copied().unwrap_or(0.0);
+                let p95 = interval_lats.get(p95_idx.min(interval_lats.len().saturating_sub(1))).copied().unwrap_or(0.0);
+                last_latency_count = new_count;
+                (p50, p95)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        if baseline_latency.is_none() && interval_p50 > 0.0 {
+            baseline_latency = Some(interval_p50);
+        }
 
         let phase = if saturation_rate.is_none() {
             "ramp"
@@ -3685,16 +3851,27 @@ async fn cmd_bench_db_async(
             "stable"
         };
         println!(
-            "  [{phase}] Rate: {current_rate} target, {interval_throughput:.0} actual, backlog: {backlog}"
+            "  [{phase}] Rate: {current_rate} target, {interval_throughput:.0} actual, backlog: {backlog}, p50: {interval_p50:.1}ms, p95: {interval_p95:.1}ms"
         );
 
         if saturation_rate.is_none() {
-            let throughput_ok = interval_throughput >= current_rate as f64 * RAMP_THRESHOLD;
+            let throughput_ok = interval_throughput >= current_rate as f64 * RAMP_THROUGHPUT_THRESHOLD;
             let backlog_ok = backlog < backlog_limit;
+            let latency_ok = baseline_latency
+                .is_none_or(|base| interval_p50 < base * RAMP_LATENCY_SLOWDOWN_FACTOR);
 
-            if throughput_ok && backlog_ok {
-                current_rate += RAMP_STEP;
+            if throughput_ok && backlog_ok && latency_ok {
+                let step = (current_rate as f64 * current_step_pct) as u64;
+                let step = step.max(50);
+                current_rate += step;
                 target_rate.store(current_rate, Ordering::Relaxed);
+            } else if !latency_ok && throughput_ok && backlog_ok {
+                current_step_pct = (current_step_pct / 2.0).max(RAMP_MIN_STEP_PCT);
+                let step = (current_rate as f64 * current_step_pct) as u64;
+                let step = step.max(50);
+                current_rate += step;
+                target_rate.store(current_rate, Ordering::Relaxed);
+                println!("  Latency increasing, reducing step to {:.0}%", current_step_pct * 100.0);
             } else {
                 let reason = if throughput_ok {
                     "backlog growth"
@@ -3704,14 +3881,16 @@ async fn cmd_bench_db_async(
                 saturation_rate = Some(interval_throughput);
                 println!("Saturation detected ({reason}) at {interval_throughput:.0} ops/s");
                 overload_remaining = OVERLOAD_STEPS;
-                current_rate += RAMP_STEP;
+                let step = (current_rate as f64 * RAMP_MIN_STEP_PCT) as u64;
+                current_rate += step.max(50);
                 target_rate.store(current_rate, Ordering::Relaxed);
                 println!("Entering overload phase at {current_rate} ops/s...");
             }
         } else if overload_remaining > 0 {
             overload_remaining -= 1;
             if overload_remaining > 0 {
-                current_rate += RAMP_STEP;
+                let step = (current_rate as f64 * RAMP_MIN_STEP_PCT) as u64;
+                current_rate += step.max(50);
                 target_rate.store(current_rate, Ordering::Relaxed);
             } else {
                 peak_rate = current_rate;
@@ -3767,6 +3946,21 @@ async fn cmd_bench_db_async(
     let saturation_display = saturation_rate.unwrap_or(throughput);
     let duration = total_elapsed.as_secs_f64();
 
+    let (lat_min, lat_p50, lat_p95, lat_p99, lat_max) = if let Ok(mut lats) = latencies.lock() {
+        if lats.is_empty() {
+            (0.0, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let len = lats.len();
+            let p50 = lats[len / 2];
+            let p95 = lats[(len as f64 * 0.95) as usize];
+            let p99 = lats[(len as f64 * 0.99) as usize];
+            (lats[0], p50, p95, p99, lats[len - 1])
+        }
+    } else {
+        (0.0, 0.0, 0.0, 0.0, 0.0)
+    };
+
     println!("\n┌───────────────────────────────────────────┐");
     println!("│           DB Benchmark Results            │");
     println!("├───────────────────────────────────────────┤");
@@ -3780,6 +3974,13 @@ async fn cmd_bench_db_async(
         println!("│ Peak Rate Tested:      {peak_rate:>10} ops/s  │");
     }
     println!("│ Throughput:            {throughput:>10.0} ops/s  │");
+    println!("├───────────────────────────────────────────┤");
+    println!("│ Latency (ms):                             │");
+    println!("│   Min:                 {lat_min:>10.2} ms      │");
+    println!("│   p50:                 {lat_p50:>10.2} ms      │");
+    println!("│   p95:                 {lat_p95:>10.2} ms      │");
+    println!("│   p99:                 {lat_p99:>10.2} ms      │");
+    println!("│   Max:                 {lat_max:>10.2} ms      │");
     println!("└───────────────────────────────────────────┘");
 
     Ok(())
@@ -3838,12 +4039,16 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
             let tx_clone = tx.clone();
             client
                 .subscribe(&response_topic, move |msg| {
-                    let actual_id = serde_json::from_slice::<Value>(&msg.payload)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("id").and_then(|id| id.as_str().map(String::from))
-                                .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
-                        });
+                    let actual_id =
+                        serde_json::from_slice::<Value>(&msg.payload)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("id")
+                                    .and_then(|id| id.as_str().map(String::from))
+                                    .or_else(|| {
+                                        v.get("data")?.get("id")?.as_str().map(String::from)
+                                    })
+                            });
                     let _ = tx_clone.try_send(actual_id);
                 })
                 .await?;
@@ -3864,9 +4069,10 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                 .ok()
                 .and_then(Result::ok)
                 .flatten()
-                && let Ok(mut ids) = inserted_ids.lock() {
-                    ids.push(actual_id);
-                }
+                && let Ok(mut ids) = inserted_ids.lock()
+            {
+                ids.push(actual_id);
+            }
             let _ = client.unsubscribe(&response_topic).await;
 
             if (i + 1) % 1000 == 0 {
@@ -3924,7 +4130,11 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                     op
                 };
 
-                let op_start = if no_latency { None } else { Some(Instant::now()) };
+                let op_start = if no_latency {
+                    None
+                } else {
+                    Some(Instant::now())
+                };
                 let success = match current_op {
                     DbOp::Insert => {
                         let id = id_counter.fetch_add(1, Ordering::Relaxed);
@@ -3940,8 +4150,11 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 let actual_id = serde_json::from_slice::<Value>(&msg.payload)
                                     .ok()
                                     .and_then(|v| {
-                                        v.get("id").and_then(|id| id.as_str().map(String::from))
-                                            .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
+                                        v.get("id")
+                                            .and_then(|id| id.as_str().map(String::from))
+                                            .or_else(|| {
+                                                v.get("data")?.get("id")?.as_str().map(String::from)
+                                            })
                                     });
                                 let _ = tx_clone.try_send(actual_id);
                             })
@@ -3968,16 +4181,18 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                             {
                                 false
                             } else {
-                                let actual_id = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                    .await
-                                    .ok()
-                                    .and_then(Result::ok)
-                                    .flatten();
+                                let actual_id =
+                                    tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
+                                        .await
+                                        .ok()
+                                        .and_then(Result::ok)
+                                        .flatten();
                                 let success = actual_id.is_some();
                                 if let Some(actual_id) = actual_id
-                                    && let Ok(mut ids) = inserted_ids.lock() {
-                                        ids.push(actual_id);
-                                    }
+                                    && let Ok(mut ids) = inserted_ids.lock()
+                                {
+                                    ids.push(actual_id);
+                                }
                                 let _ = client.unsubscribe(&response_topic).await;
                                 success
                             }
@@ -4024,12 +4239,14 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 {
                                     false
                                 } else {
-                                    let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                            .await
-                                            .ok()
-                                            .and_then(Result::ok)
-                                            .unwrap_or(false);
+                                    let result = tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        rx.recv_async(),
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -4084,12 +4301,14 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 {
                                     false
                                 } else {
-                                    let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                            .await
-                                            .ok()
-                                            .and_then(Result::ok)
-                                            .unwrap_or(false);
+                                    let result = tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        rx.recv_async(),
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -4133,12 +4352,14 @@ async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error
                                 {
                                     false
                                 } else {
-                                    let result =
-                                        tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                            .await
-                                            .ok()
-                                            .and_then(Result::ok)
-                                            .unwrap_or(false);
+                                    let result = tokio::time::timeout(
+                                        Duration::from_secs(5),
+                                        rx.recv_async(),
+                                    )
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .unwrap_or(false);
                                     let _ = client.unsubscribe(&response_topic).await;
                                     result
                                 }
@@ -5037,9 +5258,13 @@ mod profile_analysis {
     }
 
     fn print_category_breakdown(exclusive: &HashMap<String, u64>, total_excl: u64) {
-        println!("\n--------------------------------------------------------------------------------");
+        println!(
+            "\n--------------------------------------------------------------------------------"
+        );
         println!("EXCLUSIVE TIME BY CATEGORY");
-        println!("--------------------------------------------------------------------------------\n");
+        println!(
+            "--------------------------------------------------------------------------------\n"
+        );
 
         for (cat_name, filter) in CATEGORIES {
             let cat_total: u64 = exclusive
@@ -5048,15 +5273,22 @@ mod profile_analysis {
                 .map(|(_, v)| v)
                 .sum();
             if cat_total > 0 {
-                println!("{cat_name:15} {cat_total:8} samples ({:5.1}%)", pct(cat_total, total_excl));
+                println!(
+                    "{cat_name:15} {cat_total:8} samples ({:5.1}%)",
+                    pct(cat_total, total_excl)
+                );
             }
         }
     }
 
     fn print_top_functions(inclusive: &HashMap<String, u64>, total_samples: u64) {
-        println!("\n--------------------------------------------------------------------------------");
+        println!(
+            "\n--------------------------------------------------------------------------------"
+        );
         println!("TOP MQTT5/MQDB FUNCTIONS (by inclusive time)");
-        println!("--------------------------------------------------------------------------------\n");
+        println!(
+            "--------------------------------------------------------------------------------\n"
+        );
 
         let mut mqtt_funcs: Vec<_> = inclusive
             .iter()
@@ -5126,9 +5358,13 @@ mod profile_analysis {
         let total_samples = thread_totals.iter().max().copied().unwrap_or(1);
         let total_excl: u64 = exclusive.values().sum();
 
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("MQDB PROFILE ANALYSIS REPORT");
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
         println!("\nTotal samples (per thread): {total_samples}");
         println!("Total exclusive samples: {total_excl}");
 
@@ -5146,17 +5382,29 @@ mod profile_analysis {
             .sum();
         let active = total_excl.saturating_sub(waiting);
 
-        println!("\n--------------------------------------------------------------------------------");
+        println!(
+            "\n--------------------------------------------------------------------------------"
+        );
         println!("SUMMARY");
-        println!("--------------------------------------------------------------------------------");
-        println!("\nActive work: {active} samples ({:.1}%)", pct(active, total_excl));
-        println!("Waiting/idle: {waiting} samples ({:.1}%)", pct(waiting, total_excl));
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
+        println!(
+            "\nActive work: {active} samples ({:.1}%)",
+            pct(active, total_excl)
+        );
+        println!(
+            "Waiting/idle: {waiting} samples ({:.1}%)",
+            pct(waiting, total_excl)
+        );
 
         if active < total_excl / 10 {
             println!("\n[INFO] System is mostly idle - try longer benchmark or more clients");
         }
 
-        println!("\n================================================================================");
+        println!(
+            "\n================================================================================"
+        );
         Ok(())
     }
 }
