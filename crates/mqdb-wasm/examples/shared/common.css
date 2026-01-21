@@ -1,0 +1,295 @@
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+    background: #f5f5f5;
+    line-height: 1.5;
+}
+
+nav {
+    background: #333;
+    color: white;
+    padding: 10px 20px;
+    margin: -20px -20px 20px -20px;
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+}
+
+nav a {
+    color: #4fc3f7;
+    text-decoration: none;
+}
+
+nav a:hover {
+    text-decoration: underline;
+}
+
+nav a.active {
+    color: white;
+    font-weight: bold;
+}
+
+h1 {
+    color: #333;
+    margin-top: 0;
+}
+
+h2 {
+    color: #555;
+    font-size: 1.2em;
+    margin-top: 0;
+}
+
+.section {
+    background: white;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.row {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.row > label {
+    min-width: 80px;
+    font-weight: 500;
+}
+
+button {
+    background: #2196f3;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+button:hover {
+    background: #1976d2;
+}
+
+button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+button.danger {
+    background: #f44336;
+    color: white;
+}
+
+button.danger:hover {
+    background: #d32f2f;
+    color: white;
+}
+
+button.success {
+    background: #4caf50;
+    color: white;
+}
+
+button.success:hover {
+    background: #388e3c;
+    color: white;
+}
+
+button.secondary {
+    background: #757575;
+    color: white;
+}
+
+button.secondary:hover {
+    background: #616161;
+    color: white;
+}
+
+input, select, textarea {
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: #2196f3;
+}
+
+input[type="text"], input[type="number"] {
+    min-width: 150px;
+}
+
+textarea {
+    width: 100%;
+    min-height: 80px;
+    font-family: 'Monaco', 'Consolas', monospace;
+    font-size: 13px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+
+th {
+    background: #f0f0f0;
+    font-weight: 600;
+}
+
+tr:nth-child(even) {
+    background: #fafafa;
+}
+
+tr:hover {
+    background: #f0f7ff;
+}
+
+#output {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 8px;
+    margin-top: 20px;
+}
+
+#output h3 {
+    color: #4fc3f7;
+    margin: 0 0 10px 0;
+}
+
+#log {
+    max-height: 300px;
+    overflow-y: auto;
+    margin: 0;
+    font-family: 'Monaco', 'Consolas', monospace;
+    font-size: 13px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.error {
+    color: #f44336;
+}
+
+.success {
+    color: #4caf50;
+}
+
+.warning {
+    color: #ff9800;
+}
+
+.info {
+    color: #4fc3f7;
+}
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.badge.create {
+    background: #e8f5e9;
+    color: #2e7d32;
+}
+
+.badge.update {
+    background: #fff3e0;
+    color: #ef6c00;
+}
+
+.badge.delete {
+    background: #ffebee;
+    color: #c62828;
+}
+
+.code {
+    font-family: 'Monaco', 'Consolas', monospace;
+    background: #f5f5f5;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 13px;
+}
+
+.card {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 15px;
+    margin-bottom: 10px;
+}
+
+.card h3 {
+    margin: 0 0 10px 0;
+    font-size: 1em;
+}
+
+.flex {
+    display: flex;
+}
+
+.flex-wrap {
+    flex-wrap: wrap;
+}
+
+.gap-10 {
+    gap: 10px;
+}
+
+.gap-20 {
+    gap: 20px;
+}
+
+.mb-10 {
+    margin-bottom: 10px;
+}
+
+.mb-20 {
+    margin-bottom: 20px;
+}
+
+.mt-10 {
+    margin-top: 10px;
+}
+
+.mt-20 {
+    margin-top: 20px;
+}
+
+.hidden {
+    display: none;
+}
+
+.grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+
+@media (max-width: 768px) {
+    .grid-2 {
+        grid-template-columns: 1fr;
+    }
+}

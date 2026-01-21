@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Filtering & Sorting</title>
+    <link rel="stylesheet" href="shared/common.css">
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html" class="active">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+    </nav>
+
+    <h1>Filtering & Sorting</h1>
+
+    <div class="section">
+        <h2>Setup</h2>
+        <div class="flex gap-10 flex-wrap">
+            <button id="seedData" class="success">Seed Test Data (20 records)</button>
+            <button id="clearData" class="danger">Clear All</button>
+            <button id="runAllFilterTests">Run All Tests</button>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Filters</h2>
+            <div id="filterContainer">
+                <div class="filter-row row">
+                    <select class="filter-field">
+                        <option value="name">name</option>
+                        <option value="age">age</option>
+                        <option value="city">city</option>
+                        <option value="active">active</option>
+                        <option value="score">score</option>
+                    </select>
+                    <select class="filter-op">
+                        <option value="eq">=</option>
+                        <option value="ne">!=</option>
+                        <option value="gt">&gt;</option>
+                        <option value="lt">&lt;</option>
+                        <option value="gte">&gt;=</option>
+                        <option value="lte">&lt;=</option>
+                        <option value="glob">glob (~)</option>
+                        <option value="null">is null (?)</option>
+                        <option value="not_null">not null (!?)</option>
+                    </select>
+                    <input type="text" class="filter-value" value="">
+                    <button class="remove-filter danger" style="padding:4px 8px">&times;</button>
+                </div>
+            </div>
+            <button id="addFilter" class="secondary mt-10">+ Add Filter</button>
+        </div>
+
+        <div class="section">
+            <h2>Sort & Pagination</h2>
+            <div class="card">
+                <h3>Sort</h3>
+                <div class="row">
+                    <select id="sortField">
+                        <option value="">None</option>
+                        <option value="name">name</option>
+                        <option value="age">age</option>
+                        <option value="city">city</option>
+                        <option value="score">score</option>
+                    </select>
+                    <select id="sortDirection">
+                        <option value="asc">Ascending</option>
+                        <option value="desc">Descending</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card mt-10">
+                <h3>Pagination</h3>
+                <div class="row">
+                    <label>Offset:</label>
+                    <input type="number" id="offset" value="0" min="0" style="width:60px">
+                    <label>Limit:</label>
+                    <input type="number" id="limit" value="10" min="1" style="width:60px">
+                </div>
+            </div>
+            <div class="card mt-10">
+                <h3>Projection</h3>
+                <div class="row">
+                    <label>
+                        <input type="checkbox" id="projName" checked> name
+                    </label>
+                    <label>
+                        <input type="checkbox" id="projAge" checked> age
+                    </label>
+                    <label>
+                        <input type="checkbox" id="projCity" checked> city
+                    </label>
+                    <label>
+                        <input type="checkbox" id="projScore" checked> score
+                    </label>
+                    <label>
+                        <input type="checkbox" id="projActive" checked> active
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <button id="executeQuery" class="success">Execute Query</button>
+        <span id="queryInfo" style="margin-left:15px;color:#666"></span>
+    </div>
+
+    <div class="section">
+        <h2>Results</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Age</th>
+                    <th>City</th>
+                    <th>Score</th>
+                    <th>Active</th>
+                </tr>
+            </thead>
+            <tbody id="resultsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Quick Filter Tests</h2>
+        <div class="flex gap-10 flex-wrap">
+            <button id="testEq">eq: name = "Alice"</button>
+            <button id="testGt">gt: age &gt; 30</button>
+            <button id="testGlob">glob: name ~ "A*"</button>
+            <button id="testSortAsc">sort: age asc</button>
+            <button id="testSortDesc">sort: score desc</button>
+            <button id="testPagination">pagination: offset=5, limit=5</button>
+            <button id="testProjection">projection: name, age only</button>
+        </div>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('seedData').onclick = seedData;
+            document.getElementById('clearData').onclick = clearData;
+            document.getElementById('runAllFilterTests').onclick = runAllFilterTests;
+            document.getElementById('addFilter').onclick = addFilterRow;
+            document.getElementById('executeQuery').onclick = executeQuery;
+            document.getElementById('testEq').onclick = () => quickTest('eq');
+            document.getElementById('testGt').onclick = () => quickTest('gt');
+            document.getElementById('testGlob').onclick = () => quickTest('glob');
+            document.getElementById('testSortAsc').onclick = () => quickTest('sortAsc');
+            document.getElementById('testSortDesc').onclick = () => quickTest('sortDesc');
+            document.getElementById('testPagination').onclick = () => quickTest('pagination');
+            document.getElementById('testProjection').onclick = () => quickTest('projection');
+
+            document.getElementById('filterContainer').addEventListener('click', e => {
+                if (e.target.classList.contains('remove-filter')) {
+                    e.target.closest('.filter-row').remove();
+                }
+            });
+        }
+
+        function addFilterRow() {
+            const container = document.getElementById('filterContainer');
+            const row = document.createElement('div');
+            row.className = 'filter-row row';
+            row.innerHTML = `
+                <select class="filter-field">
+                    <option value="name">name</option>
+                    <option value="age">age</option>
+                    <option value="city">city</option>
+                    <option value="active">active</option>
+                    <option value="score">score</option>
+                </select>
+                <select class="filter-op">
+                    <option value="eq">=</option>
+                    <option value="ne">!=</option>
+                    <option value="gt">&gt;</option>
+                    <option value="lt">&lt;</option>
+                    <option value="gte">&gt;=</option>
+                    <option value="lte">&lt;=</option>
+                    <option value="glob">glob (~)</option>
+                    <option value="null">is null (?)</option>
+                    <option value="not_null">not null (!?)</option>
+                </select>
+                <input type="text" class="filter-value" value="">
+                <button class="remove-filter danger" style="padding:4px 8px">&times;</button>
+            `;
+            container.appendChild(row);
+        }
+
+        function getFilters() {
+            const filters = [];
+            const rows = document.querySelectorAll('.filter-row');
+            for (const row of rows) {
+                const field = row.querySelector('.filter-field').value;
+                const op = row.querySelector('.filter-op').value;
+                let value = row.querySelector('.filter-value').value;
+
+                if (op === 'null' || op === 'not_null') {
+                    filters.push({field, op, value: null});
+                } else if (value !== '') {
+                    if (!isNaN(value) && value !== '') {
+                        value = parseFloat(value);
+                    } else if (value === 'true') {
+                        value = true;
+                    } else if (value === 'false') {
+                        value = false;
+                    }
+                    filters.push({field, op, value});
+                }
+            }
+            return filters;
+        }
+
+        function getSort() {
+            const field = document.getElementById('sortField').value;
+            if (!field) return [];
+            const direction = document.getElementById('sortDirection').value;
+            return [{field, direction}];
+        }
+
+        function getPagination() {
+            const offset = parseInt(document.getElementById('offset').value) || 0;
+            const limit = parseInt(document.getElementById('limit').value) || 10;
+            return {offset, limit};
+        }
+
+        function getProjection() {
+            const fields = [];
+            if (document.getElementById('projName').checked) fields.push('name');
+            if (document.getElementById('projAge').checked) fields.push('age');
+            if (document.getElementById('projCity').checked) fields.push('city');
+            if (document.getElementById('projScore').checked) fields.push('score');
+            if (document.getElementById('projActive').checked) fields.push('active');
+            return fields.length === 5 ? null : fields;
+        }
+
+        async function executeQuery() {
+            try {
+                const filters = getFilters();
+                const sort = getSort();
+                const pagination = getPagination();
+                const projection = getProjection();
+
+                const options = {filters, sort, pagination};
+                if (projection) options.projection = projection;
+
+                log(`Query: ${JSON.stringify(options)}`);
+                const results = await db.list('people', options);
+                displayResults(results);
+                document.getElementById('queryInfo').textContent = `${results.length} results`;
+                log(`Found ${results.length} results`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        function displayResults(results) {
+            const tbody = document.getElementById('resultsBody');
+            tbody.innerHTML = '';
+            for (const r of results) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><code>${r.id}</code></td>
+                    <td>${r.name ?? '-'}</td>
+                    <td>${r.age ?? '-'}</td>
+                    <td>${r.city ?? '-'}</td>
+                    <td>${r.score ?? '-'}</td>
+                    <td>${r.active !== undefined ? (r.active ? 'Yes' : 'No') : '-'}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+            if (results.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#999">No results</td></tr>';
+            }
+        }
+
+        async function seedData() {
+            const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry', 'Ivy', 'Jack',
+                          'Karen', 'Leo', 'Mia', 'Noah', 'Olivia', 'Peter', 'Quinn', 'Rose', 'Sam', 'Tina'];
+            const cities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix'];
+
+            log('Seeding 20 test records...');
+            for (let i = 0; i < 20; i++) {
+                await db.create('people', {
+                    name: names[i],
+                    age: 20 + Math.floor(Math.random() * 40),
+                    city: cities[Math.floor(Math.random() * cities.length)],
+                    score: Math.floor(Math.random() * 100),
+                    active: Math.random() > 0.3
+                });
+            }
+            log('Seeded 20 records', 'success');
+            executeQuery();
+        }
+
+        async function clearData() {
+            const records = await db.list('people', null);
+            for (const r of records) {
+                await db.delete('people', r.id);
+            }
+            log('Cleared all records', 'success');
+            executeQuery();
+        }
+
+        async function quickTest(type) {
+            clearFilters();
+
+            switch (type) {
+                case 'eq':
+                    log('Testing: name = "Alice"');
+                    setFilter(0, 'name', 'eq', 'Alice');
+                    break;
+                case 'gt':
+                    log('Testing: age > 30');
+                    setFilter(0, 'age', 'gt', '30');
+                    break;
+                case 'glob':
+                    log('Testing: name ~ "A*"');
+                    setFilter(0, 'name', 'glob', 'A*');
+                    break;
+                case 'sortAsc':
+                    log('Testing: sort by age ascending');
+                    document.getElementById('sortField').value = 'age';
+                    document.getElementById('sortDirection').value = 'asc';
+                    break;
+                case 'sortDesc':
+                    log('Testing: sort by score descending');
+                    document.getElementById('sortField').value = 'score';
+                    document.getElementById('sortDirection').value = 'desc';
+                    break;
+                case 'pagination':
+                    log('Testing: offset=5, limit=5');
+                    document.getElementById('offset').value = '5';
+                    document.getElementById('limit').value = '5';
+                    break;
+                case 'projection':
+                    log('Testing: projection (name, age only)');
+                    document.getElementById('projName').checked = true;
+                    document.getElementById('projAge').checked = true;
+                    document.getElementById('projCity').checked = false;
+                    document.getElementById('projScore').checked = false;
+                    document.getElementById('projActive').checked = false;
+                    break;
+            }
+
+            executeQuery();
+        }
+
+        function clearFilters() {
+            const container = document.getElementById('filterContainer');
+            const rows = container.querySelectorAll('.filter-row');
+            rows.forEach((row, i) => {
+                if (i > 0) row.remove();
+            });
+            const first = rows[0];
+            if (first) {
+                first.querySelector('.filter-value').value = '';
+            }
+            document.getElementById('sortField').value = '';
+            document.getElementById('offset').value = '0';
+            document.getElementById('limit').value = '10';
+            document.querySelectorAll('[id^="proj"]').forEach(cb => cb.checked = true);
+        }
+
+        function setFilter(index, field, op, value) {
+            const rows = document.querySelectorAll('.filter-row');
+            const row = rows[index];
+            if (row) {
+                row.querySelector('.filter-field').value = field;
+                row.querySelector('.filter-op').value = op;
+                row.querySelector('.filter-value').value = value;
+            }
+        }
+
+        async function runAllFilterTests() {
+            log('=== Running All Filter Tests ===', 'info');
+
+            await clearData();
+            const testData = [
+                {name: 'Alice', age: 25, city: 'New York', score: 85, active: true},
+                {name: 'Bob', age: 30, city: 'Los Angeles', score: 72, active: true},
+                {name: 'Charlie', age: 35, city: 'Chicago', score: 90, active: false},
+                {name: 'Diana', age: 28, city: 'Houston', score: 65, active: true},
+                {name: 'Eve', age: 32, city: 'Phoenix', score: 88, active: true},
+                {name: 'Anna', age: 22, city: 'New York', score: 95, active: false}
+            ];
+            for (const d of testData) {
+                await db.create('people', d);
+            }
+            log('Created 6 test records');
+
+            log('\nTest 1: eq filter (name = "Alice")');
+            let r = await db.list('people', {filters: [{field: 'name', op: 'eq', value: 'Alice'}]});
+            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 1 ? 'success' : 'error');
+
+            log('\nTest 2: gt filter (age > 30)');
+            r = await db.list('people', {filters: [{field: 'age', op: 'gt', value: 30}]});
+            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 2 ? 'success' : 'error');
+
+            log('\nTest 3: glob filter (name ~ "A*")');
+            r = await db.list('people', {filters: [{field: 'name', op: 'glob', value: 'A*'}]});
+            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 2 ? 'success' : 'error');
+
+            log('\nTest 4: sort by age ascending');
+            r = await db.list('people', {sort: [{field: 'age', direction: 'asc'}]});
+            const ages = r.map(x => x.age);
+            const sorted = ages.every((v, i, a) => !i || a[i-1] <= v);
+            log(`  ✓ Ages in order: ${ages.join(', ')}`, sorted ? 'success' : 'error');
+
+            log('\nTest 5: sort by score descending');
+            r = await db.list('people', {sort: [{field: 'score', direction: 'desc'}]});
+            const scores = r.map(x => x.score);
+            const sortedDesc = scores.every((v, i, a) => !i || a[i-1] >= v);
+            log(`  ✓ Scores in order: ${scores.join(', ')}`, sortedDesc ? 'success' : 'error');
+
+            log('\nTest 6: pagination (offset=2, limit=2)');
+            r = await db.list('people', {pagination: {offset: 2, limit: 2}});
+            log(`  ✓ Got ${r.length} results (expected 2)`, r.length === 2 ? 'success' : 'error');
+
+            log('\nTest 7: projection (name, age only)');
+            r = await db.list('people', {projection: ['name', 'age']});
+            const hasOnlyFields = r.every(x => Object.keys(x).sort().join(',') === 'age,id,name');
+            log(`  ✓ Fields: ${Object.keys(r[0]).join(', ')}`, hasOnlyFields ? 'success' : 'error');
+
+            log('\nTest 8: combined (age >= 28, sort by score desc, limit 3)');
+            r = await db.list('people', {
+                filters: [{field: 'age', op: 'gte', value: 28}],
+                sort: [{field: 'score', direction: 'desc'}],
+                pagination: {offset: 0, limit: 3}
+            });
+            log(`  ✓ Found ${r.length} results: ${r.map(x => `${x.name}(${x.score})`).join(', ')}`, 'success');
+
+            log('\n=== All Filter Tests Complete ===', 'success');
+            executeQuery();
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

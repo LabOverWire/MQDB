@@ -30,6 +30,7 @@ struct DatabaseInner {
     foreign_keys: Vec<ForeignKeyEntry>,
     indexes: HashMap<String, Vec<Vec<String>>>,
     id_counters: HashMap<String, u64>,
+    round_robin_counters: HashMap<String, usize>,
 }
 
 struct SubscriptionEntry {
@@ -77,6 +78,7 @@ impl WasmDatabase {
                 foreign_keys: Vec::new(),
                 indexes: HashMap::new(),
                 id_counters: HashMap::new(),
+                round_robin_counters: HashMap::new(),
             })),
         }
     }
@@ -98,6 +100,9 @@ impl WasmDatabase {
         {
             let inner = self.inner.borrow();
             if let Some(schema) = inner.schemas.get(&entity) {
+                schema
+                    .apply_defaults(&mut value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
                 schema
                     .validate(&value)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -278,8 +283,10 @@ impl WasmDatabase {
                 .collect();
         }
 
-        serde_wasm_bindgen::to_value(&results)
-            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))
+        let json_str = serde_json::to_string(&results)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+        js_sys::JSON::parse(&json_str)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
     }
 
     pub fn subscribe(
@@ -1010,15 +1017,55 @@ impl WasmDatabase {
     }
 
     fn dispatch_event(&self, event: &ChangeEvent) {
-        let inner = self.inner.borrow();
+        let event_js = match serialize_event(event) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
 
-        for sub in inner.subscriptions.values() {
-            if Self::matches_subscription(sub, event) {
-                let event_js = match serialize_event(event) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let _ = sub.callback.call1(&JsValue::NULL, &event_js);
+        let mut broadcast_callbacks: Vec<js_sys::Function> = Vec::new();
+        let mut share_groups: HashMap<String, Vec<js_sys::Function>> = HashMap::new();
+
+        {
+            let inner = self.inner.borrow();
+            for sub in inner.subscriptions.values() {
+                if !Self::matches_subscription(sub, event) {
+                    continue;
+                }
+
+                match (&sub.share_group, sub.mode) {
+                    (None, _) | (Some(_), SubscriptionMode::Broadcast) => {
+                        broadcast_callbacks.push(sub.callback.clone());
+                    }
+                    (Some(group), _) => {
+                        share_groups
+                            .entry(group.clone())
+                            .or_default()
+                            .push(sub.callback.clone());
+                    }
+                }
+            }
+        }
+
+        for callback in broadcast_callbacks {
+            let _ = callback.call1(&JsValue::NULL, &event_js);
+        }
+
+        if !share_groups.is_empty() {
+            let mut inner = self.inner.borrow_mut();
+            for (group_name, callbacks) in share_groups {
+                if callbacks.is_empty() {
+                    continue;
+                }
+
+                let counter = inner
+                    .round_robin_counters
+                    .entry(group_name)
+                    .or_insert(0);
+                let idx = *counter % callbacks.len();
+                *counter = counter.wrapping_add(1);
+
+                let selected_callback = &callbacks[idx];
+                let _ = selected_callback.call1(&JsValue::NULL, &event_js);
             }
         }
     }
@@ -1028,6 +1075,10 @@ impl WasmDatabase {
             if entity != &event.entity {
                 return false;
             }
+        }
+
+        if sub.pattern == "*" || sub.pattern == "#" {
+            return true;
         }
 
         match_pattern(&sub.pattern, &event.entity, &event.id)
@@ -1135,8 +1186,10 @@ fn deserialize_js(value: &JsValue) -> Result<serde_json::Value, JsValue> {
 }
 
 fn serialize_js(value: &serde_json::Value) -> Result<JsValue, JsValue> {
-    serde_wasm_bindgen::to_value(value)
-        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))
+    let json_str = serde_json::to_string(value)
+        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+    js_sys::JSON::parse(&json_str)
+        .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
 }
 
 fn serialize_event(event: &ChangeEvent) -> Result<JsValue, JsValue> {
@@ -1150,8 +1203,10 @@ fn serialize_event(event: &ChangeEvent) -> Result<JsValue, JsValue> {
         id: event.id.clone(),
         data: event.data.clone(),
     };
-    serde_wasm_bindgen::to_value(&event_js)
-        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))
+    let json_str = serde_json::to_string(&event_js)
+        .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+    js_sys::JSON::parse(&json_str)
+        .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
 }
 
 #[cfg(test)]
