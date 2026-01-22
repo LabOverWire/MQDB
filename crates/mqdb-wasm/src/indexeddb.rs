@@ -11,11 +11,20 @@ use web_sys::{
 
 const STORE_NAME: &str = "kv";
 
+type ScanResults = Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>>;
+
 pub struct IndexedDbBackend {
     db: Rc<RefCell<Option<IdbDatabase>>>,
 }
 
 impl IndexedDbBackend {
+    /// Opens or creates an `IndexedDB` database.
+    ///
+    /// # Errors
+    /// Returns an error if `IndexedDB` is not available or the database cannot be opened.
+    ///
+    /// # Panics
+    /// Panics if event targets or database results are unexpectedly null during setup.
     pub async fn open(db_name: &str) -> Result<Self> {
         let window = web_sys::window().ok_or_else(|| Error::Internal("no window".into()))?;
         let idb: IdbFactory = window
@@ -30,17 +39,18 @@ impl IndexedDbBackend {
         let db_cell: Rc<RefCell<Option<IdbDatabase>>> = Rc::new(RefCell::new(None));
         let db_cell_success = Rc::clone(&db_cell);
 
-        let onupgradeneeded = Closure::once(Box::new(move |event: web_sys::IdbVersionChangeEvent| {
-            let target = event.target().unwrap();
-            let request: IdbOpenDbRequest = target.unchecked_into();
-            let db: IdbDatabase = request.result().unwrap().unchecked_into();
+        let onupgradeneeded =
+            Closure::once(Box::new(move |event: web_sys::IdbVersionChangeEvent| {
+                let target = event.target().unwrap();
+                let request: IdbOpenDbRequest = target.unchecked_into();
+                let db: IdbDatabase = request.result().unwrap().unchecked_into();
 
-            if !db.object_store_names().contains(STORE_NAME) {
-                let params = IdbObjectStoreParameters::new();
-                db.create_object_store_with_optional_parameters(STORE_NAME, &params)
-                    .unwrap();
-            }
-        }) as Box<dyn FnOnce(_)>);
+                if !db.object_store_names().contains(STORE_NAME) {
+                    let params = IdbObjectStoreParameters::new();
+                    db.create_object_store_with_optional_parameters(STORE_NAME, &params)
+                        .unwrap();
+                }
+            }) as Box<dyn FnOnce(_)>);
 
         request.set_onupgradeneeded(Some(onupgradeneeded.as_ref().unchecked_ref()));
         onupgradeneeded.forget();
@@ -72,7 +82,8 @@ impl IndexedDbBackend {
         onsuccess.forget();
         onerror.forget();
 
-        rx.await.map_err(|_| Error::Internal("channel closed".into()))??;
+        rx.await
+            .map_err(|_| Error::Internal("channel closed".into()))??;
 
         Ok(Self { db: db_cell })
     }
@@ -120,7 +131,8 @@ async fn request_to_future(request: &IdbRequest) -> Result<JsValue> {
     onsuccess.forget();
     onerror.forget();
 
-    rx.await.map_err(|_| Error::Internal("channel closed".into()))?
+    rx.await
+        .map_err(|_| Error::Internal("channel closed".into()))?
 }
 
 async fn request_to_result(request: &IdbRequest) -> Result<JsValue> {
@@ -138,11 +150,11 @@ fn value_to_js(value: &[u8]) -> Uint8Array {
     Uint8Array::from(value)
 }
 
-fn js_to_bytes(value: JsValue) -> Option<Vec<u8>> {
+fn js_to_bytes(value: &JsValue) -> Option<Vec<u8>> {
     if value.is_undefined() || value.is_null() {
         return None;
     }
-    let arr = Uint8Array::new(&value);
+    let arr = Uint8Array::new(value);
     Some(arr.to_vec())
 }
 
@@ -150,17 +162,19 @@ impl AsyncStorageBackend for IndexedDbBackend {
     type Batch = IndexedDbBatch;
 
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let (_tx, store): (IdbTransaction, IdbObjectStore) = self.get_store(IdbTransactionMode::Readonly)?;
+        let (_tx, store): (IdbTransaction, IdbObjectStore) =
+            self.get_store(IdbTransactionMode::Readonly)?;
         let js_key: JsValue = key_to_js(key).into();
         let request: IdbRequest = store
             .get(&js_key)
             .map_err(|e| Error::Internal(format!("get error: {e:?}")))?;
         let result = request_to_result(&request).await?;
-        Ok(js_to_bytes(result))
+        Ok(js_to_bytes(&result))
     }
 
     async fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let (_tx, store): (IdbTransaction, IdbObjectStore) = self.get_store(IdbTransactionMode::Readwrite)?;
+        let (_tx, store): (IdbTransaction, IdbObjectStore) =
+            self.get_store(IdbTransactionMode::Readwrite)?;
         let js_key: JsValue = key_to_js(key).into();
         let js_value: JsValue = value_to_js(value).into();
         let request: IdbRequest = store
@@ -171,7 +185,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
     }
 
     async fn remove(&self, key: &[u8]) -> Result<()> {
-        let (_tx, store): (IdbTransaction, IdbObjectStore) = self.get_store(IdbTransactionMode::Readwrite)?;
+        let (_tx, store): (IdbTransaction, IdbObjectStore) =
+            self.get_store(IdbTransactionMode::Readwrite)?;
         let js_key: JsValue = key_to_js(key).into();
         let request: IdbRequest = store
             .delete(&js_key)
@@ -181,7 +196,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
     }
 
     async fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let (_tx, store): (IdbTransaction, IdbObjectStore) = self.get_store(IdbTransactionMode::Readonly)?;
+        let (_tx, store): (IdbTransaction, IdbObjectStore) =
+            self.get_store(IdbTransactionMode::Readonly)?;
 
         let start: JsValue = key_to_js(prefix).into();
         let mut end_bytes = prefix.to_vec();
@@ -199,7 +215,7 @@ impl AsyncStorageBackend for IndexedDbBackend {
             .open_cursor_with_range(&range)
             .map_err(|e| Error::Internal(format!("cursor error: {e:?}")))?;
 
-        let results: Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>> = Rc::new(RefCell::new(Vec::new()));
+        let results: ScanResults = Rc::new(RefCell::new(Vec::new()));
         let results_clone = Rc::clone(&results);
         let prefix_vec = prefix.to_vec();
 
@@ -231,10 +247,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
                 let value_bytes = value_arr.to_vec();
                 results_clone.borrow_mut().push((key_bytes, value_bytes));
                 cursor.continue_().unwrap();
-            } else {
-                if let Some(sender) = tx_success.borrow_mut().take() {
-                    let _ = sender.send(Ok(()));
-                }
+            } else if let Some(sender) = tx_success.borrow_mut().take() {
+                let _ = sender.send(Ok(()));
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -251,13 +265,15 @@ impl AsyncStorageBackend for IndexedDbBackend {
         onsuccess.forget();
         onerror.forget();
 
-        rx.await.map_err(|_| Error::Internal("channel closed".into()))??;
+        rx.await
+            .map_err(|_| Error::Internal("channel closed".into()))??;
 
         Ok(results.borrow().clone())
     }
 
     async fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let (_tx, store): (IdbTransaction, IdbObjectStore) = self.get_store(IdbTransactionMode::Readonly)?;
+        let (_tx, store): (IdbTransaction, IdbObjectStore) =
+            self.get_store(IdbTransactionMode::Readonly)?;
 
         let start_js: JsValue = key_to_js(start).into();
         let end_js: JsValue = key_to_js(end).into();
@@ -269,7 +285,7 @@ impl AsyncStorageBackend for IndexedDbBackend {
             .open_cursor_with_range(&range)
             .map_err(|e| Error::Internal(format!("cursor error: {e:?}")))?;
 
-        let results: Rc<RefCell<Vec<(Vec<u8>, Vec<u8>)>>> = Rc::new(RefCell::new(Vec::new()));
+        let results: ScanResults = Rc::new(RefCell::new(Vec::new()));
         let results_clone = Rc::clone(&results);
         let end_vec = end.to_vec();
 
@@ -301,10 +317,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
                 let value_bytes = value_arr.to_vec();
                 results_clone.borrow_mut().push((key_bytes, value_bytes));
                 cursor.continue_().unwrap();
-            } else {
-                if let Some(sender) = tx_success.borrow_mut().take() {
-                    let _ = sender.send(Ok(()));
-                }
+            } else if let Some(sender) = tx_success.borrow_mut().take() {
+                let _ = sender.send(Ok(()));
             }
         }) as Box<dyn FnMut(_)>);
 
@@ -321,7 +335,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
         onsuccess.forget();
         onerror.forget();
 
-        rx.await.map_err(|_| Error::Internal("channel closed".into()))??;
+        rx.await
+            .map_err(|_| Error::Internal("channel closed".into()))??;
 
         Ok(results.borrow().clone())
     }
@@ -392,7 +407,7 @@ impl AsyncBatchOperations for IndexedDbBatch {
                 .map_err(|e| Error::Internal(format!("get error: {e:?}")))?;
             let result = request_to_result(&request).await?;
 
-            let actual = js_to_bytes(result);
+            let actual = js_to_bytes(&result);
             match actual {
                 Some(val) if val == precondition.expected_value => {}
                 _ => {

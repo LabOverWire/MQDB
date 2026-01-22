@@ -5,9 +5,9 @@ pub use indexeddb::{IndexedDbBackend, IndexedDbBatch};
 use indexeddb::IndexedDbBackend as IdbBackend;
 use mqdb::storage::{AsyncStorageBackend, Storage};
 use mqdb::{
-    build_request, match_pattern, parse_admin_topic, parse_db_topic, AdminOperation, ChangeEvent,
-    FieldDefinition, FieldType, Filter, OnDeleteAction, Operation, Pagination, Request, Schema,
-    SortDirection, SortOrder,
+    AdminOperation, ChangeEvent, FieldDefinition, FieldType, Filter, OnDeleteAction, Operation,
+    Pagination, Request, Schema, SortDirection, SortOrder, build_request, match_pattern,
+    parse_admin_topic, parse_db_topic,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -36,28 +36,44 @@ impl StorageKind {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
         match self {
             StorageKind::Memory(s) => s.get(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s.get(key).await.map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s
+                .get(key)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string())),
         }
     }
 
     async fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), JsValue> {
         match self {
-            StorageKind::Memory(s) => s.insert(key, value).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s.insert(key, value).await.map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::Memory(s) => s
+                .insert(key, value)
+                .map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s
+                .insert(key, value)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string())),
         }
     }
 
     async fn remove(&self, key: &[u8]) -> Result<(), JsValue> {
         match self {
             StorageKind::Memory(s) => s.remove(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s.remove(key).await.map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s
+                .remove(key)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string())),
         }
     }
 
     async fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, JsValue> {
         match self {
-            StorageKind::Memory(s) => s.prefix_scan(prefix).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s.prefix_scan(prefix).await.map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::Memory(s) => s
+                .prefix_scan(prefix)
+                .map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s
+                .prefix_scan(prefix)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string())),
         }
     }
 }
@@ -90,17 +106,12 @@ struct SubscriptionEntry {
     last_heartbeat: f64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SubscriptionMode {
+    #[default]
     Broadcast,
     LoadBalanced,
     Ordered,
-}
-
-impl Default for SubscriptionMode {
-    fn default() -> Self {
-        Self::Broadcast
-    }
 }
 
 #[derive(Clone)]
@@ -115,6 +126,7 @@ struct ForeignKeyEntry {
 #[wasm_bindgen]
 impl WasmDatabase {
     #[wasm_bindgen(constructor)]
+    #[must_use]
     pub fn new() -> WasmDatabase {
         let storage = Arc::new(Storage::memory());
         WasmDatabase {
@@ -133,6 +145,10 @@ impl WasmDatabase {
         }
     }
 
+    /// Opens a persistent database backed by `IndexedDB`.
+    ///
+    /// # Errors
+    /// Returns an error if `IndexedDB` is unavailable or the database cannot be opened.
     pub async fn open_persistent(db_name: &str) -> Result<WasmDatabase, JsValue> {
         let backend = IdbBackend::open(db_name)
             .await
@@ -154,6 +170,10 @@ impl WasmDatabase {
         })
     }
 
+    /// Creates a new record in the specified entity.
+    ///
+    /// # Errors
+    /// Returns an error if validation fails or the storage operation fails.
     pub async fn create(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
         let mut value: serde_json::Value = deserialize_js(&data)?;
 
@@ -189,7 +209,8 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
         self.storage.insert(key.as_bytes(), &serialized).await?;
-        self.update_indexes_async(&entity, &id, &value, None).await?;
+        self.update_indexes_async(&entity, &id, &value, None)
+            .await?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -197,10 +218,17 @@ impl WasmDatabase {
         serialize_js(&value)
     }
 
+    /// Reads a record by entity and ID.
+    ///
+    /// # Errors
+    /// Returns an error if the record is not found or deserialization fails.
     pub async fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
         let key = format!("data/{entity}/{id}");
 
-        let data = self.storage.get(key.as_bytes()).await?
+        let data = self
+            .storage
+            .get(key.as_bytes())
+            .await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let value: serde_json::Value = serde_json::from_slice(&data)
@@ -209,6 +237,10 @@ impl WasmDatabase {
         serialize_js(&value)
     }
 
+    /// Reads a record with related entities eagerly loaded.
+    ///
+    /// # Errors
+    /// Returns an error if the record is not found or includes cannot be loaded.
     pub async fn read_with_includes(
         &self,
         entity: String,
@@ -224,14 +256,18 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid includes: {e}")))?
         };
 
-        let data = self.storage.get(key.as_bytes()).await?
+        let data = self
+            .storage
+            .get(key.as_bytes())
+            .await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let mut value: serde_json::Value = serde_json::from_slice(&data)
             .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
         if !include_list.is_empty() {
-            self.load_includes_async(&entity, &mut value, &include_list, 0).await?;
+            self.load_includes_async(&entity, &mut value, &include_list, 0)
+                .await?;
         }
 
         serialize_js(&value)
@@ -270,21 +306,21 @@ impl WasmDatabase {
                 let fk_value = value.get(&rel.field_suffix).cloned();
                 if let Some(serde_json::Value::String(target_id)) = fk_value {
                     let target_key = format!("data/{}/{}", rel.target_entity, target_id);
-                    if let Ok(Some(target_data)) = self.storage.get(target_key.as_bytes()).await {
-                        if let Ok(mut related) =
+                    if let Ok(Some(target_data)) = self.storage.get(target_key.as_bytes()).await
+                        && let Ok(mut related) =
                             serde_json::from_slice::<serde_json::Value>(&target_data)
-                        {
-                            if !nested_includes.is_empty() {
-                                Box::pin(self.load_includes_async(
-                                    &rel.target_entity,
-                                    &mut related,
-                                    &nested_includes,
-                                    depth + 1,
-                                )).await?;
-                            }
-                            if let serde_json::Value::Object(obj) = value {
-                                obj.insert(field_name.to_string(), related);
-                            }
+                    {
+                        if !nested_includes.is_empty() {
+                            Box::pin(self.load_includes_async(
+                                &rel.target_entity,
+                                &mut related,
+                                &nested_includes,
+                                depth + 1,
+                            ))
+                            .await?;
+                        }
+                        if let serde_json::Value::Object(obj) = value {
+                            obj.insert(field_name.to_string(), related);
                         }
                     }
                 }
@@ -294,6 +330,10 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Updates an existing record with new field values.
+    ///
+    /// # Errors
+    /// Returns an error if the record is not found or validation fails.
     pub async fn update(
         &self,
         entity: String,
@@ -303,7 +343,10 @@ impl WasmDatabase {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
 
-        let existing_data = self.storage.get(key.as_bytes()).await?
+        let existing_data = self
+            .storage
+            .get(key.as_bytes())
+            .await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let existing: serde_json::Value = serde_json::from_slice(&existing_data)
@@ -329,14 +372,16 @@ impl WasmDatabase {
         }
 
         self.validate_not_null_async(&entity, &value)?;
-        self.validate_unique_async(&entity, &value, Some(&id)).await?;
+        self.validate_unique_async(&entity, &value, Some(&id))
+            .await?;
         self.validate_foreign_keys_async(&entity, &value).await?;
 
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
         self.storage.insert(key.as_bytes(), &serialized).await?;
-        self.update_indexes_async(&entity, &id, &value, Some(&existing)).await?;
+        self.update_indexes_async(&entity, &id, &value, Some(&existing))
+            .await?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -344,16 +389,25 @@ impl WasmDatabase {
         serialize_js(&value)
     }
 
+    /// Deletes a record by entity and ID.
+    ///
+    /// # Errors
+    /// Returns an error if the record is not found or foreign key constraints prevent deletion.
     pub async fn delete(&self, entity: String, id: String) -> Result<(), JsValue> {
         let key = format!("data/{entity}/{id}");
 
-        let existing_data = self.storage.get(key.as_bytes()).await?
+        let existing_data = self
+            .storage
+            .get(key.as_bytes())
+            .await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let existing: serde_json::Value = serde_json::from_slice(&existing_data)
             .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
-        let cascade_deletes = self.check_foreign_key_constraints_async(&entity, &id).await?;
+        let cascade_deletes = self
+            .check_foreign_key_constraints_async(&entity, &id)
+            .await?;
 
         self.storage.remove(key.as_bytes()).await?;
         self.remove_indexes_async(&entity, &id, &existing).await?;
@@ -368,6 +422,10 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Lists records from an entity with optional filtering, sorting, and pagination.
+    ///
+    /// # Errors
+    /// Returns an error if options are invalid or the storage operation fails.
     pub async fn list(&self, entity: String, options: JsValue) -> Result<JsValue, JsValue> {
         let opts: ListOptions = if options.is_null() || options.is_undefined() {
             ListOptions::default()
@@ -384,7 +442,11 @@ impl WasmDatabase {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
-            if opts.filters.iter().all(|f| self.matches_filter(&parsed, f)) {
+            if opts
+                .filters
+                .iter()
+                .all(|f| Self::matches_filter(&parsed, f))
+            {
                 results.push(parsed);
             }
         }
@@ -401,7 +463,8 @@ impl WasmDatabase {
 
         if let Some(ref includes) = opts.includes {
             for result in &mut results {
-                self.load_includes_async(&entity, result, includes, 0).await?;
+                self.load_includes_async(&entity, result, includes, 0)
+                    .await?;
             }
         }
 
@@ -418,6 +481,7 @@ impl WasmDatabase {
             .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
     }
 
+    #[must_use]
     pub fn subscribe(
         &self,
         pattern: String,
@@ -443,18 +507,19 @@ impl WasmDatabase {
         sub_id
     }
 
+    #[must_use]
     pub fn subscribe_shared(
         &self,
         pattern: String,
         entity: Option<String>,
         group: String,
-        mode: String,
+        mode: &str,
         callback: js_sys::Function,
     ) -> String {
         let sub_id = uuid::Uuid::new_v4().to_string();
         let now = js_sys::Date::now();
 
-        let mode = match mode.as_str() {
+        let mode = match mode {
             "load-balanced" | "load_balanced" => SubscriptionMode::LoadBalanced,
             "ordered" => SubscriptionMode::Ordered,
             _ => SubscriptionMode::Broadcast,
@@ -476,9 +541,10 @@ impl WasmDatabase {
         sub_id
     }
 
-    pub fn heartbeat(&self, sub_id: String) -> bool {
+    #[must_use]
+    pub fn heartbeat(&self, sub_id: &str) -> bool {
         let mut inner = self.inner.borrow_mut();
-        if let Some(entry) = inner.subscriptions.get_mut(&sub_id) {
+        if let Some(entry) = inner.subscriptions.get_mut(sub_id) {
             entry.last_heartbeat = js_sys::Date::now();
             true
         } else {
@@ -486,9 +552,10 @@ impl WasmDatabase {
         }
     }
 
-    pub fn get_subscription_info(&self, sub_id: String) -> JsValue {
+    #[must_use]
+    pub fn get_subscription_info(&self, sub_id: &str) -> JsValue {
         let inner = self.inner.borrow();
-        match inner.subscriptions.get(&sub_id) {
+        match inner.subscriptions.get(sub_id) {
             Some(entry) => {
                 let info = serde_json::json!({
                     "id": sub_id,
@@ -509,6 +576,7 @@ impl WasmDatabase {
         }
     }
 
+    #[must_use]
     pub fn list_consumer_groups(&self) -> JsValue {
         let inner = self.inner.borrow();
         let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -545,12 +613,13 @@ impl WasmDatabase {
         js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
     }
 
-    pub fn get_consumer_group(&self, group_name: String) -> JsValue {
+    #[must_use]
+    pub fn get_consumer_group(&self, group_name: &str) -> JsValue {
         let inner = self.inner.borrow();
         let mut members: Vec<serde_json::Value> = Vec::new();
 
         for (sub_id, entry) in &inner.subscriptions {
-            if entry.share_group.as_ref() == Some(&group_name) {
+            if entry.share_group.as_deref() == Some(group_name) {
                 members.push(serde_json::json!({
                     "subscription_id": sub_id,
                     "pattern": entry.pattern,
@@ -578,11 +647,16 @@ impl WasmDatabase {
         }
     }
 
-    pub fn unsubscribe(&self, sub_id: String) -> bool {
+    #[must_use]
+    pub fn unsubscribe(&self, sub_id: &str) -> bool {
         let mut inner = self.inner.borrow_mut();
-        inner.subscriptions.remove(&sub_id).is_some()
+        inner.subscriptions.remove(sub_id).is_some()
     }
 
+    /// Adds a schema definition for an entity.
+    ///
+    /// # Errors
+    /// Returns an error if the schema definition is invalid.
     pub fn add_schema(&self, entity: String, schema_js: JsValue) -> Result<(), JsValue> {
         let schema_def: SchemaDefinition = serde_wasm_bindgen::from_value(schema_js)
             .map_err(|e| JsValue::from_str(&format!("invalid schema: {e}")))?;
@@ -616,9 +690,13 @@ impl WasmDatabase {
         Ok(())
     }
 
-    pub fn get_schema(&self, entity: String) -> Result<JsValue, JsValue> {
+    /// Gets the schema definition for an entity.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn get_schema(&self, entity: &str) -> Result<JsValue, JsValue> {
         let inner = self.inner.borrow();
-        match inner.schemas.get(&entity) {
+        match inner.schemas.get(entity) {
             Some(schema) => {
                 let fields: Vec<FieldDefJs> = schema
                     .fields
@@ -639,7 +717,15 @@ impl WasmDatabase {
         }
     }
 
-    pub fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
+    /// Adds a unique constraint on the specified fields.
+    ///
+    /// # Errors
+    /// This function does not currently return errors but the signature allows for future validation.
+    pub fn add_unique_constraint(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<(), JsValue> {
         let mut inner = self.inner.borrow_mut();
 
         inner
@@ -657,6 +743,10 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Adds a NOT NULL constraint on the specified field.
+    ///
+    /// # Errors
+    /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_not_null(&self, entity: String, field: String) -> Result<(), JsValue> {
         let mut inner = self.inner.borrow_mut();
         inner
@@ -667,15 +757,19 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Adds a foreign key constraint.
+    ///
+    /// # Errors
+    /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_foreign_key(
         &self,
         source_entity: String,
         source_field: String,
         target_entity: String,
         target_field: String,
-        on_delete: String,
+        on_delete: &str,
     ) -> Result<(), JsValue> {
-        let on_delete = match on_delete.as_str() {
+        let on_delete = match on_delete {
             "cascade" => OnDeleteAction::Cascade,
             "set_null" => OnDeleteAction::SetNull,
             _ => OnDeleteAction::Restrict,
@@ -692,12 +786,20 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Adds an index on the specified fields.
+    ///
+    /// # Errors
+    /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
         let mut inner = self.inner.borrow_mut();
         inner.indexes.entry(entity).or_default().push(fields);
         Ok(())
     }
 
+    /// Adds a relationship definition for eager loading.
+    ///
+    /// # Errors
+    /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_relationship(
         &self,
         source_entity: String,
@@ -718,11 +820,12 @@ impl WasmDatabase {
         Ok(())
     }
 
-    pub fn list_relationships(&self, entity: String) -> JsValue {
+    #[must_use]
+    pub fn list_relationships(&self, entity: &str) -> JsValue {
         let inner = self.inner.borrow();
         let relationships: Vec<serde_json::Value> = inner
             .relationships
-            .get(&entity)
+            .get(entity)
             .map(|rels| {
                 rels.iter()
                     .map(|r| {
@@ -740,11 +843,12 @@ impl WasmDatabase {
         js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
     }
 
-    pub fn list_constraints(&self, entity: String) -> JsValue {
+    #[must_use]
+    pub fn list_constraints(&self, entity: &str) -> JsValue {
         let inner = self.inner.borrow();
         let mut constraints = Vec::new();
 
-        if let Some(uniques) = inner.unique_constraints.get(&entity) {
+        if let Some(uniques) = inner.unique_constraints.get(entity) {
             for fields in uniques {
                 constraints.push(serde_json::json!({
                     "type": "unique",
@@ -753,7 +857,7 @@ impl WasmDatabase {
             }
         }
 
-        if let Some(not_nulls) = inner.not_null_constraints.get(&entity) {
+        if let Some(not_nulls) = inner.not_null_constraints.get(entity) {
             for field in not_nulls {
                 constraints.push(serde_json::json!({
                     "type": "not_null",
@@ -763,7 +867,7 @@ impl WasmDatabase {
         }
 
         for fk in &inner.foreign_keys {
-            if fk.source_entity == entity {
+            if fk.source_entity.as_str() == entity {
                 constraints.push(serde_json::json!({
                     "type": "foreign_key",
                     "field": fk.source_field,
@@ -777,6 +881,10 @@ impl WasmDatabase {
         serde_wasm_bindgen::to_value(&constraints).unwrap_or(JsValue::NULL)
     }
 
+    /// Executes a database operation based on an MQTT-style topic.
+    ///
+    /// # Errors
+    /// Returns an error if the topic is invalid or the operation fails.
     pub async fn execute(&self, topic: String, payload: JsValue) -> Result<JsValue, JsValue> {
         let payload_bytes: Vec<u8> = if payload.is_null() || payload.is_undefined() {
             vec![]
@@ -787,7 +895,7 @@ impl WasmDatabase {
         };
 
         if let Some(admin_op) = parse_admin_topic(&topic) {
-            return self.handle_admin_operation(admin_op, &payload_bytes).await;
+            return self.handle_admin_operation(admin_op, &payload_bytes);
         }
 
         let Some(db_op) = parse_db_topic(&topic) else {
@@ -826,13 +934,13 @@ impl WasmDatabase {
                     .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
                 self.list(entity, opts_js).await
             }
-            Request::Subscribe { .. } | Request::Unsubscribe { .. } => {
-                Err(JsValue::from_str("use subscribe/unsubscribe methods directly"))
-            }
+            Request::Subscribe { .. } | Request::Unsubscribe { .. } => Err(JsValue::from_str(
+                "use subscribe/unsubscribe methods directly",
+            )),
         }
     }
 
-    async fn handle_admin_operation(
+    fn handle_admin_operation(
         &self,
         op: AdminOperation,
         payload: &[u8],
@@ -855,8 +963,8 @@ impl WasmDatabase {
                 self.add_schema(entity, schema_js)?;
                 Ok(serialize_js(&serde_json::json!({"message": "schema set"}))?)
             }
-            AdminOperation::SchemaGet { entity } => self.get_schema(entity),
-            AdminOperation::ConstraintList { entity } => Ok(self.list_constraints(entity)),
+            AdminOperation::SchemaGet { entity } => self.get_schema(&entity),
+            AdminOperation::ConstraintList { entity } => Ok(self.list_constraints(&entity)),
             AdminOperation::ConstraintAdd { entity } => {
                 let constraint_type = data.get("type").and_then(|v| v.as_str());
                 match constraint_type {
@@ -901,12 +1009,14 @@ impl WasmDatabase {
                             source_field.to_string(),
                             target_entity.to_string(),
                             target_field.to_string(),
-                            on_delete.to_string(),
+                            on_delete,
                         )?;
                     }
                     _ => return Err(JsValue::from_str("unknown constraint type")),
                 }
-                Ok(serialize_js(&serde_json::json!({"message": "constraint added"}))?)
+                Ok(serialize_js(
+                    &serde_json::json!({"message": "constraint added"}),
+                )?)
             }
             _ => Err(JsValue::from_str(&format!(
                 "admin operation not supported in WASM: {op:?}"
@@ -956,17 +1066,19 @@ impl WasmDatabase {
                     let existing: serde_json::Value = serde_json::from_slice(existing_data)
                         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str()) {
-                        if current_id == Some(existing_id) {
-                            continue;
-                        }
+                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
+                        && current_id == Some(existing_id)
+                    {
+                        continue;
                     }
 
                     let existing_values: Vec<Option<&serde_json::Value>> =
                         constraint_fields.iter().map(|f| existing.get(f)).collect();
 
                     if new_values == existing_values
-                        && new_values.iter().all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
+                        && new_values
+                            .iter()
+                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
                     {
                         return Err(JsValue::from_str(&format!(
                             "unique constraint violation: {entity}.{}",
@@ -1035,8 +1147,8 @@ impl WasmDatabase {
             let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
 
             for (_key, data) in items {
-                let value: serde_json::Value = serde_json::from_slice(&data)
-                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let value: serde_json::Value =
+                    serde_json::from_slice(&data).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
                 if value.get(&fk.source_field).and_then(|v| v.as_str()) == Some(id) {
                     match fk.on_delete {
@@ -1048,7 +1160,8 @@ impl WasmDatabase {
                         }
                         OnDeleteAction::Cascade => {
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
-                                cascade_deletes.push((fk.source_entity.clone(), source_id.to_string()));
+                                cascade_deletes
+                                    .push((fk.source_entity.clone(), source_id.to_string()));
                             }
                         }
                         OnDeleteAction::SetNull => {
@@ -1152,28 +1265,22 @@ impl WasmDatabase {
         Ok(())
     }
 
-    fn matches_filter(&self, value: &serde_json::Value, filter: &FilterJs) -> bool {
+    fn matches_filter(value: &serde_json::Value, filter: &FilterJs) -> bool {
         let field_value = value.get(&filter.field);
 
         match filter.op.as_str() {
-            "eq" => field_value.map_or(false, |v| v == &filter.value),
-            "ne" | "<>" => field_value.map_or(true, |v| v != &filter.value),
+            "ne" | "<>" => field_value != Some(&filter.value),
             "gt" | ">" => {
-                self.compare_values(field_value, &filter.value)
-                    .map_or(false, |ord| ord == std::cmp::Ordering::Greater)
+                Self::compare_values(field_value, &filter.value)
+                    == Some(std::cmp::Ordering::Greater)
             }
             "lt" | "<" => {
-                self.compare_values(field_value, &filter.value)
-                    .map_or(false, |ord| ord == std::cmp::Ordering::Less)
+                Self::compare_values(field_value, &filter.value) == Some(std::cmp::Ordering::Less)
             }
-            "gte" | ">=" => {
-                self.compare_values(field_value, &filter.value)
-                    .map_or(false, |ord| ord != std::cmp::Ordering::Less)
-            }
-            "lte" | "<=" => {
-                self.compare_values(field_value, &filter.value)
-                    .map_or(false, |ord| ord != std::cmp::Ordering::Greater)
-            }
+            "gte" | ">=" => Self::compare_values(field_value, &filter.value)
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less),
+            "lte" | "<=" => Self::compare_values(field_value, &filter.value)
+                .is_some_and(|ord| ord != std::cmp::Ordering::Greater),
             "glob" | "~" => {
                 if let (Some(serde_json::Value::String(s)), serde_json::Value::String(pattern)) =
                     (field_value, &filter.value)
@@ -1187,12 +1294,11 @@ impl WasmDatabase {
             "not_null" | "!?" => {
                 field_value.is_some() && field_value != Some(&serde_json::Value::Null)
             }
-            _ => field_value.map_or(false, |v| v == &filter.value),
+            _ => field_value == Some(&filter.value),
         }
     }
 
     fn compare_values(
-        &self,
         a: Option<&serde_json::Value>,
         b: &serde_json::Value,
     ) -> Option<std::cmp::Ordering> {
@@ -1231,7 +1337,9 @@ impl WasmDatabase {
             }
         }
 
-        parts.last().map_or(true, |last| last.is_empty() || text.ends_with(last))
+        parts
+            .last()
+            .is_none_or(|last| last.is_empty() || text.ends_with(last))
     }
 
     fn sort_results(results: &mut [serde_json::Value], sort: &[SortOrderJs]) {
@@ -1270,8 +1378,12 @@ impl WasmDatabase {
                     .partial_cmp(&b_f64)
                     .unwrap_or(std::cmp::Ordering::Equal)
             }
-            (serde_json::Value::String(a_str), serde_json::Value::String(b_str)) => a_str.cmp(b_str),
-            (serde_json::Value::Bool(a_bool), serde_json::Value::Bool(b_bool)) => a_bool.cmp(b_bool),
+            (serde_json::Value::String(a_str), serde_json::Value::String(b_str)) => {
+                a_str.cmp(b_str)
+            }
+            (serde_json::Value::Bool(a_bool), serde_json::Value::Bool(b_bool)) => {
+                a_bool.cmp(b_bool)
+            }
             _ => std::cmp::Ordering::Equal,
         }
     }
@@ -1285,10 +1397,10 @@ impl WasmDatabase {
             }
 
             for field in fields {
-                if field != "id" {
-                    if let Some(v) = obj.get(field) {
-                        projected.insert(field.clone(), v.clone());
-                    }
+                if field != "id"
+                    && let Some(v) = obj.get(field)
+                {
+                    projected.insert(field.clone(), v.clone());
                 }
             }
 
@@ -1299,9 +1411,8 @@ impl WasmDatabase {
     }
 
     fn dispatch_event(&self, event: &ChangeEvent) {
-        let event_js = match serialize_event(event) {
-            Ok(v) => v,
-            Err(_) => return,
+        let Ok(event_js) = serialize_event(event) else {
+            return;
         };
 
         let mut broadcast_callbacks: Vec<js_sys::Function> = Vec::new();
@@ -1339,10 +1450,7 @@ impl WasmDatabase {
                     continue;
                 }
 
-                let counter = inner
-                    .round_robin_counters
-                    .entry(group_name)
-                    .or_insert(0);
+                let counter = inner.round_robin_counters.entry(group_name).or_insert(0);
                 let idx = *counter % callbacks.len();
                 *counter = counter.wrapping_add(1);
 
@@ -1353,10 +1461,10 @@ impl WasmDatabase {
     }
 
     fn matches_subscription(sub: &SubscriptionEntry, event: &ChangeEvent) -> bool {
-        if let Some(ref entity) = sub.entity {
-            if entity != &event.entity {
-                return false;
-            }
+        if let Some(ref entity) = sub.entity
+            && entity != &event.entity
+        {
+            return false;
         }
 
         if sub.pattern == "*" || sub.pattern == "#" {
@@ -1366,6 +1474,10 @@ impl WasmDatabase {
         match_pattern(&sub.pattern, &event.entity, &event.id)
     }
 
+    /// Creates a cursor for streaming iteration over records.
+    ///
+    /// # Errors
+    /// Returns an error if options are invalid or the storage operation fails.
     pub async fn cursor(&self, entity: String, options: JsValue) -> Result<WasmCursor, JsValue> {
         let opts: CursorOptions = if options.is_null() || options.is_undefined() {
             CursorOptions::default()
@@ -1382,7 +1494,11 @@ impl WasmDatabase {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
-            if opts.filters.iter().all(|f| self.matches_filter(&parsed, f)) {
+            if opts
+                .filters
+                .iter()
+                .all(|f| Self::matches_filter(&parsed, f))
+            {
                 all_items.push(parsed);
             }
         }
@@ -1414,24 +1530,29 @@ pub struct WasmCursor {
 
 #[wasm_bindgen]
 impl WasmCursor {
-    pub fn next(&mut self) -> Result<JsValue, JsValue> {
+    /// Returns the next item from the cursor.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn next_item(&mut self) -> Result<JsValue, JsValue> {
         if self.exhausted || self.buffer.is_empty() {
             self.exhausted = true;
             return Ok(JsValue::UNDEFINED);
         }
 
-        match self.buffer.pop_front() {
-            Some(item) => {
-                self.current_index += 1;
-                serialize_js(&item)
-            }
-            None => {
-                self.exhausted = true;
-                Ok(JsValue::UNDEFINED)
-            }
+        if let Some(item) = self.buffer.pop_front() {
+            self.current_index += 1;
+            serialize_js(&item)
+        } else {
+            self.exhausted = true;
+            Ok(JsValue::UNDEFINED)
         }
     }
 
+    /// Returns up to N items from the cursor as an array.
+    ///
+    /// # Errors
+    /// Returns an error if serialization fails.
     pub fn next_batch(&mut self, size: usize) -> Result<JsValue, JsValue> {
         if self.exhausted || self.buffer.is_empty() {
             self.exhausted = true;
@@ -1457,14 +1578,17 @@ impl WasmCursor {
         self.exhausted = false;
     }
 
+    #[must_use]
     pub fn has_more(&self) -> bool {
         !self.exhausted && !self.buffer.is_empty()
     }
 
+    #[must_use]
     pub fn count(&self) -> usize {
         self.buffer.len()
     }
 
+    #[must_use]
     pub fn position(&self) -> usize {
         self.current_index
     }
@@ -1675,12 +1799,12 @@ mod tests {
         db.add_unique_constraint("users".to_string(), vec!["email".to_string()])
             .unwrap();
 
-        let data1 =
-            serde_wasm_bindgen::to_value(&serde_json::json!({"email": "test@example.com"})).unwrap();
+        let data1 = serde_wasm_bindgen::to_value(&serde_json::json!({"email": "test@example.com"}))
+            .unwrap();
         db.create("users".to_string(), data1).await.unwrap();
 
-        let data2 =
-            serde_wasm_bindgen::to_value(&serde_json::json!({"email": "test@example.com"})).unwrap();
+        let data2 = serde_wasm_bindgen::to_value(&serde_json::json!({"email": "test@example.com"}))
+            .unwrap();
         let result = db.create("users".to_string(), data2).await;
         assert!(result.is_err());
     }

@@ -68,7 +68,11 @@ pub trait AsyncStorageBackend {
     fn insert(&self, key: &[u8], value: &[u8]) -> impl Future<Output = Result<()>>;
     fn remove(&self, key: &[u8]) -> impl Future<Output = Result<()>>;
     fn prefix_scan(&self, prefix: &[u8]) -> impl Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>>>;
-    fn range_scan(&self, start: &[u8], end: &[u8]) -> impl Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>>>;
+    fn range_scan(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> impl Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>>>;
     fn batch(&self) -> Self::Batch;
     fn flush(&self) -> impl Future<Output = Result<()>>;
 }

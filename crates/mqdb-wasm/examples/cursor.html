@@ -209,7 +209,7 @@
             }
 
             try {
-                const item = cursor.next();
+                const item = cursor.next_item();
                 if (item === undefined) {
                     log('Cursor exhausted', 'info');
                 } else {
@@ -296,8 +296,8 @@
             }
 
             log('\nTest 4: next() iteration');
-            const item1 = cursor.next();
-            const item2 = cursor.next();
+            const item1 = cursor.next_item();
+            const item2 = cursor.next_item();
             if (item1 && item2 && cursor.position() === 2) {
                 log(`✓ next() works: position = ${cursor.position()}`, 'success');
             } else {
@@ -334,8 +334,8 @@
                 filters: [{ field: 'value', op: 'lte', value: 10 }],
                 sort: [{ field: 'value', direction: 'desc' }]
             });
-            const first = cursor.next();
-            const second = cursor.next();
+            const first = cursor.next_item();
+            const second = cursor.next_item();
             if (first.value > second.value) {
                 log(`✓ Sorted correctly: ${first.value} > ${second.value}`, 'success');
             } else {

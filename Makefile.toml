@@ -38,14 +38,32 @@ echo "  cargo make clean         Clean build artifacts"
 '''
 
 [tasks.format]
-description = "Format all code"
+description = "Format all crates"
+dependencies = ["format-native", "format-wasm"]
+
+[tasks.format-native]
+description = "Format native crate"
 command = "cargo"
 args = ["fmt", "--all"]
 
+[tasks.format-wasm]
+description = "Format WASM crate"
+command = "cargo"
+args = ["fmt", "--manifest-path", "crates/mqdb-wasm/Cargo.toml"]
+
 [tasks.format-check]
 description = "Check formatting (CI)"
+dependencies = ["format-check-native", "format-check-wasm"]
+
+[tasks.format-check-native]
+description = "Check native formatting"
 command = "cargo"
 args = ["fmt", "--all", "--check"]
+
+[tasks.format-check-wasm]
+description = "Check WASM formatting"
+command = "cargo"
+args = ["fmt", "--manifest-path", "crates/mqdb-wasm/Cargo.toml", "--check"]
 
 [tasks.check]
 description = "Quick compilation check"
@@ -63,12 +81,27 @@ command = "cargo"
 args = ["build", "--release"]
 
 [tasks.clippy]
-description = "Lint with pedantic warnings"
+description = "Lint all crates with pedantic warnings"
+dependencies = ["clippy-native", "clippy-wasm"]
+
+[tasks.clippy-native]
+description = "Lint native crate"
 command = "cargo"
 args = [
     "clippy",
     "--all-targets",
     "--all-features",
+    "--",
+    "-W", "clippy::pedantic",
+]
+
+[tasks.clippy-wasm]
+description = "Lint WASM crate"
+command = "cargo"
+args = [
+    "clippy",
+    "--target", "wasm32-unknown-unknown",
+    "--manifest-path", "crates/mqdb-wasm/Cargo.toml",
     "--",
     "-W", "clippy::pedantic",
 ]
