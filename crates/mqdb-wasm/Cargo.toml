@@ -11,13 +11,34 @@ mqdb = { path = "../..", default-features = false, features = ["wasm"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "console"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "console",
+    "Event",
+    "EventTarget",
+    "DomStringList",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbObjectStoreParameters",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbCursor",
+    "IdbCursorDirection",
+    "IdbCursorWithValue",
+    "IdbKeyRange",
+    "IdbVersionChangeEvent",
+    "DomException",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 uuid = { version = "1.18", features = ["v4", "js"] }
 web-time = "1.1"
+futures-channel = "0.3"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

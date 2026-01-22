@@ -3,7 +3,7 @@ mod backend;
 mod fjall_backend;
 mod memory_backend;
 
-pub use backend::{BatchOperations, StorageBackend};
+pub use backend::{AsyncBatchOperations, AsyncStorageBackend, BatchOperations, StorageBackend};
 #[cfg(feature = "native")]
 pub use fjall_backend::FjallBackend;
 pub use memory_backend::MemoryBackend;
@@ -101,9 +101,85 @@ impl BatchWriter {
         self.inner.expect_value(key, expected_value);
     }
 
-    /// # Errors
-    /// Returns an error if the commit fails.
     pub fn commit(self) -> Result<()> {
         self.inner.commit()
+    }
+}
+
+pub struct AsyncStorage<B: AsyncStorageBackend> {
+    backend: B,
+}
+
+impl<B: AsyncStorageBackend> AsyncStorage<B> {
+    #[allow(clippy::must_use_candidate)]
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.backend.get(key).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.backend.insert(key, value).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn remove(&self, key: &[u8]) -> Result<()> {
+        self.backend.remove(key).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.backend.prefix_scan(prefix).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.backend.range_scan(start, end).await
+    }
+
+    #[allow(clippy::must_use_candidate)]
+    pub fn batch(&self) -> AsyncBatchWriter<B::Batch> {
+        AsyncBatchWriter {
+            inner: self.backend.batch(),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if the flush operation fails.
+    pub async fn flush(&self) -> Result<()> {
+        self.backend.flush().await
+    }
+}
+
+pub struct AsyncBatchWriter<B: AsyncBatchOperations> {
+    inner: B,
+}
+
+impl<B: AsyncBatchOperations> AsyncBatchWriter<B> {
+    pub fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.inner.insert(key, value);
+    }
+
+    pub fn remove(&mut self, key: Vec<u8>) {
+        self.inner.remove(key);
+    }
+
+    pub fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
+        self.inner.expect_value(key, expected_value);
+    }
+
+    /// # Errors
+    /// Returns an error if the commit fails.
+    pub async fn commit(self) -> Result<()> {
+        self.inner.commit().await
     }
 }

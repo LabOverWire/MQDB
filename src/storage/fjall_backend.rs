@@ -157,3 +157,4 @@ impl BatchOperations for FjallBatch {
         Ok(())
     }
 }
+

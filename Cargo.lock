@@ -1183,6 +1183,8 @@ dependencies = [
 [[package]]
 name = "mqtt5"
 version = "0.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7844bda2b409feb45d35236377a954b769e8d12645eb7af7b1e853b53d0cce15"
 dependencies = [
  "argon2",
  "base64",
@@ -3062,3 +3064,7 @@ name = "zmij"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bd8f3f50b848df28f887acb68e41201b5aea6bc8a8dacc00fb40635ff9a72fea"
+
+[[patch.unused]]
+name = "mqtt5"
+version = "0.21.0"

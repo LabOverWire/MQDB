@@ -1,4 +1,9 @@
-use mqdb::storage::Storage;
+mod indexeddb;
+
+pub use indexeddb::{IndexedDbBackend, IndexedDbBatch};
+
+use indexeddb::IndexedDbBackend as IdbBackend;
+use mqdb::storage::{AsyncStorageBackend, Storage};
 use mqdb::{
     build_request, match_pattern, parse_admin_topic, parse_db_topic, AdminOperation, ChangeEvent,
     FieldDefinition, FieldType, Filter, OnDeleteAction, Operation, Pagination, Request, Schema,
@@ -6,7 +11,7 @@ use mqdb::{
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
@@ -18,11 +23,46 @@ pub fn init() {
 
 #[wasm_bindgen]
 pub struct WasmDatabase {
+    storage: Rc<StorageKind>,
     inner: Rc<RefCell<DatabaseInner>>,
 }
 
+enum StorageKind {
+    Memory(Arc<Storage>),
+    IndexedDb(IdbBackend),
+}
+
+impl StorageKind {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
+        match self {
+            StorageKind::Memory(s) => s.get(key).map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s.get(key).await.map_err(|e| JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    async fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), JsValue> {
+        match self {
+            StorageKind::Memory(s) => s.insert(key, value).map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s.insert(key, value).await.map_err(|e| JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    async fn remove(&self, key: &[u8]) -> Result<(), JsValue> {
+        match self {
+            StorageKind::Memory(s) => s.remove(key).map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s.remove(key).await.map_err(|e| JsValue::from_str(&e.to_string())),
+        }
+    }
+
+    async fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, JsValue> {
+        match self {
+            StorageKind::Memory(s) => s.prefix_scan(prefix).map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(s) => s.prefix_scan(prefix).await.map_err(|e| JsValue::from_str(&e.to_string())),
+        }
+    }
+}
+
 struct DatabaseInner {
-    storage: Arc<Storage>,
     schemas: HashMap<String, Schema>,
     subscriptions: HashMap<String, SubscriptionEntry>,
     unique_constraints: HashMap<String, Vec<Vec<String>>>,
@@ -31,6 +71,14 @@ struct DatabaseInner {
     indexes: HashMap<String, Vec<Vec<String>>>,
     id_counters: HashMap<String, u64>,
     round_robin_counters: HashMap<String, usize>,
+    relationships: HashMap<String, Vec<Relationship>>,
+}
+
+#[derive(Clone)]
+struct Relationship {
+    field: String,
+    target_entity: String,
+    field_suffix: String,
 }
 
 struct SubscriptionEntry {
@@ -39,6 +87,7 @@ struct SubscriptionEntry {
     callback: js_sys::Function,
     share_group: Option<String>,
     mode: SubscriptionMode,
+    last_heartbeat: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,8 +118,8 @@ impl WasmDatabase {
     pub fn new() -> WasmDatabase {
         let storage = Arc::new(Storage::memory());
         WasmDatabase {
+            storage: Rc::new(StorageKind::Memory(storage)),
             inner: Rc::new(RefCell::new(DatabaseInner {
-                storage,
                 schemas: HashMap::new(),
                 subscriptions: HashMap::new(),
                 unique_constraints: HashMap::new(),
@@ -79,8 +128,30 @@ impl WasmDatabase {
                 indexes: HashMap::new(),
                 id_counters: HashMap::new(),
                 round_robin_counters: HashMap::new(),
+                relationships: HashMap::new(),
             })),
         }
+    }
+
+    pub async fn open_persistent(db_name: &str) -> Result<WasmDatabase, JsValue> {
+        let backend = IdbBackend::open(db_name)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        Ok(WasmDatabase {
+            storage: Rc::new(StorageKind::IndexedDb(backend)),
+            inner: Rc::new(RefCell::new(DatabaseInner {
+                schemas: HashMap::new(),
+                subscriptions: HashMap::new(),
+                unique_constraints: HashMap::new(),
+                not_null_constraints: HashMap::new(),
+                foreign_keys: Vec::new(),
+                indexes: HashMap::new(),
+                id_counters: HashMap::new(),
+                round_robin_counters: HashMap::new(),
+                relationships: HashMap::new(),
+            })),
+        })
     }
 
     pub async fn create(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
@@ -107,25 +178,18 @@ impl WasmDatabase {
                     .validate(&value)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
             }
-
-            self.validate_not_null(&inner, &entity, &value)?;
-            self.validate_unique(&inner, &entity, &value, None)?;
-            self.validate_foreign_keys(&inner, &entity, &value)?;
         }
+
+        self.validate_not_null_async(&entity, &value)?;
+        self.validate_unique_async(&entity, &value, None).await?;
+        self.validate_foreign_keys_async(&entity, &value).await?;
 
         let key = format!("data/{entity}/{id}");
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        {
-            let inner = self.inner.borrow();
-            inner
-                .storage
-                .insert(key.as_bytes(), &serialized)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-            self.update_indexes(&inner, &entity, &id, &value, None)?;
-        }
+        self.storage.insert(key.as_bytes(), &serialized).await?;
+        self.update_indexes_async(&entity, &id, &value, None).await?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -136,17 +200,98 @@ impl WasmDatabase {
     pub async fn read(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
         let key = format!("data/{entity}/{id}");
 
-        let inner = self.inner.borrow();
-        let data = inner
-            .storage
-            .get(key.as_bytes())
-            .map_err(|e| JsValue::from_str(&e.to_string()))?
+        let data = self.storage.get(key.as_bytes()).await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let value: serde_json::Value = serde_json::from_slice(&data)
             .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
         serialize_js(&value)
+    }
+
+    pub async fn read_with_includes(
+        &self,
+        entity: String,
+        id: String,
+        includes: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let key = format!("data/{entity}/{id}");
+
+        let include_list: Vec<String> = if includes.is_null() || includes.is_undefined() {
+            Vec::new()
+        } else {
+            serde_wasm_bindgen::from_value(includes)
+                .map_err(|e| JsValue::from_str(&format!("invalid includes: {e}")))?
+        };
+
+        let data = self.storage.get(key.as_bytes()).await?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
+        let mut value: serde_json::Value = serde_json::from_slice(&data)
+            .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+        if !include_list.is_empty() {
+            self.load_includes_async(&entity, &mut value, &include_list, 0).await?;
+        }
+
+        serialize_js(&value)
+    }
+
+    async fn load_includes_async(
+        &self,
+        entity: &str,
+        value: &mut serde_json::Value,
+        includes: &[String],
+        depth: usize,
+    ) -> Result<(), JsValue> {
+        const MAX_DEPTH: usize = 3;
+        if depth >= MAX_DEPTH {
+            return Ok(());
+        }
+
+        let relationships: Vec<Relationship> = {
+            let inner = self.inner.borrow();
+            match inner.relationships.get(entity) {
+                Some(rels) => rels.clone(),
+                None => return Ok(()),
+            }
+        };
+
+        for include in includes {
+            let parts: Vec<&str> = include.splitn(2, '.').collect();
+            let field_name = parts[0];
+            let nested_includes: Vec<String> = if parts.len() > 1 {
+                vec![parts[1].to_string()]
+            } else {
+                Vec::new()
+            };
+
+            if let Some(rel) = relationships.iter().find(|r| r.field == field_name) {
+                let fk_value = value.get(&rel.field_suffix).cloned();
+                if let Some(serde_json::Value::String(target_id)) = fk_value {
+                    let target_key = format!("data/{}/{}", rel.target_entity, target_id);
+                    if let Ok(Some(target_data)) = self.storage.get(target_key.as_bytes()).await {
+                        if let Ok(mut related) =
+                            serde_json::from_slice::<serde_json::Value>(&target_data)
+                        {
+                            if !nested_includes.is_empty() {
+                                Box::pin(self.load_includes_async(
+                                    &rel.target_entity,
+                                    &mut related,
+                                    &nested_includes,
+                                    depth + 1,
+                                )).await?;
+                            }
+                            if let serde_json::Value::Object(obj) = value {
+                                obj.insert(field_name.to_string(), related);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn update(
@@ -158,11 +303,7 @@ impl WasmDatabase {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
 
-        let inner = self.inner.borrow();
-        let existing_data = inner
-            .storage
-            .get(key.as_bytes())
-            .map_err(|e| JsValue::from_str(&e.to_string()))?
+        let existing_data = self.storage.get(key.as_bytes()).await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let existing: serde_json::Value = serde_json::from_slice(&existing_data)
@@ -178,27 +319,24 @@ impl WasmDatabase {
             }
         }
 
-        if let Some(schema) = inner.schemas.get(&entity) {
-            schema
-                .validate(&value)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        {
+            let inner = self.inner.borrow();
+            if let Some(schema) = inner.schemas.get(&entity) {
+                schema
+                    .validate(&value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
         }
 
-        self.validate_not_null(&inner, &entity, &value)?;
-        self.validate_unique(&inner, &entity, &value, Some(&id))?;
-        self.validate_foreign_keys(&inner, &entity, &value)?;
+        self.validate_not_null_async(&entity, &value)?;
+        self.validate_unique_async(&entity, &value, Some(&id)).await?;
+        self.validate_foreign_keys_async(&entity, &value).await?;
 
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        inner
-            .storage
-            .insert(key.as_bytes(), &serialized)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        self.update_indexes(&inner, &entity, &id, &value, Some(&existing))?;
-
-        drop(inner);
+        self.storage.insert(key.as_bytes(), &serialized).await?;
+        self.update_indexes_async(&entity, &id, &value, Some(&existing)).await?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -209,26 +347,16 @@ impl WasmDatabase {
     pub async fn delete(&self, entity: String, id: String) -> Result<(), JsValue> {
         let key = format!("data/{entity}/{id}");
 
-        let inner = self.inner.borrow();
-        let existing_data = inner
-            .storage
-            .get(key.as_bytes())
-            .map_err(|e| JsValue::from_str(&e.to_string()))?
+        let existing_data = self.storage.get(key.as_bytes()).await?
             .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let existing: serde_json::Value = serde_json::from_slice(&existing_data)
             .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
-        let cascade_deletes = self.check_foreign_key_constraints(&inner, &entity, &id)?;
+        let cascade_deletes = self.check_foreign_key_constraints_async(&entity, &id).await?;
 
-        inner
-            .storage
-            .remove(key.as_bytes())
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        self.remove_indexes(&inner, &entity, &id, &existing)?;
-
-        drop(inner);
+        self.storage.remove(key.as_bytes()).await?;
+        self.remove_indexes_async(&entity, &id, &existing).await?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = Box::pin(self.delete(cascade_entity, cascade_id)).await;
@@ -249,12 +377,7 @@ impl WasmDatabase {
         };
 
         let prefix = format!("data/{entity}/");
-
-        let inner = self.inner.borrow();
-        let items = inner
-            .storage
-            .prefix_scan(prefix.as_bytes())
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
 
         let mut results = Vec::new();
         for (_key, value) in items {
@@ -274,6 +397,12 @@ impl WasmDatabase {
             let offset = pagination.offset;
             let limit = pagination.limit;
             results = results.into_iter().skip(offset).take(limit).collect();
+        }
+
+        if let Some(ref includes) = opts.includes {
+            for result in &mut results {
+                self.load_includes_async(&entity, result, includes, 0).await?;
+            }
         }
 
         if let Some(ref projection) = opts.projection {
@@ -296,6 +425,7 @@ impl WasmDatabase {
         callback: js_sys::Function,
     ) -> String {
         let sub_id = uuid::Uuid::new_v4().to_string();
+        let now = js_sys::Date::now();
 
         let mut inner = self.inner.borrow_mut();
         inner.subscriptions.insert(
@@ -306,6 +436,7 @@ impl WasmDatabase {
                 callback,
                 share_group: None,
                 mode: SubscriptionMode::default(),
+                last_heartbeat: now,
             },
         );
 
@@ -321,6 +452,7 @@ impl WasmDatabase {
         callback: js_sys::Function,
     ) -> String {
         let sub_id = uuid::Uuid::new_v4().to_string();
+        let now = js_sys::Date::now();
 
         let mode = match mode.as_str() {
             "load-balanced" | "load_balanced" => SubscriptionMode::LoadBalanced,
@@ -337,10 +469,113 @@ impl WasmDatabase {
                 callback,
                 share_group: Some(group),
                 mode,
+                last_heartbeat: now,
             },
         );
 
         sub_id
+    }
+
+    pub fn heartbeat(&self, sub_id: String) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(entry) = inner.subscriptions.get_mut(&sub_id) {
+            entry.last_heartbeat = js_sys::Date::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_subscription_info(&self, sub_id: String) -> JsValue {
+        let inner = self.inner.borrow();
+        match inner.subscriptions.get(&sub_id) {
+            Some(entry) => {
+                let info = serde_json::json!({
+                    "id": sub_id,
+                    "pattern": entry.pattern,
+                    "entity": entry.entity,
+                    "share_group": entry.share_group,
+                    "mode": match entry.mode {
+                        SubscriptionMode::Broadcast => "broadcast",
+                        SubscriptionMode::LoadBalanced => "load-balanced",
+                        SubscriptionMode::Ordered => "ordered",
+                    },
+                    "last_heartbeat": entry.last_heartbeat
+                });
+                let json_str = serde_json::to_string(&info).unwrap_or_else(|_| "null".to_string());
+                js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
+            }
+            None => JsValue::NULL,
+        }
+    }
+
+    pub fn list_consumer_groups(&self) -> JsValue {
+        let inner = self.inner.borrow();
+        let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+        for (sub_id, entry) in &inner.subscriptions {
+            if let Some(ref group_name) = entry.share_group {
+                let member = serde_json::json!({
+                    "subscription_id": sub_id,
+                    "pattern": entry.pattern,
+                    "entity": entry.entity,
+                    "mode": match entry.mode {
+                        SubscriptionMode::Broadcast => "broadcast",
+                        SubscriptionMode::LoadBalanced => "load-balanced",
+                        SubscriptionMode::Ordered => "ordered",
+                    },
+                    "last_heartbeat": entry.last_heartbeat
+                });
+                groups.entry(group_name.clone()).or_default().push(member);
+            }
+        }
+
+        let result: Vec<serde_json::Value> = groups
+            .into_iter()
+            .map(|(name, members)| {
+                serde_json::json!({
+                    "name": name,
+                    "member_count": members.len(),
+                    "members": members
+                })
+            })
+            .collect();
+
+        let json_str = serde_json::to_string(&result).unwrap_or_else(|_| "[]".to_string());
+        js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
+    }
+
+    pub fn get_consumer_group(&self, group_name: String) -> JsValue {
+        let inner = self.inner.borrow();
+        let mut members: Vec<serde_json::Value> = Vec::new();
+
+        for (sub_id, entry) in &inner.subscriptions {
+            if entry.share_group.as_ref() == Some(&group_name) {
+                members.push(serde_json::json!({
+                    "subscription_id": sub_id,
+                    "pattern": entry.pattern,
+                    "entity": entry.entity,
+                    "mode": match entry.mode {
+                        SubscriptionMode::Broadcast => "broadcast",
+                        SubscriptionMode::LoadBalanced => "load-balanced",
+                        SubscriptionMode::Ordered => "ordered",
+                    },
+                    "last_heartbeat": entry.last_heartbeat
+                }));
+            }
+        }
+
+        if members.is_empty() {
+            JsValue::NULL
+        } else {
+            let result = serde_json::json!({
+                "name": group_name,
+                "member_count": members.len(),
+                "members": members
+            });
+            let json_str = serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string());
+            js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
+        }
     }
 
     pub fn unsubscribe(&self, sub_id: String) -> bool {
@@ -463,6 +698,48 @@ impl WasmDatabase {
         Ok(())
     }
 
+    pub fn add_relationship(
+        &self,
+        source_entity: String,
+        field: String,
+        target_entity: String,
+    ) -> Result<(), JsValue> {
+        let field_suffix = format!("{field}_id");
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .relationships
+            .entry(source_entity)
+            .or_default()
+            .push(Relationship {
+                field,
+                target_entity,
+                field_suffix,
+            });
+        Ok(())
+    }
+
+    pub fn list_relationships(&self, entity: String) -> JsValue {
+        let inner = self.inner.borrow();
+        let relationships: Vec<serde_json::Value> = inner
+            .relationships
+            .get(&entity)
+            .map(|rels| {
+                rels.iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "field": r.field,
+                            "target_entity": r.target_entity,
+                            "field_suffix": r.field_suffix
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let json_str = serde_json::to_string(&relationships).unwrap_or_else(|_| "[]".to_string());
+        js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
+    }
+
     pub fn list_constraints(&self, entity: String) -> JsValue {
         let inner = self.inner.borrow();
         let mut constraints = Vec::new();
@@ -543,6 +820,7 @@ impl WasmDatabase {
                     sort: sort.into_iter().map(SortOrderJs::from).collect(),
                     pagination: pagination.map(PaginationJs::from),
                     projection,
+                    includes: None,
                 };
                 let opts_js = serde_wasm_bindgen::to_value(&opts)
                     .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
@@ -636,12 +914,12 @@ impl WasmDatabase {
         }
     }
 
-    fn validate_not_null(
+    fn validate_not_null_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
+        let inner = self.inner.borrow();
         if let Some(fields) = inner.not_null_constraints.get(entity) {
             for field in fields {
                 let field_value = value.get(field);
@@ -655,19 +933,20 @@ impl WasmDatabase {
         Ok(())
     }
 
-    fn validate_unique(
+    async fn validate_unique_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         value: &serde_json::Value,
         current_id: Option<&str>,
     ) -> Result<(), JsValue> {
-        if let Some(constraints) = inner.unique_constraints.get(entity) {
+        let constraints: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.unique_constraints.get(entity).cloned()
+        };
+
+        if let Some(constraints) = constraints {
             let prefix = format!("data/{entity}/");
-            let items = inner
-                .storage
-                .prefix_scan(prefix.as_bytes())
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
 
             for constraint_fields in constraints {
                 let new_values: Vec<Option<&serde_json::Value>> =
@@ -700,13 +979,17 @@ impl WasmDatabase {
         Ok(())
     }
 
-    fn validate_foreign_keys(
+    async fn validate_foreign_keys_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
-        for fk in &inner.foreign_keys {
+        let fks: Vec<ForeignKeyEntry> = {
+            let inner = self.inner.borrow();
+            inner.foreign_keys.clone()
+        };
+
+        for fk in &fks {
             if fk.source_entity != entity {
                 continue;
             }
@@ -721,7 +1004,7 @@ impl WasmDatabase {
                 .ok_or_else(|| JsValue::from_str("foreign key must be a string"))?;
 
             let target_key = format!("data/{}/{}", fk.target_entity, target_id);
-            if inner.storage.get(target_key.as_bytes()).ok().flatten().is_none() {
+            if self.storage.get(target_key.as_bytes()).await?.is_none() {
                 return Err(JsValue::from_str(&format!(
                     "foreign key violation: {entity}.{} references non-existent {}/{}",
                     fk.source_field, fk.target_entity, target_id
@@ -731,24 +1014,25 @@ impl WasmDatabase {
         Ok(())
     }
 
-    fn check_foreign_key_constraints(
+    async fn check_foreign_key_constraints_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         id: &str,
     ) -> Result<Vec<(String, String)>, JsValue> {
+        let fks: Vec<ForeignKeyEntry> = {
+            let inner = self.inner.borrow();
+            inner.foreign_keys.clone()
+        };
+
         let mut cascade_deletes = Vec::new();
 
-        for fk in &inner.foreign_keys {
+        for fk in &fks {
             if fk.target_entity != entity {
                 continue;
             }
 
             let prefix = format!("data/{}/", fk.source_entity);
-            let items = inner
-                .storage
-                .prefix_scan(prefix.as_bytes())
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
 
             for (_key, data) in items {
                 let value: serde_json::Value = serde_json::from_slice(&data)
@@ -776,10 +1060,7 @@ impl WasmDatabase {
                                 let key = format!("data/{}/{}", fk.source_entity, source_id);
                                 let serialized = serde_json::to_vec(&updated)
                                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                                inner
-                                    .storage
-                                    .insert(key.as_bytes(), &serialized)
-                                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                                self.storage.insert(key.as_bytes(), &serialized).await?;
                             }
                         }
                     }
@@ -790,28 +1071,30 @@ impl WasmDatabase {
         Ok(cascade_deletes)
     }
 
-    fn update_indexes(
+    async fn update_indexes_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
         old_value: Option<&serde_json::Value>,
     ) -> Result<(), JsValue> {
         if let Some(old) = old_value {
-            self.remove_indexes(inner, entity, id, old)?;
+            self.remove_indexes_async(entity, id, old).await?;
         }
 
-        if let Some(index_defs) = inner.indexes.get(entity) {
+        let index_defs: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.indexes.get(entity).cloned()
+        };
+
+        if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 let index_values: Vec<String> = fields
                     .iter()
                     .filter_map(|f| {
-                        value.get(f).map(|v| {
-                            match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                _ => v.to_string(),
-                            }
+                        value.get(f).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
                         })
                     })
                     .collect();
@@ -823,10 +1106,7 @@ impl WasmDatabase {
                         index_values.join("_"),
                         id
                     );
-                    inner
-                        .storage
-                        .insert(index_key.as_bytes(), &[])
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                    self.storage.insert(index_key.as_bytes(), &[]).await?;
                 }
             }
         }
@@ -834,23 +1114,25 @@ impl WasmDatabase {
         Ok(())
     }
 
-    fn remove_indexes(
+    async fn remove_indexes_async(
         &self,
-        inner: &DatabaseInner,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
-        if let Some(index_defs) = inner.indexes.get(entity) {
+        let index_defs: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.indexes.get(entity).cloned()
+        };
+
+        if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 let index_values: Vec<String> = fields
                     .iter()
                     .filter_map(|f| {
-                        value.get(f).map(|v| {
-                            match v {
-                                serde_json::Value::String(s) => s.clone(),
-                                _ => v.to_string(),
-                            }
+                        value.get(f).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
                         })
                     })
                     .collect();
@@ -862,7 +1144,7 @@ impl WasmDatabase {
                         index_values.join("_"),
                         id
                     );
-                    let _ = inner.storage.remove(index_key.as_bytes());
+                    let _ = self.storage.remove(index_key.as_bytes()).await;
                 }
             }
         }
@@ -1083,12 +1365,117 @@ impl WasmDatabase {
 
         match_pattern(&sub.pattern, &event.entity, &event.id)
     }
+
+    pub async fn cursor(&self, entity: String, options: JsValue) -> Result<WasmCursor, JsValue> {
+        let opts: CursorOptions = if options.is_null() || options.is_undefined() {
+            CursorOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
+        };
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+
+        let mut all_items: Vec<serde_json::Value> = Vec::new();
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+            if opts.filters.iter().all(|f| self.matches_filter(&parsed, f)) {
+                all_items.push(parsed);
+            }
+        }
+
+        if !opts.sort.is_empty() {
+            Self::sort_results(&mut all_items, &opts.sort);
+        }
+
+        Ok(WasmCursor {
+            buffer: VecDeque::from(all_items),
+            current_index: 0,
+            exhausted: false,
+        })
+    }
 }
 
 impl Default for WasmDatabase {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[wasm_bindgen]
+pub struct WasmCursor {
+    buffer: VecDeque<serde_json::Value>,
+    current_index: usize,
+    exhausted: bool,
+}
+
+#[wasm_bindgen]
+impl WasmCursor {
+    pub fn next(&mut self) -> Result<JsValue, JsValue> {
+        if self.exhausted || self.buffer.is_empty() {
+            self.exhausted = true;
+            return Ok(JsValue::UNDEFINED);
+        }
+
+        match self.buffer.pop_front() {
+            Some(item) => {
+                self.current_index += 1;
+                serialize_js(&item)
+            }
+            None => {
+                self.exhausted = true;
+                Ok(JsValue::UNDEFINED)
+            }
+        }
+    }
+
+    pub fn next_batch(&mut self, size: usize) -> Result<JsValue, JsValue> {
+        if self.exhausted || self.buffer.is_empty() {
+            self.exhausted = true;
+            return serialize_js(&serde_json::Value::Array(Vec::new()));
+        }
+
+        let mut batch = Vec::with_capacity(size);
+        for _ in 0..size {
+            if let Some(item) = self.buffer.pop_front() {
+                self.current_index += 1;
+                batch.push(item);
+            } else {
+                self.exhausted = true;
+                break;
+            }
+        }
+
+        serialize_js(&serde_json::Value::Array(batch))
+    }
+
+    pub fn reset(&mut self) {
+        self.current_index = 0;
+        self.exhausted = false;
+    }
+
+    pub fn has_more(&self) -> bool {
+        !self.exhausted && !self.buffer.is_empty()
+    }
+
+    pub fn count(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn position(&self) -> usize {
+        self.current_index
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct CursorOptions {
+    #[serde(default)]
+    filters: Vec<FilterJs>,
+    #[serde(default)]
+    sort: Vec<SortOrderJs>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1101,6 +1488,8 @@ struct ListOptions {
     pagination: Option<PaginationJs>,
     #[serde(default)]
     projection: Option<Vec<String>>,
+    #[serde(default)]
+    includes: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

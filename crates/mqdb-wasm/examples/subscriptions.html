@@ -76,6 +76,8 @@
         <a href="constraints.html">Constraints</a>
         <a href="filtering.html">Filtering</a>
         <a href="subscriptions.html" class="active">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
     </nav>
 
     <h1>Subscriptions</h1>
@@ -134,6 +136,26 @@
                 <button id="testSharedBroadcast">Test Broadcast</button>
                 <button id="testSharedLB">Test Load Balanced</button>
             </div>
+
+            <div class="card mt-10">
+                <h3>Heartbeat</h3>
+                <div class="row">
+                    <label>Subscription ID:</label>
+                    <input type="text" id="heartbeatSubId" placeholder="Enter subscription ID">
+                </div>
+                <button id="sendHeartbeat">Send Heartbeat</button>
+                <button id="getSubInfo">Get Subscription Info</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Consumer Groups</h3>
+                <button id="listGroups">List Consumer Groups</button>
+                <div class="row mt-10">
+                    <label>Group Name:</label>
+                    <input type="text" id="groupName" value="workers">
+                </div>
+                <button id="getGroupInfo">Get Group Info</button>
+            </div>
         </div>
     </div>
 
@@ -186,6 +208,10 @@
             document.getElementById('runAllSubTests').onclick = runAllSubTests;
             document.getElementById('testSharedBroadcast').onclick = testSharedBroadcast;
             document.getElementById('testSharedLB').onclick = testSharedLoadBalanced;
+            document.getElementById('sendHeartbeat').onclick = sendHeartbeat;
+            document.getElementById('getSubInfo').onclick = getSubscriptionInfo;
+            document.getElementById('listGroups').onclick = listConsumerGroups;
+            document.getElementById('getGroupInfo').onclick = getConsumerGroupInfo;
         }
 
         function createSubscription() {
@@ -466,6 +492,63 @@
                 log(`✓ Load balancing working: ${eventCount} events for 3 creates (1 per subscriber)`, 'success');
             } else {
                 log(`Events received: ${eventCount} (expected 3 for round-robin distribution)`, eventCount === 3 ? 'success' : 'warning');
+            }
+        }
+
+        function sendHeartbeat() {
+            const subId = document.getElementById('heartbeatSubId').value;
+            if (!subId) {
+                log('Enter a subscription ID first', 'warning');
+                return;
+            }
+
+            const success = db.heartbeat(subId);
+            if (success) {
+                log(`Heartbeat sent for ${subId.slice(0, 8)}...`, 'success');
+            } else {
+                log(`Subscription not found: ${subId.slice(0, 8)}...`, 'error');
+            }
+        }
+
+        function getSubscriptionInfo() {
+            const subId = document.getElementById('heartbeatSubId').value;
+            if (!subId) {
+                log('Enter a subscription ID first', 'warning');
+                return;
+            }
+
+            const info = db.get_subscription_info(subId);
+            if (info) {
+                log(`Subscription info for ${subId.slice(0, 8)}...:`);
+                log(JSON.stringify(info, null, 2));
+            } else {
+                log(`Subscription not found: ${subId.slice(0, 8)}...`, 'error');
+            }
+        }
+
+        function listConsumerGroups() {
+            const groups = db.list_consumer_groups();
+            log('Consumer Groups:', 'info');
+            if (groups.length === 0) {
+                log('No consumer groups found');
+            } else {
+                log(JSON.stringify(groups, null, 2));
+            }
+        }
+
+        function getConsumerGroupInfo() {
+            const groupName = document.getElementById('groupName').value;
+            if (!groupName) {
+                log('Enter a group name first', 'warning');
+                return;
+            }
+
+            const info = db.get_consumer_group(groupName);
+            if (info) {
+                log(`Consumer group "${groupName}":`);
+                log(JSON.stringify(info, null, 2));
+            } else {
+                log(`Consumer group not found: ${groupName}`, 'error');
             }
         }
 
