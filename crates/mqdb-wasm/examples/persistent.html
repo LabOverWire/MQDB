@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Persistent Storage (IndexedDB)</title>
+    <link rel="stylesheet" href="shared/common.css">
+    <style>
+        .storage-toggle {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .storage-toggle button {
+            flex: 1;
+            padding: 15px;
+            font-size: 16px;
+        }
+        .storage-toggle button.active {
+            background: #4a90d9;
+            color: white;
+        }
+        .idb-inspector {
+            background: #1a1a2e;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 10px;
+        }
+        .idb-inspector pre {
+            margin: 0;
+            white-space: pre-wrap;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .persistence-demo {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 2px solid #4a90d9;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .persistence-demo h3 {
+            color: #4a90d9;
+            margin-top: 0;
+        }
+        .reload-btn {
+            background: #e94560;
+            font-size: 18px;
+            padding: 15px 30px;
+        }
+        .counter-display {
+            font-size: 48px;
+            font-weight: bold;
+            color: #4a90d9;
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html" class="active">Persistent</a>
+    </nav>
+
+    <h1>Persistent Storage (IndexedDB)</h1>
+
+    <div class="persistence-demo">
+        <h3>Persistence Demo</h3>
+        <p>This counter is stored in IndexedDB. Reload the page to verify it persists!</p>
+        <div class="counter-display" id="counterValue">Loading...</div>
+        <div style="text-align: center; margin-top: 15px;">
+            <button id="incrementBtn" class="success">+1 Increment</button>
+            <button id="decrementBtn">-1 Decrement</button>
+            <button id="resetBtn" class="danger">Reset to 0</button>
+        </div>
+        <div style="text-align: center; margin-top: 20px;">
+            <button class="reload-btn" onclick="location.reload()">Reload Page to Test Persistence</button>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Storage Mode</h2>
+            <div class="storage-toggle">
+                <button id="memoryBtn">In-Memory (Ephemeral)</button>
+                <button id="persistentBtn" class="active">IndexedDB (Persistent)</button>
+            </div>
+            <div class="card">
+                <h3>Current Mode</h3>
+                <p id="modeDisplay">IndexedDB - Data persists across page reloads</p>
+            </div>
+            <div class="card mt-10">
+                <h3>Database Name</h3>
+                <input type="text" id="dbName" value="mqdb-demo" style="width: 100%;">
+                <button id="switchDbBtn" class="mt-10">Switch Database</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Quick Tests</h2>
+            <button id="runAllTests">Run All Persistence Tests</button>
+            <button id="seedData" class="success mt-10">Seed Sample Data</button>
+            <button id="clearIdb" class="danger mt-10">Clear IndexedDB</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>IndexedDB Inspector</h2>
+        <p>Raw view of what's stored in IndexedDB:</p>
+        <button id="inspectIdb">Inspect IndexedDB Contents</button>
+        <div class="idb-inspector">
+            <pre id="idbContents">Click "Inspect IndexedDB Contents" to view raw data</pre>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Records (from current database)</h2>
+        <div class="row">
+            <label>Entity:</label>
+            <select id="entity">
+                <option value="users">users</option>
+                <option value="counter">counter</option>
+                <option value="posts">posts</option>
+            </select>
+            <button id="refreshList">Refresh</button>
+        </div>
+        <table id="recordsTable">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Data</th>
+                </tr>
+            </thead>
+            <tbody id="recordsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        let isPersistent = true;
+
+        async function main() {
+            await init();
+            await initDatabase(true);
+            await loadCounter();
+            setupEventListeners();
+            refreshList();
+        }
+
+        async function initDatabase(persistent) {
+            isPersistent = persistent;
+            const dbName = document.getElementById('dbName').value;
+
+            if (persistent) {
+                log(`Opening persistent database: ${dbName}`);
+                db = await WasmDatabase.open_persistent(dbName);
+                document.getElementById('modeDisplay').textContent = 'IndexedDB - Data persists across page reloads';
+                document.getElementById('persistentBtn').classList.add('active');
+                document.getElementById('memoryBtn').classList.remove('active');
+            } else {
+                log('Creating in-memory database');
+                db = new WasmDatabase();
+                document.getElementById('modeDisplay').textContent = 'In-Memory - Data lost on page reload';
+                document.getElementById('memoryBtn').classList.add('active');
+                document.getElementById('persistentBtn').classList.remove('active');
+            }
+
+            window.db = db;
+            log(`Database initialized (${persistent ? 'persistent' : 'memory'})`, 'success');
+        }
+
+        async function loadCounter() {
+            try {
+                const counters = await db.list('counter', null);
+                if (counters.length > 0) {
+                    updateCounterDisplay(counters[0].value);
+                    log(`Loaded counter value: ${counters[0].value}`, 'success');
+                } else {
+                    await db.create('counter', { name: 'main', value: 0 });
+                    updateCounterDisplay(0);
+                    log('Created new counter with value 0', 'info');
+                }
+            } catch (e) {
+                log(`Error loading counter: ${e}`, 'error');
+            }
+        }
+
+        function updateCounterDisplay(value) {
+            document.getElementById('counterValue').textContent = value;
+        }
+
+        async function updateCounter(delta) {
+            try {
+                const counters = await db.list('counter', null);
+                if (counters.length > 0) {
+                    const newValue = counters[0].value + delta;
+                    await db.update('counter', counters[0].id, { value: newValue });
+                    updateCounterDisplay(newValue);
+                    log(`Counter updated to ${newValue}`, 'success');
+                }
+            } catch (e) {
+                log(`Error updating counter: ${e}`, 'error');
+            }
+        }
+
+        async function resetCounter() {
+            try {
+                const counters = await db.list('counter', null);
+                if (counters.length > 0) {
+                    await db.update('counter', counters[0].id, { value: 0 });
+                    updateCounterDisplay(0);
+                    log('Counter reset to 0', 'success');
+                }
+            } catch (e) {
+                log(`Error resetting counter: ${e}`, 'error');
+            }
+        }
+
+        function setupEventListeners() {
+            document.getElementById('incrementBtn').onclick = () => updateCounter(1);
+            document.getElementById('decrementBtn').onclick = () => updateCounter(-1);
+            document.getElementById('resetBtn').onclick = resetCounter;
+            document.getElementById('memoryBtn').onclick = () => initDatabase(false).then(refreshList);
+            document.getElementById('persistentBtn').onclick = () => initDatabase(true).then(loadCounter).then(refreshList);
+            document.getElementById('switchDbBtn').onclick = () => initDatabase(true).then(loadCounter).then(refreshList);
+            document.getElementById('runAllTests').onclick = runAllTests;
+            document.getElementById('seedData').onclick = seedData;
+            document.getElementById('clearIdb').onclick = clearIndexedDB;
+            document.getElementById('inspectIdb').onclick = inspectIndexedDB;
+            document.getElementById('refreshList').onclick = refreshList;
+            document.getElementById('entity').onchange = refreshList;
+        }
+
+        async function inspectIndexedDB() {
+            const dbName = document.getElementById('dbName').value;
+            log(`Inspecting IndexedDB: ${dbName}`);
+
+            try {
+                const request = indexedDB.open(dbName, 1);
+
+                request.onerror = () => {
+                    document.getElementById('idbContents').textContent = 'Error opening IndexedDB';
+                };
+
+                request.onsuccess = (event) => {
+                    const idb = event.target.result;
+                    const stores = Array.from(idb.objectStoreNames);
+
+                    if (stores.length === 0) {
+                        document.getElementById('idbContents').textContent = 'No object stores found';
+                        idb.close();
+                        return;
+                    }
+
+                    const tx = idb.transaction(stores, 'readonly');
+                    const results = {};
+                    let pending = stores.length;
+
+                    stores.forEach(storeName => {
+                        const store = tx.objectStore(storeName);
+                        const allRequest = store.openCursor();
+                        results[storeName] = [];
+
+                        allRequest.onsuccess = (e) => {
+                            const cursor = e.target.result;
+                            if (cursor) {
+                                const key = cursor.key;
+                                const value = cursor.value;
+                                let keyStr, valueStr;
+
+                                if (key instanceof Uint8Array) {
+                                    keyStr = new TextDecoder().decode(key);
+                                } else {
+                                    keyStr = String(key);
+                                }
+
+                                if (value instanceof Uint8Array) {
+                                    try {
+                                        valueStr = new TextDecoder().decode(value);
+                                        try {
+                                            valueStr = JSON.parse(valueStr);
+                                        } catch {}
+                                    } catch {
+                                        valueStr = `[Binary: ${value.length} bytes]`;
+                                    }
+                                } else {
+                                    valueStr = value;
+                                }
+
+                                results[storeName].push({ key: keyStr, value: valueStr });
+                                cursor.continue();
+                            } else {
+                                pending--;
+                                if (pending === 0) {
+                                    document.getElementById('idbContents').textContent =
+                                        JSON.stringify(results, null, 2);
+                                    log(`Found ${Object.values(results).flat().length} entries in IndexedDB`, 'success');
+                                    idb.close();
+                                }
+                            }
+                        };
+                    });
+                };
+            } catch (e) {
+                document.getElementById('idbContents').textContent = `Error: ${e}`;
+                log(`Error inspecting IndexedDB: ${e}`, 'error');
+            }
+        }
+
+        async function clearIndexedDB() {
+            const dbName = document.getElementById('dbName').value;
+            log(`Deleting IndexedDB: ${dbName}`);
+
+            try {
+                const deleteRequest = indexedDB.deleteDatabase(dbName);
+                deleteRequest.onsuccess = () => {
+                    log(`Deleted IndexedDB: ${dbName}`, 'success');
+                    document.getElementById('idbContents').textContent = 'Database deleted';
+                    initDatabase(true).then(loadCounter).then(refreshList);
+                };
+                deleteRequest.onerror = () => {
+                    log('Error deleting IndexedDB', 'error');
+                };
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function refreshList() {
+            try {
+                const entity = document.getElementById('entity').value;
+                const records = await db.list(entity, null);
+                const tbody = document.getElementById('recordsBody');
+                tbody.innerHTML = '';
+
+                for (const record of records) {
+                    const tr = document.createElement('tr');
+                    const {id, ...rest} = record;
+                    tr.innerHTML = `
+                        <td><code>${id}</code></td>
+                        <td><code>${JSON.stringify(rest)}</code></td>
+                    `;
+                    tbody.appendChild(tr);
+                }
+
+                if (records.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#999">No records</td></tr>';
+                }
+            } catch (e) {
+                log(`Error refreshing list: ${e}`, 'error');
+            }
+        }
+
+        async function seedData() {
+            log('Seeding sample data...');
+            try {
+                await db.create('users', { name: 'Alice', email: 'alice@example.com' });
+                await db.create('users', { name: 'Bob', email: 'bob@example.com' });
+                await db.create('posts', { title: 'Hello World', content: 'First post!' });
+                log('Seeded sample data', 'success');
+                refreshList();
+            } catch (e) {
+                log(`Error seeding data: ${e}`, 'error');
+            }
+        }
+
+        async function runAllTests() {
+            log('=== Running Persistence Tests ===', 'info');
+
+            log('Test 1: Create record in persistent storage');
+            const testData = { name: 'PersistenceTest', timestamp: Date.now() };
+            const created = await db.create('users', testData);
+            log(`  Created: ${JSON.stringify(created)}`, 'success');
+
+            log('Test 2: Read record back');
+            const read = await db.read('users', created.id);
+            if (read.name === 'PersistenceTest') {
+                log(`  ✓ Read verified: ${JSON.stringify(read)}`, 'success');
+            } else {
+                log('  ✗ Read returned wrong data', 'error');
+            }
+
+            log('Test 3: Verify in IndexedDB directly');
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await inspectIndexedDB();
+            log('  ✓ Check the IndexedDB Inspector above', 'success');
+
+            log('Test 4: Update record');
+            await db.update('users', created.id, { name: 'UpdatedPersistenceTest' });
+            const updated = await db.read('users', created.id);
+            if (updated.name === 'UpdatedPersistenceTest') {
+                log(`  ✓ Update verified`, 'success');
+            } else {
+                log('  ✗ Update failed', 'error');
+            }
+
+            log('Test 5: Delete record');
+            await db.delete('users', created.id);
+            try {
+                await db.read('users', created.id);
+                log('  ✗ Delete failed - record still exists', 'error');
+            } catch {
+                log('  ✓ Delete verified - record not found', 'success');
+            }
+
+            log('Test 6: Counter persistence');
+            const counterBefore = document.getElementById('counterValue').textContent;
+            await updateCounter(10);
+            const counterAfter = document.getElementById('counterValue').textContent;
+            if (parseInt(counterAfter) === parseInt(counterBefore) + 10) {
+                log(`  ✓ Counter incremented from ${counterBefore} to ${counterAfter}`, 'success');
+            } else {
+                log('  ✗ Counter update failed', 'error');
+            }
+
+            log('=== All Persistence Tests Complete ===', 'success');
+            log('Reload the page to verify the counter persists!', 'info');
+            refreshList();
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>
