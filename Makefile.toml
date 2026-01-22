@@ -1,27 +1,69 @@
 [config]
 default_to_workspace = false
 
+[tasks.help]
+description = "Show available tasks"
+script = '''
+echo "MQDB Makefile Commands"
+echo "======================"
+echo ""
+echo "Development:"
+echo "  cargo make format        Format all code"
+echo "  cargo make format-check  Check formatting (CI)"
+echo "  cargo make check         Quick compilation check"
+echo "  cargo make clippy        Lint with pedantic warnings"
+echo "  cargo make dev           Format + clippy + test"
+echo "  cargo make watch         Watch mode for check"
+echo ""
+echo "Building:"
+echo "  cargo make build         Build all targets (debug)"
+echo "  cargo make build-release Build release binary"
+echo "  cargo make build-profiling Build with profiling profile"
+echo ""
+echo "Testing:"
+echo "  cargo make test          Run all tests"
+echo "  cargo make test-verbose  Run tests with output"
+echo "  cargo make ci            CI pipeline (format-check + clippy + test)"
+echo ""
+echo "Benchmarking:"
+echo "  cargo make bench-pubsub  Run pub/sub benchmark"
+echo "  cargo make bench-db      Run DB benchmark"
+echo ""
+echo "Profiling:"
+echo "  cargo make profile-pubsub Profile pub/sub with samply"
+echo "  cargo make profile-db     Profile DB with samply"
+echo ""
+echo "Cleanup:"
+echo "  cargo make clean         Clean build artifacts"
+'''
+
 [tasks.format]
+description = "Format all code"
 command = "cargo"
 args = ["fmt", "--all"]
 
 [tasks.format-check]
+description = "Check formatting (CI)"
 command = "cargo"
 args = ["fmt", "--all", "--check"]
 
 [tasks.check]
+description = "Quick compilation check"
 command = "cargo"
 args = ["check", "--all-targets", "--all-features"]
 
 [tasks.build]
+description = "Build all targets (debug)"
 command = "cargo"
 args = ["build", "--all-targets"]
 
 [tasks.build-release]
+description = "Build release binary"
 command = "cargo"
 args = ["build", "--release"]
 
 [tasks.clippy]
+description = "Lint with pedantic warnings"
 command = "cargo"
 args = [
     "clippy",
@@ -32,36 +74,40 @@ args = [
 ]
 
 [tasks.test]
+description = "Run all tests"
 command = "cargo"
 args = ["test", "--all-features"]
 
 [tasks.test-verbose]
+description = "Run tests with output"
 command = "cargo"
 args = ["test", "--all-features", "--", "--nocapture"]
 
 [tasks.clean]
+description = "Clean build artifacts"
 command = "cargo"
 args = ["clean"]
 
 [tasks.dev]
-description = "Format, clippy, and test"
+description = "Format + clippy + test"
 dependencies = ["format", "clippy", "test"]
 
 [tasks.ci]
-description = "CI pipeline: format-check, clippy, test"
+description = "CI pipeline (format-check + clippy + test)"
 dependencies = ["format-check", "clippy", "test"]
 
 [tasks.watch]
+description = "Watch mode for check"
 command = "cargo"
 args = ["watch", "-x", "check"]
 
 [tasks.bench-pubsub]
-description = "Run pub/sub benchmark with auto-start"
+description = "Run pub/sub benchmark"
 command = "cargo"
 args = ["run", "--release", "--", "dev", "bench", "pubsub"]
 
 [tasks.bench-db]
-description = "Run DB benchmark with auto-start"
+description = "Run DB benchmark"
 command = "cargo"
 args = ["run", "--release", "--", "dev", "bench", "db"]
 
@@ -76,6 +122,6 @@ command = "cargo"
 args = ["run", "--release", "--", "dev", "profile", "db"]
 
 [tasks.build-profiling]
-description = "Build with profiling profile (no LTO)"
+description = "Build with profiling profile"
 command = "cargo"
 args = ["build", "--profile=profiling"]

@@ -15,7 +15,7 @@ bebytes = { version = "3.0.2", features = ["bytes"] }
 clap = { version = "4.5", features = ["derive", "env"], optional = true }
 comfy-table = { version = "7.2", optional = true }
 fjall = { version = "3.0", optional = true }
-mqtt5 = { version = "0.20", optional = true }
+mqtt5 = { version = "0.21", optional = true }
 tokio = { version = "1.49", features = ["full"], optional = true }
 quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }

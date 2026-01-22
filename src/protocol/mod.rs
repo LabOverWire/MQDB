@@ -104,6 +104,10 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     }
 }
 
+/// Builds a database request from an operation descriptor and payload.
+///
+/// # Errors
+/// Returns an error if JSON deserialization fails, required ID is missing, or operation is unknown.
 pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String> {
     let data: Value = if payload.is_empty() {
         Value::Null

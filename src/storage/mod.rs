@@ -101,6 +101,10 @@ impl BatchWriter {
         self.inner.expect_value(key, expected_value);
     }
 
+    /// Commits all queued operations atomically.
+    ///
+    /// # Errors
+    /// Returns an error if the commit fails or expected values don't match.
     pub fn commit(self) -> Result<()> {
         self.inner.commit()
     }
