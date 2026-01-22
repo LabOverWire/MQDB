@@ -986,6 +986,15 @@ impl Database {
         registry.add(relationship);
     }
 
+    pub async fn list_relationships(&self, entity: &str) -> Vec<Relationship> {
+        let registry = self.relationship_registry.read().await;
+        registry.get_all(entity).cloned().unwrap_or_default()
+    }
+
+    pub async fn get_subscription_info(&self, sub_id: &str) -> Option<Subscription> {
+        self.registry.get(sub_id).await
+    }
+
     pub async fn get_schema(&self, entity: &str) -> Option<Schema> {
         let registry = self.schema_registry.read().await;
         registry.get_schema(entity).cloned()
