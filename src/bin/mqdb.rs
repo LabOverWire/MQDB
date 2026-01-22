@@ -2994,9 +2994,7 @@ fn cmd_dev_start_cluster(
         } else {
             " (MQTT bridges)"
         };
-        println!(
-            "Starting node {node_id} on port {port}{transport_mode}..."
-        );
+        println!("Starting node {node_id} on port {port}{transport_mode}...");
 
         cmd.spawn()?;
 
@@ -3823,13 +3821,15 @@ async fn cmd_bench_db_async(
         let (interval_p50, interval_p95) = if let Ok(lats) = latencies.lock() {
             let new_count = lats.len();
             if new_count > last_latency_count {
-                let mut interval_lats: Vec<f64> =
-                    lats[last_latency_count..new_count].to_vec();
+                let mut interval_lats: Vec<f64> = lats[last_latency_count..new_count].to_vec();
                 interval_lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let p50_idx = interval_lats.len() / 2;
                 let p95_idx = (interval_lats.len() as f64 * 0.95) as usize;
                 let p50 = interval_lats.get(p50_idx).copied().unwrap_or(0.0);
-                let p95 = interval_lats.get(p95_idx.min(interval_lats.len().saturating_sub(1))).copied().unwrap_or(0.0);
+                let p95 = interval_lats
+                    .get(p95_idx.min(interval_lats.len().saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0);
                 last_latency_count = new_count;
                 (p50, p95)
             } else {
@@ -3855,7 +3855,8 @@ async fn cmd_bench_db_async(
         );
 
         if saturation_rate.is_none() {
-            let throughput_ok = interval_throughput >= current_rate as f64 * RAMP_THROUGHPUT_THRESHOLD;
+            let throughput_ok =
+                interval_throughput >= current_rate as f64 * RAMP_THROUGHPUT_THRESHOLD;
             let backlog_ok = backlog < backlog_limit;
             let latency_ok = baseline_latency
                 .is_none_or(|base| interval_p50 < base * RAMP_LATENCY_SLOWDOWN_FACTOR);
@@ -3871,7 +3872,10 @@ async fn cmd_bench_db_async(
                 let step = step.max(50);
                 current_rate += step;
                 target_rate.store(current_rate, Ordering::Relaxed);
-                println!("  Latency increasing, reducing step to {:.0}%", current_step_pct * 100.0);
+                println!(
+                    "  Latency increasing, reducing step to {:.0}%",
+                    current_step_pct * 100.0
+                );
             } else {
                 let reason = if throughput_ok {
                     "backlog growth"

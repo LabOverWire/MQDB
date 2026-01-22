@@ -753,8 +753,8 @@ impl ClusteredAgent {
             let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());
             let admin_mqtt_client = mqtt5::MqttClient::new(&admin_client_id);
             if let (Some(user), Some(pass)) = (&service_username, &service_password) {
-                let options =
-                    mqtt5::types::ConnectOptions::new(&admin_client_id).with_credentials(user, pass);
+                let options = mqtt5::types::ConnectOptions::new(&admin_client_id)
+                    .with_credentials(user, pass);
                 Box::pin(admin_mqtt_client.connect_with_options(&broker_addr, options))
                     .await
                     .map_err(|e| format!("failed to connect admin client: {e}"))?;
@@ -892,7 +892,12 @@ impl ClusteredAgent {
 
         let rx_local_publish = if self.use_direct_quic {
             let ctrl = self.controller.read().await;
-            Some(ctrl.transport().as_quic().expect("expected QUIC").local_publish_rx())
+            Some(
+                ctrl.transport()
+                    .as_quic()
+                    .expect("expected QUIC")
+                    .local_publish_rx(),
+            )
         } else {
             None
         };

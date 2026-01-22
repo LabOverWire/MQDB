@@ -161,7 +161,10 @@ mod tests {
         let backend = MemoryBackend::new();
 
         StorageBackend::insert(&backend, b"key1", b"value1").unwrap();
-        assert_eq!(StorageBackend::get(&backend, b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(
+            StorageBackend::get(&backend, b"key1").unwrap(),
+            Some(b"value1".to_vec())
+        );
 
         StorageBackend::remove(&backend, b"key1").unwrap();
         assert_eq!(StorageBackend::get(&backend, b"key1").unwrap(), None);
@@ -188,8 +191,14 @@ mod tests {
         batch.insert(b"key2".to_vec(), b"value2".to_vec());
         batch.commit().unwrap();
 
-        assert_eq!(StorageBackend::get(&backend, b"key1").unwrap(), Some(b"value1".to_vec()));
-        assert_eq!(StorageBackend::get(&backend, b"key2").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(
+            StorageBackend::get(&backend, b"key1").unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(
+            StorageBackend::get(&backend, b"key2").unwrap(),
+            Some(b"value2".to_vec())
+        );
     }
 
     #[test]
@@ -202,7 +211,10 @@ mod tests {
         batch.insert(b"key1".to_vec(), b"value2".to_vec());
         batch.commit().unwrap();
 
-        assert_eq!(StorageBackend::get(&backend, b"key1").unwrap(), Some(b"value2".to_vec()));
+        assert_eq!(
+            StorageBackend::get(&backend, b"key1").unwrap(),
+            Some(b"value2".to_vec())
+        );
     }
 
     #[test]
@@ -216,6 +228,9 @@ mod tests {
 
         let result = batch.commit();
         assert!(result.is_err());
-        assert_eq!(StorageBackend::get(&backend, b"key1").unwrap(), Some(b"value1".to_vec()));
+        assert_eq!(
+            StorageBackend::get(&backend, b"key1").unwrap(),
+            Some(b"value1".to_vec())
+        );
     }
 }

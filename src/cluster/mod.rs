@@ -36,8 +36,6 @@ mod migration;
 #[cfg(feature = "native")]
 mod mqtt_transport;
 #[cfg(feature = "native")]
-mod quic_transport;
-#[cfg(feature = "native")]
 mod node_controller;
 #[cfg(feature = "native")]
 mod offset_store;
@@ -51,6 +49,8 @@ mod publish_router;
 mod qos2_store;
 #[cfg(feature = "native")]
 mod query_coordinator;
+#[cfg(feature = "native")]
+mod quic_transport;
 #[cfg(feature = "native")]
 mod quorum;
 #[cfg(feature = "native")]
@@ -134,8 +134,6 @@ pub use migration::{
 #[cfg(feature = "native")]
 pub use mqtt_transport::MqttTransport;
 #[cfg(feature = "native")]
-pub use quic_transport::{LocalPublishRequest, QuicDirectTransport};
-#[cfg(feature = "native")]
 pub use node_controller::{NodeController, RaftMessage, TickOutput};
 #[cfg(feature = "native")]
 pub use offset_store::{ConsumerOffset, OffsetStore, OffsetStoreError, offset_key};
@@ -158,6 +156,8 @@ pub use qos2_store::{
 };
 #[cfg(feature = "native")]
 pub use query_coordinator::{QueryCoordinator, QueryResult};
+#[cfg(feature = "native")]
+pub use quic_transport::{LocalPublishRequest, QuicDirectTransport};
 #[cfg(feature = "native")]
 pub use quorum::{PendingWrites, QuorumResult, QuorumTracker};
 #[cfg(feature = "native")]

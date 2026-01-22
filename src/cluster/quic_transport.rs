@@ -115,8 +115,9 @@ impl QuicDirectTransport {
     ) -> Result<(), TransportError> {
         let server_config = build_server_config(cert_path, key_path)?;
 
-        let endpoint = Endpoint::server(server_config, addr)
-            .map_err(|e| TransportError::SendFailed(format!("failed to bind QUIC endpoint: {e}")))?;
+        let endpoint = Endpoint::server(server_config, addr).map_err(|e| {
+            TransportError::SendFailed(format!("failed to bind QUIC endpoint: {e}"))
+        })?;
 
         info!(addr = %addr, node = self.node_id.get(), "QUIC direct transport bound");
 
@@ -476,10 +477,7 @@ async fn handle_incoming_connection(
     let peer_node = NodeId::validated(peer_node_id)
         .ok_or_else(|| TransportError::SendFailed("invalid peer node ID".to_string()))?;
 
-    info!(
-        peer = peer_node.get(),
-        "accepted incoming QUIC connection"
-    );
+    info!(peer = peer_node.get(), "accepted incoming QUIC connection");
 
     {
         let peer_conn = PeerConnection {
@@ -716,10 +714,9 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     let key_file = std::fs::File::open(key_path)
         .map_err(|e| TransportError::SendFailed(format!("failed to open key file: {e}")))?;
 
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(cert_file))
-            .filter_map(Result::ok)
-            .collect();
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
+        .filter_map(Result::ok)
+        .collect();
 
     if certs.is_empty() {
         return Err(TransportError::SendFailed(
@@ -729,7 +726,9 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
 
     let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
         .map_err(|e| TransportError::SendFailed(format!("failed to parse key file: {e}")))?
-        .ok_or_else(|| TransportError::SendFailed("no private key found in key file".to_string()))?;
+        .ok_or_else(|| {
+            TransportError::SendFailed("no private key found in key file".to_string())
+        })?;
 
     let server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -737,8 +736,9 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
         .map_err(|e| TransportError::SendFailed(format!("failed to build TLS config: {e}")))?;
 
     let server_config = ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)
-            .map_err(|e| TransportError::SendFailed(format!("failed to create QUIC config: {e}")))?,
+        quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).map_err(|e| {
+            TransportError::SendFailed(format!("failed to create QUIC config: {e}"))
+        })?,
     ));
 
     Ok(server_config)

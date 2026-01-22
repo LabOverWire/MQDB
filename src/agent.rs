@@ -18,7 +18,9 @@ const BROKER_MAX_CLIENTS: usize = 10_000;
 const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
 const SESSION_EXPIRY_SECS: u64 = 3600;
 
-pub use crate::protocol::{build_request, parse_admin_topic, parse_db_topic, AdminOperation, DbOperation};
+pub use crate::protocol::{
+    AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic,
+};
 
 pub struct MqdbAgent {
     db: Arc<Database>,
@@ -687,4 +689,3 @@ fn is_valid_backup_name(name: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
-
