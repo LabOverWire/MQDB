@@ -21,8 +21,8 @@
             color: white;
         }
         .idb-inspector {
-            background: #1a1a2e;
-            border: 1px solid #333;
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
             border-radius: 4px;
             padding: 15px;
             margin-top: 10px;
@@ -33,17 +33,21 @@
             font-size: 12px;
             max-height: 300px;
             overflow-y: auto;
+            color: #1e293b;
         }
         .persistence-demo {
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            background: linear-gradient(135deg, #f0f4f8 0%, #e2e8f0 100%);
             border: 2px solid #4a90d9;
             padding: 20px;
             border-radius: 8px;
             margin-bottom: 20px;
         }
         .persistence-demo h3 {
-            color: #4a90d9;
+            color: #2563eb;
             margin-top: 0;
+        }
+        .persistence-demo p {
+            color: #334155;
         }
         .reload-btn {
             background: #e94560;
@@ -53,7 +57,7 @@
         .counter-display {
             font-size: 48px;
             font-weight: bold;
-            color: #4a90d9;
+            color: #1d4ed8;
             text-align: center;
             padding: 20px;
         }
@@ -159,7 +163,9 @@
 
         async function main() {
             await init();
-            await initDatabase(true);
+            const savedMode = localStorage.getItem('mqdb-storage-mode');
+            const usePersistent = savedMode !== 'memory';
+            await initDatabase(usePersistent);
             await loadCounter();
             setupEventListeners();
             refreshList();
@@ -167,6 +173,7 @@
 
         async function initDatabase(persistent) {
             isPersistent = persistent;
+            localStorage.setItem('mqdb-storage-mode', persistent ? 'persistent' : 'memory');
             const dbName = document.getElementById('dbName').value;
 
             if (persistent) {
@@ -238,7 +245,7 @@
             document.getElementById('incrementBtn').onclick = () => updateCounter(1);
             document.getElementById('decrementBtn').onclick = () => updateCounter(-1);
             document.getElementById('resetBtn').onclick = resetCounter;
-            document.getElementById('memoryBtn').onclick = () => initDatabase(false).then(refreshList);
+            document.getElementById('memoryBtn').onclick = () => initDatabase(false).then(loadCounter).then(refreshList);
             document.getElementById('persistentBtn').onclick = () => initDatabase(true).then(loadCounter).then(refreshList);
             document.getElementById('switchDbBtn').onclick = () => initDatabase(true).then(loadCounter).then(refreshList);
             document.getElementById('runAllTests').onclick = runAllTests;
