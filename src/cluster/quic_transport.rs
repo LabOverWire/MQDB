@@ -25,10 +25,12 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 struct PeerConnection {
-    #[allow(dead_code)]
-    connection: Connection,
+    _connection: Connection,
     send_stream: tokio::sync::Mutex<SendStream>,
 }
+
+const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
 pub struct LocalPublishRequest {
     pub topic: String,
@@ -80,8 +82,8 @@ impl Clone for QuicDirectTransport {
 impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
-        let (inbox_tx, inbox_rx) = flume::unbounded();
-        let (local_publish_tx, local_publish_rx) = flume::unbounded();
+        let (inbox_tx, inbox_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
+        let (local_publish_tx, local_publish_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
 
         Self {
             node_id,
@@ -151,7 +153,7 @@ impl QuicDirectTransport {
             .as_ref()
             .ok_or(TransportError::NotConnected)?;
 
-        let client_config = build_client_config_insecure();
+        let client_config = build_client_config_insecure()?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -180,7 +182,7 @@ impl QuicDirectTransport {
                 .map_err(|e| TransportError::SendFailed(format!("failed to send header: {e}")))?;
 
             let peer_conn = PeerConnection {
-                connection: connection.clone(),
+                _connection: connection.clone(),
                 send_stream: stream,
             };
 
@@ -481,7 +483,7 @@ async fn handle_incoming_connection(
 
     {
         let peer_conn = PeerConnection {
-            connection: connection.clone(),
+            _connection: connection.clone(),
             send_stream: tokio::sync::Mutex::new(send_stream),
         };
         peers.write().await.insert(peer_node, peer_conn);
@@ -508,7 +510,7 @@ async fn receiver_task(
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len > 10 * 1024 * 1024 {
+        if msg_len > MAX_MESSAGE_SIZE {
             error!(peer = peer_node.get(), len = msg_len, "message too large");
             break;
         }
@@ -744,16 +746,17 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     Ok(server_config)
 }
 
-fn build_client_config_insecure() -> quinn::ClientConfig {
+fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError> {
     let crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
 
-    quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-            .expect("valid rustls client config"),
-    ))
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+        TransportError::SendFailed(format!("failed to create QUIC client config: {e}"))
+    })?;
+
+    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
 #[derive(Debug)]
@@ -841,5 +844,53 @@ mod tests {
 
         let parsed = parse_message(&bytes, node1);
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn new_transport_creates_bounded_channels() {
+        let node1 = NodeId::validated(1).unwrap();
+        let transport = QuicDirectTransport::new(node1);
+
+        assert_eq!(transport.local_node(), node1);
+        assert!(!transport.inbox_rx.is_disconnected());
+        assert!(!transport.local_publish_rx.is_disconnected());
+        assert_eq!(transport.inbox_rx.capacity(), Some(INBOX_CHANNEL_CAPACITY));
+    }
+
+    #[test]
+    fn parse_rejects_short_payload() {
+        let node1 = NodeId::validated(1).unwrap();
+        let result = parse_message(&[0u8, 1u8], node1);
+        assert!(result.is_none());
+
+        let result = parse_message(&[], node1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_invalid_node_id() {
+        let node1 = NodeId::validated(1).unwrap();
+        let payload = [0u8, 0, 0];
+        let result = parse_message(&payload, node1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_unknown_message_type() {
+        let node1 = NodeId::validated(1).unwrap();
+        let payload = [0u8, 2, 255, 0, 0, 0, 0];
+        let result = parse_message(&payload, node1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn max_message_size_constant_is_10mb() {
+        assert_eq!(MAX_MESSAGE_SIZE, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn inbox_channel_capacity_constant_is_reasonable() {
+        const _: () = assert!(INBOX_CHANNEL_CAPACITY >= 1024);
+        const _: () = assert!(INBOX_CHANNEL_CAPACITY <= 65536);
     }
 }

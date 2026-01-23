@@ -477,7 +477,7 @@ impl ClusteredAgent {
         self.bind_address.port() + self.cluster_port_offset
     }
 
-    fn create_bridge_configs(&self) -> Vec<BridgeConfig> {
+    fn create_bridge_configs(&self) -> Result<Vec<BridgeConfig>, std::net::AddrParseError> {
         let direction = if self.bridge_out_only {
             BridgeDirection::Out
         } else {
@@ -487,8 +487,7 @@ impl ClusteredAgent {
         self.peers
             .iter()
             .map(|peer| {
-                let peer_addr: SocketAddr =
-                    peer.address.parse().expect("peer address should be valid");
+                let peer_addr: SocketAddr = peer.address.parse()?;
                 let cluster_addr = format!(
                     "{}:{}",
                     peer_addr.ip(),
@@ -520,16 +519,16 @@ impl ClusteredAgent {
                     }
                 }
 
-                config
+                Ok(config)
             })
             .collect()
     }
 
     /// # Errors
-    /// Returns an error if broker startup or transport connection fails.
+    /// Returns an error if broker startup, transport connection, or address parsing fails.
     ///
     /// # Panics
-    /// Panics if the cluster listener address cannot be parsed (should never happen with valid bind address).
+    /// Panics if `run()` is called more than once (internal fields moved on first call).
     #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let event_handler = Arc::new(ClusterEventHandler::new(
@@ -560,7 +559,7 @@ impl ClusteredAgent {
                     "created dedicated bridge executor"
                 );
             }
-            let configs = self.create_bridge_configs();
+            let configs = self.create_bridge_configs()?;
             let use_external = self.bridge_executor.is_some() && !configs.is_empty();
             (configs, use_external)
         };
@@ -626,7 +625,7 @@ impl ClusteredAgent {
         let cluster_addr: SocketAddr =
             format!("{}:{}", self.bind_address.ip(), self.cluster_port())
                 .parse()
-                .expect("valid cluster address");
+                .map_err(|e| format!("invalid cluster address: {e}"))?;
 
         if !self.use_direct_quic {
             let cluster_listener = if let (Some(cert_file), Some(key_file)) =
@@ -705,11 +704,13 @@ impl ClusteredAgent {
         };
 
         let admin_client = if self.use_direct_quic {
-            let quic_transport = transport.as_quic().expect("expected QUIC transport");
+            let quic_transport = transport
+                .as_quic()
+                .ok_or("expected QUIC transport but found MQTT transport")?;
             let cluster_addr: SocketAddr =
                 format!("{}:{}", self.bind_address.ip(), self.cluster_port())
                     .parse()
-                    .expect("valid cluster address");
+                    .map_err(|e| format!("invalid cluster address: {e}"))?;
 
             let (cert_file, key_file) = match (&self.quic_cert_file, &self.quic_key_file) {
                 (Some(c), Some(k)) => (c.clone(), k.clone()),
@@ -731,13 +732,19 @@ impl ClusteredAgent {
                             continue;
                         }
                     };
-                    let peer_cluster_addr: SocketAddr = format!(
+                    let peer_cluster_addr: SocketAddr = match format!(
                         "{}:{}",
                         peer_addr.ip(),
                         peer_addr.port() + self.cluster_port_offset
                     )
                     .parse()
-                    .expect("valid peer cluster address");
+                    {
+                        Ok(addr) => addr,
+                        Err(e) => {
+                            warn!(peer = peer_node_id.get(), error = %e, "invalid peer cluster address");
+                            continue;
+                        }
+                    };
                     if let Err(e) = quic_transport
                         .connect_to_peer(peer_node_id, peer_cluster_addr)
                         .await
@@ -892,12 +899,9 @@ impl ClusteredAgent {
 
         let rx_local_publish = if self.use_direct_quic {
             let ctrl = self.controller.read().await;
-            Some(
-                ctrl.transport()
-                    .as_quic()
-                    .expect("expected QUIC")
-                    .local_publish_rx(),
-            )
+            ctrl.transport()
+                .as_quic()
+                .map(QuicDirectTransport::local_publish_rx)
         } else {
             None
         };
