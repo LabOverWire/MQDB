@@ -7,6 +7,7 @@ pub enum ReplicaRole {
     None,
     Primary,
     Replica,
+    AwaitingSnapshot,
 }
 
 #[derive(Debug)]
@@ -53,6 +54,11 @@ impl ReplicaState {
         self.sequence
     }
 
+    pub fn set_sequence(&mut self, seq: u64) {
+        self.sequence = seq;
+        self.pending_writes.clear();
+    }
+
     #[must_use]
     pub fn role(&self) -> ReplicaRole {
         self.role
@@ -76,13 +82,20 @@ impl ReplicaState {
         self.pending_writes.clear();
     }
 
+    pub fn become_awaiting_snapshot(&mut self, epoch: Epoch) {
+        self.role = ReplicaRole::AwaitingSnapshot;
+        self.epoch = epoch;
+        self.sequence = 0;
+        self.pending_writes.clear();
+    }
+
     pub fn step_down(&mut self) {
         self.role = ReplicaRole::None;
         self.pending_writes.clear();
     }
 
     pub fn handle_write(&mut self, write: &ReplicationWrite) -> ReplicationAck {
-        if self.role == ReplicaRole::None {
+        if self.role == ReplicaRole::None || self.role == ReplicaRole::AwaitingSnapshot {
             return ReplicationAck::not_replica(self.partition, self.node_id);
         }
 

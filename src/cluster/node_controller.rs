@@ -87,6 +87,7 @@ pub struct NodeController<T: ClusterTransport> {
     dead_nodes_for_session_update: VecDeque<NodeId>,
     migration_manager: MigrationManager,
     pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
+    requested_snapshots: HashSet<PartitionId>,
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     draining: bool,
     query_coordinator: QueryCoordinator,
@@ -152,6 +153,7 @@ impl<T: ClusterTransport> NodeController<T> {
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             pending_snapshots: HashMap::new(),
+            requested_snapshots: HashSet::new(),
             outgoing_snapshots: HashMap::new(),
             draining: false,
             query_coordinator: QueryCoordinator::new(node_id),
@@ -254,6 +256,29 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
+    }
+
+    pub async fn become_replica_with_snapshot(
+        &mut self,
+        partition: PartitionId,
+        epoch: Epoch,
+        primary: NodeId,
+    ) {
+        let state = self
+            .replicas
+            .entry(partition.get())
+            .or_insert_with(|| ReplicaState::new(partition, self.node_id));
+
+        state.become_awaiting_snapshot(epoch);
+
+        tracing::info!(
+            ?partition,
+            epoch = epoch.get(),
+            source = primary.get(),
+            "becoming replica, requesting initial snapshot"
+        );
+
+        self.request_snapshot(partition, primary).await;
     }
 
     pub fn step_down(&mut self, partition: PartitionId) {
@@ -381,12 +406,15 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             };
 
-            tracing::debug!(
+            tracing::info!(
                 ?partition,
                 from_seq,
                 to_seq,
                 ?primary,
-                "initiating catchup request as replica"
+                current_seq = state.sequence(),
+                epoch = state.epoch().get(),
+                pending_writes = state.pending_count(),
+                "requesting catchup"
             );
 
             let req = CatchupRequest::create(partition, from_seq, to_seq, self.node_id);
@@ -396,11 +424,51 @@ impl<T: ClusterTransport> NodeController<T> {
 
             state.mark_catchup_requested(now);
         }
+
+        self.collect_awaiting_snapshot_requests(output);
+    }
+
+    fn collect_awaiting_snapshot_requests(&mut self, output: &mut TickOutput) {
+        for (&partition_id, state) in &self.replicas {
+            if state.role() != ReplicaRole::AwaitingSnapshot {
+                continue;
+            }
+
+            let Some(partition) = PartitionId::new(partition_id) else {
+                continue;
+            };
+
+            if self.requested_snapshots.contains(&partition)
+                || self.pending_snapshots.contains_key(&partition)
+            {
+                continue;
+            }
+
+            let Some(primary) = self.partition_map.get(partition).primary else {
+                continue;
+            };
+
+            if primary == self.node_id {
+                continue;
+            }
+
+            tracing::info!(
+                ?partition,
+                ?primary,
+                "retrying snapshot request for awaiting replica"
+            );
+
+            self.requested_snapshots.insert(partition);
+            let req = SnapshotRequest::create(partition, self.node_id);
+            output
+                .catchup_requests
+                .push((primary, ClusterMessage::SnapshotRequest(req)));
+        }
     }
 
     fn handle_node_death(&mut self, dead_node: NodeId) {
         tracing::warn!(?dead_node, "node death detected");
-        let _ = self.tx_raft_events.send(RaftEvent::NodeDead(dead_node));
+        let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
 
         for partition in super::PartitionId::all() {
@@ -592,7 +660,19 @@ impl<T: ClusterTransport> NodeController<T> {
                     } else if NodeId::validated(update.replica1) == Some(self.node_id)
                         || NodeId::validated(update.replica2) == Some(self.node_id)
                     {
-                        self.become_replica(partition, epoch, 0);
+                        let dominated = self
+                            .replicas
+                            .get(&partition.get())
+                            .is_some_and(|s| {
+                                matches!(
+                                    s.role(),
+                                    ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
+                                ) && s.epoch() >= epoch
+                            });
+                        if !dominated {
+                            self.become_replica_with_snapshot(partition, epoch, primary)
+                                .await;
+                        }
                     } else {
                         self.step_down(partition);
                     }
@@ -600,7 +680,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.partition_map.apply_update(update);
                 self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self.tx_raft_events.send(RaftEvent::ExternalUpdate(*update));
+                let _ = self.tx_raft_events.try_send(RaftEvent::ExternalUpdate(*update));
                 tracing::info!(
                     partition = update.partition,
                     primary = update.primary,
@@ -680,10 +760,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 tracing::info!(?node_id, "received drain notification");
                 let _ = self
                     .tx_raft_events
-                    .send(RaftEvent::DrainNotification(node_id));
+                    .try_send(RaftEvent::DrainNotification(node_id));
             }
             ClusterMessage::RequestVote(req) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::RequestVote {
+                let _ = self.tx_raft_messages.try_send(RaftMessage::RequestVote {
                     from: msg.from,
                     request: req,
                 });
@@ -691,13 +771,13 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::RequestVoteResponse(resp) => {
                 let _ = self
                     .tx_raft_messages
-                    .send(RaftMessage::RequestVoteResponse {
+                    .try_send(RaftMessage::RequestVoteResponse {
                         from: msg.from,
                         response: resp,
                     });
             }
             ClusterMessage::AppendEntries(req) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::AppendEntries {
+                let _ = self.tx_raft_messages.try_send(RaftMessage::AppendEntries {
                     from: msg.from,
                     request: req,
                 });
@@ -705,7 +785,7 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::AppendEntriesResponse(resp) => {
                 let _ = self
                     .tx_raft_messages
-                    .send(RaftMessage::AppendEntriesResponse {
+                    .try_send(RaftMessage::AppendEntriesResponse {
                         from: msg.from,
                         response: resp,
                     });
@@ -783,7 +863,19 @@ impl<T: ClusterTransport> NodeController<T> {
                     } else if NodeId::validated(update.replica1) == Some(self.node_id)
                         || NodeId::validated(update.replica2) == Some(self.node_id)
                     {
-                        self.become_replica(partition, epoch, 0);
+                        let dominated = self
+                            .replicas
+                            .get(&partition.get())
+                            .is_some_and(|s| {
+                                matches!(
+                                    s.role(),
+                                    ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
+                                ) && s.epoch() >= epoch
+                            });
+                        if !dominated {
+                            self.become_replica_with_snapshot(partition, epoch, primary)
+                                .await;
+                        }
                     } else {
                         self.step_down(partition);
                     }
@@ -791,7 +883,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.partition_map.apply_update(update);
                 self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self.tx_raft_events.send(RaftEvent::ExternalUpdate(*update));
+                let _ = self.tx_raft_events.try_send(RaftEvent::ExternalUpdate(*update));
                 tracing::info!(
                     partition = update.partition,
                     primary = update.primary,
@@ -975,7 +1067,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.write_log
                     .append(partition, write.sequence, write.clone());
                 let t_log = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-                tracing::info!(
+                tracing::trace!(
                     node = self.node_id.get(),
                     from = from.get(),
                     t_state,
@@ -1382,7 +1474,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         let t_send = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
-        tracing::info!(
+        tracing::trace!(
             node = self.node_id.get(),
             t_state,
             t_writelog,
@@ -1430,7 +1522,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let t_lookup = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             let _ = self.replicate_write_async(write, &replicas).await;
             let t_replicate = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-            tracing::info!(
+            tracing::trace!(
                 node = self.node_id.get(),
                 ?partition,
                 replica_count = replicas.len(),
@@ -1916,7 +2008,18 @@ impl<T: ClusterTransport> NodeController<T> {
         from_seq: u64,
         to_seq: u64,
     ) {
-        tracing::debug!(?partition, from_seq, to_seq, "processing catchup request");
+        let oldest_seq = self.write_log.oldest_sequence(partition);
+        let newest_seq = self.write_log.newest_sequence(partition);
+        tracing::info!(
+            ?partition,
+            from_seq,
+            to_seq,
+            ?oldest_seq,
+            ?newest_seq,
+            log_entries = self.write_log.entry_count(partition),
+            requester = from.get(),
+            "received catchup request"
+        );
 
         let writes = if self.write_log.can_catchup(partition, from_seq) {
             self.write_log.get_range(partition, from_seq, to_seq)
@@ -1929,6 +2032,14 @@ impl<T: ClusterTransport> NodeController<T> {
             Vec::new()
         };
 
+        tracing::info!(
+            ?partition,
+            write_count = writes.len(),
+            first_seq = writes.first().map(|w| w.sequence),
+            last_seq = writes.last().map(|w| w.sequence),
+            "sending catchup response"
+        );
+
         let resp = CatchupResponse::create(partition, self.node_id, writes);
         let _ = self
             .transport
@@ -1938,6 +2049,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     async fn handle_catchup_response(&mut self, resp: CatchupResponse) {
         let partition = resp.partition;
+        let responder = resp.responder_id;
         tracing::debug!(
             ?partition,
             write_count = resp.writes.len(),
@@ -1945,12 +2057,50 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         if resp.writes.is_empty() {
+            let needs_snapshot = self
+                .replicas
+                .get(&partition.get())
+                .is_some_and(ReplicaState::has_gap);
+            if needs_snapshot {
+                tracing::info!(
+                    ?partition,
+                    "catchup response empty but replica has gap - switching to awaiting snapshot"
+                );
+                if let Some(state) = self.replicas.get_mut(&partition.get()) {
+                    let epoch = state.epoch();
+                    state.become_awaiting_snapshot(epoch);
+                }
+                self.request_snapshot(partition, responder).await;
+            }
             return;
         }
 
         let mut writes: Vec<_> = resp.writes;
         writes.sort_by_key(|w| w.sequence);
 
+        let replica_seq = self
+            .replicas
+            .get(&partition.get())
+            .map_or(0, ReplicaState::sequence);
+        let min_write_seq = writes.first().map_or(0, |w| w.sequence);
+
+        if min_write_seq > replica_seq + 1000 {
+            tracing::info!(
+                ?partition,
+                replica_seq,
+                min_write_seq,
+                "catchup data too far ahead of replica - switching to awaiting snapshot"
+            );
+            if let Some(state) = self.replicas.get_mut(&partition.get()) {
+                let epoch = state.epoch();
+                state.become_awaiting_snapshot(epoch);
+            }
+            self.request_snapshot(partition, responder).await;
+            return;
+        }
+
+        let mut applied_count = 0;
+        let mut rejected_count = 0;
         for write in &writes {
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 let ack = state.handle_write(write);
@@ -1962,15 +2112,19 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                     self.write_log
                         .append(partition, write.sequence, write.clone());
+                    applied_count += 1;
                 } else {
-                    tracing::warn!(
-                        ?partition,
-                        seq = write.sequence,
-                        "catchup write rejected by replica state"
-                    );
+                    rejected_count += 1;
                 }
             }
         }
+
+        tracing::debug!(
+            ?partition,
+            applied_count,
+            rejected_count,
+            "catchup response processed"
+        );
     }
 
     async fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
@@ -2083,6 +2237,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(from, ClusterMessage::SnapshotComplete(complete))
                 .await;
             self.pending_snapshots.remove(&partition);
+            self.requested_snapshots.remove(&partition);
             return;
         }
 
@@ -2094,6 +2249,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .and_then(SnapshotBuilder::assemble)
             else {
                 tracing::error!(?partition, "failed to assemble snapshot");
+                self.requested_snapshots.remove(&partition);
                 let complete = SnapshotComplete::failed(partition);
                 let _ = self
                     .transport
@@ -2118,6 +2274,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         tracing::debug!(?partition, ?e, "no active migration for snapshot");
                     }
 
+                    if let Some(state) = self.replicas.get_mut(&partition.get()) {
+                        let current_epoch = state.epoch();
+                        state.become_replica(current_epoch, sequence);
+                        tracing::info!(
+                            ?partition,
+                            sequence,
+                            "replica now active after snapshot import"
+                        );
+                    }
+
+                    self.requested_snapshots.remove(&partition);
+
                     let complete = SnapshotComplete::ok(partition, sequence);
                     let _ = self
                         .transport
@@ -2126,6 +2294,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
+                    self.requested_snapshots.remove(&partition);
                     let complete = SnapshotComplete::failed(partition);
                     let _ = self
                         .transport
@@ -2167,7 +2336,15 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub async fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
+        if self.requested_snapshots.contains(&partition)
+            || self.pending_snapshots.contains_key(&partition)
+        {
+            tracing::debug!(?partition, "snapshot already requested or pending");
+            return;
+        }
+
         tracing::info!(?partition, source = from.get(), "requesting snapshot");
+        self.requested_snapshots.insert(partition);
 
         let request = SnapshotRequest::create(partition, self.node_id);
         let _ = self
