@@ -2050,6 +2050,19 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn handle_catchup_response(&mut self, resp: CatchupResponse) {
         let partition = resp.partition;
         let responder = resp.responder_id;
+
+        if self
+            .replicas
+            .get(&partition.get())
+            .is_some_and(|s| s.role() == ReplicaRole::AwaitingSnapshot)
+        {
+            tracing::debug!(
+                ?partition,
+                "ignoring catchup response - replica awaiting snapshot"
+            );
+            return;
+        }
+
         tracing::debug!(
             ?partition,
             write_count = resp.writes.len(),
