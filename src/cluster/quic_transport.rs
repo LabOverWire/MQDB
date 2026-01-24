@@ -21,8 +21,11 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
+
+const SEND_TIMEOUT_MS: u64 = 5000;
 
 struct PeerConnection {
     _connection: Connection,
@@ -30,7 +33,6 @@ struct PeerConnection {
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
-const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
 pub struct LocalPublishRequest {
     pub topic: String,
@@ -51,6 +53,7 @@ pub struct QuicDirectTransport {
     server_addr: Arc<RwLock<Option<SocketAddr>>>,
     local_publish_tx: flume::Sender<LocalPublishRequest>,
     local_publish_rx: flume::Receiver<LocalPublishRequest>,
+    insecure: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for QuicDirectTransport {
@@ -75,6 +78,7 @@ impl Clone for QuicDirectTransport {
             server_addr: self.server_addr.clone(),
             local_publish_tx: self.local_publish_tx.clone(),
             local_publish_rx: self.local_publish_rx.clone(),
+            insecure: self.insecure.clone(),
         }
     }
 }
@@ -82,8 +86,8 @@ impl Clone for QuicDirectTransport {
 impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
-        let (inbox_tx, inbox_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
-        let (local_publish_tx, local_publish_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
+        let (inbox_tx, inbox_rx) = flume::unbounded();
+        let (local_publish_tx, local_publish_rx) = flume::unbounded();
 
         Self {
             node_id,
@@ -97,6 +101,16 @@ impl QuicDirectTransport {
             server_addr: Arc::new(RwLock::new(None)),
             local_publish_tx,
             local_publish_rx,
+            insecure: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_insecure(&self, insecure: bool) {
+        self.insecure.store(insecure, Ordering::SeqCst);
+        if insecure {
+            warn!(
+                "QUIC transport configured with insecure TLS - certificates will NOT be verified"
+            );
         }
     }
 
@@ -153,7 +167,11 @@ impl QuicDirectTransport {
             .as_ref()
             .ok_or(TransportError::NotConnected)?;
 
-        let client_config = build_client_config_insecure()?;
+        let client_config = if self.insecure.load(Ordering::SeqCst) {
+            build_client_config_insecure()?
+        } else {
+            build_client_config_secure()?
+        };
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -164,6 +182,7 @@ impl QuicDirectTransport {
         info!(
             peer = peer_id.get(),
             addr = %peer_addr,
+            insecure = self.insecure.load(Ordering::SeqCst),
             "connected to peer via QUIC"
         );
 
@@ -326,13 +345,17 @@ impl QuicDirectTransport {
             .ok_or(TransportError::NodeNotFound(peer_id))?;
 
         let mut stream = peer.send_stream.lock().await;
-        stream
-            .write_all(&len_prefix)
+
+        let timeout = Duration::from_millis(SEND_TIMEOUT_MS);
+
+        tokio::time::timeout(timeout, stream.write_all(&len_prefix))
             .await
+            .map_err(|_| TransportError::SendFailed("send timeout (length prefix)".to_string()))?
             .map_err(|e| TransportError::SendFailed(format!("failed to write length: {e}")))?;
-        stream
-            .write_all(&payload)
+
+        tokio::time::timeout(timeout, stream.write_all(&payload))
             .await
+            .map_err(|_| TransportError::SendFailed("send timeout (payload)".to_string()))?
             .map_err(|e| TransportError::SendFailed(format!("failed to write payload: {e}")))?;
 
         trace!(
@@ -526,6 +549,8 @@ async fn receiver_task(
             notify.notify_one();
         }
     }
+
+    debug!(peer = peer_node.get(), "receiver task ended");
 }
 
 #[allow(clippy::too_many_lines)]
@@ -746,6 +771,37 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     Ok(server_config)
 }
 
+fn build_client_config_secure() -> Result<quinn::ClientConfig, TransportError> {
+    let mut root_store = rustls::RootCertStore::empty();
+
+    let cert_result = rustls_native_certs::load_native_certs();
+    for err in &cert_result.errors {
+        debug!(error = %err, "error loading native certificate");
+    }
+    for cert in cert_result.certs {
+        if let Err(e) = root_store.add(cert) {
+            debug!(error = %e, "failed to add certificate to root store");
+        }
+    }
+
+    if root_store.is_empty() {
+        return Err(TransportError::SendFailed(
+            "no trusted root certificates found - use --quic-insecure for self-signed certs"
+                .to_string(),
+        ));
+    }
+
+    let crypto = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+        TransportError::SendFailed(format!("failed to create QUIC client config: {e}"))
+    })?;
+
+    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
+}
+
 fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError> {
     let crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -847,14 +903,14 @@ mod tests {
     }
 
     #[test]
-    fn new_transport_creates_bounded_channels() {
+    fn new_transport_creates_channels() {
         let node1 = NodeId::validated(1).unwrap();
         let transport = QuicDirectTransport::new(node1);
 
         assert_eq!(transport.local_node(), node1);
         assert!(!transport.inbox_rx.is_disconnected());
         assert!(!transport.local_publish_rx.is_disconnected());
-        assert_eq!(transport.inbox_rx.capacity(), Some(INBOX_CHANNEL_CAPACITY));
+        assert_eq!(transport.inbox_rx.capacity(), None);
     }
 
     #[test]
@@ -886,11 +942,5 @@ mod tests {
     #[test]
     fn max_message_size_constant_is_10mb() {
         assert_eq!(MAX_MESSAGE_SIZE, 10 * 1024 * 1024);
-    }
-
-    #[test]
-    fn inbox_channel_capacity_constant_is_reasonable() {
-        const _: () = assert!(INBOX_CHANNEL_CAPACITY >= 1024);
-        const _: () = assert!(INBOX_CHANNEL_CAPACITY <= 65536);
     }
 }
