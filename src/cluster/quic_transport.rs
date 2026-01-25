@@ -87,7 +87,7 @@ impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
         let (inbox_tx, inbox_rx) = flume::unbounded();
-        let (local_publish_tx, local_publish_rx) = flume::unbounded();
+        let (local_publish_tx, local_publish_rx) = flume::bounded(10_000);
 
         Self {
             node_id,
@@ -117,6 +117,18 @@ impl QuicDirectTransport {
     #[must_use]
     pub fn local_publish_rx(&self) -> flume::Receiver<LocalPublishRequest> {
         self.local_publish_rx.clone()
+    }
+
+    pub fn log_queue_stats(&self) {
+        let inbox_len = self.inbox_rx.len();
+        let publish_len = self.local_publish_rx.len();
+        if inbox_len > 100 || publish_len > 100 {
+            warn!(
+                inbox_len,
+                publish_len,
+                "quic transport queue backlog"
+            );
+        }
     }
 
     /// Bind the QUIC endpoint to the given address.
@@ -430,21 +442,27 @@ impl ClusterTransport for QuicDirectTransport {
     }
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = self.local_publish_tx.send(LocalPublishRequest {
-            topic,
-            payload,
-            qos,
-            retain: false,
-        });
+        let _ = self
+            .local_publish_tx
+            .send_async(LocalPublishRequest {
+                topic,
+                payload,
+                qos,
+                retain: false,
+            })
+            .await;
     }
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = self.local_publish_tx.send(LocalPublishRequest {
-            topic,
-            payload,
-            qos,
-            retain: true,
-        });
+        let _ = self
+            .local_publish_tx
+            .send_async(LocalPublishRequest {
+                topic,
+                payload,
+                qos,
+                retain: true,
+            })
+            .await;
     }
 }
 
@@ -911,6 +929,7 @@ mod tests {
         assert!(!transport.inbox_rx.is_disconnected());
         assert!(!transport.local_publish_rx.is_disconnected());
         assert_eq!(transport.inbox_rx.capacity(), None);
+        assert_eq!(transport.local_publish_rx.capacity(), Some(10_000));
     }
 
     #[test]
