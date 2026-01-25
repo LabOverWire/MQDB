@@ -87,7 +87,7 @@ impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
         let (inbox_tx, inbox_rx) = flume::unbounded();
-        let (local_publish_tx, local_publish_rx) = flume::bounded(10_000);
+        let (local_publish_tx, local_publish_rx) = flume::bounded(100_000);
 
         Self {
             node_id,
@@ -442,27 +442,25 @@ impl ClusterTransport for QuicDirectTransport {
     }
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = self
-            .local_publish_tx
-            .send_async(LocalPublishRequest {
-                topic,
-                payload,
-                qos,
-                retain: false,
-            })
-            .await;
+        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
+            topic: topic.clone(),
+            payload,
+            qos,
+            retain: false,
+        }) {
+            warn!(topic, "local_publish queue full, dropping message: {e}");
+        }
     }
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let _ = self
-            .local_publish_tx
-            .send_async(LocalPublishRequest {
-                topic,
-                payload,
-                qos,
-                retain: true,
-            })
-            .await;
+        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
+            topic: topic.clone(),
+            payload,
+            qos,
+            retain: true,
+        }) {
+            warn!(topic, "local_publish queue full, dropping retained message: {e}");
+        }
     }
 }
 
@@ -929,7 +927,7 @@ mod tests {
         assert!(!transport.inbox_rx.is_disconnected());
         assert!(!transport.local_publish_rx.is_disconnected());
         assert_eq!(transport.inbox_rx.capacity(), None);
-        assert_eq!(transport.local_publish_rx.capacity(), Some(10_000));
+        assert_eq!(transport.local_publish_rx.capacity(), Some(100_000));
     }
 
     #[test]
