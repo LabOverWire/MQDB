@@ -118,6 +118,7 @@ pub struct RaftState {
     current_term: u64,
     voted_for: Option<NodeId>,
     log: Vec<LogEntry>,
+    log_base_index: u64,
     commit_index: u64,
     last_applied: u64,
     role: RaftRole,
@@ -136,6 +137,7 @@ impl RaftState {
             current_term: 0,
             voted_for: None,
             log: Vec::new(),
+            log_base_index: 0,
             commit_index: 0,
             last_applied: 0,
             role: RaftRole::Follower,
@@ -154,11 +156,13 @@ impl RaftState {
         voted_for: Option<NodeId>,
         log: Vec<LogEntry>,
     ) -> Self {
+        let log_base_index = log.first().map_or(0, |e| e.index.saturating_sub(1));
         Self {
             node_id,
             current_term,
             voted_for,
             log,
+            log_base_index,
             commit_index: 0,
             last_applied: 0,
             role: RaftRole::Follower,
@@ -229,12 +233,21 @@ impl RaftState {
         self.log.last()
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    fn log_position(&self, index: u64) -> Option<usize> {
+        if index <= self.log_base_index {
+            return None;
+        }
+        Some((index - self.log_base_index - 1) as usize)
+    }
+
     #[must_use]
     pub fn log_term_at(&self, index: u64) -> Option<u64> {
         if index == 0 {
             return Some(0);
         }
-        self.log.iter().find(|e| e.index == index).map(|e| e.term)
+        let pos = self.log_position(index)?;
+        self.log.get(pos).filter(|e| e.index == index).map(|e| e.term)
     }
 
     pub fn add_peer(&mut self, peer: NodeId) {
@@ -338,7 +351,10 @@ impl RaftState {
     }
 
     pub fn append_entry(&mut self, entry: LogEntry) {
-        if let Some(pos) = self.log.iter().position(|e| e.index == entry.index) {
+        let Some(pos) = self.log_position(entry.index) else {
+            return;
+        };
+        if pos < self.log.len() {
             if self.log[pos].term != entry.term {
                 self.log.truncate(pos);
                 self.log.push(entry);
@@ -377,11 +393,13 @@ impl RaftState {
 
     #[must_use]
     pub fn entries_from(&self, start_index: u64) -> Vec<LogEntry> {
-        self.log
-            .iter()
-            .filter(|e| e.index >= start_index)
-            .cloned()
-            .collect()
+        let Some(pos) = self.log_position(start_index) else {
+            return self.log.clone();
+        };
+        if pos >= self.log.len() {
+            return Vec::new();
+        }
+        self.log[pos..].to_vec()
     }
 
     #[must_use]
@@ -449,31 +467,38 @@ impl RaftState {
 
     #[must_use]
     pub fn pending_commands(&mut self) -> Vec<RaftCommand> {
-        let start = std::time::Instant::now();
-        let pending_count = self.commit_index.saturating_sub(self.last_applied);
-
         let mut commands = Vec::new();
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
-            if let Some(entry) = self.log.iter().find(|e| e.index == self.last_applied)
+            let Some(pos) = self.log_position(self.last_applied) else {
+                continue;
+            };
+            if let Some(entry) = self.log.get(pos)
+                && entry.index == self.last_applied
                 && let Some(cmd) = entry.command()
             {
                 commands.push(cmd);
             }
         }
-
-        let elapsed = start.elapsed();
-        if elapsed.as_micros() > 100 {
-            tracing::warn!(
-                elapsed_us = elapsed.as_micros(),
-                log_len = self.log.len(),
-                pending_count = pending_count,
-                commands_found = commands.len(),
-                "slow pending_commands"
-            );
-        }
-
         commands
+    }
+
+    pub fn compact_log(&mut self, keep_entries: usize) {
+        if self.log.len() <= keep_entries {
+            return;
+        }
+        let safe_index = self.last_applied.min(self.commit_index);
+        let Some(safe_pos) = self.log_position(safe_index) else {
+            return;
+        };
+        let remove_count = safe_pos.saturating_sub(keep_entries);
+        if remove_count == 0 {
+            return;
+        }
+        self.log.drain(..remove_count);
+        if let Some(first) = self.log.first() {
+            self.log_base_index = first.index - 1;
+        }
     }
 
     #[must_use]

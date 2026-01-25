@@ -270,11 +270,13 @@ impl RaftNode {
     }
 
     fn apply_committed(&mut self) -> Vec<RaftOutput> {
-        self.state
+        let commands: Vec<_> = self.state
             .pending_commands()
             .into_iter()
             .map(RaftOutput::ApplyCommand)
-            .collect()
+            .collect();
+        self.state.compact_log(1000);
+        commands
     }
 
     pub fn handle_request_vote(
