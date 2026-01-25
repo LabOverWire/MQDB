@@ -31,6 +31,10 @@ const SESSION_EXPIRY_SECS: u64 = 3600;
 const CLEANUP_INTERVAL_SECS: u64 = 3600;
 const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
 
+const RAFT_CHANNEL_CAPACITY: usize = 4096;
+const MAIN_QUEUE_CAPACITY: usize = 4096;
+const BATCH_QUEUE_CAPACITY: usize = 16;
+
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
     pub node_id: u16,
@@ -81,7 +85,7 @@ impl ClusterConfig {
             password_file: None,
             acl_file: None,
             use_quic: true,
-            quic_insecure: true,
+            quic_insecure: false,
             quic_cert_file: None,
             quic_key_file: None,
             bridge_out_only: false,
@@ -188,6 +192,12 @@ impl ClusterTransportKind {
         match self {
             Self::Mqtt(_) => None,
             Self::Quic(t) => Some(t),
+        }
+    }
+
+    pub fn log_queue_stats(&self) {
+        if let Self::Quic(t) = self {
+            t.log_queue_stats();
         }
     }
 }
@@ -343,17 +353,18 @@ impl ClusteredAgent {
             None
         };
 
-        let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
-        let (tx_raft_events, rx_raft_events) = flume::unbounded();
+        let (tx_raft_messages, rx_raft_messages) = flume::bounded(RAFT_CHANNEL_CAPACITY);
+        let (tx_raft_events, rx_raft_events) = flume::bounded(RAFT_CHANNEL_CAPACITY);
         let tx_raft_events_clone = tx_raft_events.clone();
         let tx_raft_messages_for_processor = tx_raft_messages.clone();
         let tx_raft_events_for_processor = tx_raft_events.clone();
-        let (tx_raft_admin, rx_raft_admin) = flume::unbounded();
+        let (tx_raft_admin, rx_raft_admin) = flume::bounded(RAFT_CHANNEL_CAPACITY);
         let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
         let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
 
         let (transport, transport_inbox_rx) = if config.use_direct_quic {
             let quic_transport = QuicDirectTransport::new(node_id);
+            quic_transport.set_insecure(config.quic_insecure);
             let inbox_rx = quic_transport.inbox_rx();
             (ClusterTransportKind::Quic(quic_transport), inbox_rx)
         } else {
@@ -412,8 +423,8 @@ impl ClusteredAgent {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let (tx_tick, rx_tick) = flume::bounded(1);
-        let (tx_main_queue, rx_main_queue) = flume::bounded(4096);
-        let (tx_batch, rx_batch) = flume::bounded(16);
+        let (tx_main_queue, rx_main_queue) = flume::bounded(MAIN_QUEUE_CAPACITY);
+        let (tx_batch, rx_batch) = flume::bounded(BATCH_QUEUE_CAPACITY);
 
         let mut processor = MessageProcessor::new(
             node_id,
@@ -963,6 +974,7 @@ impl ClusteredAgent {
                             );
                         }
                     }
+                    ctrl.transport().log_queue_stats();
                 }
 
                 Ok(batch) = rx_batch.recv_async() => {
@@ -1120,6 +1132,7 @@ impl ClusteredAgent {
                         None => std::future::pending().await,
                     }
                 } => {
+                    const BATCH_SIZE: u32 = 64;
                     let options = mqtt5::PublishOptions {
                         qos: mqtt5::QoS::from(req.qos),
                         retain: req.retain,
@@ -1131,6 +1144,28 @@ impl ClusteredAgent {
                         options,
                     ).await {
                         warn!(error = %e, topic = %req.topic, "failed to publish local request");
+                    }
+
+                    if let Some(rx) = &rx_local_publish {
+                        let mut count = 1u32;
+                        while let Ok(req) = rx.try_recv() {
+                            let options = mqtt5::PublishOptions {
+                                qos: mqtt5::QoS::from(req.qos),
+                                retain: req.retain,
+                                ..Default::default()
+                            };
+                            if let Err(e) = admin_client.publish_with_options(
+                                &req.topic,
+                                req.payload,
+                                options,
+                            ).await {
+                                warn!(error = %e, topic = %req.topic, "failed to publish local request");
+                            }
+                            count += 1;
+                            if count.is_multiple_of(BATCH_SIZE) {
+                                tokio::task::yield_now().await;
+                            }
+                        }
                     }
                 }
                 _ = shutdown_rx.recv() => {
