@@ -85,7 +85,16 @@ impl MessageProcessor {
                 }
 
                 Ok(msg) = self.rx_inbox.recv_async() => {
+                    const BATCH_SIZE: u32 = 64;
                     self.process_message(msg);
+                    let mut count = 1u32;
+                    while let Ok(msg) = self.rx_inbox.try_recv() {
+                        self.process_message(msg);
+                        count += 1;
+                        if count.is_multiple_of(BATCH_SIZE) {
+                            tokio::task::yield_now().await;
+                        }
+                    }
                 }
             }
         }
@@ -105,7 +114,7 @@ impl MessageProcessor {
         batch.heartbeat_updates = std::mem::take(&mut self.pending_heartbeat_updates);
 
         for dead in &batch.dead_nodes {
-            let _ = self.tx_raft_events.send(RaftEvent::NodeDead(*dead));
+            let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(*dead));
         }
 
         batch
@@ -117,7 +126,7 @@ impl MessageProcessor {
                 self.heartbeat_manager
                     .receive_heartbeat(msg.from, hb, msg.received_at);
                 if self.heartbeat_manager.node_status(msg.from) == NodeStatus::Alive {
-                    let _ = self.tx_raft_events.send(RaftEvent::NodeAlive(msg.from));
+                    let _ = self.tx_raft_events.try_send(RaftEvent::NodeAlive(msg.from));
                 }
                 self.pending_heartbeat_updates.push(HeartbeatUpdate {
                     from: msg.from,
@@ -127,7 +136,7 @@ impl MessageProcessor {
             }
 
             ClusterMessage::RequestVote(req) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::RequestVote {
+                let _ = self.tx_raft_messages.try_send(RaftMessage::RequestVote {
                     from: msg.from,
                     request: *req,
                 });
@@ -135,13 +144,13 @@ impl MessageProcessor {
             ClusterMessage::RequestVoteResponse(resp) => {
                 let _ = self
                     .tx_raft_messages
-                    .send(RaftMessage::RequestVoteResponse {
+                    .try_send(RaftMessage::RequestVoteResponse {
                         from: msg.from,
                         response: *resp,
                     });
             }
             ClusterMessage::AppendEntries(req) => {
-                let _ = self.tx_raft_messages.send(RaftMessage::AppendEntries {
+                let _ = self.tx_raft_messages.try_send(RaftMessage::AppendEntries {
                     from: msg.from,
                     request: req.clone(),
                 });
@@ -149,7 +158,7 @@ impl MessageProcessor {
             ClusterMessage::AppendEntriesResponse(resp) => {
                 let _ = self
                     .tx_raft_messages
-                    .send(RaftMessage::AppendEntriesResponse {
+                    .try_send(RaftMessage::AppendEntriesResponse {
                         from: msg.from,
                         response: *resp,
                     });
