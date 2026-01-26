@@ -26,6 +26,7 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 const SEND_TIMEOUT_MS: u64 = 5000;
+const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
 struct PeerConnection {
     _connection: Connection,
@@ -86,7 +87,7 @@ impl Clone for QuicDirectTransport {
 impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
-        let (inbox_tx, inbox_rx) = flume::unbounded();
+        let (inbox_tx, inbox_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
         let (local_publish_tx, local_publish_rx) = flume::bounded(100_000);
 
         Self {
@@ -561,8 +562,11 @@ async fn receiver_task(
         }
 
         if let Some(msg) = parse_message(&buf, local_node) {
-            let _ = inbox_tx.send(msg);
-            notify.notify_one();
+            if let Err(e) = inbox_tx.try_send(msg) {
+                warn!(peer = peer_node.get(), "inbox queue full, dropping message: {e}");
+            } else {
+                notify.notify_one();
+            }
         }
     }
 
@@ -926,7 +930,7 @@ mod tests {
         assert_eq!(transport.local_node(), node1);
         assert!(!transport.inbox_rx.is_disconnected());
         assert!(!transport.local_publish_rx.is_disconnected());
-        assert_eq!(transport.inbox_rx.capacity(), None);
+        assert_eq!(transport.inbox_rx.capacity(), Some(INBOX_CHANNEL_CAPACITY));
         assert_eq!(transport.local_publish_rx.capacity(), Some(100_000));
     }
 
