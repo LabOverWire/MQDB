@@ -1,0 +1,20 @@
+# Raft Leader Flapping Scenario
+# This scenario explores a path where leader flapping could occur
+
+# Step 1: Node n1 becomes candidate (times out)
+step: state'["n1"] = "Candidate" /\ term'["n1"] = 1
+
+# Step 2: n1 sends RequestVote to n2
+step: \E msg \in network': msg.type = "RequestVoteReq" /\ msg.from = "n1" /\ msg.to = "n2"
+
+# Step 3: n2 grants vote to n1
+step: \E msg \in network': msg.type = "RequestVoteResp" /\ msg.from = "n2" /\ msg.granted = TRUE
+
+# Step 4: n1 receives vote and becomes leader
+step: state'["n1"] = "Leader"
+
+# Step 5: n2 times out and becomes candidate (potential flapping!)
+step: state'["n2"] = "Candidate" /\ term'["n2"] > term["n2"]
+
+# Step 6: n2's RequestVote causes n1 to step down
+step: state'["n1"] = "Follower"

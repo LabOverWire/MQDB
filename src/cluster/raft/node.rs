@@ -13,6 +13,7 @@ pub struct RaftConfig {
     pub election_timeout_min_ms: u64,
     pub election_timeout_max_ms: u64,
     pub heartbeat_interval_ms: u64,
+    pub startup_grace_period_ms: u64,
 }
 
 impl Default for RaftConfig {
@@ -21,6 +22,7 @@ impl Default for RaftConfig {
             election_timeout_min_ms: 3000,
             election_timeout_max_ms: 5000,
             heartbeat_interval_ms: 500,
+            startup_grace_period_ms: 10000,
         }
     }
 }
@@ -50,6 +52,7 @@ pub struct RaftNode {
     election_timeout: u64,
     last_election_time: u64,
     random_seed: u64,
+    startup_time: Option<u64>,
 }
 
 impl RaftNode {
@@ -64,6 +67,7 @@ impl RaftNode {
             election_timeout: timeout,
             last_election_time: 0,
             random_seed: u64::from(node_id.get()),
+            startup_time: None,
         }
     }
 
@@ -95,6 +99,7 @@ impl RaftNode {
             election_timeout: timeout,
             last_election_time: 0,
             random_seed: u64::from(node_id.get()),
+            startup_time: None,
         })
     }
 
@@ -166,6 +171,17 @@ impl RaftNode {
         self.election_timeout = self.config.election_timeout_min_ms + offset;
     }
 
+    fn can_start_election(&self, now_ms: u64) -> bool {
+        let has_peers = !self.state.peers().is_empty();
+        if has_peers {
+            return true;
+        }
+        let Some(startup) = self.startup_time else {
+            return false;
+        };
+        now_ms >= startup + self.config.startup_grace_period_ms
+    }
+
     fn persist_state(&self) {
         if let Some(ref storage) = self.storage {
             let _ = storage.persist_state(self.state.current_term(), self.state.voted_for());
@@ -194,11 +210,17 @@ impl RaftNode {
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
+        if self.startup_time.is_none() {
+            self.startup_time = Some(now_ms);
+        }
+
         let mut outputs = Vec::new();
 
         match self.state.role() {
             RaftRole::Follower | RaftRole::Candidate => {
-                if now_ms >= self.last_heartbeat_time + self.election_timeout {
+                if now_ms >= self.last_heartbeat_time + self.election_timeout
+                    && self.can_start_election(now_ms)
+                {
                     outputs.extend(self.start_election(now_ms));
                 }
             }
@@ -473,6 +495,7 @@ mod tests {
             election_timeout_min_ms: 150,
             election_timeout_max_ms: 300,
             heartbeat_interval_ms: 50,
+            startup_grace_period_ms: 0,
         }
     }
 
@@ -608,5 +631,79 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, RaftOutput::ApplyCommand(_)))
         );
+    }
+
+    #[test]
+    fn no_election_without_peers_during_grace_period() {
+        let config = RaftConfig {
+            election_timeout_min_ms: 100,
+            election_timeout_max_ms: 200,
+            heartbeat_interval_ms: 50,
+            startup_grace_period_ms: 5000,
+        };
+        let node_id = NodeId::validated(1).unwrap();
+        let mut node = RaftNode::create(node_id, config);
+
+        let outputs = node.tick(0);
+        assert!(outputs.is_empty());
+        assert_eq!(node.role(), RaftRole::Follower);
+
+        let outputs = node.tick(1000);
+        assert!(outputs.is_empty());
+        assert_eq!(node.role(), RaftRole::Follower);
+
+        let outputs = node.tick(3000);
+        assert!(outputs.is_empty());
+        assert_eq!(node.role(), RaftRole::Follower);
+    }
+
+    #[test]
+    fn election_allowed_after_grace_period_without_peers() {
+        let config = RaftConfig {
+            election_timeout_min_ms: 100,
+            election_timeout_max_ms: 200,
+            heartbeat_interval_ms: 50,
+            startup_grace_period_ms: 1000,
+        };
+        let node_id = NodeId::validated(1).unwrap();
+        let mut node = RaftNode::create(node_id, config);
+
+        node.tick(0);
+        assert_eq!(node.role(), RaftRole::Follower);
+
+        let outputs = node.tick(500);
+        assert!(outputs.is_empty());
+        assert_eq!(node.role(), RaftRole::Follower);
+
+        let outputs = node.tick(1500);
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::BecameLeader))
+        );
+        assert_eq!(node.role(), RaftRole::Leader);
+    }
+
+    #[test]
+    fn election_allowed_immediately_with_peers() {
+        let config = RaftConfig {
+            election_timeout_min_ms: 100,
+            election_timeout_max_ms: 200,
+            heartbeat_interval_ms: 50,
+            startup_grace_period_ms: 10000,
+        };
+        let node_id = NodeId::validated(1).unwrap();
+        let mut node = RaftNode::create(node_id, config);
+        node.add_peer(NodeId::validated(2).unwrap());
+
+        node.tick(0);
+
+        let outputs = node.tick(500);
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+        );
+        assert_eq!(node.role(), RaftRole::Candidate);
     }
 }

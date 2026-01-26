@@ -12,6 +12,7 @@ fn test_raft_config() -> RaftConfig {
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
         heartbeat_interval_ms: 50,
+        startup_grace_period_ms: 0,
     }
 }
 
