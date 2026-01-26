@@ -29,7 +29,13 @@ use crate::storage::StorageBackend;
 use bebytes::BeBytes;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::Instant;
 use tokio::sync::oneshot;
+
+static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static WRITE_REQUEST_SENT: AtomicU64 = AtomicU64::new(0);
+static WRITE_RECEIVED: AtomicU64 = AtomicU64::new(0);
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
 const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -91,7 +97,7 @@ pub struct NodeController<T: ClusterTransport> {
     outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     draining: bool,
     query_coordinator: QueryCoordinator,
-    synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashSet<String>>>>,
+    synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashMap<String, Instant>>>>,
     pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
@@ -169,7 +175,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub fn set_synced_retained_topics(
         &mut self,
-        topics: Arc<tokio::sync::RwLock<HashSet<String>>>,
+        topics: Arc<tokio::sync::RwLock<HashMap<String, Instant>>>,
     ) {
         self.synced_retained_topics = Some(topics);
     }
@@ -1113,6 +1119,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     async fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
+        WRITE_RECEIVED.fetch_add(1, AtomicOrdering::Relaxed);
         let partition = write.partition;
         let is_broadcast = write.entity == entity::TOPIC_INDEX
             || write.entity == entity::WILDCARDS
@@ -1511,6 +1518,19 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
+        let write_count = WRITE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        if write_count % 10000 == 0 {
+            let wr_sent = WRITE_REQUEST_SENT.load(AtomicOrdering::Relaxed);
+            let wr_recv = WRITE_RECEIVED.load(AtomicOrdering::Relaxed);
+            tracing::warn!(
+                node = self.node_id.get(),
+                writes = write_count,
+                wr_sent,
+                wr_recv,
+                entity = %write.entity,
+                "WRITE_COUNTER milestone"
+            );
+        }
         let start = std::time::Instant::now();
         let partition = write.partition;
 
@@ -1532,6 +1552,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 "write_or_forward: broadcasting to alive nodes"
             );
             for node in targets {
+                WRITE_REQUEST_SENT.fetch_add(1, AtomicOrdering::Relaxed);
                 let _ = self
                     .transport
                     .send(*node, ClusterMessage::WriteRequest(write.clone()))
@@ -1542,6 +1563,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if self.is_local_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
+            WRITE_REQUEST_SENT.fetch_add(replicas.len() as u64, AtomicOrdering::Relaxed);
             let t_lookup = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             let _ = self.replicate_write_async(write, &replicas).await;
             let t_replicate = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -3350,7 +3372,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let qos = msg.qos;
 
             if let Some(ref synced_topics) = self.synced_retained_topics {
-                synced_topics.write().await.insert(topic.clone());
+                synced_topics.write().await.insert(topic.clone(), Instant::now());
             }
 
             tracing::debug!(

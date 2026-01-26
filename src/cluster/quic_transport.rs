@@ -443,6 +443,10 @@ impl ClusterTransport for QuicDirectTransport {
     }
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let queue_len = self.local_publish_tx.len();
+        if queue_len > 1000 && queue_len % 1000 == 0 {
+            warn!(topic, queue_len, "local_publish queue growing");
+        }
         if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
             topic: topic.clone(),
             payload,
@@ -562,8 +566,27 @@ async fn receiver_task(
         }
 
         if let Some(msg) = parse_message(&buf, local_node) {
-            if let Err(e) = inbox_tx.try_send(msg) {
-                warn!(peer = peer_node.get(), "inbox queue full, dropping message: {e}");
+            if let Err(flume::TrySendError::Full(dropped)) = inbox_tx.try_send(msg) {
+                let msg_type = match &dropped.message {
+                    ClusterMessage::Heartbeat(_) => "Heartbeat",
+                    ClusterMessage::Write(_) => "Write",
+                    ClusterMessage::WriteRequest(_) => "WriteRequest",
+                    ClusterMessage::Ack(_) => "Ack",
+                    ClusterMessage::DeathNotice { .. } => "DeathNotice",
+                    ClusterMessage::DrainNotification { .. } => "DrainNotification",
+                    ClusterMessage::RequestVote(_) => "RequestVote",
+                    ClusterMessage::RequestVoteResponse(_) => "RequestVoteResponse",
+                    ClusterMessage::AppendEntries(_) => "AppendEntries",
+                    ClusterMessage::AppendEntriesResponse(_) => "AppendEntriesResponse",
+                    ClusterMessage::CatchupRequest(_) => "CatchupRequest",
+                    ClusterMessage::CatchupResponse(_) => "CatchupResponse",
+                    ClusterMessage::ForwardedPublish(_) => "ForwardedPublish",
+                    ClusterMessage::SnapshotRequest(_) => "SnapshotRequest",
+                    ClusterMessage::SnapshotChunk(_) => "SnapshotChunk",
+                    ClusterMessage::SnapshotComplete(_) => "SnapshotComplete",
+                    _ => "Other",
+                };
+                warn!(peer = peer_node.get(), msg_type, "inbox queue full, dropping message");
             } else {
                 notify.notify_one();
             }

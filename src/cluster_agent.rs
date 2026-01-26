@@ -30,6 +30,8 @@ const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
 const SESSION_EXPIRY_SECS: u64 = 3600;
 const CLEANUP_INTERVAL_SECS: u64 = 3600;
 const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
+const RETAINED_SYNC_CLEANUP_INTERVAL_SECS: u64 = 30;
+const RETAINED_SYNC_TTL_SECS: u64 = 5;
 
 const RAFT_CHANNEL_CAPACITY: usize = 4096;
 const MAIN_QUEUE_CAPACITY: usize = 4096;
@@ -546,10 +548,11 @@ impl ClusteredAgent {
             self.node_id,
             self.controller.clone(),
         ));
+        let synced_retained_topics = event_handler.synced_retained_topics();
 
         {
             let mut ctrl = self.controller.write().await;
-            ctrl.set_synced_retained_topics(event_handler.synced_retained_topics());
+            ctrl.set_synced_retained_topics(synced_retained_topics.clone());
         }
 
         let storage_config = StorageConfig {
@@ -899,6 +902,8 @@ impl ClusteredAgent {
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
+        let mut retained_sync_cleanup_interval =
+            interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         let tx_tick = self.tx_tick.take().expect("tx_tick already taken");
@@ -1121,6 +1126,16 @@ impl ClusteredAgent {
                             );
                         }
                         stores.subscriptions.mark_reconciliation(now);
+                    }
+                }
+                _ = retained_sync_cleanup_interval.tick() => {
+                    let ttl = std::time::Duration::from_secs(RETAINED_SYNC_TTL_SECS);
+                    let mut synced = synced_retained_topics.write().await;
+                    let before_len = synced.len();
+                    synced.retain(|_, insert_time| insert_time.elapsed() < ttl);
+                    let removed = before_len - synced.len();
+                    if removed > 0 {
+                        debug!(removed, remaining = synced.len(), "cleaned up stale retained sync entries");
                     }
                 }
                 Ok(req) = admin_rx.recv_async() => {

@@ -15,17 +15,25 @@ use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
     ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, trace, warn};
+
+static RETAINED_SET_TOTAL: AtomicU64 = AtomicU64::new(0);
+static RETAINED_SET_SKIPPED: AtomicU64 = AtomicU64::new(0);
+static RETAINED_SET_PROCESSED: AtomicU64 = AtomicU64::new(0);
+
+const RETAINED_SYNC_TTL: Duration = Duration::from_secs(5);
 
 pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     node_id: NodeId,
     controller: Arc<RwLock<NodeController<T>>>,
-    synced_retained_topics: Arc<RwLock<HashSet<String>>>,
+    synced_retained_topics: Arc<RwLock<HashMap<String, Instant>>>,
     db_handler: DbRequestHandler,
 }
 
@@ -34,13 +42,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         Self {
             node_id,
             controller,
-            synced_retained_topics: Arc::new(RwLock::new(HashSet::new())),
+            synced_retained_topics: Arc::new(RwLock::new(HashMap::new())),
             db_handler: DbRequestHandler::new(node_id),
         }
     }
 
     #[must_use]
-    pub fn synced_retained_topics(&self) -> Arc<RwLock<HashSet<String>>> {
+    pub fn synced_retained_topics(&self) -> Arc<RwLock<HashMap<String, Instant>>> {
         Arc::clone(&self.synced_retained_topics)
     }
 
@@ -443,7 +451,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 let mut synced = synced_topics.write().await;
                 for msg in retained_to_deliver {
                     let topic = msg.topic_str().to_string();
-                    synced.insert(topic.clone());
+                    synced.insert(topic.clone(), Instant::now());
                     debug!(
                         topic,
                         qos = msg.qos,
@@ -693,7 +701,22 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         event: RetainedSetEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let synced_topics = Arc::clone(&self.synced_retained_topics);
+        let node_id = self.node_id;
         Box::pin(async move {
+            let total = RETAINED_SET_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+            if total.is_multiple_of(10000) {
+                let skipped = RETAINED_SET_SKIPPED.load(AtomicOrdering::Relaxed);
+                let processed = RETAINED_SET_PROCESSED.load(AtomicOrdering::Relaxed);
+                tracing::warn!(
+                    node = node_id.get(),
+                    total,
+                    skipped,
+                    processed,
+                    topic = %event.topic,
+                    "RETAINED_SET_COUNTER milestone"
+                );
+            }
+
             if event.topic.starts_with("$SYS/") || event.topic.starts_with("_mqdb/") {
                 trace!("skipping internal retained message");
                 return;
@@ -701,13 +724,17 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
 
             let topic_str = event.topic.as_ref().to_string();
             {
-                let mut synced = synced_topics.write().await;
-                if synced.remove(&topic_str) {
+                let synced = synced_topics.read().await;
+                if let Some(&insert_time) = synced.get(&topic_str)
+                    && insert_time.elapsed() < RETAINED_SYNC_TTL
+                {
+                    RETAINED_SET_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
                     trace!(topic = %topic_str, "skipping synced retained message");
                     return;
                 }
             }
 
+            RETAINED_SET_PROCESSED.fetch_add(1, AtomicOrdering::Relaxed);
             debug!(
                 topic = %event.topic,
                 cleared = event.cleared,
