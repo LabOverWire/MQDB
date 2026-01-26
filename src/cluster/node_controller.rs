@@ -3350,11 +3350,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let qos = msg.qos;
 
             if let Some(ref synced_topics) = self.synced_retained_topics {
-                let synced = synced_topics.clone();
-                let topic_clone = topic.clone();
-                tokio::spawn(async move {
-                    synced.write().await.insert(topic_clone);
-                });
+                synced_topics.write().await.insert(topic.clone());
             }
 
             tracing::debug!(
