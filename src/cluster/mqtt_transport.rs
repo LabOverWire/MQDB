@@ -23,6 +23,7 @@ use tokio::sync::Notify;
 const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
 const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
 const FORWARD_TOPIC_PREFIX: &str = "_mqdb/forward";
+const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
 #[derive(Clone)]
 pub struct MqttTransport {
@@ -53,7 +54,7 @@ impl MqttTransport {
         let forward_client_id = format!("mqdb-forward-{}", node_id.get());
         let forward_client = MqttClient::new(&forward_client_id);
 
-        let (tx, rx) = flume::unbounded();
+        let (tx, rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
 
         Self {
             node_id,

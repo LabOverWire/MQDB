@@ -27,6 +27,7 @@ glob = "0.3"
 regex = "1.12.2"
 flume = { version = "0.12.0", features = ["async"] }
 arc-swap = "1.8.0"
+rustls-native-certs = { version = "0.8.3", optional = true }
 
 [features]
 default = ["native"]
@@ -40,6 +41,7 @@ native = [
     "dep:quinn",
     "dep:rustls",
     "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
 ]
 wasm = [
     "dep:web-time",

@@ -38,11 +38,26 @@ impl BoundedLog {
     }
 
     fn get_range(&self, from_seq: u64, to_seq: u64) -> Vec<ReplicationWrite> {
-        self.entries
+        let start = std::time::Instant::now();
+
+        let result: Vec<ReplicationWrite> = self.entries
             .iter()
             .filter(|e| e.sequence >= from_seq && e.sequence <= to_seq)
             .map(|e| e.write.clone())
-            .collect()
+            .collect();
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 500 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                entries = self.entries.len(),
+                from_seq,
+                to_seq,
+                "slow write_log get_range"
+            );
+        }
+
+        result
     }
 
     fn get_from(&self, from_seq: u64) -> Vec<ReplicationWrite> {
@@ -57,7 +72,19 @@ impl BoundedLog {
         if seq <= self.base_sequence {
             return false;
         }
-        self.entries.iter().any(|e| e.sequence == seq)
+        let start = std::time::Instant::now();
+        let result = self.entries.iter().any(|e| e.sequence == seq);
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 500 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                entries = self.entries.len(),
+                seq,
+                "slow write_log has_sequence"
+            );
+        }
+        result
     }
 
     fn can_catchup(&self, from_seq: u64) -> bool {

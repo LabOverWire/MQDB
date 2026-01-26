@@ -124,6 +124,8 @@ impl HeartbeatManager {
     }
 
     fn update_partition_map_from_heartbeat(&mut self, from: NodeId, heartbeat: &Heartbeat) {
+        let start = std::time::Instant::now();
+
         for partition in super::PartitionId::all() {
             let sender_claims_primary = heartbeat.is_primary(partition);
             let sender_claims_replica = heartbeat.is_replica(partition);
@@ -154,6 +156,15 @@ impl HeartbeatManager {
                     );
                 }
             }
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 500 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                from = from.get(),
+                "slow update_partition_map_from_heartbeat"
+            );
         }
     }
 

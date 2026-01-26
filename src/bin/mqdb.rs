@@ -604,6 +604,11 @@ enum ClusterAction {
             help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
         )]
         direct_quic: bool,
+        #[arg(
+            long,
+            help = "Skip TLS certificate verification for direct QUIC (use with self-signed certs)"
+        )]
+        quic_insecure: bool,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -747,6 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge_out,
                 cluster_port_offset,
                 direct_quic,
+                quic_insecure,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -765,6 +771,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bridge_out,
                     cluster_port_offset,
                     direct_quic,
+                    quic_insecure,
                 }))
                 .await?;
             }
@@ -1174,6 +1181,7 @@ struct ClusterStartArgs {
     bridge_out: bool,
     cluster_port_offset: u16,
     direct_quic: bool,
+    quic_insecure: bool,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1215,6 +1223,9 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     config = config.with_cluster_port_offset(args.cluster_port_offset);
     if args.direct_quic {
         config = config.with_direct_quic(true);
+    }
+    if args.quic_insecure {
+        config = config.with_quic_insecure(true);
     }
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
@@ -2977,6 +2988,7 @@ fn cmd_dev_start_cluster(
 
         if direct_quic {
             cmd.arg("--direct-quic");
+            cmd.arg("--quic-insecure");
         }
 
         let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());

@@ -300,6 +300,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub fn tick(&mut self, now: u64) -> TickOutput {
+        let start = std::time::Instant::now();
+
         self.current_time = now;
         let mut output = TickOutput::default();
 
@@ -314,6 +316,16 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.collect_catchup_requests(now, &mut output);
         self.collect_stale_scatter_responses(now, &mut output);
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 1000 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                replicas = self.replicas.len(),
+                "slow node_controller tick"
+            );
+        }
+
         output
     }
 
@@ -467,6 +479,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn handle_node_death(&mut self, dead_node: NodeId) {
+        let start = std::time::Instant::now();
+
         tracing::warn!(?dead_node, "node death detected");
         let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
@@ -489,6 +503,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     "replica died, this node is primary - replication factor reduced"
                 );
             }
+        }
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 500 {
+            tracing::warn!(
+                elapsed_us = elapsed.as_micros(),
+                dead_node = dead_node.get(),
+                "slow handle_node_death"
+            );
         }
     }
 
