@@ -355,11 +355,12 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                         );
                     } else if is_response_topic {
                         trace!(topic, "response topic - skipping retained query");
-                    } else if ctrl.query_local_retained_exact(topic).is_some() {
-                        trace!(topic, "local retained exists - broker handles delivery");
-                    } else if let Some(rx) = ctrl.start_async_retained_query(topic).await {
-                        debug!(topic, "started remote retained query");
-                        pending_queries.push((topic.to_string(), rx));
+                    } else {
+                        trace!(topic, "broker handles local retained delivery natively");
+                        if let Some(rx) = ctrl.start_async_retained_query(topic).await {
+                            debug!(topic, "started remote retained query");
+                            pending_queries.push((topic.to_string(), rx));
+                        }
                     }
 
                     let (_snapshot, write) = ctrl

@@ -2792,7 +2792,7 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(1000));
 
     let sub_output = Command::new("timeout")
         .args([

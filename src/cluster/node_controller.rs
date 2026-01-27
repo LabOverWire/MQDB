@@ -1519,7 +1519,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
         let write_count = WRITE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-        if write_count % 10000 == 0 {
+        if write_count.is_multiple_of(10000) {
             let wr_sent = WRITE_REQUEST_SENT.load(AtomicOrdering::Relaxed);
             let wr_recv = WRITE_RECEIVED.load(AtomicOrdering::Relaxed);
             tracing::warn!(
@@ -3357,8 +3357,19 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
+        let topic = write.id.clone();
+
+        if let Some(ref synced_topics) = self.synced_retained_topics {
+            let synced = synced_topics.read().await;
+            if let Some(&insert_time) = synced.get(&topic)
+                && insert_time.elapsed() < std::time::Duration::from_secs(5)
+            {
+                tracing::trace!(topic, "skipping retained sync within TTL window");
+                return;
+            }
+        }
+
         if write.operation == Operation::Delete {
-            let topic = write.id.clone();
             tracing::debug!(topic, "clearing retained message from local broker");
             self.transport
                 .queue_local_publish_retained(topic, Vec::new(), 0)
@@ -3367,12 +3378,14 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if let Ok((msg, _)) = RetainedMessage::try_from_be_bytes(&write.data) {
-            let topic = msg.topic_str().to_string();
             let payload = msg.payload.clone();
             let qos = msg.qos;
 
             if let Some(ref synced_topics) = self.synced_retained_topics {
-                synced_topics.write().await.insert(topic.clone(), Instant::now());
+                synced_topics
+                    .write()
+                    .await
+                    .insert(topic.clone(), Instant::now());
             }
 
             tracing::debug!(

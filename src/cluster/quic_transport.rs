@@ -444,7 +444,7 @@ impl ClusterTransport for QuicDirectTransport {
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
         let queue_len = self.local_publish_tx.len();
-        if queue_len > 1000 && queue_len % 1000 == 0 {
+        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
             warn!(topic, queue_len, "local_publish queue growing");
         }
         if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
