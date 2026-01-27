@@ -2,7 +2,7 @@
 
 Results from the complete benchmark matrix comparing MQTT bridges vs Direct QUIC transport.
 
-**Test Date:** 2026-01-19 (updated 2026-01-20 with improved async benchmarks)
+**Test Date:** 2026-01-19 (updated 2026-01-20 with improved async benchmarks, 2026-01-26 with triplicate topology comparison)
 
 ## Executive Summary
 
@@ -276,3 +276,198 @@ The async benchmark uses adaptive ramp-up with latency tracking:
 4. **Reports saturation point** as maximum sustainable throughput
 
 This methodology finds true saturation in ~20-30 seconds regardless of system capacity, avoiding the artificial ceiling seen in fixed-duration benchmarks.
+
+---
+
+## Part E: Triplicate Topology Comparison (2026-01-26)
+
+*Fresh triplicate benchmarks comparing Partial Mesh vs Full Mesh with Direct QUIC transport. Statistical analysis included.*
+
+### Per-Node Statistics (mean ± stdev)
+
+#### Insert (ops/s)
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 3,965 ± 193 | 4,492 ± 752 | +13.3% |
+| Node 2 | 4,367 ± 117 | 5,092 ± 959 | +16.6% |
+| Node 3 | 4,029 ± 30 | 4,396 ± 851 | +9.1% |
+
+#### Get (ops/s)
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 4,864 ± 421 | 5,736 ± 845 | +17.9% |
+| Node 2 | 5,655 ± 154 | 6,592 ± 1,138 | +16.6% |
+| Node 3 | 3,576 ± 117 | 4,809 ± 1,856 | +34.5% |
+
+#### Update (ops/s)
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 4,400 ± 33 | 5,069 ± 1,120 | +15.2% |
+| Node 2 | 4,775 ± 109 | 5,742 ± 1,317 | +20.2% |
+| Node 3 | 3,849 ± 168 | 4,815 ± 1,423 | +25.1% |
+
+#### Delete (ops/s)
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 4,775 ± 61 | 5,593 ± 1,211 | +17.1% |
+| Node 2 | 5,347 ± 97 | 6,509 ± 1,833 | +21.7% |
+| Node 3 | 2,763 ± 92 | 4,190 ± 2,548 | +51.7% |
+
+#### PubSub (msg/s)
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 215,900 ± 17,594 | 228,242 ± 17,015 | +5.7% |
+| Node 2 | 215,806 ± 19,071 | 205,669 ± 2,701 | -4.7% |
+| Node 3 | 215,595 ± 15,397 | 205,540 ± 3,773 | -4.7% |
+
+### Cluster Aggregate Statistics (sum of all 3 nodes)
+
+| Operation | Partial Mesh | Full Mesh | Diff | Winner |
+|-----------|--------------|-----------|------|--------|
+| Insert | 12,361 ± 331 ops/s | 13,981 ± 2,550 ops/s | +13.1% | Full |
+| Get | 14,095 ± 549 ops/s | 17,137 ± 3,836 ops/s | +21.6% | Full |
+| Update | 13,024 ± 195 ops/s | 15,625 ± 3,849 ops/s | +20.0% | Full |
+| List | 52 ± 1 ops/s | 67 ± 24 ops/s | +29.0% | Full |
+| Delete | 12,884 ± 148 ops/s | 16,293 ± 5,591 ops/s | +26.5% | Full |
+| PubSub | 647,301 ± 20,135 msg/s | 639,451 ± 20,884 msg/s | -1.2% | Partial |
+
+**Summary:** Full mesh wins 5/6 operations, Partial wins PubSub marginally.
+
+### Statistical Significance (t-test)
+
+| Operation | t-statistic | Significant? |
+|-----------|-------------|--------------|
+| Insert | 1.09 | NO |
+| Get | 1.36 | NO |
+| Update | 1.17 | NO |
+| List | 1.10 | NO |
+| Delete | 1.06 | NO |
+| PubSub | -0.47 | NO |
+
+*Critical value: |t| > 2.78 for p < 0.05 with df=4*
+
+**None of the differences are statistically significant** due to high variance in Full Mesh results.
+
+### Raw Run Data
+
+#### Partial Mesh (Cluster Totals)
+| Run | Insert | Get | Update | List | Delete | PubSub |
+|-----|--------|-----|--------|------|--------|--------|
+| 1 | 11,983 | 13,506 | 12,842 | 52 | 12,772 | 627,640 |
+| 2 | 12,498 | 14,593 | 13,000 | 51 | 12,829 | 646,383 |
+| 3 | 12,601 | 14,185 | 13,229 | 52 | 13,052 | 667,879 |
+
+#### Full Mesh (Cluster Totals)
+| Run | Insert | Get | Update | List | Delete | PubSub |
+|-----|--------|-----|--------|------|--------|--------|
+| 1 | 12,490 | 15,137 | 13,466 | 53 | 13,006 | 650,676 |
+| 2 | 16,925 | 21,560 | 20,069 | 94 | 22,748 | 652,322 |
+| 3 | 12,528 | 14,714 | 13,340 | 53 | 13,124 | 615,355 |
+
+### Analysis
+
+**Key Observation:** Full Mesh Run 2 was an outlier with 35-75% higher throughput than other runs. This inflated Full Mesh's mean but also created high variance (stddev 2,500-5,500 vs Partial's 100-550), making statistical significance impossible to establish.
+
+| Metric | Partial Mesh | Full Mesh |
+|--------|--------------|-----------|
+| Mean Performance | Lower | Higher (+13-27%) |
+| Consistency (CV) | **Very Low (1-4%)** | High (18-43%) |
+| Predictability | **Excellent** | Variable |
+
+### Recommendation
+
+**Use Partial Mesh for predictable performance.** While Full Mesh *can* achieve higher throughput (as seen in Run 2), results are inconsistent. Partial Mesh provides stable, reproducible performance with minimal variance between runs.
+
+---
+
+## Part F: Triplicate Async Topology Comparison (2026-01-26)
+
+*Fresh triplicate async benchmarks comparing Partial Mesh vs Full Mesh with Direct QUIC transport. Async mode uses adaptive ramp-up to find saturation point.*
+
+### Per-Node Statistics (mean ± stdev) - Saturation Point ops/s
+
+#### Async Insert
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 9,531 ± 27 | 9,570 ± 98 | +0.4% |
+| Node 2 | 9,500 ± 303 | 9,672 ± 69 | +1.8% |
+| Node 3 | 9,540 ± 79 | 9,666 ± 80 | +1.3% |
+
+#### Async Get
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 16,782 ± 71 | 16,740 ± 426 | -0.3% |
+| Node 2 | 16,728 ± 515 | 17,043 ± 98 | +1.9% |
+| Node 3 | 16,999 ± 190 | 16,726 ± 199 | -1.6% |
+
+#### Async Update
+| Node | Partial Mesh | Full Mesh | Difference |
+|------|--------------|-----------|------------|
+| Node 1 | 10,238 ± 257 | 10,677 ± 90 | +4.3% |
+| Node 2 | 9,474 ± 671 | 10,611 ± 165 | +12.0% |
+| Node 3 | 10,841 ± 260 | 10,685 ± 296 | -1.4% |
+
+### Cluster Aggregate Statistics (sum of all 3 nodes)
+
+| Operation | Partial Mesh | Full Mesh | Diff | Winner |
+|-----------|--------------|-----------|------|--------|
+| Insert | 28,571 ± 404 ops/s | 28,909 ± 208 ops/s | +1.2% | Full |
+| Get | 50,510 ± 647 ops/s | 50,509 ± 617 ops/s | -0.0% | Partial |
+| Update | 30,553 ± 293 ops/s | 31,973 ± 400 ops/s | +4.6% | Full |
+
+**Summary:** Full mesh wins 2/3 operations (Insert, Update), Partial wins Get by negligible margin.
+
+### Statistical Significance (t-test)
+
+| Operation | t-statistic | Significant? |
+|-----------|-------------|--------------|
+| Insert | 1.29 | NO |
+| Get | -0.00 | NO |
+| Update | 4.96 | **YES** |
+
+*Critical value: |t| > 2.78 for p < 0.05 with df=4*
+
+**Only Async Update shows statistically significant difference** - Full Mesh is ~4.6% faster with p < 0.05.
+
+### Raw Run Data
+
+#### Partial Mesh (Cluster Totals)
+| Run | Insert | Get | Update |
+|-----|--------|-----|--------|
+| 1 | 28,957 | 50,894 | 30,372 |
+| 2 | 28,606 | 49,763 | 30,396 |
+| 3 | 28,151 | 50,872 | 30,891 |
+
+#### Full Mesh (Cluster Totals)
+| Run | Insert | Get | Update |
+|-----|--------|-----|--------|
+| 1 | 28,792 | 50,606 | 32,189 |
+| 2 | 28,785 | 49,849 | 31,511 |
+| 3 | 29,149 | 51,072 | 32,218 |
+
+### Variance Analysis (Coefficient of Variation)
+
+| Operation | Partial CV | Full CV | More Consistent |
+|-----------|------------|---------|-----------------|
+| Insert | 1.4% | 0.7% | Full |
+| Get | 1.3% | 1.2% | Full |
+| Update | 1.0% | 1.3% | Partial |
+
+### Analysis
+
+**Key Observation:** Unlike the sync benchmarks where Full Mesh showed high variance due to an outlier run, async benchmarks show **both topologies are highly consistent** (CV 0.7-1.4%).
+
+| Metric | Partial Mesh | Full Mesh |
+|--------|--------------|-----------|
+| Insert Performance | 28,571 ops/s | 28,909 ops/s (+1.2%) |
+| Get Performance | 50,510 ops/s | 50,509 ops/s (equal) |
+| Update Performance | 30,553 ops/s | 31,973 ops/s (+4.6%) |
+| Consistency | Excellent | Excellent |
+
+### Recommendation
+
+**For async workloads, topology choice has minimal impact.** Both Partial and Full Mesh achieve essentially identical throughput (~29k insert, ~50k get, ~31k update ops/s). The only statistically significant difference is a 4.6% advantage for Full Mesh on updates, which may not be operationally meaningful.
+
+**Choose based on operational preferences:**
+- **Partial Mesh:** Fewer connections, simpler network topology
+- **Full Mesh:** Marginally better update performance, fully redundant connectivity
