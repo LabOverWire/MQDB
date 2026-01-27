@@ -42,6 +42,8 @@ enum Commands {
         delete: bool,
         #[arg(short = 'n', long)]
         stdout: bool,
+        #[arg(short, long)]
+        file: Option<PathBuf>,
     },
     Create {
         entity: String,
@@ -787,8 +789,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             batch,
             delete,
             stdout: _,
+            file,
         } => {
-            cmd_passwd(&username, batch, delete)?;
+            cmd_passwd(&username, batch, delete, file)?;
         }
         Commands::Create {
             entity,
@@ -1395,9 +1398,18 @@ fn cmd_passwd(
     username: &str,
     batch: Option<String>,
     delete: bool,
+    file: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if delete {
-        eprintln!("Delete operation not yet implemented");
+        let path = file.ok_or("--file is required for --delete")?;
+        let contents = std::fs::read_to_string(&path)?;
+        let prefix = format!("{username}:");
+        let remaining: Vec<&str> = contents
+            .lines()
+            .filter(|line| !line.starts_with(&prefix))
+            .collect();
+        std::fs::write(&path, remaining.join("\n") + "\n")?;
+        eprintln!("Deleted user '{username}' from {}", path.display());
         return Ok(());
     }
 
@@ -1411,7 +1423,36 @@ fn cmd_passwd(
     };
 
     let hash = mqtt5::broker::auth::PasswordAuthProvider::hash_password(&password)?;
-    println!("{username}:{hash}");
+
+    if let Some(path) = file {
+        let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let prefix = format!("{username}:");
+        let mut found = false;
+        let updated: Vec<String> = contents
+            .lines()
+            .map(|line| {
+                if line.starts_with(&prefix) {
+                    found = true;
+                    format!("{username}:{hash}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        contents = updated.join("\n") + "\n";
+        if !found {
+            use std::fmt::Write;
+            let _ = writeln!(contents, "{username}:{hash}");
+        }
+        std::fs::write(&path, &contents)?;
+        eprintln!(
+            "{} user '{username}' in {}",
+            if found { "Updated" } else { "Added" },
+            path.display()
+        );
+    } else {
+        println!("{username}:{hash}");
+    }
 
     Ok(())
 }
@@ -1523,9 +1564,7 @@ async fn cmd_watch(
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !filters.is_empty() {
-        eprintln!("Note: Client-side filtering not yet implemented, showing all events");
-    }
+    let parsed_filters: Vec<Value> = filters.iter().flat_map(|f| parse_filters(f)).collect();
 
     let client = Box::pin(connect_client(&conn)).await?;
     let topic = format!("$DB/{entity}/events/#");
@@ -1543,10 +1582,83 @@ async fn cmd_watch(
     eprintln!("Watching {entity} events (Ctrl+C to stop)...");
 
     while let Ok(event) = rx.recv_async().await {
+        if !parsed_filters.is_empty() {
+            let data = event.get("data").unwrap_or(&event);
+            if !matches_filters(data, &parsed_filters) {
+                continue;
+            }
+        }
         output_response(&event, &format);
     }
 
     Ok(())
+}
+
+fn matches_filters(data: &Value, filters: &[Value]) -> bool {
+    filters.iter().all(|filter| {
+        let field = filter.get("field").and_then(Value::as_str).unwrap_or("");
+        let op = filter.get("op").and_then(Value::as_str).unwrap_or("eq");
+        let expected = filter.get("value").cloned().unwrap_or(Value::Null);
+
+        let actual = data.get(field).cloned().unwrap_or(Value::Null);
+
+        match op {
+            "eq" => actual == expected,
+            "neq" => actual != expected,
+            "gt" => compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Greater),
+            "lt" => compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Less),
+            "gte" => compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Less),
+            "lte" => compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Greater),
+            "like" => {
+                if let (Some(a), Some(p)) = (actual.as_str(), expected.as_str()) {
+                    glob_match(p, a)
+                } else {
+                    false
+                }
+            }
+            "is_null" => actual.is_null(),
+            "is_not_null" => !actual.is_null(),
+            _ => false,
+        }
+    })
+}
+
+fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (a, b) {
+        (Value::Number(a), Value::Number(b)) => {
+            let af = a.as_f64()?;
+            let bf = b.as_f64()?;
+            af.partial_cmp(&bf)
+        }
+        (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
+        _ => None,
+    }
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == text;
+    }
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(found) = text[pos..].find(part) {
+            if i == 0 && found != 0 {
+                return false;
+            }
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+    if parts.last().unwrap_or(&"").is_empty() {
+        true
+    } else {
+        pos == text.len()
+    }
 }
 
 async fn cmd_schema_set(

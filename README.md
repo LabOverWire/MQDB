@@ -496,7 +496,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 
 **Limited Support:**
 - **Backups**: Creates per-node backup only (not cluster-wide snapshot)
-- **Constraints**: Returns "not yet supported in cluster mode"
+- **Constraints**: Unique constraints fully supported; foreign key and NOT NULL constraints not yet available in cluster mode
 - **Consumer Groups**: Returns empty list (shared subscriptions work, but group tracking is local)
 
 ## CLI Tool
