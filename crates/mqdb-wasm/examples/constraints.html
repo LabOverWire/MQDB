@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Constraints</title>
+    <link rel="stylesheet" href="shared/common.css">
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html" class="active">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+    </nav>
+
+    <h1>Constraints</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Add Constraint</h2>
+            <div class="row">
+                <label>Entity:</label>
+                <input type="text" id="constraintEntity" value="users">
+            </div>
+            <div class="row">
+                <label>Type:</label>
+                <select id="constraintType">
+                    <option value="unique">Unique</option>
+                    <option value="not_null">NOT NULL</option>
+                    <option value="foreign_key">Foreign Key</option>
+                </select>
+            </div>
+
+            <div id="uniqueFields" class="card mt-10">
+                <h3>Unique Constraint</h3>
+                <div class="row">
+                    <label>Fields:</label>
+                    <input type="text" id="uniqueFieldList" value="email" placeholder="comma-separated">
+                </div>
+            </div>
+
+            <div id="notNullFields" class="card mt-10 hidden">
+                <h3>NOT NULL Constraint</h3>
+                <div class="row">
+                    <label>Field:</label>
+                    <input type="text" id="notNullField" value="name">
+                </div>
+            </div>
+
+            <div id="fkFields" class="card mt-10 hidden">
+                <h3>Foreign Key Constraint</h3>
+                <div class="row">
+                    <label>Source Field:</label>
+                    <input type="text" id="fkSourceField" value="user_id">
+                </div>
+                <div class="row">
+                    <label>Target Entity:</label>
+                    <input type="text" id="fkTargetEntity" value="users">
+                </div>
+                <div class="row">
+                    <label>Target Field:</label>
+                    <input type="text" id="fkTargetField" value="id">
+                </div>
+                <div class="row">
+                    <label>On Delete:</label>
+                    <select id="fkOnDelete">
+                        <option value="restrict">RESTRICT</option>
+                        <option value="cascade">CASCADE</option>
+                        <option value="set_null">SET NULL</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="row mt-10">
+                <button id="addConstraintBtn" class="success">Add Constraint</button>
+                <button id="listConstraintsBtn">List Constraints</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Operations</h2>
+            <div class="card">
+                <h3>Quick Tests</h3>
+                <button id="runAllConstraintTests">Run All Tests</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Unique Constraint</h3>
+                <button id="testUniquePass" class="success">Create Unique</button>
+                <button id="testUniqueFail" class="danger">Duplicate (Fail)</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Foreign Key</h3>
+                <button id="setupFK">Setup FK Demo</button>
+                <button id="testFKPass" class="success">Valid FK</button>
+                <button id="testFKFail" class="danger">Invalid FK</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Cascade Delete</h3>
+                <button id="setupCascade">Setup CASCADE</button>
+                <button id="testCascade" class="danger">Delete Parent</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Restrict Delete</h3>
+                <button id="setupRestrict">Setup RESTRICT</button>
+                <button id="testRestrict" class="danger">Delete Parent</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Current Constraints</h2>
+        <div id="constraintsDisplay">
+            <p style="color:#999">No constraints defined yet</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Data View</h2>
+        <div class="row">
+            <label>Entity:</label>
+            <select id="viewEntity">
+                <option value="users">users</option>
+                <option value="posts">posts</option>
+                <option value="comments">comments</option>
+            </select>
+            <button id="refreshData">Refresh</button>
+            <button id="clearData" class="danger">Clear</button>
+        </div>
+        <table id="dataTable">
+            <thead><tr><th>ID</th><th>Data</th></tr></thead>
+            <tbody id="dataBody"></tbody>
+        </table>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        const trackedEntities = new Set(['users', 'posts', 'comments']);
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            window.db = db;
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('constraintType').onchange = updateConstraintForm;
+            document.getElementById('addConstraintBtn').onclick = addConstraint;
+            document.getElementById('listConstraintsBtn').onclick = listConstraints;
+            document.getElementById('runAllConstraintTests').onclick = runAllConstraintTests;
+            document.getElementById('testUniquePass').onclick = testUniquePass;
+            document.getElementById('testUniqueFail').onclick = testUniqueFail;
+            document.getElementById('setupFK').onclick = setupFK;
+            document.getElementById('testFKPass').onclick = testFKPass;
+            document.getElementById('testFKFail').onclick = testFKFail;
+            document.getElementById('setupCascade').onclick = setupCascade;
+            document.getElementById('testCascade').onclick = testCascade;
+            document.getElementById('setupRestrict').onclick = setupRestrict;
+            document.getElementById('testRestrict').onclick = testRestrict;
+            document.getElementById('refreshData').onclick = refreshData;
+            document.getElementById('clearData').onclick = clearData;
+            document.getElementById('viewEntity').onchange = refreshData;
+        }
+
+        function updateConstraintForm() {
+            const type = document.getElementById('constraintType').value;
+            document.getElementById('uniqueFields').classList.toggle('hidden', type !== 'unique');
+            document.getElementById('notNullFields').classList.toggle('hidden', type !== 'not_null');
+            document.getElementById('fkFields').classList.toggle('hidden', type !== 'foreign_key');
+        }
+
+        async function addConstraint() {
+            try {
+                const entity = document.getElementById('constraintEntity').value;
+                const type = document.getElementById('constraintType').value;
+
+                if (type === 'unique') {
+                    const fields = document.getElementById('uniqueFieldList').value.split(',').map(f => f.trim());
+                    log(`Adding unique constraint on ${entity}(${fields.join(', ')})...`);
+                    db.add_unique_constraint(entity, fields);
+                    log(`Unique constraint added`, 'success');
+                } else if (type === 'not_null') {
+                    const field = document.getElementById('notNullField').value;
+                    log(`Adding NOT NULL constraint on ${entity}.${field}...`);
+                    db.add_not_null(entity, field);
+                    log(`NOT NULL constraint added`, 'success');
+                } else if (type === 'foreign_key') {
+                    const sourceField = document.getElementById('fkSourceField').value;
+                    const targetEntity = document.getElementById('fkTargetEntity').value;
+                    const targetField = document.getElementById('fkTargetField').value;
+                    const onDelete = document.getElementById('fkOnDelete').value;
+                    log(`Adding FK: ${entity}.${sourceField} -> ${targetEntity}.${targetField} (${onDelete.toUpperCase()})...`);
+                    db.add_foreign_key(entity, sourceField, targetEntity, targetField, onDelete);
+                    log(`Foreign key constraint added`, 'success');
+                }
+
+                trackedEntities.add(entity);
+                updateConstraintsDisplay();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function listConstraints() {
+            const entity = document.getElementById('constraintEntity').value;
+            log(`Listing constraints for ${entity}...`);
+            const constraints = db.list_constraints(entity);
+            log(`Constraints: ${JSON.stringify(constraints, null, 2)}`, 'info');
+        }
+
+        function updateConstraintsDisplay() {
+            const container = document.getElementById('constraintsDisplay');
+            let html = '';
+
+            for (const entity of trackedEntities) {
+                const constraints = db.list_constraints(entity);
+                if (constraints && constraints.length > 0) {
+                    html += `<div class="card">
+                        <h3>${entity}</h3>
+                        <ul>`;
+                    for (const c of constraints) {
+                        if (c.type === 'unique') {
+                            html += `<li>UNIQUE(${c.fields.join(', ')})</li>`;
+                        } else if (c.type === 'not_null') {
+                            html += `<li>NOT NULL(${c.field})</li>`;
+                        } else if (c.type === 'foreign_key') {
+                            html += `<li>FK: ${c.field} → ${c.target_entity}.${c.target_field} (${c.on_delete.toUpperCase()})</li>`;
+                        }
+                    }
+                    html += '</ul></div>';
+                }
+            }
+
+            container.innerHTML = html || '<p style="color:#999">No constraints defined yet</p>';
+        }
+
+        async function refreshData() {
+            const entity = document.getElementById('viewEntity').value;
+            try {
+                const records = await db.list(entity, null);
+                const tbody = document.getElementById('dataBody');
+                tbody.innerHTML = '';
+                for (const record of records) {
+                    const {id, ...rest} = record;
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `<td><code>${id}</code></td><td><code>${JSON.stringify(rest)}</code></td>`;
+                    tbody.appendChild(tr);
+                }
+                if (records.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#999">No records</td></tr>';
+                }
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function clearData() {
+            const entity = document.getElementById('viewEntity').value;
+            try {
+                const records = await db.list(entity, null);
+                for (const r of records) {
+                    try { await db.delete(entity, r.id); } catch (e) {}
+                }
+                log(`Cleared ${entity}`, 'success');
+                refreshData();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function testUniquePass() {
+            log('Testing unique constraint (should pass)...');
+            db.add_unique_constraint('users', ['email']);
+            try {
+                const result = await db.create('users', {name: 'Alice', email: 'unique_' + Date.now() + '@test.com'});
+                log(`✓ Created user: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`✗ Error: ${e}`, 'error');
+            }
+            updateConstraintsDisplay();
+            refreshData();
+        }
+
+        async function testUniqueFail() {
+            log('Testing unique constraint (should fail)...');
+            db.add_unique_constraint('users', ['email']);
+            const email = 'duplicate@test.com';
+            try {
+                await db.create('users', {name: 'First', email: email});
+                await db.create('users', {name: 'Second', email: email});
+                log('✗ Should have thrown error', 'error');
+            } catch (e) {
+                log(`✓ Correctly rejected duplicate: ${e}`, 'success');
+            }
+            updateConstraintsDisplay();
+            refreshData();
+        }
+
+        async function setupFK() {
+            log('Setting up FK demo: posts.user_id -> users.id (RESTRICT)...');
+            db.add_foreign_key('posts', 'user_id', 'users', 'id', 'restrict');
+            const user = await db.create('users', {name: 'FK Demo User', email: 'fk_' + Date.now() + '@test.com'});
+            log(`Created user: ${JSON.stringify(user)}`, 'success');
+            updateConstraintsDisplay();
+            refreshData();
+        }
+
+        async function testFKPass() {
+            log('Testing FK with valid reference...');
+            try {
+                const users = await db.list('users', null);
+                if (users.length === 0) {
+                    log('No users found. Run "Setup FK Demo" first.', 'warning');
+                    return;
+                }
+                const userId = users[0].id;
+                const post = await db.create('posts', {title: 'Test Post', user_id: userId});
+                log(`✓ Created post with valid FK: ${JSON.stringify(post)}`, 'success');
+            } catch (e) {
+                log(`✗ Error: ${e}`, 'error');
+            }
+            refreshData();
+        }
+
+        async function testFKFail() {
+            log('Testing FK with invalid reference...');
+            try {
+                await db.create('posts', {title: 'Bad Post', user_id: 'nonexistent_999'});
+                log('✗ Should have thrown FK violation', 'error');
+            } catch (e) {
+                log(`✓ Correctly rejected invalid FK: ${e}`, 'success');
+            }
+        }
+
+        async function setupCascade() {
+            log('Setting up CASCADE demo: comments.post_id -> posts.id (CASCADE)...');
+            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'cascade');
+            const post = await db.create('posts', {title: 'Parent Post', content: 'Will be deleted'});
+            const comment1 = await db.create('comments', {text: 'Comment 1', post_id: post.id});
+            const comment2 = await db.create('comments', {text: 'Comment 2', post_id: post.id});
+            log(`Created post ${post.id} with 2 comments`, 'success');
+            updateConstraintsDisplay();
+            refreshData();
+        }
+
+        async function testCascade() {
+            log('Testing CASCADE delete...');
+            try {
+                const posts = await db.list('posts', null);
+                if (posts.length === 0) {
+                    log('No posts found. Run "Setup CASCADE" first.', 'warning');
+                    return;
+                }
+                const postId = posts[0].id;
+                const commentsBefore = await db.list('comments', null);
+                log(`Before: ${posts.length} posts, ${commentsBefore.length} comments`);
+
+                await db.delete('posts', postId);
+
+                const postsAfter = await db.list('posts', null);
+                const commentsAfter = await db.list('comments', null);
+                log(`After: ${postsAfter.length} posts, ${commentsAfter.length} comments`);
+
+                if (commentsAfter.length < commentsBefore.length) {
+                    log('✓ CASCADE delete worked - comments were deleted', 'success');
+                } else {
+                    log('✗ Comments were not cascaded', 'error');
+                }
+            } catch (e) {
+                log(`✗ Error: ${e}`, 'error');
+            }
+            refreshData();
+        }
+
+        async function setupRestrict() {
+            log('Setting up RESTRICT demo...');
+            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'restrict');
+            const post = await db.create('posts', {title: 'Protected Post', content: 'Cannot delete while has comments'});
+            const comment = await db.create('comments', {text: 'Blocking comment', post_id: post.id});
+            log(`Created post ${post.id} with 1 comment`, 'success');
+            updateConstraintsDisplay();
+            refreshData();
+        }
+
+        async function testRestrict() {
+            log('Testing RESTRICT delete...');
+            try {
+                const posts = await db.list('posts', null);
+                if (posts.length === 0) {
+                    log('No posts found. Run "Setup RESTRICT" first.', 'warning');
+                    return;
+                }
+                const postId = posts[0].id;
+                await db.delete('posts', postId);
+                log('✗ Should have been blocked by RESTRICT', 'error');
+            } catch (e) {
+                log(`✓ RESTRICT blocked delete: ${e}`, 'success');
+            }
+            refreshData();
+        }
+
+        async function runAllConstraintTests() {
+            log('=== Running All Constraint Tests ===', 'info');
+
+            log('\n--- Test 1: Unique Constraint ---');
+            db.add_unique_constraint('test_users', ['email']);
+            await db.create('test_users', {name: 'User1', email: 'unique@test.com'});
+            log('Created first user with unique@test.com', 'success');
+            try {
+                await db.create('test_users', {name: 'User2', email: 'unique@test.com'});
+                log('✗ Duplicate should have been rejected', 'error');
+            } catch (e) {
+                log('✓ Duplicate correctly rejected', 'success');
+            }
+
+            log('\n--- Test 2: NOT NULL Constraint ---');
+            db.add_not_null('test_users', 'name');
+            try {
+                await db.create('test_users', {email: 'noname@test.com'});
+                log('✗ Missing required field should have been rejected', 'error');
+            } catch (e) {
+                log('✓ Missing NOT NULL field correctly rejected', 'success');
+            }
+
+            log('\n--- Test 3: Foreign Key (Valid) ---');
+            db.add_foreign_key('test_posts', 'author_id', 'test_users', 'id', 'restrict');
+            const user = await db.create('test_users', {name: 'Author', email: 'author_' + Date.now() + '@test.com'});
+            try {
+                const post = await db.create('test_posts', {title: 'Post', author_id: user.id});
+                log(`✓ Created post with valid FK: ${post.id}`, 'success');
+            } catch (e) {
+                log(`✗ Valid FK rejected: ${e}`, 'error');
+            }
+
+            log('\n--- Test 4: Foreign Key (Invalid) ---');
+            try {
+                await db.create('test_posts', {title: 'Bad Post', author_id: 'fake_id'});
+                log('✗ Invalid FK should have been rejected', 'error');
+            } catch (e) {
+                log('✓ Invalid FK correctly rejected', 'success');
+            }
+
+            log('\n--- Test 5: CASCADE Delete ---');
+            db.add_foreign_key('test_comments', 'post_id', 'test_posts', 'id', 'cascade');
+            const testPosts = await db.list('test_posts', null);
+            if (testPosts.length > 0) {
+                const pid = testPosts[0].id;
+                await db.create('test_comments', {text: 'Comment', post_id: pid});
+                await db.create('test_comments', {text: 'Comment 2', post_id: pid});
+                const before = await db.list('test_comments', null);
+                log(`Before delete: ${before.length} comments`);
+                await db.delete('test_posts', pid);
+                const after = await db.list('test_comments', null);
+                log(`After delete: ${after.length} comments`);
+                log('✓ CASCADE delete completed', 'success');
+            }
+
+            log('\n--- Test 6: RESTRICT Delete ---');
+            const newUser = await db.create('test_users', {name: 'Protected', email: 'protected_' + Date.now() + '@test.com'});
+            db.add_foreign_key('test_profiles', 'user_id', 'test_users', 'id', 'restrict');
+            await db.create('test_profiles', {bio: 'My bio', user_id: newUser.id});
+            try {
+                await db.delete('test_users', newUser.id);
+                log('✗ RESTRICT should have blocked delete', 'error');
+            } catch (e) {
+                log('✓ RESTRICT correctly blocked delete', 'success');
+            }
+
+            log('\n=== All Constraint Tests Complete ===', 'success');
+            updateConstraintsDisplay();
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

@@ -49,17 +49,18 @@ async fn benchmark_writes(db: &Database, count: usize) -> Result<(), Box<dyn std
     let p95 = latencies[count * 95 / 100];
     let p99 = latencies[count * 99 / 100];
 
+    #[allow(clippy::cast_precision_loss)]
     let throughput = count as f64 / total_elapsed.as_secs_f64();
 
-    println!("Total records: {}", count);
+    println!("Total records: {count}");
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
-    println!("Throughput: {:.0} writes/sec", throughput);
+    println!("Throughput: {throughput:.0} writes/sec");
     println!("Latency p50: {:.2}ms", p50.as_secs_f64() * 1000.0);
     println!("Latency p95: {:.2}ms", p95.as_secs_f64() * 1000.0);
     println!("Latency p99: {:.2}ms", p99.as_secs_f64() * 1000.0);
 
     let target_met = p50 < Duration::from_millis(5) && throughput > 5000.0;
-    println!("Target met (p50 < 5ms, throughput > 5k/s): {}", target_met);
+    println!("Target met (p50 < 5ms, throughput > 5k/s): {target_met}");
 
     println!();
 
@@ -89,17 +90,18 @@ async fn benchmark_reads(db: &Database, count: usize) -> Result<(), Box<dyn std:
     let p95 = latencies[count * 95 / 100];
     let p99 = latencies[count * 99 / 100];
 
+    #[allow(clippy::cast_precision_loss)]
     let throughput = count as f64 / total_elapsed.as_secs_f64();
 
-    println!("Total reads: {}", count);
+    println!("Total reads: {count}");
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
-    println!("Throughput: {:.0} reads/sec", throughput);
+    println!("Throughput: {throughput:.0} reads/sec");
     println!("Latency p50: {:.2}ms", p50.as_secs_f64() * 1000.0);
     println!("Latency p95: {:.2}ms", p95.as_secs_f64() * 1000.0);
     println!("Latency p99: {:.2}ms", p99.as_secs_f64() * 1000.0);
 
     let target_met = p50 < Duration::from_millis(1);
-    println!("Target met (p50 < 1ms): {}", target_met);
+    println!("Target met (p50 < 1ms): {target_met}");
 
     println!();
 
@@ -133,24 +135,28 @@ async fn benchmark_updates(db: &Database, count: usize) -> Result<(), Box<dyn st
     let p95 = latencies[count * 95 / 100];
     let p99 = latencies[count * 99 / 100];
 
+    #[allow(clippy::cast_precision_loss)]
     let throughput = count as f64 / total_elapsed.as_secs_f64();
 
-    println!("Total updates: {}", count);
+    println!("Total updates: {count}");
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
-    println!("Throughput: {:.0} updates/sec", throughput);
+    println!("Throughput: {throughput:.0} updates/sec");
     println!("Latency p50: {:.2}ms", p50.as_secs_f64() * 1000.0);
     println!("Latency p95: {:.2}ms", p95.as_secs_f64() * 1000.0);
     println!("Latency p99: {:.2}ms", p99.as_secs_f64() * 1000.0);
 
     let target_met = p50 < Duration::from_millis(5);
-    println!("Target met (p50 < 5ms): {}", target_met);
+    println!("Target met (p50 < 5ms): {target_met}");
 
     println!();
 
     Ok(())
 }
 
-async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn std::error::Error>> {
+async fn benchmark_list(
+    db: &Database,
+    iterations: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("List/Scan Performance Test");
     println!("--------------------------");
 
@@ -159,16 +165,21 @@ async fn benchmark_list(db: &Database, iterations: usize) -> Result<(), Box<dyn 
     let start = Instant::now();
 
     for _ in 0..iterations {
-        let _ = db.list("users".into(), vec![], vec![], None, vec![], None).await;
+        let _ = db
+            .list("users".into(), vec![], vec![], None, vec![], None)
+            .await;
     }
 
     let total_elapsed = start.elapsed();
+    #[allow(clippy::cast_precision_loss)]
     let throughput = iterations as f64 / total_elapsed.as_secs_f64();
 
-    println!("Total scans: {}", iterations);
+    println!("Total scans: {iterations}");
     println!("Total time: {:.2}s", total_elapsed.as_secs_f64());
-    println!("Throughput: {:.0} scans/sec", throughput);
-    println!("Avg latency: {:.2}ms", (total_elapsed.as_secs_f64() * 1000.0) / iterations as f64);
+    println!("Throughput: {throughput:.0} scans/sec");
+    #[allow(clippy::cast_precision_loss)]
+    let avg_latency = (total_elapsed.as_secs_f64() * 1000.0) / iterations as f64;
+    println!("Avg latency: {avg_latency:.2}ms");
 
     println!();
 

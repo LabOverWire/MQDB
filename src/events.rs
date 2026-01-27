@@ -22,7 +22,12 @@ pub struct ChangeEvent {
 }
 
 impl ChangeEvent {
-    pub fn new(entity: String, id: String, operation: Operation, data: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        entity: String,
+        id: String,
+        operation: Operation,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             sequence: SEQUENCE.fetch_add(1, Ordering::SeqCst),
             entity,
@@ -33,34 +38,41 @@ impl ChangeEvent {
         }
     }
 
+    #[must_use]
     pub fn with_operation_id(mut self, operation_id: String) -> Self {
         self.operation_id = Some(operation_id);
         self
     }
 
+    #[must_use]
     pub fn create(entity: String, id: String, data: serde_json::Value) -> Self {
         Self::new(entity, id, Operation::Create, Some(data))
     }
 
+    #[must_use]
     pub fn update(entity: String, id: String, data: serde_json::Value) -> Self {
         Self::new(entity, id, Operation::Update, Some(data))
     }
 
+    #[must_use]
     pub fn delete(entity: String, id: String) -> Self {
         Self::new(entity, id, Operation::Delete, None)
     }
 
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn partition(&self, num_partitions: u8) -> u8 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         if num_partitions == 0 {
             return 0;
         }
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let key = format!("{}:{}", self.entity, self.id);
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (hasher.finish() % num_partitions as u64) as u8
+        (hasher.finish() % u64::from(num_partitions)) as u8
     }
 }
 

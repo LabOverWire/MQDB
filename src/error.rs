@@ -53,7 +53,9 @@ pub enum Error {
         value: String,
     },
 
-    #[error("foreign key violation: {entity}.{field} references non-existent {target_entity}/{target_id}")]
+    #[error(
+        "foreign key violation: {entity}.{field} references non-existent {target_entity}/{target_id}"
+    )]
     ForeignKeyViolation {
         entity: String,
         field: String,
@@ -61,7 +63,9 @@ pub enum Error {
         target_id: String,
     },
 
-    #[error("foreign key restrict: cannot delete {entity}/{id} - referenced by {referencing_entity}")]
+    #[error(
+        "foreign key restrict: cannot delete {entity}/{id} - referenced by {referencing_entity}"
+    )]
     ForeignKeyRestrict {
         entity: String,
         id: String,

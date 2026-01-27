@@ -33,12 +33,14 @@ impl FieldDefinition {
         }
     }
 
+    #[must_use]
     pub fn required(mut self) -> Self {
         self.required = true;
         self
     }
 
-    pub fn default(mut self, value: Value) -> Self {
+    #[must_use]
+    pub fn with_default(mut self, value: Value) -> Self {
         self.default = Some(value);
         self
     }
@@ -70,11 +72,14 @@ impl Schema {
         }
     }
 
+    #[must_use]
     pub fn add_field(mut self, field: FieldDefinition) -> Self {
         self.fields.insert(field.name.clone(), field);
         self
     }
 
+    /// # Errors
+    /// Returns an error if the data does not conform to the schema.
     pub fn validate(&self, data: &Value) -> Result<()> {
         let obj = data.as_object().ok_or_else(|| Error::SchemaViolation {
             entity: self.entity.clone(),
@@ -119,6 +124,8 @@ impl Schema {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the data is not an object.
     pub fn apply_defaults(&self, data: &mut Value) -> Result<()> {
         let obj = data.as_object_mut().ok_or_else(|| Error::SchemaViolation {
             entity: self.entity.clone(),
@@ -127,10 +134,10 @@ impl Schema {
         })?;
 
         for (field_name, field_def) in &self.fields {
-            if !obj.contains_key(field_name) {
-                if let Some(default) = &field_def.default {
-                    obj.insert(field_name.clone(), default.clone());
-                }
+            if !obj.contains_key(field_name)
+                && let Some(default) = &field_def.default
+            {
+                obj.insert(field_name.clone(), default.clone());
             }
         }
 
@@ -143,6 +150,7 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             schemas: HashMap::new(),
@@ -153,10 +161,13 @@ impl SchemaRegistry {
         self.schemas.insert(schema.entity.clone(), schema);
     }
 
+    #[must_use]
     pub fn get_schema(&self, entity: &str) -> Option<&Schema> {
         self.schemas.get(entity)
     }
 
+    /// # Errors
+    /// Returns an error if the entity has a schema and validation fails.
     pub fn validate_entity(&self, entity_name: &str, data: &Value) -> Result<()> {
         if let Some(schema) = self.schemas.get(entity_name) {
             schema.validate(data)?;
@@ -164,6 +175,8 @@ impl SchemaRegistry {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the entity has a schema and applying defaults fails.
     pub fn apply_defaults(&self, entity_name: &str, data: &mut Value) -> Result<()> {
         if let Some(schema) = self.schemas.get(entity_name) {
             schema.apply_defaults(data)?;
@@ -171,6 +184,8 @@ impl SchemaRegistry {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if serialization fails.
     pub fn persist_schema(&self, batch: &mut BatchWriter, schema: &Schema) -> Result<()> {
         let key = keys::encode_schema_key(&schema.entity);
         let value = serde_json::to_vec(schema)?;
@@ -178,6 +193,8 @@ impl SchemaRegistry {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if reading or deserializing schemas fails.
     pub fn load_schemas(&mut self, storage: &Storage) -> Result<()> {
         let prefix = b"meta/schema/";
         let items = storage.prefix_scan(prefix)?;
@@ -212,7 +229,7 @@ mod tests {
     fn test_field_definition() {
         let field = FieldDefinition::new("name", FieldType::String)
             .required()
-            .default(json!("anonymous"));
+            .with_default(json!("anonymous"));
 
         assert_eq!(field.name, "name");
         assert_eq!(field.field_type, FieldType::String);
@@ -250,8 +267,7 @@ mod tests {
 
     #[test]
     fn test_schema_validation_wrong_type() {
-        let schema = Schema::new("users")
-            .add_field(FieldDefinition::new("age", FieldType::Number));
+        let schema = Schema::new("users").add_field(FieldDefinition::new("age", FieldType::Number));
 
         let data = json!({
             "age": "thirty"
@@ -267,7 +283,7 @@ mod tests {
         let schema = Schema::new("users")
             .add_field(FieldDefinition::new("name", FieldType::String))
             .add_field(
-                FieldDefinition::new("status", FieldType::String).default(json!("active")),
+                FieldDefinition::new("status", FieldType::String).with_default(json!("active")),
             );
 
         let mut data = json!({

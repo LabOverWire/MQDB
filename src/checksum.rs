@@ -1,11 +1,13 @@
 use crc32fast::Hasher;
 
+#[must_use]
 pub fn compute_checksum(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
     hasher.update(data);
     hasher.finalize()
 }
 
+#[must_use]
 pub fn encode_with_checksum(data: &[u8]) -> Vec<u8> {
     let checksum = compute_checksum(data);
     let mut result = Vec::with_capacity(4 + data.len());
@@ -14,6 +16,8 @@ pub fn encode_with_checksum(data: &[u8]) -> Vec<u8> {
     result
 }
 
+/// # Errors
+/// Returns an error if data is too short or checksum doesn't match.
 pub fn decode_and_verify(data: &[u8]) -> Result<&[u8], String> {
     if data.len() < 4 {
         return Err("data too short for checksum".to_string());
@@ -87,7 +91,7 @@ mod tests {
             corrupted[i] ^= 0x01;
 
             let result = decode_and_verify(&corrupted);
-            assert!(result.is_err(), "Failed to detect bitflip at position {}", i);
+            assert!(result.is_err(), "Failed to detect bitflip at position {i}");
         }
     }
 }

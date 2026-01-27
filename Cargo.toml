@@ -4,23 +4,57 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crc32fast = "1.5.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-thiserror = "2.0.17"
-tracing = "0.1.41"
-uuid = { version = "1.18.1", features = ["v4"] }
+crc32fast = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+uuid = { version = "1.19", features = ["v4", "v7"] }
+bebytes = { version = "3.0.2", features = ["bytes"] }
 
-clap = { version = "4.5.53", features = ["derive", "env"], optional = true }
-comfy-table = { version = "7.2.1", optional = true }
-fjall = { version = "2.11.2", optional = true }
-mqtt5 = { version = "0.11.0", path = "../mqtt-lib/crates/mqtt5", optional = true }
-tokio = { version = "1.48.0", features = ["full"], optional = true }
+clap = { version = "4.5", features = ["derive", "env"], optional = true }
+comfy-table = { version = "7.2", optional = true }
+fjall = { version = "3.0", optional = true }
+mqtt5 = { version = "0.21", optional = true }
+tokio = { version = "1.49", features = ["full"], optional = true }
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+    "env-filter",
+], optional = true }
+glob = "0.3"
+regex = "1.12.2"
+flume = { version = "0.12.0", features = ["async"] }
+arc-swap = "1.8.0"
+rustls-native-certs = { version = "0.8.3", optional = true }
 
 [features]
 default = ["native"]
-native = ["dep:clap", "dep:comfy-table", "dep:fjall", "dep:mqtt5", "dep:tokio"]
-opentelemetry = ["mqtt5/opentelemetry", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+native = [
+    "dep:clap",
+    "dep:comfy-table",
+    "dep:fjall",
+    "dep:mqtt5",
+    "dep:tokio",
+    "dep:tracing-subscriber",
+    "dep:quinn",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-native-certs",
+]
+wasm = [
+    "dep:web-time",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+]
+opentelemetry = [
+    "mqtt5/opentelemetry",
+    "dep:opentelemetry",
+    "dep:tracing-opentelemetry",
+]
+tracing-subscriber = ["dep:tracing-subscriber"]
 
 [dependencies.opentelemetry]
 version = "0.31"
@@ -38,7 +72,28 @@ required-features = ["native"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 uuid = { version = "1.18.1", features = ["v4", "js"] }
+web-time = { version = "1.1", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", features = ["Window"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.23.0"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+
+[profile.release]
+debug = true
+
+[profile.bench]
+debug = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+lto = false
+codegen-units = 1
+split-debuginfo = "packed"
+
+[patch.crates-io]
+mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }
+mqtt5-protocol = { path = "../mqtt-lib/crates/mqtt5-protocol" }

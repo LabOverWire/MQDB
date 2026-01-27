@@ -5,6 +5,7 @@ use mqtt5::broker::auth::PasswordAuthProvider;
 use mqtt5::client::MqttClient;
 use parking_lot_mqtt::{Result, now_timestamp, publish_request};
 use serde_json::json;
+use std::fmt::Write as _;
 use tokio::time::{Duration, sleep};
 
 #[tokio::main]
@@ -58,14 +59,14 @@ async fn start_agent() -> Result<(tokio::task::JoinHandle<()>, tempfile::TempDir
         ("mqdb-service", "service123"),
     ] {
         let hash = PasswordAuthProvider::hash_password(pass)?;
-        passwd_content.push_str(&format!("{user}:{hash}\n"));
+        let _ = writeln!(passwd_content, "{user}:{hash}");
     }
     std::fs::write(&passwd_path, passwd_content)?;
 
     let acl_path = tmp.path().join("acl.txt");
     std::fs::write(
         &acl_path,
-        r#"user mqdb-service topic # permission readwrite
+        r"user mqdb-service topic # permission readwrite
 user * topic +/responses/# permission readwrite
 user admin topic $DB/# permission readwrite
 user admin topic $DB/_admin/# permission readwrite
@@ -75,7 +76,7 @@ user gate topic $DB/parking_sessions/+ permission write
 user gate topic gate/+/responses permission readwrite
 user dashboard topic $DB/+/events/# permission read
 user dashboard topic gate/+/status permission read
-"#,
+",
     )?;
 
     let agent = MqdbAgent::new(db).with_bind_address("127.0.0.1:1884".parse()?);
@@ -145,10 +146,10 @@ async fn run_dashboard() -> Result<()> {
                 let op = event["operation"].as_str().unwrap_or("unknown");
                 let id = event["id"].as_str().unwrap_or("?");
                 println!("📊 [SPOT] {op} - ID:{id}");
-                if let Some(data) = event.get("data") {
-                    if let Some(status) = data.get("status") {
-                        println!("   └─ Status: {status}");
-                    }
+                if let Some(data) = event.get("data")
+                    && let Some(status) = data.get("status")
+                {
+                    println!("   └─ Status: {status}");
                 }
             }
         })

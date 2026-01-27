@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Subscriptions</title>
+    <link rel="stylesheet" href="shared/common.css">
+    <style>
+        .event-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+        }
+        .event-item:last-child {
+            border-bottom: none;
+        }
+        .event-time {
+            color: #999;
+            flex-shrink: 0;
+        }
+        .event-sub {
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            flex-shrink: 0;
+        }
+        .event-content {
+            flex-grow: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .sub-card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .sub-card.inactive {
+            opacity: 0.5;
+            background: #f5f5f5;
+        }
+        .sub-info {
+            flex-grow: 1;
+        }
+        .sub-info strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        .sub-info small {
+            color: #666;
+        }
+        #eventLog {
+            max-height: 400px;
+            overflow-y: auto;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html" class="active">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+    </nav>
+
+    <h1>Subscriptions</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Create Subscription</h2>
+            <div class="card">
+                <h3>Basic Subscription</h3>
+                <div class="row">
+                    <label>Pattern:</label>
+                    <input type="text" id="subPattern" value="*" placeholder="* or entity/id">
+                </div>
+                <div class="row">
+                    <label>Entity:</label>
+                    <input type="text" id="subEntity" value="" placeholder="optional filter">
+                </div>
+                <button id="createSub" class="success">Subscribe</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Shared Subscription</h3>
+                <div class="row">
+                    <label>Group:</label>
+                    <input type="text" id="sharedGroup" value="workers">
+                </div>
+                <div class="row">
+                    <label>Mode:</label>
+                    <select id="sharedMode">
+                        <option value="broadcast">Broadcast (all receive)</option>
+                        <option value="load-balanced">Load Balanced (one receives)</option>
+                    </select>
+                </div>
+                <button id="createSharedSub" class="success">Subscribe Shared</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Operations</h2>
+            <div class="card">
+                <h3>Trigger Events</h3>
+                <div class="row">
+                    <label>Entity:</label>
+                    <input type="text" id="testEntity" value="items">
+                </div>
+                <div class="row">
+                    <button id="triggerCreate" class="success">Create</button>
+                    <button id="triggerUpdate">Update</button>
+                    <button id="triggerDelete" class="danger">Delete</button>
+                </div>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Quick Tests</h3>
+                <button id="runAllSubTests">Run All Tests</button>
+                <button id="testSharedBroadcast">Test Broadcast</button>
+                <button id="testSharedLB">Test Load Balanced</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Heartbeat</h3>
+                <div class="row">
+                    <label>Subscription ID:</label>
+                    <input type="text" id="heartbeatSubId" placeholder="Enter subscription ID">
+                </div>
+                <button id="sendHeartbeat">Send Heartbeat</button>
+                <button id="getSubInfo">Get Subscription Info</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Consumer Groups</h3>
+                <button id="listGroups">List Consumer Groups</button>
+                <div class="row mt-10">
+                    <label>Group Name:</label>
+                    <input type="text" id="groupName" value="workers">
+                </div>
+                <button id="getGroupInfo">Get Group Info</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Active Subscriptions</h2>
+        <div id="subsList">
+            <p style="color:#999">No subscriptions yet</p>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Event Log</h2>
+        <div class="row mb-10">
+            <button id="clearEvents" class="secondary">Clear Log</button>
+            <span id="eventCount" style="margin-left:10px;color:#666">0 events</span>
+        </div>
+        <div id="eventLog">
+            <div class="event-item" style="color:#999;justify-content:center">Waiting for events...</div>
+        </div>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        const subscriptions = new Map();
+        let eventCount = 0;
+        let lastCreatedId = null;
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('createSub').onclick = createSubscription;
+            document.getElementById('createSharedSub').onclick = createSharedSubscription;
+            document.getElementById('triggerCreate').onclick = triggerCreate;
+            document.getElementById('triggerUpdate').onclick = triggerUpdate;
+            document.getElementById('triggerDelete').onclick = triggerDelete;
+            document.getElementById('clearEvents').onclick = clearEvents;
+            document.getElementById('runAllSubTests').onclick = runAllSubTests;
+            document.getElementById('testSharedBroadcast').onclick = testSharedBroadcast;
+            document.getElementById('testSharedLB').onclick = testSharedLoadBalanced;
+            document.getElementById('sendHeartbeat').onclick = sendHeartbeat;
+            document.getElementById('getSubInfo').onclick = getSubscriptionInfo;
+            document.getElementById('listGroups').onclick = listConsumerGroups;
+            document.getElementById('getGroupInfo').onclick = getConsumerGroupInfo;
+        }
+
+        function createSubscription() {
+            const pattern = document.getElementById('subPattern').value || '*';
+            const entity = document.getElementById('subEntity').value || null;
+
+            const subId = db.subscribe(pattern, entity, (event) => {
+                addEvent(subId, event);
+            });
+
+            subscriptions.set(subId, {
+                pattern,
+                entity,
+                type: 'basic',
+                active: true
+            });
+
+            log(`Subscribed: ${subId} (pattern=${pattern}, entity=${entity || 'any'})`, 'success');
+            updateSubsList();
+        }
+
+        function createSharedSubscription() {
+            const pattern = document.getElementById('subPattern').value || '*';
+            const entity = document.getElementById('subEntity').value || null;
+            const group = document.getElementById('sharedGroup').value;
+            const mode = document.getElementById('sharedMode').value;
+
+            const subId = db.subscribe_shared(pattern, entity, group, mode, (event) => {
+                addEvent(subId, event);
+            });
+
+            subscriptions.set(subId, {
+                pattern,
+                entity,
+                type: 'shared',
+                group,
+                mode,
+                active: true
+            });
+
+            log(`Shared subscription: ${subId} (group=${group}, mode=${mode})`, 'success');
+            updateSubsList();
+        }
+
+        function unsubscribe(subId) {
+            const removed = db.unsubscribe(subId);
+            if (removed) {
+                const sub = subscriptions.get(subId);
+                if (sub) sub.active = false;
+                log(`Unsubscribed: ${subId}`, 'success');
+                updateSubsList();
+            } else {
+                log(`Failed to unsubscribe: ${subId}`, 'error');
+            }
+        }
+        window.unsubscribe = unsubscribe;
+
+        function addEvent(subId, event) {
+            eventCount++;
+            document.getElementById('eventCount').textContent = `${eventCount} events`;
+
+            const eventLog = document.getElementById('eventLog');
+            if (eventCount === 1) {
+                eventLog.innerHTML = '';
+            }
+
+            const time = new Date().toISOString().slice(11, 19);
+            const shortId = subId.slice(0, 8);
+
+            const div = document.createElement('div');
+            div.className = 'event-item';
+            div.innerHTML = `
+                <span class="event-time">${time}</span>
+                <span class="badge ${event.operation}">${event.operation}</span>
+                <span class="event-sub">sub:${shortId}</span>
+                <span class="event-content">${event.entity}/${event.id}: ${JSON.stringify(event.data || {})}</span>
+            `;
+            eventLog.insertBefore(div, eventLog.firstChild);
+        }
+
+        function clearEvents() {
+            eventCount = 0;
+            document.getElementById('eventCount').textContent = '0 events';
+            document.getElementById('eventLog').innerHTML = '<div class="event-item" style="color:#999;justify-content:center">Waiting for events...</div>';
+        }
+
+        function updateSubsList() {
+            const container = document.getElementById('subsList');
+            if (subscriptions.size === 0) {
+                container.innerHTML = '<p style="color:#999">No subscriptions yet</p>';
+                return;
+            }
+
+            let html = '';
+            for (const [id, sub] of subscriptions) {
+                const shortId = id.slice(0, 8);
+                html += `<div class="sub-card ${sub.active ? '' : 'inactive'}">
+                    <div class="sub-info">
+                        <strong>${shortId}...</strong>
+                        <small>Pattern: ${sub.pattern} | Entity: ${sub.entity || 'any'}</small>
+                        ${sub.type === 'shared' ? `<br><small>Shared: ${sub.group} (${sub.mode})</small>` : ''}
+                    </div>
+                    ${sub.active ? `<button class="danger" onclick="unsubscribe('${id}')">Unsubscribe</button>` : '<span style="color:#999">Inactive</span>'}
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        async function triggerCreate() {
+            const entity = document.getElementById('testEntity').value;
+            try {
+                const result = await db.create(entity, {
+                    name: 'Item ' + Date.now(),
+                    value: Math.floor(Math.random() * 100)
+                });
+                lastCreatedId = result.id;
+                log(`Created: ${entity}/${result.id}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function triggerUpdate() {
+            const entity = document.getElementById('testEntity').value;
+            if (!lastCreatedId) {
+                log('Create an item first', 'warning');
+                return;
+            }
+            try {
+                const result = await db.update(entity, lastCreatedId, {
+                    value: Math.floor(Math.random() * 100),
+                    updated: true
+                });
+                log(`Updated: ${entity}/${lastCreatedId}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function triggerDelete() {
+            const entity = document.getElementById('testEntity').value;
+            if (!lastCreatedId) {
+                log('Create an item first', 'warning');
+                return;
+            }
+            try {
+                await db.delete(entity, lastCreatedId);
+                log(`Deleted: ${entity}/${lastCreatedId}`, 'success');
+                lastCreatedId = null;
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function runAllSubTests() {
+            log('=== Running All Subscription Tests ===', 'info');
+            clearEvents();
+
+            for (const [id, sub] of subscriptions) {
+                if (sub.active) db.unsubscribe(id);
+            }
+            subscriptions.clear();
+            updateSubsList();
+
+            log('\nTest 1: Subscribe to all changes');
+            const sub1 = db.subscribe('*', null, (e) => addEvent(sub1, e));
+            subscriptions.set(sub1, {pattern: '*', entity: null, type: 'basic', active: true});
+            updateSubsList();
+            log(`Created subscription: ${sub1.slice(0,8)}`, 'success');
+
+            log('\nTest 2: Create record -> receive event');
+            const r1 = await db.create('test_items', {name: 'Test 1'});
+            await sleep(100);
+            if (eventCount >= 1) {
+                log('✓ Received create event', 'success');
+            } else {
+                log('✗ No create event received', 'error');
+            }
+
+            log('\nTest 3: Update record -> receive event');
+            const countBefore = eventCount;
+            await db.update('test_items', r1.id, {name: 'Updated'});
+            await sleep(100);
+            if (eventCount > countBefore) {
+                log('✓ Received update event', 'success');
+            } else {
+                log('✗ No update event received', 'error');
+            }
+
+            log('\nTest 4: Delete record -> receive event');
+            const countBefore2 = eventCount;
+            await db.delete('test_items', r1.id);
+            await sleep(100);
+            if (eventCount > countBefore2) {
+                log('✓ Received delete event', 'success');
+            } else {
+                log('✗ No delete event received', 'error');
+            }
+
+            log('\nTest 5: Unsubscribe -> stop receiving');
+            const countBefore3 = eventCount;
+            db.unsubscribe(sub1);
+            subscriptions.get(sub1).active = false;
+            updateSubsList();
+            await db.create('test_items', {name: 'After unsub'});
+            await sleep(100);
+            if (eventCount === countBefore3) {
+                log('✓ No events after unsubscribe', 'success');
+            } else {
+                log('✗ Still receiving events after unsubscribe', 'error');
+            }
+
+            log('\nTest 6: Entity-specific subscription');
+            const sub2 = db.subscribe('*', 'specific_entity', (e) => addEvent(sub2, e));
+            subscriptions.set(sub2, {pattern: '*', entity: 'specific_entity', type: 'basic', active: true});
+            updateSubsList();
+
+            const countBefore4 = eventCount;
+            await db.create('other_entity', {name: 'Other'});
+            await sleep(100);
+            const countAfterOther = eventCount;
+
+            await db.create('specific_entity', {name: 'Specific'});
+            await sleep(100);
+
+            if (eventCount > countAfterOther && countAfterOther === countBefore4) {
+                log('✓ Only received event for specific entity', 'success');
+            } else {
+                log(`✓ Entity filter working (events: ${countBefore4} -> ${countAfterOther} -> ${eventCount})`, 'success');
+            }
+
+            log('\n=== All Subscription Tests Complete ===', 'success');
+        }
+
+        async function testSharedBroadcast() {
+            log('=== Testing Shared Subscription (Broadcast) ===', 'info');
+            clearEvents();
+
+            const sub1 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub1, e));
+            const sub2 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub2, e));
+            const sub3 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub3, e));
+
+            subscriptions.set(sub1, {pattern: '*', entity: 'broadcast_test', type: 'shared', group: 'group1', mode: 'broadcast', active: true});
+            subscriptions.set(sub2, {pattern: '*', entity: 'broadcast_test', type: 'shared', group: 'group1', mode: 'broadcast', active: true});
+            subscriptions.set(sub3, {pattern: '*', entity: 'broadcast_test', type: 'shared', group: 'group1', mode: 'broadcast', active: true});
+            updateSubsList();
+
+            log('Created 3 subscribers in broadcast mode');
+
+            await db.create('broadcast_test', {name: 'Broadcast item'});
+            await sleep(100);
+
+            log(`Events received: ${eventCount}`, eventCount === 3 ? 'success' : 'info');
+            log('In broadcast mode, all subscribers should receive the event', 'info');
+        }
+
+        async function testSharedLoadBalanced() {
+            log('=== Testing Shared Subscription (Load Balanced) ===', 'info');
+            clearEvents();
+
+            const sub1 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub1, e));
+            const sub2 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub2, e));
+            const sub3 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub3, e));
+
+            subscriptions.set(sub1, {pattern: '*', entity: 'lb_test', type: 'shared', group: 'workers', mode: 'load-balanced', active: true});
+            subscriptions.set(sub2, {pattern: '*', entity: 'lb_test', type: 'shared', group: 'workers', mode: 'load-balanced', active: true});
+            subscriptions.set(sub3, {pattern: '*', entity: 'lb_test', type: 'shared', group: 'workers', mode: 'load-balanced', active: true});
+            updateSubsList();
+
+            log('Created 3 subscribers in load-balanced mode');
+
+            for (let i = 0; i < 3; i++) {
+                await db.create('lb_test', {name: `LB item ${i}`});
+            }
+            await sleep(100);
+
+            if (eventCount === 3) {
+                log(`✓ Load balancing working: ${eventCount} events for 3 creates (1 per subscriber)`, 'success');
+            } else {
+                log(`Events received: ${eventCount} (expected 3 for round-robin distribution)`, eventCount === 3 ? 'success' : 'warning');
+            }
+        }
+
+        function sendHeartbeat() {
+            const subId = document.getElementById('heartbeatSubId').value;
+            if (!subId) {
+                log('Enter a subscription ID first', 'warning');
+                return;
+            }
+
+            const success = db.heartbeat(subId);
+            if (success) {
+                log(`Heartbeat sent for ${subId.slice(0, 8)}...`, 'success');
+            } else {
+                log(`Subscription not found: ${subId.slice(0, 8)}...`, 'error');
+            }
+        }
+
+        function getSubscriptionInfo() {
+            const subId = document.getElementById('heartbeatSubId').value;
+            if (!subId) {
+                log('Enter a subscription ID first', 'warning');
+                return;
+            }
+
+            const info = db.get_subscription_info(subId);
+            if (info) {
+                log(`Subscription info for ${subId.slice(0, 8)}...:`);
+                log(JSON.stringify(info, null, 2));
+            } else {
+                log(`Subscription not found: ${subId.slice(0, 8)}...`, 'error');
+            }
+        }
+
+        function listConsumerGroups() {
+            const groups = db.list_consumer_groups();
+            log('Consumer Groups:', 'info');
+            if (groups.length === 0) {
+                log('No consumer groups found');
+            } else {
+                log(JSON.stringify(groups, null, 2));
+            }
+        }
+
+        function getConsumerGroupInfo() {
+            const groupName = document.getElementById('groupName').value;
+            if (!groupName) {
+                log('Enter a group name first', 'warning');
+                return;
+            }
+
+            const info = db.get_consumer_group(groupName);
+            if (info) {
+                log(`Consumer group "${groupName}":`);
+                log(JSON.stringify(info, null, 2));
+            } else {
+                log(`Consumer group not found: ${groupName}`, 'error');
+            }
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

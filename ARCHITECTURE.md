@@ -6,6 +6,7 @@
 
 MQDB is a message-oriented reactive database built in Rust that combines:
 - **Native MQTT integration** with embedded broker and topic-based API
+- **Distributed clustering** with 64-partition sharding, Raft consensus, and automatic rebalancing
 - **Point-to-point delivery** with consumer groups and partition-based routing
 - **Reactive subscriptions** with MQTT-style pub/sub patterns
 - **Schema-less JSON** entities with optional schema validation
@@ -32,6 +33,7 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 
 ### Architecture Layers (Bottom to Top)
 
+**Single-Node (Agent Mode):**
 ```
 ┌─────────────────────────────────────────────────┐
 │           MQTT Clients / Web Browsers           │
@@ -56,6 +58,32 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 ├─────────────────────────────────────────────────┤
 │    Fjall (Native) │ Memory (WASM/Testing)       │
 │  LSM Persistence  │  In-Memory HashMap          │
+└─────────────────────────────────────────────────┘
+```
+
+**Multi-Node (Cluster Mode):**
+```
+┌─────────────────────────────────────────────────┐
+│           MQTT Clients / Web Browsers           │
+├─────────────────────────────────────────────────┤
+│       ClusteredAgent (cluster_agent.rs)         │
+│  Embedded Broker │ Auth │ ACL │ Event Handler   │
+├─────────────────────────────────────────────────┤
+│         NodeController (node_controller.rs)     │
+│  Partition Map │ Write Routing │ Replication    │
+├─────────────────────────────────────────────────┤
+│      Raft Consensus    │    Store Manager       │
+│  Leader Election │     │  17 Typed Stores       │
+│  Log Replication │     │  Sessions, Topics, DB  │
+├─────────────────────────────────────────────────┤
+│         Cluster Transport (transport.rs)        │
+│  MQTT Bridges  or  Direct QUIC Transport        │
+├─────────────────────────────────────────────────┤
+│         Storage Abstraction (StorageBackend)    │
+│  BatchWriter │ Transactions │ Durability        │
+├─────────────────────────────────────────────────┤
+│               Fjall (Native)                    │
+│  Raft Log │ Stores │ LSM Persistence            │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -156,7 +184,7 @@ fkref/{target_entity}/{target_id}/...       → FK reverse lookups (reserved)
 data/users/123                              → User entity with ID 123
 idx/users/email/alice@example.com/123       → Email index entry
 meta/schema/users                           → Users schema definition
-meta/constraint/fk/posts/posts_author_id_users_fk
+meta/constraint/fk/posts/posts_author_id_fk → Foreign key constraint
 ```
 
 ---
@@ -688,7 +716,6 @@ batch.commit()?;                            // Commit or conflict
 - Better concurrency than pessimistic locks
 - No deadlock risk
 - Simpler implementation
-- But: requires retry logic for conflicts
 
 ---
 
@@ -1125,9 +1152,110 @@ db.subscribe_query("users WHERE status = 'active'").await?;
 
 ---
 
-## 9. Performance Characteristics
+## 9. Cluster Integration
 
-### Benchmark Results (M-series Mac, Release Mode)
+The single-node architecture described in this document forms the foundation for MQDB's distributed cluster mode. This section describes how the components integrate.
+
+### 9.1 Deployment Modes
+
+MQDB supports two deployment modes:
+
+| Mode | Entry Point | Use Case |
+|------|-------------|----------|
+| **Agent** | `MqdbAgent` (`agent.rs`) | Single-node standalone broker |
+| **Cluster** | `ClusteredAgent` (`cluster_agent.rs`) | Multi-node distributed system |
+
+Both modes share the same database API, but cluster mode adds:
+- Raft consensus for partition management
+- MQTT bridges or direct QUIC for inter-node transport
+- 64 fixed partitions with replication factor 2
+- Automatic rebalancing and failover
+
+### 9.2 Storage Layer in Cluster Mode
+
+In cluster mode, the `StorageBackend` trait is used by multiple subsystems:
+
+**Raft Storage** (`cluster/raft/storage.rs`):
+- Persists Raft log entries and metadata
+- Uses `DurabilityMode::Immediate` for consensus safety
+- Path: `{db_path}/raft/`
+
+**Cluster Stores** (`cluster/store_manager.rs`):
+- Manages 17 distinct stores for MQTT and database state
+- Uses configurable durability (default: `PeriodicMs(10)`)
+- Path: `{db_path}/stores/`
+- Includes: sessions, subscriptions, retained messages, QoS state, database data
+
+### 9.3 Entity Types
+
+Cluster mode introduces two classes of entities:
+
+**Partitioned Entities** (hash-based distribution):
+- Sessions: `hash(client_id) % 64`
+- Database records: `hash(entity/id) % 64`
+- Retained messages: `hash(topic) % 64`
+
+**Broadcast Entities** (replicated to all nodes):
+- `_topic_index`: Topic → subscriber mappings
+- `_wildcards`: Wildcard subscription patterns
+- `_client_loc`: Client → connected node mappings
+- `_db_schema`: Database schema definitions
+- `_db_constraint`: Constraint definitions
+
+Broadcast entities enable local pub/sub routing without cross-node queries.
+
+### 9.4 Transport Options
+
+Cluster nodes communicate via two transport implementations:
+
+| Transport | Class | Characteristics |
+|-----------|-------|-----------------|
+| **MQTT Bridges** | `MqttTransport` | Uses broker infrastructure, bridge overhead |
+| **Direct QUIC** | `QuicDirectTransport` | Bypasses broker, 1.2-2.5x faster |
+
+Both implement the `ClusterTransport` trait and support:
+- Point-to-point messaging to specific nodes
+- Broadcast to all cluster members
+- Partition-based routing to primary owners
+
+### 9.5 Replication Model
+
+MQDB uses a two-tier replication model:
+
+**Control Plane (Raft Consensus)**:
+- Strong consistency for partition map changes
+- Leader election and membership management
+- Log replication with quorum acknowledgment
+
+**Data Plane (Async Replication)**:
+- Primary-replica model (RF=2)
+- Primary applies locally, forwards to replica
+- Best-effort replication (no per-write quorum)
+- Optimized for throughput over strict consistency
+
+### 9.6 API Compatibility
+
+Database operations work identically in both modes:
+
+**Agent Mode**:
+```
+$DB/{entity}/create → MqdbAgent → Database API → Local storage
+```
+
+**Cluster Mode**:
+```
+$DB/{entity}/create → ClusteredAgent → NodeController → Partition primary → Replicas
+```
+
+The `$DB/` topic prefix is handled by both modes, ensuring client applications work transparently.
+
+For detailed cluster architecture, see `DISTRIBUTED_DESIGN.md`.
+
+---
+
+## 10. Performance Characteristics (Single-Node)
+
+### Benchmark Results (Single-Node Agent Mode, M-series Mac, Release Mode)
 
 | Operation | Throughput | p50 Latency | p95 Latency | p99 Latency |
 |-----------|------------|-------------|-------------|-------------|
@@ -1135,6 +1263,8 @@ db.subscribe_query("users WHERE status = 'active'").await?;
 | Reads     | 558k/s     | 0.00ms      | 0.00ms      | 0.01ms      |
 | Updates   | 191k/s     | 0.00ms      | 0.01ms      | 0.01ms      |
 | List/Scan | 91/s       | 10.96ms     | -           | -           |
+
+Note: These benchmarks are for single-node agent mode. For cluster mode performance characteristics, see `DISTRIBUTED_DESIGN.md` section A6.
 
 ### Bottlenecks
 
@@ -1178,23 +1308,29 @@ db.subscribe_query("users WHERE status = 'active'").await?;
 
 ---
 
-## 10. Error Handling Strategy
+## 11. Error Handling Strategy
 
 ### Error Types
 
 ```rust
 pub enum Error {
-    Storage(String),              // Fjall errors (I/O, corruption)
+    Storage(fjall::Error),        // Fjall errors (native only)
+    StorageGeneric(String),       // Generic storage errors
     NotFound { entity, id },      // Entity doesn't exist
-    Conflict,                     // Optimistic lock failure
-    Corruption(String),           // Checksum mismatch
+    Serialization(serde_json::Error), // JSON parse/serialize errors
+    InvalidKey(String),           // Key decoding errors
+    Validation(String),           // General validation errors
+    ConstraintViolation(String),  // Generic constraint errors
+    Internal(String),             // Internal errors
+    SystemTime(String),           // System time errors
+    Corruption { entity, id },    // Checksum mismatch
+    BackupFailed(String),         // Backup/restore failures
+    Conflict(String),             // Optimistic lock failure
     SchemaViolation { entity, field, reason },
     UniqueViolation { entity, field, value },
     ForeignKeyViolation { entity, field, target_entity, target_id },
     ForeignKeyRestrict { entity, id, referencing_entity },
     NotNullViolation { entity, field },
-    Validation(String),           // General validation errors
-    InvalidKey(String),           // Key decoding errors
     InvalidForeignKey,            // FK value not a string
 }
 ```
@@ -1222,20 +1358,35 @@ pub enum Error {
 
 ---
 
-## 11. Configuration Options
+## 12. Configuration Options
 
 ### DatabaseConfig
 
 ```rust
 pub struct DatabaseConfig {
     pub path: PathBuf,                          // Database directory
-    pub durability: DurabilityMode,             // Flush strategy
+    pub durability: DurabilityMode,             // Flush strategy (default: Immediate)
     pub event_channel_capacity: usize,          // Broadcast buffer (default: 1000)
-    pub max_list_results: usize,                // Prevent huge result sets (default: 10000)
-    pub max_subscriptions: usize,               // Limit active subs (default: 1000)
-    pub ttl_cleanup_interval_secs: Option<u64>, // Background task (default: None)
-    pub max_cursor_buffer: usize,               // Cursor memory limit (default: 1000)
+    pub max_list_results: Option<usize>,        // Prevent huge result sets (default: Some(10000))
+    pub max_subscriptions: Option<usize>,       // Limit active subs (default: Some(1000))
+    pub ttl_cleanup_interval_secs: Option<u64>, // Background task (default: Some(60))
+    pub max_cursor_buffer: usize,               // Cursor memory limit (default: 100)
     pub max_sort_buffer: usize,                 // Max entities for in-memory sort (default: 10000)
+    pub outbox: OutboxConfig,                   // Outbox settings (see below)
+    pub shared_subscription: SharedSubscriptionConfig, // Shared subscription settings
+    pub spawn_background_tasks: bool,           // Enable background tasks (default: true)
+}
+
+pub struct OutboxConfig {
+    pub enabled: bool,                          // Enable outbox pattern (default: true)
+    pub retry_interval_ms: u64,                 // Retry interval (default: 5000)
+    pub max_retries: u32,                       // Max retries before dead letter (default: 10)
+    pub batch_size: usize,                      // Batch processing size (default: 100)
+}
+
+pub struct SharedSubscriptionConfig {
+    pub num_partitions: u8,                     // Partitions for shared subs (default: 8)
+    pub consumer_timeout_ms: u64,               // Consumer heartbeat timeout (default: 30000)
 }
 ```
 
@@ -1244,7 +1395,7 @@ pub struct DatabaseConfig {
 ```rust
 pub enum DurabilityMode {
     Immediate,        // fsync before commit returns (safest, slowest)
-    Periodic(u64),    // fsync every N ms (balanced)
+    PeriodicMs(u64),  // fsync every N ms (balanced)
     None,             // no fsync (fastest, data loss risk)
 }
 ```
@@ -1254,21 +1405,22 @@ pub enum DurabilityMode {
 **High Throughput (testing):**
 ```rust
 DatabaseConfig::new("db")
-    .with_durability(DurabilityMode::None)
-    .with_event_channel_capacity(10000)
+    .with_durability(DurabilityMode::None)       // Skip fsync
+    .with_event_capacity(10000)                  // Larger event buffer
+    .without_background_tasks()                  // No cleanup overhead
 ```
 
 **Low Latency (production):**
 ```rust
 DatabaseConfig::new("db")
-    .with_durability(DurabilityMode::Immediate)
+    .with_durability(DurabilityMode::Immediate)  // fsync every commit
 ```
 
 **Balanced (typical production):**
 ```rust
 DatabaseConfig::new("db")
-    .with_durability(DurabilityMode::Periodic(100))  // 100ms flush
-    .with_ttl_cleanup_interval(Some(60))             // Clean every 60s
+    .with_durability(DurabilityMode::PeriodicMs(100))  // 100ms flush
+    .with_ttl_cleanup_interval(Some(60))               // Clean every 60s
 ```
 
 **Memory-Constrained:**
@@ -1281,20 +1433,22 @@ DatabaseConfig::new("db")
 
 ---
 
-## 12. Testing Strategy
+## 13. Testing Strategy
 
-### Test Coverage: 142 Tests
+### Test Coverage: 683+ Tests
 
-**Breakdown:**
-- 68 unit tests (component isolation)
-- 74 integration tests (full workflows)
+**Major Test Suites:**
+- 472 unit tests (library components including cluster modules)
+- 68 protocol/encoding tests
+- 49 subscription/topic tests
+- Integration tests:
   - 25 constraint tests
   - 17 CRUD + features
   - 13 crash recovery
   - 7 point-to-point delivery
-  - 6 transaction conflicts
-  - 4 concurrency
-  - 2 durability
+  - 6 transaction tests
+  - 4 concurrency tests
+  - 4 cluster integration tests
 
 ### Test Categories
 
@@ -1357,7 +1511,7 @@ let db = Database::open(path).await?;
 
 ---
 
-## 13. Operational Considerations
+## 14. Operational Considerations
 
 ### Monitoring
 
@@ -1450,7 +1604,7 @@ db.backup_logical(format!("backups/logical_{}.jsonl", timestamp)).await?;
 
 ---
 
-## 14. Conclusion
+## 15. Conclusion
 
 ### MQDB is Optimized For:
 
@@ -1463,11 +1617,12 @@ db.backup_logical(format!("backups/logical_{}.jsonl", timestamp)).await?;
 ### Key Strengths:
 
 1. **Native MQTT Integration:** Embedded broker with topic-based database API
-2. **Point-to-Point Delivery:** Consumer groups with LoadBalanced and Ordered modes
-3. **ACID Transactions:** Full transactional guarantees with outbox pattern
-4. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications
-5. **Platform Flexibility:** Runs native (Fjall) or in browsers (WASM/Memory)
-6. **Rust Safety:** Memory-safe, no data races, strong type system
+2. **Distributed Clustering:** 64-partition sharding with Raft consensus and automatic rebalancing
+3. **Point-to-Point Delivery:** Consumer groups with LoadBalanced and Ordered modes
+4. **ACID Transactions:** Full transactional guarantees with outbox pattern
+5. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications
+6. **Platform Flexibility:** Runs native (Fjall) or in browsers (WASM/Memory)
+7. **Rust Safety:** Memory-safe, no data races, strong type system
 
 ### Design Philosophy:
 
@@ -1488,19 +1643,29 @@ MQDB prioritizes:
 - Message processing pipelines
 - Browser-based applications (WASM)
 - Rapid prototyping (schema-less)
+- Distributed MQTT broker with embedded database (cluster mode)
 
 ❌ **Not ideal for:**
 - Massive scale (billions of entities)
 - Complex analytical queries (no query planner)
-- Distributed systems (no replication yet)
 - SQL compatibility required
 
 ### Contributing:
 
 The architecture is designed for extensibility. Key extension points:
-- Custom storage backends (trait abstraction)
-- MQTT integration layer (dispatcher hooks)
-- Query language (filter system)
-- Additional constraint types (framework in place)
+- Custom storage backends (implement `StorageBackend` trait from `storage/backend.rs`)
+- Cluster transport (implement `ClusterTransport` trait from `cluster/transport.rs`)
+- MQTT integration layer (dispatcher hooks in `agent.rs`)
+- Query language (filter system in `database.rs`)
+- Additional constraint types (framework in place via `cluster/db/constraint_store.rs`)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+
+---
+
+## Related Documentation
+
+- **DISTRIBUTED_DESIGN.md** - Detailed cluster architecture and design decisions
+- **IMPLEMENTATION_PLAN.md** - Milestone plan (all M1-M10 complete)
+- **COMPLETE_MATRIX_DOC.md** - Benchmark specification
+- **README.md** - User-facing documentation with examples

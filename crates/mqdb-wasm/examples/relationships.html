@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Relationships</title>
+    <link rel="stylesheet" href="shared/common.css">
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html" class="active">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+    </nav>
+
+    <h1>Relationships & Includes</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Setup</h2>
+            <div class="card">
+                <h3>Create Test Data</h3>
+                <p>Creates authors and posts with relationships</p>
+                <button id="setupData" class="success">Setup Test Data</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Define Relationship</h3>
+                <div class="row">
+                    <label>Source Entity:</label>
+                    <input type="text" id="sourceEntity" value="posts" readonly>
+                </div>
+                <div class="row">
+                    <label>Field Name:</label>
+                    <input type="text" id="fieldName" value="author" readonly>
+                </div>
+                <div class="row">
+                    <label>Target Entity:</label>
+                    <input type="text" id="targetEntity" value="authors" readonly>
+                </div>
+                <button id="addRelationship" class="success">Add Relationship</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Operations</h2>
+            <div class="card">
+                <h3>Read with Includes</h3>
+                <div class="row">
+                    <label>Entity:</label>
+                    <input type="text" id="readEntity" value="posts">
+                </div>
+                <div class="row">
+                    <label>ID:</label>
+                    <input type="text" id="readId" value="1">
+                </div>
+                <div class="row">
+                    <label>Includes:</label>
+                    <input type="text" id="readIncludes" value='["author"]' placeholder='["author"]'>
+                </div>
+                <button id="readWithIncludes">Read with Includes</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>List with Includes</h3>
+                <div class="row">
+                    <label>Entity:</label>
+                    <input type="text" id="listEntity" value="posts">
+                </div>
+                <div class="row">
+                    <label>Includes:</label>
+                    <input type="text" id="listIncludes" value='["author"]'>
+                </div>
+                <button id="listWithIncludes">List with Includes</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Quick Tests</h2>
+        <button id="runAllTests" class="success">Run All Tests</button>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        let testAuthors = [];
+        let testPosts = [];
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('setupData').onclick = setupTestData;
+            document.getElementById('addRelationship').onclick = addRelationship;
+            document.getElementById('readWithIncludes').onclick = readWithIncludes;
+            document.getElementById('listWithIncludes').onclick = listWithIncludes;
+            document.getElementById('runAllTests').onclick = runAllTests;
+        }
+
+        async function setupTestData() {
+            log('Setting up test data...', 'info');
+
+            try {
+                const author1 = await db.create('authors', { name: 'Alice Smith', email: 'alice@example.com' });
+                const author2 = await db.create('authors', { name: 'Bob Jones', email: 'bob@example.com' });
+
+                testAuthors = [author1, author2];
+                log(`Created authors: ${author1.id}, ${author2.id}`, 'success');
+
+                const post1 = await db.create('posts', { title: 'First Post', author_id: author1.id, content: 'Hello world' });
+                const post2 = await db.create('posts', { title: 'Second Post', author_id: author1.id, content: 'Another post' });
+                const post3 = await db.create('posts', { title: 'Bob Post', author_id: author2.id, content: 'Bob writes' });
+
+                testPosts = [post1, post2, post3];
+                log(`Created posts: ${post1.id}, ${post2.id}, ${post3.id}`, 'success');
+
+                log('Test data setup complete', 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        function addRelationship() {
+            const source = document.getElementById('sourceEntity').value;
+            const field = document.getElementById('fieldName').value;
+            const target = document.getElementById('targetEntity').value;
+
+            try {
+                db.add_relationship(source, field, target);
+                log(`Added relationship: ${source}.${field} -> ${target}`, 'success');
+
+                const rels = db.list_relationships(source);
+                log(`Relationships for ${source}: ${JSON.stringify(rels, null, 2)}`);
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function readWithIncludes() {
+            const entity = document.getElementById('readEntity').value;
+            const id = document.getElementById('readId').value;
+            const includesStr = document.getElementById('readIncludes').value;
+
+            try {
+                const includes = JSON.parse(includesStr);
+                const result = await db.read_with_includes(entity, id, includes);
+                log(`Read ${entity}/${id} with includes:`, 'success');
+                log(JSON.stringify(result, null, 2));
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function listWithIncludes() {
+            const entity = document.getElementById('listEntity').value;
+            const includesStr = document.getElementById('listIncludes').value;
+
+            try {
+                const includes = JSON.parse(includesStr);
+                const result = await db.list(entity, { includes });
+                log(`List ${entity} with includes (${result.length} items):`, 'success');
+                log(JSON.stringify(result, null, 2));
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function runAllTests() {
+            log('=== Running All Relationship Tests ===', 'info');
+
+            log('\nTest 1: Setup test data');
+            await setupTestData();
+            await sleep(100);
+
+            log('\nTest 2: Add relationship');
+            db.add_relationship('posts', 'author', 'authors');
+            const rels = db.list_relationships('posts');
+            if (rels.length === 1 && rels[0].field === 'author') {
+                log('✓ Relationship added successfully', 'success');
+            } else {
+                log('✗ Failed to add relationship', 'error');
+            }
+
+            log('\nTest 3: Read with includes');
+            const post = await db.read_with_includes('posts', testPosts[0].id, ['author']);
+            if (post.author && post.author.name) {
+                log(`✓ Read with includes worked: post.author.name = "${post.author.name}"`, 'success');
+            } else {
+                log('✗ Read with includes failed - no author embedded', 'error');
+            }
+
+            log('\nTest 4: List with includes');
+            const posts = await db.list('posts', { includes: ['author'] });
+            const allHaveAuthor = posts.every(p => p.author && p.author.name);
+            if (allHaveAuthor) {
+                log(`✓ List with includes worked: all ${posts.length} posts have author embedded`, 'success');
+            } else {
+                log('✗ List with includes failed - some posts missing author', 'error');
+            }
+
+            log('\nTest 5: Verify author data integrity');
+            const alicePosts = posts.filter(p => p.author.name === 'Alice Smith');
+            if (alicePosts.length === 2) {
+                log('✓ Author data correct: Alice has 2 posts', 'success');
+            } else {
+                log(`✗ Author data incorrect: expected 2 Alice posts, got ${alicePosts.length}`, 'error');
+            }
+
+            log('\n=== All Relationship Tests Complete ===', 'success');
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

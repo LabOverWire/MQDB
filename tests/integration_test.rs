@@ -5,7 +5,9 @@ use tempfile::TempDir;
 #[tokio::test]
 async fn test_crud_operations() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({
         "name": "Alice",
@@ -19,7 +21,10 @@ async fn test_crud_operations() {
 
     let id = created["id"].as_str().unwrap().to_string();
 
-    let retrieved = db.read("users".into(), id.clone(), vec![], None).await.unwrap();
+    let retrieved = db
+        .read("users".into(), id.clone(), vec![], None)
+        .await
+        .unwrap();
     assert_eq!(retrieved["name"], "Alice");
     assert_eq!(retrieved["email"], "alice@example.com");
 
@@ -27,9 +32,12 @@ async fn test_crud_operations() {
         "name": "Alice Smith"
     });
 
-    let updated = db.update("users".into(), id.clone(), updates).await.unwrap();
-    assert_eq!(updated["name"], "Alice Smith");
-    assert_eq!(updated["email"], "alice@example.com");
+    let updated_user = db
+        .update("users".into(), id.clone(), updates)
+        .await
+        .unwrap();
+    assert_eq!(updated_user["name"], "Alice Smith");
+    assert_eq!(updated_user["email"], "alice@example.com");
 
     db.delete("users".into(), id.clone()).await.unwrap();
 
@@ -40,7 +48,9 @@ async fn test_crud_operations() {
 #[tokio::test]
 async fn test_list_operations() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     db.add_index("users".into(), vec!["status".into()]).await;
 
@@ -54,35 +64,67 @@ async fn test_list_operations() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![], None).await.unwrap();
+    let all_users = db
+        .list("users".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
     assert_eq!(all_users.len(), 3);
 
     let active_filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let active_users = db.list("users".into(), vec![active_filter], vec![], None, vec![], None).await.unwrap();
+    let active_users = db
+        .list(
+            "users".into(),
+            vec![active_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(active_users.len(), 2);
 
     for user in active_users {
         assert_eq!(user["status"], "active");
+    }
+
+    let neq_filter = Filter::new("status".into(), FilterOp::Neq, json!("inactive"));
+    let not_inactive_users = db
+        .list("users".into(), vec![neq_filter], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        not_inactive_users.len(),
+        2,
+        "Neq filter should return 2 active users"
+    );
+    for user in not_inactive_users {
+        assert_ne!(user["status"], "inactive");
     }
 }
 
 #[tokio::test]
 async fn test_reactive_subscriptions() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let mut receiver = db.event_receiver();
 
-    let sub_id = db.subscribe("users/#".into(), Some("users".into())).await.unwrap();
+    let sub_id = db
+        .subscribe("users/#".into(), Some("users".into()))
+        .await
+        .unwrap();
 
     let user = json!({"name": "Test User", "email": "test@example.com"});
     let created = db.create("users".into(), user).await.unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
-    let event = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        receiver.recv()
-    ).await.unwrap().unwrap();
+    let event = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(event.entity, "users");
     assert_eq!(event.id, id);
@@ -95,21 +137,27 @@ async fn test_subscription_persistence() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
-        db.subscribe("users/#".into(), Some("users".into())).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        db.subscribe("users/#".into(), Some("users".into()))
+            .await
+            .unwrap();
     }
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         let mut receiver = db.event_receiver();
 
         let user = json!({"name": "Persisted Test", "email": "test@example.com"});
         db.create("users".into(), user).await.unwrap();
 
-        let event = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            receiver.recv()
-        ).await.unwrap().unwrap();
+        let event = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(event.entity, "users");
     }
@@ -118,12 +166,18 @@ async fn test_subscription_persistence() {
 #[tokio::test]
 async fn test_wildcard_subscriptions() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let mut receiver = db.event_receiver();
 
-    db.subscribe("users/+".into(), Some("users".into())).await.unwrap();
-    db.subscribe("posts/#".into(), Some("posts".into())).await.unwrap();
+    db.subscribe("users/+".into(), Some("users".into()))
+        .await
+        .unwrap();
+    db.subscribe("posts/#".into(), Some("posts".into()))
+        .await
+        .unwrap();
 
     let user = json!({"name": "User 1"});
     db.create("users".into(), user).await.unwrap();
@@ -131,25 +185,28 @@ async fn test_wildcard_subscriptions() {
     let post = json!({"title": "Post 1"});
     db.create("posts".into(), post).await.unwrap();
 
-    let event1 = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        receiver.recv()
-    ).await.unwrap().unwrap();
+    let event1 = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(event1.entity, "users");
 
-    let event2 = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        receiver.recv()
-    ).await.unwrap().unwrap();
+    let event2 = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(event2.entity, "posts");
 }
 
 #[tokio::test]
 async fn test_extended_filter_operators() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
-    db.add_index("users".into(), vec!["status".into(), "role".into()]).await;
+    db.add_index("users".into(), vec!["status".into(), "role".into()])
+        .await;
 
     let users = vec![
         json!({"name": "Alice", "email": "alice@example.com", "status": "active", "role": "admin", "age": 30}),
@@ -163,7 +220,10 @@ async fn test_extended_filter_operators() {
     }
 
     let in_filter = Filter::new("status".into(), FilterOp::In, json!(["active", "pending"]));
-    let in_results = db.list("users".into(), vec![in_filter], vec![], None, vec![], None).await.unwrap();
+    let in_results = db
+        .list("users".into(), vec![in_filter], vec![], None, vec![], None)
+        .await
+        .unwrap();
     assert_eq!(in_results.len(), 3);
     for user in &in_results {
         let status = user["status"].as_str().unwrap();
@@ -171,29 +231,72 @@ async fn test_extended_filter_operators() {
     }
 
     let like_filter = Filter::new("email".into(), FilterOp::Like, json!("*@example.com"));
-    let like_results = db.list("users".into(), vec![like_filter], vec![], None, vec![], None).await.unwrap();
+    let like_results = db
+        .list(
+            "users".into(),
+            vec![like_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(like_results.len(), 4);
 
     let like_prefix = Filter::new("name".into(), FilterOp::Like, json!("*li*"));
-    let like_prefix_results = db.list("users".into(), vec![like_prefix], vec![], None, vec![], None).await.unwrap();
+    let like_prefix_results = db
+        .list(
+            "users".into(),
+            vec![like_prefix],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(like_prefix_results.len(), 2);
 
     let is_null_filter = Filter::new("role".into(), FilterOp::IsNull, json!(null));
-    let is_null_results = db.list("users".into(), vec![is_null_filter], vec![], None, vec![], None).await.unwrap();
+    let is_null_results = db
+        .list(
+            "users".into(),
+            vec![is_null_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(is_null_results.len(), 1);
     assert_eq!(is_null_results[0]["name"], "David");
 
     let is_not_null_filter = Filter::new("role".into(), FilterOp::IsNotNull, json!(null));
-    let is_not_null_results = db.list("users".into(), vec![is_not_null_filter], vec![], None, vec![], None).await.unwrap();
+    let is_not_null_results = db
+        .list(
+            "users".into(),
+            vec![is_not_null_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(is_not_null_results.len(), 3);
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_sorting_and_pagination() {
     use mqdb::{Pagination, SortOrder};
 
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     for i in 0..10 {
         let user = json!({
@@ -204,97 +307,125 @@ async fn test_sorting_and_pagination() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let all_users = db.list("users".into(), vec![], vec![], None, vec![], None).await.unwrap();
+    let all_users = db
+        .list("users".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
     assert_eq!(all_users.len(), 10);
 
-    let sorted_by_age_asc = db.list(
-        "users".into(),
-        vec![],
-        vec![SortOrder::asc("age".into())],
-        None,
-        vec![],
-    None,
-    ).await.unwrap();
+    let sorted_by_age_asc = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![SortOrder::asc("age".into())],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(sorted_by_age_asc[0]["age"], 20);
     assert_eq!(sorted_by_age_asc[9]["age"], 29);
 
-    let sorted_by_age_desc = db.list(
-        "users".into(),
-        vec![],
-        vec![SortOrder::desc("age".into())],
-        None,
-        vec![],
-    None,
-    ).await.unwrap();
+    let sorted_by_age_desc = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![SortOrder::desc("age".into())],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(sorted_by_age_desc[0]["age"], 29);
     assert_eq!(sorted_by_age_desc[9]["age"], 20);
 
-    let multi_sort = db.list(
-        "users".into(),
-        vec![],
-        vec![
-            SortOrder::asc("score".into()),
-            SortOrder::desc("age".into())
-        ],
-        None,
-        vec![],
-    None,
-    ).await.unwrap();
+    let multi_sort = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![
+                SortOrder::asc("score".into()),
+                SortOrder::desc("age".into()),
+            ],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(multi_sort.len(), 10);
 
-    let paginated_page1 = db.list(
-        "users".into(),
-        vec![],
-        vec![SortOrder::asc("age".into())],
-        Some(Pagination::new(3, 0)),
-        vec![],
-    None,
-    ).await.unwrap();
+    let paginated_page1 = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![SortOrder::asc("age".into())],
+            Some(Pagination::new(3, 0)),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(paginated_page1.len(), 3);
     assert_eq!(paginated_page1[0]["age"], 20);
     assert_eq!(paginated_page1[2]["age"], 22);
 
-    let paginated_page2 = db.list(
-        "users".into(),
-        vec![],
-        vec![SortOrder::asc("age".into())],
-        Some(Pagination::new(3, 3)),
-        vec![],
-    None,
-    ).await.unwrap();
+    let paginated_page2 = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![SortOrder::asc("age".into())],
+            Some(Pagination::new(3, 3)),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(paginated_page2.len(), 3);
     assert_eq!(paginated_page2[0]["age"], 23);
     assert_eq!(paginated_page2[2]["age"], 25);
 
-    let paginated_last = db.list(
-        "users".into(),
-        vec![],
-        vec![SortOrder::asc("age".into())],
-        Some(Pagination::new(3, 9)),
-        vec![],
-    None,
-    ).await.unwrap();
+    let paginated_last = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![SortOrder::asc("age".into())],
+            Some(Pagination::new(3, 9)),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(paginated_last.len(), 1);
     assert_eq!(paginated_last[0]["age"], 29);
 
-    let empty_page = db.list(
-        "users".into(),
-        vec![],
-        vec![],
-        Some(Pagination::new(5, 20)),
-        vec![],
-    None,
-    ).await.unwrap();
+    let empty_page = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![],
+            Some(Pagination::new(5, 20)),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(empty_page.len(), 0);
 }
 
 #[tokio::test]
 async fn test_relationships_and_includes() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
-    db.add_relationship("posts".into(), "author".into(), "users".into()).await;
-    db.add_relationship("comments".into(), "post".into(), "posts".into()).await;
+    db.add_relationship("posts".into(), "author".into(), "users".into())
+        .await;
+    db.add_relationship("comments".into(), "post".into(), "posts".into())
+        .await;
 
     let author = json!({
         "name": "Alice",
@@ -318,18 +449,34 @@ async fn test_relationships_and_includes() {
     let created_comment = db.create("comments".into(), comment).await.unwrap();
     let comment_id = created_comment["id"].as_str().unwrap().to_string();
 
-    let post_with_author = db.read("posts".into(), post_id.clone(), vec!["author".into()], None).await.unwrap();
+    let post_with_author = db
+        .read("posts".into(), post_id.clone(), vec!["author".into()], None)
+        .await
+        .unwrap();
     assert_eq!(post_with_author["title"], "My First Post");
     assert_eq!(post_with_author["author"]["name"], "Alice");
     assert_eq!(post_with_author["author"]["email"], "alice@example.com");
     assert_eq!(post_with_author["author"]["id"], author_id);
 
-    let comment_with_post = db.read("comments".into(), comment_id, vec!["post".into()], None).await.unwrap();
+    let comment_with_post = db
+        .read("comments".into(), comment_id, vec!["post".into()], None)
+        .await
+        .unwrap();
     assert_eq!(comment_with_post["text"], "Great post!");
     assert_eq!(comment_with_post["post"]["title"], "My First Post");
     assert_eq!(comment_with_post["post"]["id"], post_id);
 
-    let posts = db.list("posts".into(), vec![], vec![], None, vec!["author".into()], None).await.unwrap();
+    let posts = db
+        .list(
+            "posts".into(),
+            vec![],
+            vec![],
+            None,
+            vec!["author".into()],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0]["author"]["name"], "Alice");
 }
@@ -344,7 +491,9 @@ async fn test_ttl_expiration() {
 
     let mut receiver = db.event_receiver();
 
-    db.subscribe("temp/#".into(), Some("temp".into())).await.unwrap();
+    db.subscribe("temp/#".into(), Some("temp".into()))
+        .await
+        .unwrap();
 
     let short_lived = json!({
         "name": "Temporary Entity",
@@ -357,7 +506,10 @@ async fn test_ttl_expiration() {
     assert!(created.get("_expires_at").is_some());
     assert!(created.get("ttl_secs").is_none());
 
-    let retrieved = db.read("temp".into(), id.clone(), vec![], None).await.unwrap();
+    let retrieved = db
+        .read("temp".into(), id.clone(), vec![], None)
+        .await
+        .unwrap();
     assert_eq!(retrieved["name"], "Temporary Entity");
 
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -365,16 +517,17 @@ async fn test_ttl_expiration() {
     let result = db.read("temp".into(), id.clone(), vec![], None).await;
     assert!(result.is_err());
 
-    let create_event = tokio::time::timeout(
-        tokio::time::Duration::from_millis(100),
-        receiver.recv()
-    ).await.unwrap().unwrap();
+    let create_event =
+        tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(create_event.entity, "temp");
 
-    let delete_event = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        receiver.recv()
-    ).await.unwrap().unwrap();
+    let delete_event = tokio::time::timeout(tokio::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(delete_event.entity, "temp");
     assert_eq!(delete_event.id, id);
@@ -412,7 +565,8 @@ async fn test_ttl_with_indexes() {
     let config = DatabaseConfig::new(tmp.path()).with_ttl_cleanup_interval(Some(1));
     let db = Database::open_with_config(config).await.unwrap();
 
-    db.add_index("sessions".into(), vec!["user_id".into()]).await;
+    db.add_index("sessions".into(), vec!["user_id".into()])
+        .await;
 
     let session = json!({
         "user_id": "user123",
@@ -423,19 +577,34 @@ async fn test_ttl_with_indexes() {
     db.create("sessions".into(), session).await.unwrap();
 
     let filter = Filter::new("user_id".into(), FilterOp::Eq, json!("user123"));
-    let results = db.list("sessions".into(), vec![filter.clone()], vec![], None, vec![], None).await.unwrap();
+    let results = db
+        .list(
+            "sessions".into(),
+            vec![filter.clone()],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
-    let results_after = db.list("sessions".into(), vec![filter], vec![], None, vec![], None).await.unwrap();
+    let results_after = db
+        .list("sessions".into(), vec![filter], vec![], None, vec![], None)
+        .await
+        .unwrap();
     assert_eq!(results_after.len(), 0);
 }
 
 #[tokio::test]
 async fn test_cursor_api() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     for i in 0..50 {
         let user = json!({
@@ -446,28 +615,28 @@ async fn test_cursor_api() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let mut cursor = db.cursor("users".into(), vec![], vec![]).await.unwrap();
+    let mut cursor = db.cursor("users".into(), vec![], vec![]).unwrap();
 
     let mut count = 0;
-    while let Some(_user) = cursor.next().await.unwrap() {
+    while let Some(_user) = cursor.next().unwrap() {
         count += 1;
     }
     assert_eq!(count, 50);
 
     let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let mut filtered_cursor = db.cursor("users".into(), vec![filter], vec![]).await.unwrap();
+    let mut filtered_cursor = db.cursor("users".into(), vec![filter], vec![]).unwrap();
 
     let mut active_count = 0;
-    while let Some(user) = filtered_cursor.next().await.unwrap() {
+    while let Some(user) = filtered_cursor.next().unwrap() {
         assert_eq!(user["status"], "active");
         active_count += 1;
     }
     assert_eq!(active_count, 25);
 
     let age_filter = Filter::new("age".into(), FilterOp::Gt, json!(30));
-    let mut age_cursor = db.cursor("users".into(), vec![age_filter], vec![]).await.unwrap();
+    let mut age_cursor = db.cursor("users".into(), vec![age_filter], vec![]).unwrap();
 
-    let batch = age_cursor.next_batch(10).await.unwrap();
+    let batch = age_cursor.next_batch(10).unwrap();
     assert!(!batch.is_empty());
     for user in batch {
         let age = user["age"].as_u64().unwrap();
@@ -478,7 +647,9 @@ async fn test_cursor_api() {
 #[tokio::test]
 async fn test_cursor_with_sorting() {
     let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     for i in 0..20 {
         let user = json!({
@@ -490,11 +661,11 @@ async fn test_cursor_with_sorting() {
     }
 
     let sort_by_age_asc = vec![SortOrder::new("age".into(), SortDirection::Asc)];
-    let mut cursor = db.cursor("users".into(), vec![], sort_by_age_asc).await.unwrap();
+    let mut cursor = db.cursor("users".into(), vec![], sort_by_age_asc).unwrap();
 
     let mut prev_age = 0;
     let mut count = 0;
-    while let Some(user) = cursor.next().await.unwrap() {
+    while let Some(user) = cursor.next().unwrap() {
         let age = user["age"].as_u64().unwrap();
         assert!(age >= prev_age, "ages should be in ascending order");
         prev_age = age;
@@ -503,10 +674,10 @@ async fn test_cursor_with_sorting() {
     assert_eq!(count, 20);
 
     let sort_by_age_desc = vec![SortOrder::new("age".into(), SortDirection::Desc)];
-    let mut desc_cursor = db.cursor("users".into(), vec![], sort_by_age_desc).await.unwrap();
+    let mut desc_cursor = db.cursor("users".into(), vec![], sort_by_age_desc).unwrap();
 
     let mut prev_age = u64::MAX;
-    while let Some(user) = desc_cursor.next().await.unwrap() {
+    while let Some(user) = desc_cursor.next().unwrap() {
         let age = user["age"].as_u64().unwrap();
         assert!(age <= prev_age, "ages should be in descending order");
         prev_age = age;
@@ -516,10 +687,10 @@ async fn test_cursor_with_sorting() {
         SortOrder::new("score".into(), SortDirection::Asc),
         SortOrder::new("age".into(), SortDirection::Desc),
     ];
-    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).await.unwrap();
+    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).unwrap();
 
     let mut results = vec![];
-    while let Some(user) = multi_cursor.next().await.unwrap() {
+    while let Some(user) = multi_cursor.next().unwrap() {
         results.push((
             user["score"].as_u64().unwrap(),
             user["age"].as_u64().unwrap(),
@@ -546,7 +717,9 @@ async fn test_physical_backup_and_restore() {
     let db_path = tmp.path().join("db");
     let backup_path = tmp.path().join("backup");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
 
     for i in 0..10 {
         let user = json!({
@@ -556,11 +729,13 @@ async fn test_physical_backup_and_restore() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    db.backup_physical(&backup_path).await.unwrap();
+    db.backup_physical(&backup_path).unwrap();
 
     drop(db);
 
-    let restored_db = Database::open(&backup_path).await.unwrap();
+    let restored_db = Database::open_without_background_tasks(&backup_path)
+        .await
+        .unwrap();
     let users = restored_db
         .list("users".into(), vec![], vec![], None, vec![], None)
         .await
@@ -575,21 +750,25 @@ async fn test_logical_backup_and_restore() {
     let db_path = tmp.path().join("db");
     let backup_file = tmp.path().join("backup.jsonl");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
 
     for i in 0..20 {
         let product = json!({
             "name": format!("Product {}", i),
-            "price": 10.0 + i as f64,
+            "price": 10.0 + f64::from(i),
             "stock": 100 - i,
         });
         db.create("products".into(), product).await.unwrap();
     }
 
-    db.backup_logical(&backup_file).await.unwrap();
+    db.backup_logical(&backup_file).unwrap();
 
     let new_db_path = tmp.path().join("restored_db");
-    let new_db = Database::open(&new_db_path).await.unwrap();
+    let new_db = Database::open_without_background_tasks(&new_db_path)
+        .await
+        .unwrap();
 
     let count = new_db.restore_logical(&backup_file).await.unwrap();
     assert_eq!(count, 20);
@@ -613,7 +792,9 @@ async fn test_backup_fails_if_destination_exists() {
     let db_path = tmp.path().join("db");
     let backup_path = tmp.path().join("backup");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
 
     db.create("users".into(), json!({"name": "Test"}))
         .await
@@ -621,7 +802,7 @@ async fn test_backup_fails_if_destination_exists() {
 
     std::fs::create_dir(&backup_path).unwrap();
 
-    let result = db.backup_physical(&backup_path).await;
+    let result = db.backup_physical(&backup_path);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
 }
@@ -632,7 +813,9 @@ async fn test_restore_fails_if_source_not_found() {
     let db_path = tmp.path().join("db");
     let missing_backup = tmp.path().join("missing.jsonl");
 
-    let db = Database::open(&db_path).await.unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
 
     let result = db.restore_logical(&missing_backup).await;
     assert!(result.is_err());

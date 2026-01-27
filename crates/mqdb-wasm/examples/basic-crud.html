@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Basic CRUD</title>
+    <link rel="stylesheet" href="shared/common.css">
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html" class="active">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+    </nav>
+
+    <h1>Basic CRUD Operations</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Create / Update Record</h2>
+            <div class="row">
+                <label>Entity:</label>
+                <select id="entity">
+                    <option value="users">users</option>
+                    <option value="posts">posts</option>
+                    <option value="products">products</option>
+                </select>
+            </div>
+            <div class="row">
+                <label>ID:</label>
+                <input type="text" id="recordId" placeholder="Leave empty for create">
+            </div>
+            <div class="row">
+                <label>Data (JSON):</label>
+            </div>
+            <textarea id="recordData">{"name": "Alice", "email": "alice@example.com", "age": 30}</textarea>
+            <div class="row mt-10">
+                <button id="createBtn" class="success">Create</button>
+                <button id="updateBtn">Update</button>
+                <button id="readBtn" class="secondary">Read</button>
+                <button id="deleteBtn" class="danger">Delete</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Quick Actions</h2>
+            <div class="card">
+                <h3>Test Scenarios</h3>
+                <button id="runAllTests">Run All Tests</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Sample Data</h3>
+                <button id="seedUsers">Seed 5 Users</button>
+                <button id="seedPosts">Seed 5 Posts</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Cleanup</h3>
+                <button id="clearEntity" class="danger">Clear Current Entity</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Records</h2>
+        <button id="refreshList">Refresh List</button>
+        <table id="recordsTable">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Data</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="recordsBody">
+            </tbody>
+        </table>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            window.db = db;
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+            refreshList();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('createBtn').onclick = handleCreate;
+            document.getElementById('readBtn').onclick = handleRead;
+            document.getElementById('updateBtn').onclick = handleUpdate;
+            document.getElementById('deleteBtn').onclick = handleDelete;
+            document.getElementById('refreshList').onclick = refreshList;
+            document.getElementById('entity').onchange = refreshList;
+            document.getElementById('runAllTests').onclick = runAllTests;
+            document.getElementById('seedUsers').onclick = seedUsers;
+            document.getElementById('seedPosts').onclick = seedPosts;
+            document.getElementById('clearEntity').onclick = clearEntity;
+        }
+
+        function getEntity() {
+            return document.getElementById('entity').value;
+        }
+
+        function getData() {
+            try {
+                return JSON.parse(document.getElementById('recordData').value);
+            } catch (e) {
+                throw new Error('Invalid JSON: ' + e.message);
+            }
+        }
+
+        async function handleCreate() {
+            try {
+                const entity = getEntity();
+                const data = getData();
+                log(`Creating ${entity}...`);
+                const result = await db.create(entity, data);
+                log(`Created: ${JSON.stringify(result)}`, 'success');
+                refreshList();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function handleRead() {
+            try {
+                const entity = getEntity();
+                const id = document.getElementById('recordId').value;
+                if (!id) {
+                    log('Please enter an ID to read', 'warning');
+                    return;
+                }
+                log(`Reading ${entity}/${id}...`);
+                const result = await db.read(entity, id);
+                log(`Read: ${JSON.stringify(result)}`, 'success');
+                document.getElementById('recordData').value = JSON.stringify(result, null, 2);
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function handleUpdate() {
+            try {
+                const entity = getEntity();
+                const id = document.getElementById('recordId').value;
+                if (!id) {
+                    log('Please enter an ID to update', 'warning');
+                    return;
+                }
+                const data = getData();
+                log(`Updating ${entity}/${id}...`);
+                const result = await db.update(entity, id, data);
+                log(`Updated: ${JSON.stringify(result)}`, 'success');
+                refreshList();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function handleDelete() {
+            try {
+                const entity = getEntity();
+                const id = document.getElementById('recordId').value;
+                if (!id) {
+                    log('Please enter an ID to delete', 'warning');
+                    return;
+                }
+                log(`Deleting ${entity}/${id}...`);
+                await db.delete(entity, id);
+                log(`Deleted ${entity}/${id}`, 'success');
+                document.getElementById('recordId').value = '';
+                refreshList();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function refreshList() {
+            try {
+                const entity = getEntity();
+                const records = await db.list(entity, null);
+                const tbody = document.getElementById('recordsBody');
+                tbody.innerHTML = '';
+
+                for (const record of records) {
+                    const tr = document.createElement('tr');
+                    const {id, ...rest} = record;
+                    tr.innerHTML = `
+                        <td><code>${id}</code></td>
+                        <td><code>${JSON.stringify(rest)}</code></td>
+                        <td>
+                            <button onclick="window.selectRecord('${id}')">Select</button>
+                            <button class="danger" onclick="window.deleteRecord('${id}')">Delete</button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                }
+
+                if (records.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999">No records</td></tr>';
+                }
+            } catch (e) {
+                log(`Error refreshing list: ${e}`, 'error');
+            }
+        }
+
+        window.selectRecord = async function(id) {
+            document.getElementById('recordId').value = id;
+            try {
+                const entity = getEntity();
+                const record = await db.read(entity, id);
+                const {id: _, ...rest} = record;
+                document.getElementById('recordData').value = JSON.stringify(rest, null, 2);
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        };
+
+        window.deleteRecord = async function(id) {
+            try {
+                const entity = getEntity();
+                await db.delete(entity, id);
+                log(`Deleted ${entity}/${id}`, 'success');
+                refreshList();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        };
+
+        async function runAllTests() {
+            log('=== Running CRUD Tests ===', 'info');
+
+            log('Test 1: Create a user');
+            const created = await db.create('users', {name: 'TestUser', email: 'test@test.com'});
+            const testId = created.id;
+            log(`  ✓ Created user with id=${testId}`, 'success');
+
+            log('Test 2: Read the user');
+            const read = await db.read('users', testId);
+            if (read.name === 'TestUser') {
+                log(`  ✓ Read user: ${JSON.stringify(read)}`, 'success');
+            } else {
+                log('  ✗ Read returned wrong data', 'error');
+            }
+
+            log('Test 3: Update user name');
+            const updated = await db.update('users', testId, {name: 'UpdatedUser'});
+            if (updated.name === 'UpdatedUser' && updated.email === 'test@test.com') {
+                log(`  ✓ Updated user: ${JSON.stringify(updated)}`, 'success');
+            } else {
+                log('  ✗ Update failed', 'error');
+            }
+
+            log('Test 4: Delete user');
+            await db.delete('users', testId);
+            log('  ✓ Deleted user', 'success');
+
+            log('Test 5: Read deleted user (should fail)');
+            try {
+                await db.read('users', testId);
+                log('  ✗ Should have thrown error', 'error');
+            } catch (e) {
+                log('  ✓ Correctly threw error: ' + e, 'success');
+            }
+
+            log('Test 6: List all users');
+            const list = await db.list('users', null);
+            log(`  ✓ Listed ${list.length} users`, 'success');
+
+            log('=== All CRUD Tests Passed ===', 'success');
+            refreshList();
+        }
+
+        async function seedUsers() {
+            const users = [
+                {name: 'Alice', email: 'alice@example.com', age: 30},
+                {name: 'Bob', email: 'bob@example.com', age: 25},
+                {name: 'Charlie', email: 'charlie@example.com', age: 35},
+                {name: 'Diana', email: 'diana@example.com', age: 28},
+                {name: 'Eve', email: 'eve@example.com', age: 32}
+            ];
+            log('Seeding 5 users...');
+            for (const user of users) {
+                await db.create('users', user);
+            }
+            log('Seeded 5 users', 'success');
+            if (getEntity() === 'users') refreshList();
+        }
+
+        async function seedPosts() {
+            const posts = [
+                {title: 'First Post', content: 'Hello World!', views: 100},
+                {title: 'Second Post', content: 'More content', views: 50},
+                {title: 'Third Post', content: 'Even more', views: 200},
+                {title: 'Fourth Post', content: 'Almost done', views: 75},
+                {title: 'Fifth Post', content: 'The end', views: 150}
+            ];
+            log('Seeding 5 posts...');
+            for (const post of posts) {
+                await db.create('posts', post);
+            }
+            log('Seeded 5 posts', 'success');
+            if (getEntity() === 'posts') refreshList();
+        }
+
+        async function clearEntity() {
+            const entity = getEntity();
+            log(`Clearing all ${entity}...`);
+            const records = await db.list(entity, null);
+            for (const record of records) {
+                await db.delete(entity, record.id);
+            }
+            log(`Cleared ${records.length} ${entity}`, 'success');
+            refreshList();
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

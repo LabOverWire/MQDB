@@ -1,24 +1,25 @@
 use super::backend::{BatchOperations, StorageBackend};
 use crate::config::DurabilityMode;
 use crate::error::Result;
-use fjall::{Config, TransactionalKeyspace, TransactionalPartitionHandle};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable, Slice};
 use std::path::Path;
-use std::sync::Arc;
 
 pub struct FjallBackend {
-    keyspace: Arc<TransactionalKeyspace>,
-    partition: Arc<TransactionalPartitionHandle>,
+    db: Database,
+    keyspace: Keyspace,
     durability: DurabilityMode,
 }
 
 impl FjallBackend {
+    /// # Errors
+    /// Returns an error if the storage fails to open.
     pub fn open<P: AsRef<Path>>(path: P, durability: DurabilityMode) -> Result<Self> {
-        let keyspace = Config::new(path).open_transactional()?;
-        let partition = keyspace.open_partition("main", Default::default())?;
+        let db = Database::builder(path.as_ref()).open()?;
+        let keyspace = db.keyspace("main", KeyspaceCreateOptions::default)?;
 
         Ok(Self {
-            keyspace: Arc::new(keyspace),
-            partition: Arc::new(partition),
+            db,
+            keyspace,
             durability,
         })
     }
@@ -26,7 +27,7 @@ impl FjallBackend {
     fn sync_if_needed(&self) -> Result<()> {
         match self.durability {
             DurabilityMode::Immediate => {
-                self.keyspace.persist(fjall::PersistMode::SyncAll)?;
+                self.db.persist(PersistMode::SyncAll)?;
             }
             DurabilityMode::PeriodicMs(_) | DurabilityMode::None => {}
         }
@@ -36,36 +37,36 @@ impl FjallBackend {
 
 impl StorageBackend for FjallBackend {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        Ok(self.partition.get(key)?.map(|v| v.to_vec()))
+        Ok(self.keyspace.get(key)?.map(|v| v.to_vec()))
     }
 
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.partition.insert(key, value)?;
+        self.keyspace.insert(key, value)?;
         self.sync_if_needed()?;
         Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<()> {
-        self.partition.remove(key)?;
+        self.keyspace.remove(key)?;
         self.sync_if_needed()?;
         Ok(())
     }
 
     fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let tx = self.keyspace.read_tx();
+        let snapshot = self.db.snapshot();
         let mut results = Vec::new();
-        for item in tx.prefix(&self.partition, prefix) {
-            let (k, v) = item?;
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            let (k, v) = guard.into_inner()?;
             results.push((k.to_vec(), v.to_vec()));
         }
         Ok(results)
     }
 
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let tx = self.keyspace.read_tx();
+        let snapshot = self.db.snapshot();
         let mut results = Vec::new();
-        for item in tx.range(&self.partition, start..end) {
-            let (k, v) = item?;
+        for guard in snapshot.range(&self.keyspace, start..end) {
+            let (k, v) = guard.into_inner()?;
             results.push((k.to_vec(), v.to_vec()));
         }
         Ok(results)
@@ -73,8 +74,8 @@ impl StorageBackend for FjallBackend {
 
     fn batch(&self) -> Box<dyn BatchOperations> {
         Box::new(FjallBatch {
-            keyspace: Arc::clone(&self.keyspace),
-            partition: Arc::clone(&self.partition),
+            db: self.db.clone(),
+            keyspace: self.keyspace.clone(),
             durability: self.durability.clone(),
             operations: Vec::new(),
             preconditions: Vec::new(),
@@ -82,8 +83,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn flush(&self) -> Result<()> {
-        self.keyspace.persist(fjall::PersistMode::SyncAll)?;
-        Ok(())
+        self.sync_if_needed()
     }
 }
 
@@ -98,8 +98,8 @@ struct Precondition {
 }
 
 pub struct FjallBatch {
-    keyspace: Arc<TransactionalKeyspace>,
-    partition: Arc<TransactionalPartitionHandle>,
+    db: Database,
+    keyspace: Keyspace,
     durability: DurabilityMode,
     operations: Vec<BatchOp>,
     preconditions: Vec<Precondition>,
@@ -122,10 +122,10 @@ impl BatchOperations for FjallBatch {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        let mut tx = self.keyspace.write_tx();
+        let snapshot = self.db.snapshot();
 
         for precondition in &self.preconditions {
-            let actual = tx.get(&self.partition, &precondition.key)?;
+            let actual: Option<Slice> = snapshot.get(&self.keyspace, &precondition.key)?;
             match actual {
                 Some(val) if val.as_ref() == precondition.expected_value.as_slice() => {}
                 _ => {
@@ -136,18 +136,20 @@ impl BatchOperations for FjallBatch {
             }
         }
 
+        let mut batch = self.db.batch();
+
         for op in self.operations {
             match op {
-                BatchOp::Insert(k, v) => tx.insert(&self.partition, &k, &v),
-                BatchOp::Remove(k) => tx.remove(&self.partition, &k),
+                BatchOp::Insert(k, v) => batch.insert(&self.keyspace, k, v),
+                BatchOp::Remove(k) => batch.remove(&self.keyspace, k),
             }
         }
 
-        tx.commit()?;
+        batch.commit()?;
 
         match self.durability {
             DurabilityMode::Immediate => {
-                self.keyspace.persist(fjall::PersistMode::SyncAll)?;
+                self.db.persist(PersistMode::SyncAll)?;
             }
             DurabilityMode::PeriodicMs(_) | DurabilityMode::None => {}
         }

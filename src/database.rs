@@ -1,5 +1,8 @@
 use crate::config::DatabaseConfig;
 use crate::constraint::ConstraintManager;
+use crate::consumer_group::{
+    ConsumerGroup, ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo,
+};
 use crate::dispatcher::EventDispatcher;
 use crate::entity::Entity;
 use crate::error::{Error, Result};
@@ -10,7 +13,6 @@ use crate::outbox::{Outbox, OutboxProcessor};
 use crate::relationship::{Relationship, RelationshipRegistry};
 use crate::schema::{Schema, SchemaRegistry};
 use crate::storage::{Storage, StorageBackend};
-use crate::consumer_group::{ConsumerGroup, ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
 use crate::subscription::{Subscription, SubscriptionMode, SubscriptionRegistry};
 use crate::types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
 use serde_json::Value;
@@ -19,7 +21,8 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
@@ -41,19 +44,33 @@ pub struct Database {
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
+    background_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl Database {
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = DatabaseConfig::new(path.as_ref().to_path_buf());
         Self::open_with_config(config).await
     }
 
+    /// # Errors
+    /// Returns an error if the database cannot be opened.
+    pub async fn open_without_background_tasks<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let config = DatabaseConfig::new(path.as_ref().to_path_buf()).without_background_tasks();
+        Self::open_with_config(config).await
+    }
+
+    /// # Errors
+    /// Returns an error if the database cannot be opened or initialized.
     pub async fn open_with_config(config: DatabaseConfig) -> Result<Self> {
         let storage = Arc::new(Storage::open(&config.path, config.durability.clone())?);
         Self::init_with_storage(storage, config).await
     }
 
+    /// # Errors
+    /// Returns an error if initialization fails.
     pub async fn open_with_backend(
         backend: Arc<dyn StorageBackend>,
         config: DatabaseConfig,
@@ -62,6 +79,7 @@ impl Database {
         Self::init_with_storage(storage, config).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn init_with_storage(storage: Arc<Storage>, config: DatabaseConfig) -> Result<Self> {
         let registry = Arc::new(SubscriptionRegistry::new(Arc::clone(&storage)));
         let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
@@ -86,76 +104,78 @@ impl Database {
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let mut handles = Vec::new();
 
-        if config.outbox.enabled {
-            let pending_count = outbox.pending_count().unwrap_or(0);
-            if pending_count > 0 {
-                tracing::info!(
-                    pending = pending_count,
-                    "found pending outbox entries, starting processor"
+        if config.spawn_background_tasks {
+            if config.outbox.enabled {
+                let pending_count = outbox.pending_count().unwrap_or(0);
+                if pending_count > 0 {
+                    tracing::info!(
+                        pending = pending_count,
+                        "found pending outbox entries, starting processor"
+                    );
+                }
+
+                let mut processor = OutboxProcessor::new(
+                    Arc::clone(&outbox),
+                    Arc::clone(&dispatcher),
+                    config.outbox.clone(),
+                    shutdown_rx.clone(),
                 );
+                handles.push(tokio::spawn(async move {
+                    processor.run().await;
+                }));
             }
 
-            let mut processor = OutboxProcessor::new(
-                Arc::clone(&outbox),
-                Arc::clone(&dispatcher),
-                config.outbox.clone(),
-                shutdown_rx.clone(),
-            );
-            tokio::spawn(async move {
-                processor.run().await;
-            });
-        }
+            if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
+                let storage_clone = Arc::clone(&storage);
+                let dispatcher_clone = Arc::clone(&dispatcher);
+                let outbox_clone = Arc::clone(&outbox);
+                let index_manager_clone = Arc::clone(&index_manager);
 
-        if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
-            let storage_clone = Arc::clone(&storage);
-            let dispatcher_clone = Arc::clone(&dispatcher);
-            let outbox_clone = Arc::clone(&outbox);
-            let index_manager_clone = Arc::clone(&index_manager);
+                handles.push(tokio::spawn(async move {
+                    ttl_cleanup_task(
+                        storage_clone,
+                        dispatcher_clone,
+                        outbox_clone,
+                        index_manager_clone,
+                        interval_secs,
+                    )
+                    .await;
+                }));
+            }
 
-            tokio::spawn(async move {
-                ttl_cleanup_task(
-                    storage_clone,
-                    dispatcher_clone,
-                    outbox_clone,
-                    index_manager_clone,
-                    interval_secs,
-                )
-                .await;
-            });
-        }
+            if config.shared_subscription.consumer_timeout_ms > 0 {
+                let consumer_groups_clone = Arc::clone(&consumer_groups);
+                let timeout_ms = config.shared_subscription.consumer_timeout_ms;
+                let mut shutdown_rx_clone = shutdown_rx.clone();
 
-        if config.shared_subscription.consumer_timeout_ms > 0 {
-            let consumer_groups_clone = Arc::clone(&consumer_groups);
-            let timeout_ms = config.shared_subscription.consumer_timeout_ms;
-            let mut shutdown_rx_clone = shutdown_rx.clone();
-
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    std::time::Duration::from_millis(timeout_ms / 2),
-                );
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let mut groups = consumer_groups_clone.write().await;
-                            for (name, group) in groups.iter_mut() {
-                                let stale = group.remove_stale_members(timeout_ms);
-                                if !stale.is_empty() {
-                                    tracing::info!(
-                                        group = %name,
-                                        removed = ?stale,
-                                        "removed stale consumers"
-                                    );
+                handles.push(tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
+                    loop {
+                        tokio::select! {
+                            _ = interval.tick() => {
+                                let mut groups = consumer_groups_clone.write().await;
+                                for (name, group) in groups.iter_mut() {
+                                    let stale = group.remove_stale_members(timeout_ms);
+                                    if !stale.is_empty() {
+                                        tracing::info!(
+                                            group = %name,
+                                            removed = ?stale,
+                                            "removed stale consumers"
+                                        );
+                                    }
                                 }
                             }
-                        }
-                        _ = shutdown_rx_clone.changed() => {
-                            tracing::debug!("heartbeat cleanup task shutting down");
-                            break;
+                            _ = shutdown_rx_clone.changed() => {
+                                tracing::debug!("heartbeat cleanup task shutting down");
+                                break;
+                            }
                         }
                     }
-                }
-            });
+                }));
+            }
         }
 
         Ok(Self {
@@ -171,9 +191,12 @@ impl Database {
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
             shutdown_tx,
+            background_handles: Arc::new(std::sync::Mutex::new(handles)),
         })
     }
 
+    /// # Errors
+    /// Returns an error if validation or persistence fails.
     pub async fn create(&self, entity_name: String, mut data: Value) -> Result<Value> {
         let schema_registry = self.schema_registry.read().await;
         schema_registry.apply_defaults(&entity_name, &mut data)?;
@@ -184,7 +207,7 @@ impl Database {
         if let Value::Object(ref mut obj) = data {
             obj.insert("id".to_string(), Value::String(id.clone()));
 
-            if let Some(ttl_secs) = obj.get("ttl_secs").and_then(|v| v.as_u64()) {
+            if let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
@@ -224,6 +247,8 @@ impl Database {
         Ok(entity.to_json())
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or reading fails.
     pub async fn read(
         &self,
         entity_name: String,
@@ -233,13 +258,10 @@ impl Database {
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let entity = Entity::deserialize(entity_name.clone(), id, &data)?;
         let mut result = entity.to_json();
@@ -250,7 +272,7 @@ impl Database {
         }
 
         let result = if let Some(ref fields) = projection {
-            self.project_fields(result, fields)
+            Self::project_fields(result, fields)
         } else {
             result
         };
@@ -275,28 +297,27 @@ impl Database {
             let registry = self.relationship_registry.read().await;
 
             for include_field in includes {
-                if let Some(rel) = registry.get(entity_name, include_field) {
-                    if let Some(id_value) = entity.get(&rel.field_suffix) {
-                        if let Some(id_str) = id_value.as_str() {
-                            match self
-                                .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
-                                .await
-                            {
-                                Ok(related_entity) => {
-                                    if let Value::Object(obj) = entity {
-                                        obj.insert(rel.field.clone(), related_entity);
-                                    }
-                                }
-                                Err(Error::NotFound { .. }) => {
-                                    tracing::warn!(
-                                        "related entity not found: {}/{}",
-                                        rel.target_entity,
-                                        id_str
-                                    );
-                                }
-                                Err(e) => return Err(e),
+                if let Some(rel) = registry.get(entity_name, include_field)
+                    && let Some(id_value) = entity.get(&rel.field_suffix)
+                    && let Some(id_str) = id_value.as_str()
+                {
+                    match self
+                        .read(rel.target_entity.clone(), id_str.to_string(), vec![], None)
+                        .await
+                    {
+                        Ok(related_entity) => {
+                            if let Value::Object(obj) = entity {
+                                obj.insert(rel.field.clone(), related_entity);
                             }
                         }
+                        Err(Error::NotFound { .. }) => {
+                            tracing::warn!(
+                                "related entity not found: {}/{}",
+                                rel.target_entity,
+                                id_str
+                            );
+                        }
+                        Err(e) => return Err(e),
                     }
                 }
             }
@@ -305,7 +326,7 @@ impl Database {
         })
     }
 
-    fn project_fields(&self, entity: Value, fields: &[String]) -> Value {
+    fn project_fields(entity: Value, fields: &[String]) -> Value {
         if let Value::Object(obj) = entity {
             let mut projected = serde_json::Map::new();
 
@@ -314,10 +335,10 @@ impl Database {
             }
 
             for field in fields {
-                if field != "id" {
-                    if let Some(value) = obj.get(field) {
-                        projected.insert(field.clone(), value.clone());
-                    }
+                if field != "id"
+                    && let Some(value) = obj.get(field)
+                {
+                    projected.insert(field.clone(), value.clone());
                 }
             }
             Value::Object(projected)
@@ -326,16 +347,15 @@ impl Database {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or update fails.
     pub async fn update(&self, entity_name: String, id: String, fields: Value) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let existing_data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
         let mut updated_data = existing_entity.data.clone();
@@ -355,7 +375,12 @@ impl Database {
         let mut batch = self.storage.batch();
 
         let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.validate_update(&updated_entity, &existing_entity, &mut batch, &self.storage)?;
+        constraint_manager.validate_update(
+            &updated_entity,
+            &existing_entity,
+            &mut batch,
+            &self.storage,
+        )?;
         drop(constraint_manager);
 
         batch.expect_value(key, existing_data);
@@ -380,18 +405,17 @@ impl Database {
         Ok(updated_entity.to_json())
     }
 
+    /// # Errors
+    /// Returns an error if the entity is not found or deletion fails.
     pub async fn delete(&self, entity_name: String, id: String) -> Result<()> {
         use crate::constraint::DeleteOperation;
 
         let key = keys::encode_data_key(&entity_name, &id);
 
-        let existing_data = self
-            .storage
-            .get(&key)?
-            .ok_or_else(|| Error::NotFound {
-                entity: entity_name.clone(),
-                id: id.clone(),
-            })?;
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.clone(),
+            id: id.clone(),
+        })?;
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
 
@@ -460,7 +484,8 @@ impl Database {
         }
 
         let operation_id = uuid::Uuid::new_v4().to_string();
-        self.outbox.enqueue_events(&mut batch, &operation_id, &events);
+        self.outbox
+            .enqueue_events(&mut batch, &operation_id, &events);
 
         batch.commit()?;
 
@@ -472,80 +497,36 @@ impl Database {
         Ok(())
     }
 
-    pub async fn list(
-        &self,
-        entity_name: String,
-        filters: Vec<Filter>,
-        sort: Vec<SortOrder>,
-        pagination: Option<Pagination>,
-        includes: Vec<String>,
-        projection: Option<Vec<String>>,
-    ) -> Result<Vec<Value>> {
+    fn scan_all_entities(&self, entity_name: &str) -> Result<Vec<Value>> {
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
         let mut results = Vec::new();
+        for (key, value) in items {
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            results.push(entity.to_json());
+        }
+        Ok(results)
+    }
 
-        if filters.is_empty() {
-            let prefix = format!("data/{entity_name}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes())?;
-
-            for (key, value) in items {
-                let (_, id) = keys::decode_data_key(&key)?;
-                let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
-                results.push(entity.to_json());
-            }
-        } else {
-            let index_manager = self.index_manager.read().await;
-            let use_index = filters.first().map(|f| f.op == FilterOp::Eq).unwrap_or(false);
-
-            if use_index {
-                if let Some(filter) = filters.first() {
-                    let value_bytes = keys::encode_value_for_index(&filter.value)?;
-                    let ids = index_manager.lookup_by_field(
-                        &self.storage,
-                        &entity_name,
-                        &filter.field,
-                        &value_bytes,
-                    )?;
-
-                    for id in ids {
-                        match self.read(entity_name.clone(), id.clone(), vec![], None).await {
-                            Ok(entity_data) => {
-                                if self.matches_filters(&entity_data, &filters) {
-                                    results.push(entity_data);
-                                }
-                            }
-                            Err(Error::NotFound { .. }) => {
-                                tracing::warn!(
-                                    "index pointed to non-existent entity: {}/{}",
-                                    entity_name,
-                                    id
-                                );
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-            } else {
-                let prefix = format!("data/{entity_name}/");
-                let items = self.storage.prefix_scan(prefix.as_bytes())?;
-
-                for (key, value) in items {
-                    let (_, id) = keys::decode_data_key(&key)?;
-                    let entity = Entity::deserialize(entity_name.clone(), id, &value)?;
-                    let entity_data = entity.to_json();
-                    if self.matches_filters(&entity_data, &filters) {
-                        results.push(entity_data);
-                    }
-                }
+    fn scan_filtered_entities(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+        let mut results = Vec::new();
+        for (key, value) in items {
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            let entity_data = entity.to_json();
+            if Self::matches_filters(&entity_data, filters) {
+                results.push(entity_data);
             }
         }
+        Ok(results)
+    }
 
-        if !sort.is_empty() {
-            self.sort_results(&mut results, &sort);
-        }
-
-        let offset = pagination.as_ref().map(|p| p.offset).unwrap_or(0);
-        let limit = pagination.as_ref().map(|p| p.limit).unwrap_or(usize::MAX);
-
+    fn apply_pagination(&self, results: &[Value], pagination: Option<&Pagination>) -> Vec<Value> {
+        let offset = pagination.map_or(0, |p| p.offset);
+        let limit = pagination.map_or(usize::MAX, |p| p.limit);
         let requested_end = offset.saturating_add(limit).min(results.len());
 
         let final_end = if let Some(max) = self.config.max_list_results {
@@ -563,31 +544,144 @@ impl Database {
         };
 
         if offset >= results.len() {
-            return Ok(vec![]);
+            return vec![];
+        }
+        results[offset..final_end].to_vec()
+    }
+
+    /// # Errors
+    /// Returns an error if listing entities fails.
+    pub async fn list(
+        &self,
+        entity_name: String,
+        filters: Vec<Filter>,
+        sort: Vec<SortOrder>,
+        pagination: Option<Pagination>,
+        includes: Vec<String>,
+        projection: Option<Vec<String>>,
+    ) -> Result<Vec<Value>> {
+        let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
+            (
+                self.list_with_early_pagination(&entity_name, pagination.as_ref())?,
+                true,
+            )
+        } else if filters.is_empty() {
+            (self.scan_all_entities(&entity_name)?, false)
+        } else {
+            (self.list_with_filters(&entity_name, &filters).await?, false)
+        };
+
+        if !sort.is_empty() {
+            Self::sort_results(&mut results, &sort);
         }
 
-        let mut paginated_results = results[offset..final_end].to_vec();
+        let mut paginated = if early_pagination_applied {
+            results
+        } else {
+            self.apply_pagination(&results, pagination.as_ref())
+        };
 
         if !includes.is_empty() {
-            for entity in &mut paginated_results {
+            for entity in &mut paginated {
                 self.load_includes(entity, &entity_name, &includes, 0)
                     .await?;
             }
         }
 
-        let paginated_results = if let Some(ref fields) = projection {
-            paginated_results
+        Ok(if let Some(ref fields) = projection {
+            paginated
                 .into_iter()
-                .map(|e| self.project_fields(e, fields))
+                .map(|e| Self::project_fields(e, fields))
                 .collect()
         } else {
-            paginated_results
-        };
-
-        Ok(paginated_results)
+            paginated
+        })
     }
 
-    pub async fn cursor(
+    fn list_with_early_pagination(
+        &self,
+        entity_name: &str,
+        pagination: Option<&Pagination>,
+    ) -> Result<Vec<Value>> {
+        let requested_limit = pagination.map_or(usize::MAX, |p| p.limit);
+        let limit = self
+            .config
+            .max_list_results
+            .map_or(requested_limit, |max| requested_limit.min(max));
+        let offset = pagination.map_or(0, |p| p.offset);
+        let prefix = format!("data/{entity_name}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+
+        let mut results = Vec::new();
+        let mut skipped = 0;
+        for (key, value) in items {
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            if results.len() >= limit {
+                break;
+            }
+            let (_, id) = keys::decode_data_key(&key)?;
+            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
+            results.push(entity.to_json());
+        }
+        Ok(results)
+    }
+
+    async fn list_with_filters(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+        let index_manager = self.index_manager.read().await;
+
+        if let Some(filter) = filters.first()
+            && filter.op == FilterOp::Eq
+        {
+            let value_bytes = keys::encode_value_for_index(&filter.value)?;
+            let ids = index_manager.lookup_by_field(
+                &self.storage,
+                entity_name,
+                &filter.field,
+                &value_bytes,
+            )?;
+            if !ids.is_empty() {
+                return self.list_from_index_ids(entity_name, &ids, filters).await;
+            }
+        }
+        self.scan_filtered_entities(entity_name, filters)
+    }
+
+    async fn list_from_index_ids(
+        &self,
+        entity_name: &str,
+        ids: &[String],
+        filters: &[Filter],
+    ) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+        for id in ids {
+            match self
+                .read(entity_name.to_string(), id.clone(), vec![], None)
+                .await
+            {
+                Ok(entity_data) => {
+                    if Self::matches_filters(&entity_data, filters) {
+                        results.push(entity_data);
+                    }
+                }
+                Err(Error::NotFound { .. }) => {
+                    tracing::warn!(
+                        "index pointed to non-existent entity: {}/{}",
+                        entity_name,
+                        id
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(results)
+    }
+
+    /// # Errors
+    /// Returns an error if creating the cursor fails.
+    pub fn cursor(
         &self,
         entity_name: String,
         filters: Vec<Filter>,
@@ -603,14 +697,14 @@ impl Database {
         )
     }
 
-    fn sort_results(&self, results: &mut [Value], sort: &[SortOrder]) {
+    fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
         results.sort_by(|a, b| {
             for order in sort {
                 let a_val = a.get(&order.field);
                 let b_val = b.get(&order.field);
 
                 let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => self.compare_json_values(av, bv),
+                    (Some(av), Some(bv)) => Self::compare_json_values(av, bv),
                     (Some(_), None) => std::cmp::Ordering::Greater,
                     (None, Some(_)) => std::cmp::Ordering::Less,
                     (None, None) => std::cmp::Ordering::Equal,
@@ -629,21 +723,22 @@ impl Database {
         });
     }
 
-    fn compare_json_values(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+    fn compare_json_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
             (Value::Number(a_num), Value::Number(b_num)) => {
                 let a_f64 = a_num.as_f64().unwrap_or(0.0);
                 let b_f64 = b_num.as_f64().unwrap_or(0.0);
-                a_f64.partial_cmp(&b_f64).unwrap_or(std::cmp::Ordering::Equal)
+                a_f64
+                    .partial_cmp(&b_f64)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
             (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
             (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
-            (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
             _ => std::cmp::Ordering::Equal,
         }
     }
 
-    fn matches_filters(&self, entity: &Value, filters: &[Filter]) -> bool {
+    fn matches_filters(entity: &Value, filters: &[Filter]) -> bool {
         for filter in filters {
             if let Some(field_value) = entity.get(&filter.field) {
                 if !filter.matches(field_value) {
@@ -656,6 +751,8 @@ impl Database {
         true
     }
 
+    /// # Errors
+    /// Returns an error if registration fails or limit is reached.
     pub async fn subscribe(&self, pattern: String, entity: Option<String>) -> Result<String> {
         if let Some(max_subs) = self.config.max_subscriptions {
             let current_count = self.registry.count().await;
@@ -674,6 +771,8 @@ impl Database {
         Ok(sub_id)
     }
 
+    /// # Errors
+    /// Returns an error if registration fails or limit is reached.
     pub async fn subscribe_shared(
         &self,
         pattern: String,
@@ -718,7 +817,7 @@ impl Database {
                 .entry(group.clone())
                 .or_insert_with(|| ConsumerGroup::new(group.clone(), num_partitions));
 
-            let partitions = consumer_group.add_member(consumer_id);
+            let partitions = consumer_group.add_member(&consumer_id);
 
             if mode == SubscriptionMode::Ordered {
                 Some(partitions)
@@ -727,8 +826,8 @@ impl Database {
             }
         };
 
-        let subscription = Subscription::new(sub_id.clone(), pattern, entity)
-            .with_share_group(group, mode);
+        let subscription =
+            Subscription::new(sub_id.clone(), pattern, entity).with_share_group(group, mode);
 
         self.registry.register(subscription).await?;
 
@@ -738,15 +837,17 @@ impl Database {
         })
     }
 
+    /// # Errors
+    /// Returns an error if unregistering fails.
     pub async fn unsubscribe(&self, sub_id: &str) -> Result<()> {
-        if let Some(sub) = self.registry.get(sub_id).await {
-            if let Some(group) = &sub.share_group {
-                let mut groups = self.consumer_groups.write().await;
-                if let Some(cg) = groups.get_mut(group) {
-                    cg.remove_member(sub_id);
-                    if cg.member_count() == 0 {
-                        groups.remove(group);
-                    }
+        if let Some(sub) = self.registry.get(sub_id).await
+            && let Some(group) = &sub.share_group
+        {
+            let mut groups = self.consumer_groups.write().await;
+            if let Some(cg) = groups.get_mut(group) {
+                cg.remove_member(sub_id);
+                if cg.member_count() == 0 {
+                    groups.remove(group);
                 }
             }
         }
@@ -756,11 +857,17 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the subscription is not found.
     pub async fn heartbeat(&self, sub_id: &str) -> Result<()> {
-        let sub = self.registry.get(sub_id).await.ok_or_else(|| Error::NotFound {
-            entity: "subscription".into(),
-            id: sub_id.into(),
-        })?;
+        let sub = self
+            .registry
+            .get(sub_id)
+            .await
+            .ok_or_else(|| Error::NotFound {
+                entity: "subscription".into(),
+                id: sub_id.into(),
+            })?;
 
         if let Some(group) = &sub.share_group {
             let mut groups = self.consumer_groups.write().await;
@@ -771,14 +878,17 @@ impl Database {
         Ok(())
     }
 
+    #[must_use]
     pub fn event_receiver(&self) -> tokio::sync::broadcast::Receiver<ChangeEvent> {
         self.dispatcher.subscribe()
     }
 
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.config.path
     }
 
+    #[must_use]
     pub fn num_partitions(&self) -> u8 {
         self.config.shared_subscription.num_partitions
     }
@@ -809,6 +919,20 @@ impl Database {
         tracing::info!("database shutdown signal sent");
     }
 
+    pub async fn close(self) {
+        let _ = self.shutdown_tx.send(true);
+        let handles: Vec<_> = self
+            .background_handles
+            .lock()
+            .map(|mut guard| guard.drain(..).collect())
+            .unwrap_or_default();
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if the backup fails.
     pub fn backup<P: AsRef<Path>>(&self, backup_path: P) -> Result<()> {
         self.storage.flush()?;
 
@@ -821,9 +945,8 @@ impl Database {
             })?;
         }
 
-        copy_dir_recursive(src, dst).map_err(|e| {
-            Error::BackupFailed(format!("failed to create backup: {e}"))
-        })?;
+        copy_dir_recursive(src, dst)
+            .map_err(|e| Error::BackupFailed(format!("failed to create backup: {e}")))?;
 
         Ok(())
     }
@@ -841,7 +964,8 @@ impl Database {
             .unwrap_or(0);
 
         let next = current + 1;
-        self.storage.insert(&counter_key, next.to_string().as_bytes())?;
+        self.storage
+            .insert(&counter_key, next.to_string().as_bytes())?;
 
         Ok(next.to_string())
     }
@@ -862,6 +986,15 @@ impl Database {
         registry.add(relationship);
     }
 
+    pub async fn list_relationships(&self, entity: &str) -> Vec<Relationship> {
+        let registry = self.relationship_registry.read().await;
+        registry.get_all(entity).cloned().unwrap_or_default()
+    }
+
+    pub async fn get_subscription_info(&self, sub_id: &str) -> Option<Subscription> {
+        self.registry.get(sub_id).await
+    }
+
     pub async fn get_schema(&self, entity: &str) -> Option<Schema> {
         let registry = self.schema_registry.read().await;
         registry.get_schema(entity).cloned()
@@ -872,6 +1005,8 @@ impl Database {
         manager.get_constraints(entity).to_vec()
     }
 
+    /// # Errors
+    /// Returns an error if persisting the schema fails.
     pub async fn add_schema(&self, schema: Schema) -> Result<()> {
         let mut batch = self.storage.batch();
 
@@ -887,11 +1022,9 @@ impl Database {
         Ok(())
     }
 
-    pub async fn add_unique_constraint(
-        &self,
-        entity: String,
-        fields: Vec<String>,
-    ) -> Result<()> {
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
+    pub async fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<()> {
         use crate::constraint::{Constraint, UniqueConstraint};
 
         self.add_index(entity.clone(), fields.clone()).await;
@@ -912,6 +1045,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
         use crate::constraint::{Constraint, NotNullConstraint};
 
@@ -931,6 +1066,8 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if persisting the constraint fails.
     pub async fn add_foreign_key(
         &self,
         source_entity: String,
@@ -963,22 +1100,11 @@ impl Database {
         Ok(())
     }
 
-    pub async fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+    /// # Errors
+    /// Returns an error if the backup fails.
+    pub fn backup_physical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs;
         use std::io;
-
-        let dest = destination.as_ref();
-
-        self.storage.flush()?;
-
-        if dest.exists() {
-            return Err(crate::error::Error::BackupFailed(format!(
-                "destination already exists: {}",
-                dest.display()
-            )));
-        }
-
-        let src = &self.config.path;
 
         fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             fs::create_dir_all(dst)?;
@@ -997,15 +1123,34 @@ impl Database {
             Ok(())
         }
 
+        let dest = destination.as_ref();
+
+        self.storage.flush()?;
+
+        if dest.exists() {
+            return Err(crate::error::Error::BackupFailed(format!(
+                "destination already exists: {}",
+                dest.display()
+            )));
+        }
+
+        let src = &self.config.path;
+
         copy_dir_recursive(src, dest).map_err(|e| {
             crate::error::Error::BackupFailed(format!("failed to copy database: {e}"))
         })?;
 
-        tracing::info!("physical backup completed: {} -> {}", src.display(), dest.display());
+        tracing::info!(
+            "physical backup completed: {} -> {}",
+            src.display(),
+            dest.display()
+        );
         Ok(())
     }
 
-    pub async fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
+    /// # Errors
+    /// Returns an error if the backup fails.
+    pub fn backup_logical<P: AsRef<Path>>(&self, destination: P) -> Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
 
@@ -1052,13 +1197,17 @@ impl Database {
             crate::error::Error::BackupFailed(format!("failed to flush backup: {e}"))
         })?;
 
-        tracing::info!("logical backup completed: {count} entities written to {}", dest.display());
+        tracing::info!(
+            "logical backup completed: {count} entities written to {}",
+            dest.display()
+        );
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if the restore fails.
     pub async fn restore_logical<P: AsRef<Path>>(&self, source: P) -> Result<usize> {
-        use std::fs::File;
-        use std::io::{BufRead, BufReader};
+        use tokio::io::AsyncBufReadExt;
 
         let src = source.as_ref();
 
@@ -1069,18 +1218,19 @@ impl Database {
             )));
         }
 
-        let file = File::open(src).map_err(|e| {
+        let file = tokio::fs::File::open(src).await.map_err(|e| {
             crate::error::Error::BackupFailed(format!("failed to open backup file: {e}"))
         })?;
 
-        let reader = BufReader::new(file);
+        let reader = tokio::io::BufReader::new(file);
+        let mut lines = reader.lines();
         let mut count = 0;
 
-        for line in reader.lines() {
-            let line = line.map_err(|e| {
-                crate::error::Error::BackupFailed(format!("failed to read line: {e}"))
-            })?;
-
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| crate::error::Error::BackupFailed(format!("failed to read line: {e}")))?
+        {
             if line.trim().is_empty() {
                 continue;
             }
@@ -1108,11 +1258,13 @@ impl Database {
             count += 1;
         }
 
-        tracing::info!("logical restore completed: {count} entities restored from {}", src.display());
+        tracing::info!(
+            "logical restore completed: {count} entities restored from {}",
+            src.display()
+        );
         Ok(count)
     }
 }
-
 
 async fn ttl_cleanup_task(
     storage: Arc<Storage>,
@@ -1135,17 +1287,15 @@ async fn ttl_cleanup_task(
         };
 
         let prefix = b"data/";
-        let items = match storage.prefix_scan(prefix) {
-            Ok(items) => items,
-            Err(_) => continue,
+        let Ok(items) = storage.prefix_scan(prefix) else {
+            continue;
         };
 
         let mut expired_entities = Vec::new();
 
         for (key, value) in items {
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
             };
 
             let parts: Vec<&str> = key_str.split('/').collect();
@@ -1156,20 +1306,15 @@ async fn ttl_cleanup_task(
             let entity_name = parts[1];
             let id = parts[2];
 
-            let entity = match Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
-            {
-                Ok(e) => e,
-                Err(_) => continue,
+            let Ok(entity) = Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
+            else {
+                continue;
             };
 
-            if let Some(expires_at) = entity
-                .data
-                .get("_expires_at")
-                .and_then(|v| v.as_u64())
+            if let Some(expires_at) = entity.data.get("_expires_at").and_then(Value::as_u64)
+                && expires_at <= now
             {
-                if expires_at <= now {
-                    expired_entities.push((key, entity));
-                }
+                expired_entities.push((key, entity));
             }
         }
 
@@ -1213,6 +1358,17 @@ async fn ttl_cleanup_task(
     }
 }
 
+impl Drop for Database {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
+        if let Ok(mut handles) = self.background_handles.lock() {
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
+        }
+    }
+}
+
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1232,23 +1388,18 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_glob_match() {
-        let filter = Filter::new("test".into(), FilterOp::Like, json!("*li*"));
+        assert!(Filter::glob_match("Alice", "*li*"));
+        assert!(Filter::glob_match("Charlie", "*li*"));
+        assert!(!Filter::glob_match("Bob", "*li*"));
+        assert!(!Filter::glob_match("David", "*li*"));
 
-        assert!(filter.glob_match("Alice", "*li*"));
-        assert!(filter.glob_match("Charlie", "*li*"));
-        assert!(!filter.glob_match("Bob", "*li*"));
-        assert!(!filter.glob_match("David", "*li*"));
+        assert!(Filter::glob_match("test@example.com", "*@example.com"));
+        assert!(Filter::glob_match("a@example.com", "*@example.com"));
 
-        let filter2 = Filter::new("test".into(), FilterOp::Like, json!("*@example.com"));
-        assert!(filter2.glob_match("test@example.com", "*@example.com"));
-        assert!(filter2.glob_match("a@example.com", "*@example.com"));
-
-        let filter3 = Filter::new("test".into(), FilterOp::Like, json!("*lie"));
-        assert!(filter3.glob_match("Charlie", "*lie"));
-        assert!(!filter3.glob_match("Alice", "*lie"));
+        assert!(Filter::glob_match("Charlie", "*lie"));
+        assert!(!Filter::glob_match("Alice", "*lie"));
     }
 }

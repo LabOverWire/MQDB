@@ -49,6 +49,7 @@ pub struct ConsumerGroup {
 }
 
 impl ConsumerGroup {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(name: String, num_partitions: u8) -> Self {
         Self {
             name,
@@ -58,19 +59,20 @@ impl ConsumerGroup {
         }
     }
 
-    pub fn add_member(&mut self, consumer_id: String) -> Vec<u8> {
-        if self.members.contains_key(&consumer_id) {
+    pub fn add_member(&mut self, consumer_id: &str) -> Vec<u8> {
+        if self.members.contains_key(consumer_id) {
             return self
                 .members
-                .get(&consumer_id)
+                .get(consumer_id)
                 .map(|m| m.assigned_partitions.clone())
                 .unwrap_or_default();
         }
 
+        let consumer_id_owned = consumer_id.to_owned();
         self.members.insert(
-            consumer_id.clone(),
+            consumer_id_owned.clone(),
             ConsumerMember {
-                consumer_id: consumer_id.clone(),
+                consumer_id: consumer_id_owned,
                 assigned_partitions: Vec::new(),
                 last_heartbeat: Instant::now(),
             },
@@ -79,7 +81,7 @@ impl ConsumerGroup {
         self.rebalance();
 
         self.members
-            .get(&consumer_id)
+            .get(consumer_id)
             .map(|m| m.assigned_partitions.clone())
             .unwrap_or_default()
     }
@@ -96,6 +98,7 @@ impl ConsumerGroup {
         }
     }
 
+    #[must_use]
     pub fn get_member(&self, consumer_id: &str) -> Option<&ConsumerMember> {
         self.members.get(consumer_id)
     }
@@ -104,24 +107,26 @@ impl ConsumerGroup {
         self.members.values()
     }
 
+    #[must_use]
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
 
+    #[must_use]
     pub fn get_partition_owner(&self, partition: u8) -> Option<&str> {
-        self.assignments.get(&partition).map(|s| s.as_str())
+        self.assignments.get(&partition).map(String::as_str)
     }
 
     pub fn rebalance(&mut self) {
         self.assignments.clear();
 
-        let member_ids: Vec<String> = {
+        let sorted_ids: Vec<String> = {
             let mut ids: Vec<_> = self.members.keys().cloned().collect();
             ids.sort();
             ids
         };
 
-        if member_ids.is_empty() {
+        if sorted_ids.is_empty() {
             for member in self.members.values_mut() {
                 member.assigned_partitions.clear();
             }
@@ -133,8 +138,8 @@ impl ConsumerGroup {
         }
 
         for partition in 0..self.num_partitions {
-            let member_idx = partition as usize % member_ids.len();
-            let member_id = &member_ids[member_idx];
+            let idx = partition as usize % sorted_ids.len();
+            let member_id = &sorted_ids[idx];
 
             self.assignments.insert(partition, member_id.clone());
 
@@ -174,7 +179,7 @@ mod tests {
     #[test]
     fn test_single_member_gets_all_partitions() {
         let mut group = ConsumerGroup::new("test".into(), 8);
-        let partitions = group.add_member("consumer-1".into());
+        let partitions = group.add_member("consumer-1");
 
         assert_eq!(partitions.len(), 8);
         assert_eq!(partitions, vec![0, 1, 2, 3, 4, 5, 6, 7]);
@@ -183,8 +188,8 @@ mod tests {
     #[test]
     fn test_two_members_split_partitions() {
         let mut group = ConsumerGroup::new("test".into(), 8);
-        group.add_member("consumer-1".into());
-        let partitions_2 = group.add_member("consumer-2".into());
+        group.add_member("consumer-1");
+        let partitions_2 = group.add_member("consumer-2");
 
         let partitions_1 = group
             .get_member("consumer-1")
@@ -194,17 +199,21 @@ mod tests {
         assert_eq!(partitions_1.len(), 4);
         assert_eq!(partitions_2.len(), 4);
 
-        let mut all: Vec<u8> = partitions_1.iter().chain(partitions_2.iter()).copied().collect();
-        all.sort();
+        let mut all: Vec<u8> = partitions_1
+            .iter()
+            .chain(partitions_2.iter())
+            .copied()
+            .collect();
+        all.sort_unstable();
         assert_eq!(all, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
     fn test_three_members_distribute_partitions() {
         let mut group = ConsumerGroup::new("test".into(), 8);
-        group.add_member("a".into());
-        group.add_member("b".into());
-        group.add_member("c".into());
+        group.add_member("a");
+        group.add_member("b");
+        group.add_member("c");
 
         let p_a = group.get_member("a").unwrap().assigned_partitions.clone();
         let p_b = group.get_member("b").unwrap().assigned_partitions.clone();
@@ -221,8 +230,8 @@ mod tests {
     #[test]
     fn test_member_removal_triggers_rebalance() {
         let mut group = ConsumerGroup::new("test".into(), 8);
-        group.add_member("consumer-1".into());
-        group.add_member("consumer-2".into());
+        group.add_member("consumer-1");
+        group.add_member("consumer-2");
 
         group.remove_member("consumer-2");
 
@@ -237,7 +246,7 @@ mod tests {
     #[test]
     fn test_partition_owner_lookup() {
         let mut group = ConsumerGroup::new("test".into(), 4);
-        group.add_member("consumer-1".into());
+        group.add_member("consumer-1");
 
         assert_eq!(group.get_partition_owner(0), Some("consumer-1"));
         assert_eq!(group.get_partition_owner(3), Some("consumer-1"));
@@ -247,12 +256,12 @@ mod tests {
     #[test]
     fn test_deterministic_assignment() {
         let mut group1 = ConsumerGroup::new("test".into(), 8);
-        group1.add_member("a".into());
-        group1.add_member("b".into());
+        group1.add_member("a");
+        group1.add_member("b");
 
         let mut group2 = ConsumerGroup::new("test".into(), 8);
-        group2.add_member("b".into());
-        group2.add_member("a".into());
+        group2.add_member("b");
+        group2.add_member("a");
 
         let p1_a = group1.get_member("a").unwrap().assigned_partitions.clone();
         let p2_a = group2.get_member("a").unwrap().assigned_partitions.clone();

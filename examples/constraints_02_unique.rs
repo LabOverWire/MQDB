@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     let created = db.create("users".into(), user1).await?;
-    println!("✓ Created: {}\n", created);
+    println!("✓ Created: {created}\n");
 
     println!("Creating another user with different email...");
     let user2 = json!({
@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "bob@example.com"
     });
     let created = db.create("users".into(), user2).await?;
-    println!("✓ Created: {}\n", created);
+    println!("✓ Created: {created}\n");
 
     println!("Attempting to create user with duplicate email...");
     let duplicate = json!({
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("users".into(), duplicate).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Unique constraint violation: {}\n", e),
+        Err(e) => println!("✓ Unique constraint violation: {e}\n"),
     }
 
     println!("=== Composite Unique Constraints ===\n");
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("posts".into(), duplicate).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Unique constraint violation: {}\n", e),
+        Err(e) => println!("✓ Unique constraint violation: {e}\n"),
     }
 
     println!("Summary:");

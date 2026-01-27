@@ -1,7 +1,7 @@
-use crate::types::{Filter, SortDirection, SortOrder};
 use crate::entity::Entity;
 use crate::error::Result;
 use crate::storage::Storage;
+use crate::types::{Filter, SortDirection, SortOrder};
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ pub struct Query {
 }
 
 impl Query {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             filters: Vec::new(),
@@ -24,21 +25,25 @@ impl Query {
         }
     }
 
+    #[must_use]
     pub fn with_filters(mut self, filters: Vec<Filter>) -> Self {
         self.filters = filters;
         self
     }
 
+    #[must_use]
     pub fn with_sort(mut self, sort: Vec<SortOrder>) -> Self {
         self.sort = sort;
         self
     }
 
+    #[must_use]
     pub fn with_includes(mut self, includes: Vec<String>) -> Self {
         self.includes = includes;
         self
     }
 
+    #[must_use]
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size = size;
         self
@@ -92,10 +97,13 @@ impl Cursor {
         })
     }
 
-    pub async fn next(&mut self) -> Result<Option<Value>> {
+    /// # Errors
+    /// Returns an error if reading or deserializing entities fails.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Option<Value>> {
         if !self.sort_orders.is_empty() {
             if self.sorted_buffer.is_none() {
-                self.load_and_sort().await?;
+                self.load_and_sort()?;
             }
 
             if let Some(ref sorted) = self.sorted_buffer {
@@ -103,9 +111,8 @@ impl Cursor {
                     let result = sorted[self.sorted_position].clone();
                     self.sorted_position += 1;
                     return Ok(Some(result));
-                } else {
-                    return Ok(None);
                 }
+                return Ok(None);
             }
         }
 
@@ -117,16 +124,18 @@ impl Cursor {
             return Ok(None);
         }
 
-        self.fill_buffer().await?;
+        self.fill_buffer()?;
 
         Ok(self.buffer.pop_front())
     }
 
-    pub async fn next_batch(&mut self, size: usize) -> Result<Vec<Value>> {
+    /// # Errors
+    /// Returns an error if reading or deserializing entities fails.
+    pub fn next_batch(&mut self, size: usize) -> Result<Vec<Value>> {
         let mut batch = Vec::with_capacity(size);
 
         while batch.len() < size {
-            match self.next().await? {
+            match self.next()? {
                 Some(entity) => batch.push(entity),
                 None => break,
             }
@@ -135,7 +144,7 @@ impl Cursor {
         Ok(batch)
     }
 
-    async fn fill_buffer(&mut self) -> Result<()> {
+    fn fill_buffer(&mut self) -> Result<()> {
         while self.buffer.len() < self.max_buffer_size && self.position < self.fjall_items.len() {
             let (key, value) = &self.fjall_items[self.position];
             self.position += 1;
@@ -167,28 +176,28 @@ impl Cursor {
                 FilterOp::Neq => field_value != Some(&filter.value),
                 FilterOp::Lt => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_lt()).unwrap_or(false)
+                        Self::compare_values(a, b).is_some_and(std::cmp::Ordering::is_lt)
                     } else {
                         false
                     }
                 }
                 FilterOp::Lte => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_le()).unwrap_or(false)
+                        Self::compare_values(a, b).is_some_and(std::cmp::Ordering::is_le)
                     } else {
                         false
                     }
                 }
                 FilterOp::Gt => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_gt()).unwrap_or(false)
+                        Self::compare_values(a, b).is_some_and(std::cmp::Ordering::is_gt)
                     } else {
                         false
                     }
                 }
                 FilterOp::Gte => {
                     if let (Some(a), Some(b)) = (field_value, Some(&filter.value)) {
-                        Self::compare_values(a, b).map(|ord| ord.is_ge()).unwrap_or(false)
+                        Self::compare_values(a, b).is_some_and(std::cmp::Ordering::is_ge)
                     } else {
                         false
                     }
@@ -210,9 +219,7 @@ impl Cursor {
                     }
                 }
                 FilterOp::IsNull => field_value.is_none() || field_value == Some(&Value::Null),
-                FilterOp::IsNotNull => {
-                    field_value.is_some() && field_value != Some(&Value::Null)
-                }
+                FilterOp::IsNotNull => field_value.is_some() && field_value != Some(&Value::Null),
             };
 
             if !matches {
@@ -282,7 +289,7 @@ impl Cursor {
         true
     }
 
-    async fn load_and_sort(&mut self) -> Result<()> {
+    fn load_and_sort(&mut self) -> Result<()> {
         let mut all_entities = Vec::new();
 
         while self.position < self.fjall_items.len() {
@@ -320,7 +327,9 @@ impl Cursor {
                 let b_val = b.get(&order.field);
 
                 let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => Self::compare_values(av, bv).unwrap_or(std::cmp::Ordering::Equal),
+                    (Some(av), Some(bv)) => {
+                        Self::compare_values(av, bv).unwrap_or(std::cmp::Ordering::Equal)
+                    }
                     (Some(_), None) => std::cmp::Ordering::Greater,
                     (None, Some(_)) => std::cmp::Ordering::Less,
                     (None, None) => std::cmp::Ordering::Equal,

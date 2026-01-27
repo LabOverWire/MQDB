@@ -56,21 +56,25 @@ pub enum Request {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
-    NotFound = 404,
     BadRequest = 400,
+    Forbidden = 403,
+    NotFound = 404,
     Conflict = 409,
     Internal = 500,
 }
 
 impl ErrorCode {
+    #[must_use]
     pub fn as_u16(self) -> u16 {
         self as u16
     }
 
+    #[must_use]
     pub fn as_grpc_code(self) -> i32 {
         match self {
-            ErrorCode::NotFound => 5,
             ErrorCode::BadRequest => 3,
+            ErrorCode::Forbidden => 7,
+            ErrorCode::NotFound => 5,
             ErrorCode::Conflict => 6,
             ErrorCode::Internal => 13,
         }
@@ -91,6 +95,7 @@ pub enum Response {
 }
 
 impl Response {
+    #[must_use]
     pub fn ok(data: Value) -> Self {
         Response::Ok { data }
     }
@@ -102,10 +107,12 @@ impl Response {
         }
     }
 
+    #[must_use]
     pub fn is_ok(&self) -> bool {
         matches!(self, Response::Ok { .. })
     }
 
+    #[must_use]
     pub fn is_error(&self) -> bool {
         matches!(self, Response::Error { .. })
     }
@@ -194,23 +201,21 @@ mod execute {
                     entity,
                     share_group,
                     mode,
-                } => {
-                    match (share_group, mode) {
-                        (Some(group), Some(m)) => {
-                            match self.subscribe_shared(pattern, entity, group, m).await {
-                                Ok(result) => Response::ok(serde_json::json!({
-                                    "id": result.id,
-                                    "assigned_partitions": result.assigned_partitions
-                                })),
-                                Err(e) => e.into(),
-                            }
-                        }
-                        _ => match self.subscribe(pattern, entity).await {
-                            Ok(id) => Response::ok(value_from_string(id)),
+                } => match (share_group, mode) {
+                    (Some(group), Some(m)) => {
+                        match self.subscribe_shared(pattern, entity, group, m).await {
+                            Ok(result) => Response::ok(serde_json::json!({
+                                "id": result.id,
+                                "assigned_partitions": result.assigned_partitions
+                            })),
                             Err(e) => e.into(),
-                        },
+                        }
                     }
-                }
+                    _ => match self.subscribe(pattern, entity).await {
+                        Ok(id) => Response::ok(value_from_string(id)),
+                        Err(e) => e.into(),
+                    },
+                },
                 Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
                     Ok(()) => Response::ok(value_from_unit(())),
                     Err(e) => e.into(),
@@ -288,7 +293,7 @@ mod tests {
                 assert_eq!(code, 404);
                 assert!(message.contains("not found"));
             }
-            _ => panic!("expected error response"),
+            Response::Ok { .. } => panic!("expected error response"),
         }
     }
 }

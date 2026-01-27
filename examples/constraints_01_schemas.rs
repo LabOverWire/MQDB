@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("age", FieldType::Number))
         .add_field(FieldDefinition::new("active", FieldType::Boolean))
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await?;
 
@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "active": true
     });
     let created = db.create("users".into(), user1).await?;
-    println!("✓ Created user: {}", created);
+    println!("✓ Created user: {created}");
     println!("  Note: 'status' defaulted to 'active'\n");
 
     println!("Creating user with missing optional fields...");
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Bob"
     });
     let created = db.create("users".into(), user2).await?;
-    println!("✓ Created user: {}\n", created);
+    println!("✓ Created user: {created}\n");
 
     println!("Attempting to create user with wrong type (age as string)...");
     let invalid_user = json!({
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("users".into(), invalid_user).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Validation error: {}\n", e),
+        Err(e) => println!("✓ Validation error: {e}\n"),
     }
 
     println!("Attempting to create user without required field (name)...");
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     match db.create("users".into(), missing_required).await {
         Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Validation error: {}\n", e),
+        Err(e) => println!("✓ Validation error: {e}\n"),
     }
 
     println!("Summary:");

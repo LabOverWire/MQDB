@@ -7,10 +7,9 @@ pub const SUB_PREFIX: &[u8] = b"sub";
 pub const DEDUP_PREFIX: &[u8] = b"dedup";
 pub const META_PREFIX: &[u8] = b"meta";
 
+#[must_use]
 pub fn encode_data_key(entity: &str, id: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(
-        DATA_PREFIX.len() + 1 + entity.len() + 1 + id.len(),
-    );
+    let mut key = Vec::with_capacity(DATA_PREFIX.len() + 1 + entity.len() + 1 + id.len());
     key.extend_from_slice(DATA_PREFIX);
     key.push(SEPARATOR);
     key.extend_from_slice(entity.as_bytes());
@@ -19,6 +18,8 @@ pub fn encode_data_key(entity: &str, id: &str) -> Vec<u8> {
     key
 }
 
+/// # Errors
+/// Returns an error if the key is not a valid data key.
 pub fn decode_data_key(key: &[u8]) -> Result<(String, String)> {
     let parts: Vec<&[u8]> = key.split(|&b| b == SEPARATOR).collect();
 
@@ -34,6 +35,7 @@ pub fn decode_data_key(key: &[u8]) -> Result<(String, String)> {
     Ok((entity, id))
 }
 
+#[must_use]
 pub fn encode_index_key(entity: &str, field: &str, value: &[u8], id: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(
         INDEX_PREFIX.len() + 1 + entity.len() + 1 + field.len() + 1 + value.len() + 1 + id.len(),
@@ -50,6 +52,7 @@ pub fn encode_index_key(entity: &str, field: &str, value: &[u8], id: &str) -> Ve
     key
 }
 
+#[must_use]
 pub fn encode_index_prefix(entity: &str, field: &str, value: Option<&[u8]>) -> Vec<u8> {
     let mut key = Vec::new();
     key.extend_from_slice(INDEX_PREFIX);
@@ -66,6 +69,7 @@ pub fn encode_index_prefix(entity: &str, field: &str, value: Option<&[u8]>) -> V
     key
 }
 
+#[must_use]
 pub fn encode_subscription_key(sub_id: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(SUB_PREFIX.len() + 1 + sub_id.len());
     key.extend_from_slice(SUB_PREFIX);
@@ -74,6 +78,7 @@ pub fn encode_subscription_key(sub_id: &str) -> Vec<u8> {
     key
 }
 
+#[must_use]
 pub fn encode_dedup_key(correlation_id: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(DEDUP_PREFIX.len() + 1 + correlation_id.len());
     key.extend_from_slice(DEDUP_PREFIX);
@@ -82,6 +87,7 @@ pub fn encode_dedup_key(correlation_id: &str) -> Vec<u8> {
     key
 }
 
+#[must_use]
 pub fn encode_meta_key(key_name: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(META_PREFIX.len() + 1 + key_name.len());
     key.extend_from_slice(META_PREFIX);
@@ -90,6 +96,8 @@ pub fn encode_meta_key(key_name: &str) -> Vec<u8> {
     key
 }
 
+/// # Errors
+/// Returns an error if the value cannot be indexed.
 pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
     match value {
         serde_json::Value::Null => Ok(b"null".to_vec()),
@@ -110,18 +118,23 @@ pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
             }
         }
         serde_json::Value::String(s) => Ok(s.as_bytes().to_vec()),
-        _ => Err(Error::Validation("cannot index arrays or objects directly".into())),
+        _ => Err(Error::Validation(
+            "cannot index arrays or objects directly".into(),
+        )),
     }
 }
 
+#[must_use]
 pub fn encode_schema_key(entity: &str) -> Vec<u8> {
     format!("meta/schema/{entity}").into_bytes()
 }
 
+#[must_use]
 pub fn encode_constraint_key(constraint_type: &str, entity: &str, name: &str) -> Vec<u8> {
     format!("meta/constraint/{constraint_type}/{entity}/{name}").into_bytes()
 }
 
+#[must_use]
 pub fn encode_fk_reverse_index_key(
     target_entity: &str,
     target_id: &str,
@@ -131,6 +144,7 @@ pub fn encode_fk_reverse_index_key(
     format!("fkref/{target_entity}/{target_id}/{source_entity}/{source_id}").into_bytes()
 }
 
+#[must_use]
 pub fn encode_fk_reverse_prefix(target_entity: &str, target_id: &str) -> Vec<u8> {
     format!("fkref/{target_entity}/{target_id}/").into_bytes()
 }

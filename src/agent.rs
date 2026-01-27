@@ -1,5 +1,6 @@
-use crate::{Database, Request, Response};
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use crate::{Database, Response};
+use mqtt5::broker::config::QuicConfig;
+use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -8,217 +9,18 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 #[cfg(feature = "opentelemetry")]
 use mqtt5::telemetry::propagation;
 
-#[derive(Debug, Clone)]
-pub struct DbOperation {
-    pub entity: String,
-    pub operation: String,
-    pub id: Option<String>,
-}
+const BROKER_MAX_CLIENTS: usize = 10_000;
+const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
+const SESSION_EXPIRY_SECS: u64 = 3600;
 
-#[derive(Debug, Clone)]
-pub enum AdminOperation {
-    SchemaSet { entity: String },
-    SchemaGet { entity: String },
-    ConstraintAdd { entity: String },
-    ConstraintList { entity: String },
-    Backup,
-    Restore,
-    BackupList,
-    Subscribe,
-    Heartbeat { sub_id: String },
-    Unsubscribe { sub_id: String },
-    ConsumerGroupList,
-    ConsumerGroupShow { name: String },
-}
-
-type ListOptions = (
-    Vec<crate::Filter>,
-    Vec<crate::SortOrder>,
-    Option<crate::Pagination>,
-    Vec<String>,
-    Option<Vec<String>>,
-);
-
-pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
-    if let Some(rest) = topic.strip_prefix("$DB/_sub/") {
-        let parts: Vec<&str> = rest.split('/').collect();
-        return match parts.as_slice() {
-            ["subscribe"] => Some(AdminOperation::Subscribe),
-            [id, "heartbeat"] => Some(AdminOperation::Heartbeat {
-                sub_id: (*id).to_string(),
-            }),
-            [id, "unsubscribe"] => Some(AdminOperation::Unsubscribe {
-                sub_id: (*id).to_string(),
-            }),
-            _ => None,
-        };
-    }
-
-    let parts: Vec<&str> = topic.strip_prefix("$DB/_admin/")?.split('/').collect();
-
-    match parts.as_slice() {
-        ["schema", entity, "set"] => Some(AdminOperation::SchemaSet {
-            entity: (*entity).to_string(),
-        }),
-        ["schema", entity, "get"] => Some(AdminOperation::SchemaGet {
-            entity: (*entity).to_string(),
-        }),
-        ["constraint", entity, "add"] => Some(AdminOperation::ConstraintAdd {
-            entity: (*entity).to_string(),
-        }),
-        ["constraint", entity, "list"] => Some(AdminOperation::ConstraintList {
-            entity: (*entity).to_string(),
-        }),
-        ["backup"] => Some(AdminOperation::Backup),
-        ["backup", "list"] => Some(AdminOperation::BackupList),
-        ["restore"] => Some(AdminOperation::Restore),
-        ["consumer-groups"] => Some(AdminOperation::ConsumerGroupList),
-        ["consumer-groups", name] => Some(AdminOperation::ConsumerGroupShow {
-            name: (*name).to_string(),
-        }),
-        _ => None,
-    }
-}
-
-pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
-    let parts: Vec<&str> = topic.strip_prefix("$DB/")?.split('/').collect();
-
-    match parts.as_slice() {
-        [entity, op] if *op == "create" || *op == "list" => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: (*op).to_string(),
-            id: None,
-        }),
-        [entity, id] => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: "read".to_string(),
-            id: Some((*id).to_string()),
-        }),
-        [entity, id, op] if *op == "update" || *op == "delete" => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: (*op).to_string(),
-            id: Some((*id).to_string()),
-        }),
-        _ => None,
-    }
-}
-
-pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String> {
-    let data: Value = if payload.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(payload).map_err(|e| e.to_string())?
-    };
-
-    match op.operation.as_str() {
-        "create" => Ok(Request::Create {
-            entity: op.entity,
-            data,
-        }),
-        "read" => {
-            let id = op.id.ok_or("read requires id in topic")?;
-            let (includes, projection) = extract_read_options(&data);
-            Ok(Request::Read {
-                entity: op.entity,
-                id,
-                includes,
-                projection,
-            })
-        }
-        "update" => {
-            let id = op.id.ok_or("update requires id in topic")?;
-            Ok(Request::Update {
-                entity: op.entity,
-                id,
-                fields: data,
-            })
-        }
-        "delete" => {
-            let id = op.id.ok_or("delete requires id in topic")?;
-            Ok(Request::Delete {
-                entity: op.entity,
-                id,
-            })
-        }
-        "list" => {
-            let (filters, sort, pagination, includes, projection) = extract_list_options(&data);
-            Ok(Request::List {
-                entity: op.entity,
-                filters,
-                sort,
-                pagination,
-                includes,
-                projection,
-            })
-        }
-        _ => Err(format!("unknown operation: {}", op.operation)),
-    }
-}
-
-fn extract_read_options(data: &Value) -> (Vec<String>, Option<Vec<String>>) {
-    let includes = data
-        .get("includes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let projection = data
-        .get("projection")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
-
-    (includes, projection)
-}
-
-fn extract_list_options(data: &Value) -> ListOptions {
-    let filters: Vec<crate::Filter> = data
-        .get("filters")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let sort: Vec<crate::SortOrder> = data
-        .get("sort")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-
-    let pagination: Option<crate::Pagination> = data
-        .get("pagination")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-    let includes = data
-        .get("includes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let projection = data
-        .get("projection")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        });
-
-    (filters, sort, pagination, includes, projection)
-}
+pub use crate::protocol::{
+    AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic,
+};
 
 pub struct MqdbAgent {
     db: Arc<Database>,
@@ -230,15 +32,20 @@ pub struct MqdbAgent {
     service_username: Option<String>,
     service_password: Option<String>,
     backup_dir: PathBuf,
+    quic_cert_file: Option<PathBuf>,
+    quic_key_file: Option<PathBuf>,
 }
 
 impl MqdbAgent {
+    /// # Panics
+    /// Panics if the default bind address cannot be parsed (should never happen).
+    #[allow(clippy::must_use_candidate)]
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         let backup_dir = db.path().join("backups");
         Self {
             db: Arc::new(db),
-            bind_address: "127.0.0.1:1884".parse().unwrap(),
+            bind_address: "127.0.0.1:1883".parse().unwrap(),
             shutdown_tx,
             password_file: None,
             acl_file: None,
@@ -246,46 +53,64 @@ impl MqdbAgent {
             service_username: None,
             service_password: None,
             backup_dir,
+            quic_cert_file: None,
+            quic_key_file: None,
         }
     }
 
+    #[must_use]
     pub fn with_bind_address(mut self, addr: SocketAddr) -> Self {
         self.bind_address = addr;
         self
     }
 
+    #[must_use]
     pub fn with_password_file(mut self, path: PathBuf) -> Self {
         self.password_file = Some(path);
         self
     }
 
+    #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
         self.acl_file = Some(path);
         self
     }
 
+    #[must_use]
     pub fn with_anonymous(mut self, allow: bool) -> Self {
         self.allow_anonymous = allow;
         self
     }
 
+    #[must_use]
     pub fn with_service_credentials(mut self, username: String, password: String) -> Self {
         self.service_username = Some(username);
         self.service_password = Some(password);
         self
     }
 
+    #[must_use]
     pub fn with_backup_dir(mut self, path: PathBuf) -> Self {
         self.backup_dir = path;
         self
     }
 
+    #[must_use]
+    pub fn with_quic_certs(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
+        self.quic_cert_file = Some(cert_file);
+        self.quic_key_file = Some(key_file);
+        self
+    }
+
+    /// # Errors
+    /// Returns an error if the broker fails to start or encounters a runtime error.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
-            max_clients: 1000,
-            max_packet_size: 10 * 1024 * 1024,
-            session_expiry_interval: Duration::from_secs(3600),
+            max_clients: BROKER_MAX_CLIENTS,
+            max_packet_size: BROKER_MAX_PACKET_SIZE,
+            session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
             wildcard_subscription_available: true,
@@ -296,38 +121,84 @@ impl MqdbAgent {
         };
 
         config.auth_config.allow_anonymous = self.allow_anonymous;
-        if let Some(ref path) = self.password_file {
-            config.auth_config.password_file = Some(path.clone());
-        }
         if let Some(ref path) = self.acl_file {
             config.auth_config.acl_file = Some(path.clone());
         }
 
-        let mut broker = MqttBroker::with_config(config).await?;
+        let (service_username, service_password, custom_auth_provider) =
+            if let Some(ref path) = self.password_file {
+                if self.service_username.is_none() {
+                    let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
+                    let svc_pass = uuid::Uuid::new_v4().to_string();
+                    let auth_provider = PasswordAuthProvider::from_file(path).await?;
+                    auth_provider.add_user(svc_user.clone(), &svc_pass)?;
+                    (
+                        Some(svc_user),
+                        Some(svc_pass),
+                        Some(Arc::new(auth_provider)),
+                    )
+                } else {
+                    config.auth_config.password_file = Some(path.clone());
+                    (
+                        self.service_username.clone(),
+                        self.service_password.clone(),
+                        None,
+                    )
+                }
+            } else {
+                (
+                    self.service_username.clone(),
+                    self.service_password.clone(),
+                    None,
+                )
+            };
+
+        if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
+            let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
+                .with_bind_address(self.bind_address);
+            config = config.with_quic(quic_config);
+            info!(quic_bind = %self.bind_address, "QUIC listener configured");
+        }
+
+        let mut broker = if let Some(provider) = custom_auth_provider {
+            MqttBroker::with_config(config)
+                .await?
+                .with_auth_provider(provider)
+        } else {
+            MqttBroker::with_config(config).await?
+        };
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let db = Arc::clone(&self.db);
         let bind_addr = self.bind_address;
         let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let service_username = self.service_username.clone();
-        let service_password = self.service_password.clone();
         let backup_dir = self.backup_dir.clone();
+        let handler_username = service_username.clone();
+        let handler_password = service_password.clone();
 
         let handler_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let client = MqttClient::new("mqdb-internal-handler");
-            let addr = format!("{}:{}", bind_addr.ip(), bind_addr.port());
-
-            let response_creds = (service_username.clone(), service_password.clone());
-            let connect_result = if let (Some(user), Some(pass)) = (service_username, service_password) {
-                let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
-                    .with_credentials(user, pass);
-                client.connect_with_options(&addr, options).await.map(|_| ())
+            let connect_ip = if bind_addr.ip().is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
             } else {
-                client.connect(&addr).await
+                bind_addr.ip()
             };
+            let addr = format!("{}:{}", connect_ip, bind_addr.port());
+
+            let response_creds = (handler_username.clone(), handler_password.clone());
+            let connect_result =
+                if let (Some(user), Some(pass)) = (handler_username, handler_password) {
+                    let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
+                        .with_credentials(user, pass);
+                    Box::pin(client.connect_with_options(&addr, options))
+                        .await
+                        .map(|_| ())
+                } else {
+                    client.connect(&addr).await
+                };
 
             if let Err(e) = connect_result {
                 error!("Failed to connect internal handler: {}", e);
@@ -353,7 +224,9 @@ impl MqdbAgent {
             let response_connect = if let (Some(user), Some(pass)) = response_creds {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-response-publisher")
                     .with_credentials(user, pass);
-                response_client.connect_with_options(&addr, options).await.map(|_| ())
+                Box::pin(response_client.connect_with_options(&addr, options))
+                    .await
+                    .map(|_| ())
             } else {
                 response_client.connect(&addr).await
             };
@@ -366,14 +239,11 @@ impl MqdbAgent {
             loop {
                 tokio::select! {
                     msg = msg_rx.recv() => {
-                        match msg {
-                            Some(message) => {
-                                handle_message(&db, &response_client, message, &backup_dir).await;
-                            }
-                            None => {
-                                debug!("Message channel closed");
-                                break;
-                            }
+                        if let Some(message) = msg {
+                            handle_message(&db, &response_client, message, &backup_dir).await;
+                        } else {
+                            debug!("Message channel closed");
+                            break;
                         }
                     }
                     _ = shutdown_rx.recv() => {
@@ -387,8 +257,8 @@ impl MqdbAgent {
         let event_db = Arc::clone(&self.db);
         let event_addr = self.bind_address;
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
-        let event_service_username = self.service_username.clone();
-        let event_service_password = self.service_password.clone();
+        let event_service_username = service_username.clone();
+        let event_service_password = service_password.clone();
         let num_partitions = self.db.num_partitions();
 
         let event_task = tokio::spawn(async move {
@@ -397,10 +267,14 @@ impl MqdbAgent {
             let client = MqttClient::new("mqdb-event-publisher");
             let addr = format!("{}:{}", event_addr.ip(), event_addr.port());
 
-            let connect_result = if let (Some(user), Some(pass)) = (event_service_username, event_service_password) {
+            let connect_result = if let (Some(user), Some(pass)) =
+                (event_service_username, event_service_password)
+            {
                 let options = mqtt5::types::ConnectOptions::new("mqdb-event-publisher")
                     .with_credentials(user, pass);
-                client.connect_with_options(&addr, options).await.map(|_| ())
+                Box::pin(client.connect_with_options(&addr, options))
+                    .await
+                    .map(|_| ())
             } else {
                 client.connect(&addr).await
             };
@@ -475,12 +349,9 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
         return;
     }
 
-    let op = match parse_db_topic(topic) {
-        Some(op) => op,
-        None => {
-            warn!("Invalid $DB topic format: {}", topic);
-            return;
-        }
+    let Some(op) = parse_db_topic(topic) else {
+        warn!("Invalid $DB topic format: {}", topic);
+        return;
     };
 
     let request = match build_request(op.clone(), &message.payload) {
@@ -506,11 +377,11 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
 
     #[cfg(feature = "opentelemetry")]
     let span = {
-        use opentelemetry::trace::{SpanContext, TraceContextExt};
         use opentelemetry::Context;
+        use opentelemetry::trace::{SpanContext, TraceContextExt, TraceState};
         use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-        let user_props: Vec<(String, String)> = message.properties.user_properties.to_vec();
+        let user_props: Vec<(String, String)> = message.properties.user_properties.clone();
 
         if let Some(parent_cx) = propagation::extract_trace_context(&user_props) {
             let parent = SpanContext::new(
@@ -518,7 +389,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
                 parent_cx.span_id(),
                 parent_cx.trace_flags(),
                 false,
-                Default::default(),
+                TraceState::default(),
             );
             let _ = span.set_parent(Context::current().with_remote_span_context(parent));
         }
@@ -541,6 +412,7 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(
     db: &Database,
     client: &MqttClient,
@@ -591,70 +463,70 @@ async fn handle_admin_operation(
         AdminOperation::ConstraintAdd { entity } => {
             let constraint_type = payload.get("type").and_then(|v| v.as_str());
 
-            let result = match constraint_type {
-                Some("unique") => {
-                    let fields: Vec<String> = payload
-                        .get("fields")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
+            let result =
+                match constraint_type {
+                    Some("unique") => {
+                        let fields: Vec<String> = payload
+                            .get("fields")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
-                    if fields.is_empty() {
-                        Err("unique constraint requires fields array".to_string())
-                    } else {
-                        db.add_unique_constraint(entity, fields)
-                            .await
-                            .map_err(|e| e.to_string())
+                        if fields.is_empty() {
+                            Err("unique constraint requires fields array".to_string())
+                        } else {
+                            db.add_unique_constraint(entity, fields)
+                                .await
+                                .map_err(|e| e.to_string())
+                        }
                     }
-                }
-                Some("not_null") => {
-                    let field = payload
-                        .get("field")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+                    Some("not_null") => {
+                        let field = payload
+                            .get("field")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
 
-                    match field {
-                        Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
-                        None => Err("not_null constraint requires field".to_string()),
+                        match field {
+                            Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
+                            None => Err("not_null constraint requires field".to_string()),
+                        }
                     }
-                }
-                Some("foreign_key") => {
-                    let source_field = payload.get("field").and_then(|v| v.as_str());
-                    let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
-                    let target_field = payload.get("target_field").and_then(|v| v.as_str());
-                    let on_delete = payload
-                        .get("on_delete")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("restrict");
+                    Some("foreign_key") => {
+                        let source_field = payload.get("field").and_then(|v| v.as_str());
+                        let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
+                        let target_field = payload.get("target_field").and_then(|v| v.as_str());
+                        let on_delete = payload
+                            .get("on_delete")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("restrict");
 
-                    let action = match on_delete {
-                        "cascade" => OnDeleteAction::Cascade,
-                        "set_null" => OnDeleteAction::SetNull,
-                        _ => OnDeleteAction::Restrict,
-                    };
+                        let action = match on_delete {
+                            "cascade" => OnDeleteAction::Cascade,
+                            "set_null" => OnDeleteAction::SetNull,
+                            _ => OnDeleteAction::Restrict,
+                        };
 
-                    match (source_field, target_entity, target_field) {
-                        (Some(sf), Some(te), Some(tf)) => db
-                            .add_foreign_key(
-                                entity,
-                                sf.to_string(),
-                                te.to_string(),
-                                tf.to_string(),
-                                action,
-                            )
-                            .await
-                            .map_err(|e| e.to_string()),
-                        _ => Err(
-                            "foreign_key requires field, target_entity, target_field".to_string(),
-                        ),
+                        match (source_field, target_entity, target_field) {
+                            (Some(sf), Some(te), Some(tf)) => db
+                                .add_foreign_key(
+                                    entity,
+                                    sf.to_string(),
+                                    te.to_string(),
+                                    tf.to_string(),
+                                    action,
+                                )
+                                .await
+                                .map_err(|e| e.to_string()),
+                            _ => Err("foreign_key requires field, target_entity, target_field"
+                                .to_string()),
+                        }
                     }
-                }
-                _ => Err(format!("unknown constraint type: {constraint_type:?}")),
-            };
+                    _ => Err(format!("unknown constraint type: {constraint_type:?}")),
+                };
 
             match result {
                 Ok(()) => Response::ok(json!({"message": "constraint added"})),
@@ -680,7 +552,7 @@ async fn handle_admin_operation(
                     crate::ErrorCode::BadRequest,
                     "invalid backup name: must be alphanumeric, underscore, or hyphen only",
                 )
-            } else if let Err(e) = std::fs::create_dir_all(backup_dir) {
+            } else if let Err(e) = tokio::fs::create_dir_all(backup_dir).await {
                 Response::error(
                     crate::ErrorCode::Internal,
                     format!("failed to create backup directory: {e}"),
@@ -693,23 +565,22 @@ async fn handle_admin_operation(
                 }
             }
         }
-        AdminOperation::Restore => {
-            Response::error(
-                crate::ErrorCode::Internal,
-                "restore requires agent restart - use CLI with --restore flag",
-            )
-        }
+        AdminOperation::Restore => Response::error(
+            crate::ErrorCode::Internal,
+            "restore requires agent restart - use CLI with --restore flag",
+        ),
         AdminOperation::BackupList => {
-            if !backup_dir.exists() {
-                Response::ok(json!(Vec::<String>::new()))
-            } else {
-                match std::fs::read_dir(backup_dir) {
-                    Ok(entries) => {
-                        let backups: Vec<_> = entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().is_dir())
-                            .filter_map(|e| e.file_name().into_string().ok())
-                            .collect();
+            if backup_dir.exists() {
+                match tokio::fs::read_dir(backup_dir).await {
+                    Ok(mut entries) => {
+                        let mut backups = Vec::new();
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            if entry.path().is_dir()
+                                && let Ok(name) = entry.file_name().into_string()
+                            {
+                                backups.push(name);
+                            }
+                        }
                         Response::ok(json!(backups))
                     }
                     Err(e) => Response::error(
@@ -717,6 +588,8 @@ async fn handle_admin_operation(
                         format!("failed to read backup directory: {e}"),
                     ),
                 }
+            } else {
+                Response::ok(json!(Vec::<String>::new()))
             }
         }
         AdminOperation::Subscribe => {
@@ -780,13 +653,24 @@ async fn handle_admin_operation(
                 format!("consumer group not found: {name}"),
             ),
         },
+        AdminOperation::Health => Response::ok(json!({
+            "status": "healthy",
+            "ready": true,
+            "mode": "agent",
+            "details": {
+                "partitions": db.num_partitions()
+            }
+        })),
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
                 if let Err(e) = client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish admin response to {}: {}", response_topic, e);
+                    error!(
+                        "Failed to publish admin response to {}: {}",
+                        response_topic, e
+                    );
                 }
             }
             Err(e) => {
@@ -804,136 +688,4 @@ fn is_valid_backup_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_db_topic_create() {
-        let op = parse_db_topic("$DB/users/create").unwrap();
-        assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "create");
-        assert!(op.id.is_none());
-    }
-
-    #[test]
-    fn test_parse_db_topic_read() {
-        let op = parse_db_topic("$DB/users/123").unwrap();
-        assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "read");
-        assert_eq!(op.id, Some("123".to_string()));
-    }
-
-    #[test]
-    fn test_parse_db_topic_update() {
-        let op = parse_db_topic("$DB/users/123/update").unwrap();
-        assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "update");
-        assert_eq!(op.id, Some("123".to_string()));
-    }
-
-    #[test]
-    fn test_parse_db_topic_delete() {
-        let op = parse_db_topic("$DB/users/123/delete").unwrap();
-        assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "delete");
-        assert_eq!(op.id, Some("123".to_string()));
-    }
-
-    #[test]
-    fn test_parse_db_topic_list() {
-        let op = parse_db_topic("$DB/users/list").unwrap();
-        assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "list");
-        assert!(op.id.is_none());
-    }
-
-    #[test]
-    fn test_parse_db_topic_invalid() {
-        assert!(parse_db_topic("invalid/topic").is_none());
-        assert!(parse_db_topic("$DB").is_none());
-        assert!(parse_db_topic("$DB/").is_none());
-    }
-
-    #[test]
-    fn test_build_create_request() {
-        let op = DbOperation {
-            entity: "users".to_string(),
-            operation: "create".to_string(),
-            id: None,
-        };
-        let payload = br#"{"name": "Alice"}"#;
-        let request = build_request(op, payload).unwrap();
-
-        match request {
-            Request::Create { entity, data } => {
-                assert_eq!(entity, "users");
-                assert_eq!(data["name"], "Alice");
-            }
-            _ => panic!("expected Create request"),
-        }
-    }
-
-    #[test]
-    fn test_build_read_request() {
-        let op = DbOperation {
-            entity: "users".to_string(),
-            operation: "read".to_string(),
-            id: Some("123".to_string()),
-        };
-        let payload = br#"{"projection": ["name", "email"]}"#;
-        let request = build_request(op, payload).unwrap();
-
-        match request {
-            Request::Read {
-                entity,
-                id,
-                projection,
-                ..
-            } => {
-                assert_eq!(entity, "users");
-                assert_eq!(id, "123");
-                assert_eq!(
-                    projection,
-                    Some(vec!["name".to_string(), "email".to_string()])
-                );
-            }
-            _ => panic!("expected Read request"),
-        }
-    }
-
-    #[test]
-    fn test_build_list_request() {
-        let op = DbOperation {
-            entity: "users".to_string(),
-            operation: "list".to_string(),
-            id: None,
-        };
-        let payload = br#"{"filters": [{"field": "age", "op": "gt", "value": 18}]}"#;
-        let request = build_request(op, payload).unwrap();
-
-        match request {
-            Request::List {
-                entity, filters, ..
-            } => {
-                assert_eq!(entity, "users");
-                assert_eq!(filters.len(), 1);
-                assert_eq!(filters[0].field, "age");
-            }
-            _ => panic!("expected List request"),
-        }
-    }
-
-    #[test]
-    fn test_read_without_id_fails() {
-        let op = DbOperation {
-            entity: "users".to_string(),
-            operation: "read".to_string(),
-            id: None,
-        };
-        let result = build_request(op, &[]);
-        assert!(result.is_err());
-    }
 }

@@ -53,9 +53,7 @@ impl ForeignKeyConstraint {
         let source_field = source_field.into();
         let target_entity = target_entity.into();
         let target_field = target_field.into();
-        let name = format!(
-            "{source_entity}_{source_field}_{target_entity}_fk"
-        );
+        let name = format!("{source_entity}_{source_field}_{target_entity}_fk");
         Self {
             source_entity,
             source_field,
@@ -95,6 +93,7 @@ pub enum Constraint {
 }
 
 impl Constraint {
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Constraint::Unique(c) => &c.name,
@@ -103,6 +102,7 @@ impl Constraint {
         }
     }
 
+    #[must_use]
     pub fn entity(&self) -> &str {
         match self {
             Constraint::Unique(c) => &c.entity,
@@ -111,6 +111,7 @@ impl Constraint {
         }
     }
 
+    #[must_use]
     fn constraint_type(&self) -> &str {
         match self {
             Constraint::Unique(_) => "unique",
@@ -141,6 +142,7 @@ pub struct ConstraintManager {
 }
 
 impl ConstraintManager {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             constraints: HashMap::new(),
@@ -149,19 +151,16 @@ impl ConstraintManager {
 
     pub fn add_constraint(&mut self, constraint: Constraint) {
         let entity = constraint.entity().to_string();
-        self.constraints
-            .entry(entity)
-            .or_default()
-            .push(constraint);
+        self.constraints.entry(entity).or_default().push(constraint);
     }
 
+    #[must_use]
     pub fn get_constraints(&self, entity: &str) -> &[Constraint] {
-        self.constraints
-            .get(entity)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.constraints.get(entity).map_or(&[], Vec::as_slice)
     }
 
+    /// # Errors
+    /// Returns an error if any constraint is violated.
     pub fn validate_create(
         &self,
         entity: &Entity,
@@ -172,15 +171,17 @@ impl ConstraintManager {
 
         for constraint in constraints {
             match constraint {
-                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
-                Constraint::Unique(c) => self.validate_unique(entity, c, storage)?,
-                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+                Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
+                Constraint::Unique(c) => Self::validate_unique(entity, c, storage)?,
+                Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
 
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if any constraint is violated.
     pub fn validate_update(
         &self,
         entity: &Entity,
@@ -192,17 +193,19 @@ impl ConstraintManager {
 
         for constraint in constraints {
             match constraint {
-                Constraint::NotNull(c) => self.validate_not_null(entity, c)?,
+                Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
                 Constraint::Unique(c) => {
-                    self.validate_unique_update(entity, old_entity, c, storage)?
+                    Self::validate_unique_update(entity, old_entity, c, storage)?;
                 }
-                Constraint::ForeignKey(c) => self.validate_foreign_key(entity, c, storage)?,
+                Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
 
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if a foreign key constraint prevents deletion.
     pub fn validate_delete(
         &self,
         entity: &Entity,
@@ -231,66 +234,66 @@ impl ConstraintManager {
         let all_constraints: Vec<&Constraint> = self.constraints.values().flatten().collect();
 
         for constraint in all_constraints {
-            if let Constraint::ForeignKey(fk) = constraint {
-                if fk.target_entity == entity.name {
-                    match fk.on_delete {
-                        OnDeleteAction::Restrict => {
-                            let referencing = self.find_referencing_entities(
-                                storage,
-                                &fk.source_entity,
-                                &fk.source_field,
-                                &entity.id,
-                            )?;
-                            if !referencing.is_empty() {
-                                return Err(Error::ForeignKeyRestrict {
-                                    entity: entity.name.clone(),
-                                    id: entity.id.clone(),
-                                    referencing_entity: fk.source_entity.clone(),
-                                });
-                            }
+            if let Constraint::ForeignKey(fk) = constraint
+                && fk.target_entity == entity.name
+            {
+                match fk.on_delete {
+                    OnDeleteAction::Restrict => {
+                        let referencing = Self::find_referencing_entities(
+                            storage,
+                            &fk.source_entity,
+                            &fk.source_field,
+                            &entity.id,
+                        )?;
+                        if !referencing.is_empty() {
+                            return Err(Error::ForeignKeyRestrict {
+                                entity: entity.name.clone(),
+                                id: entity.id.clone(),
+                                referencing_entity: fk.source_entity.clone(),
+                            });
                         }
-                        OnDeleteAction::Cascade => {
-                            let referencing = self.find_referencing_entities(
-                                storage,
-                                &fk.source_entity,
-                                &fk.source_field,
-                                &entity.id,
-                            )?;
-                            for id in referencing {
-                                let cascade_key = keys::encode_data_key(&fk.source_entity, &id);
-                                if let Some(cascade_data) = storage.get(&cascade_key)? {
-                                    let cascade_entity = Entity::deserialize(
-                                        fk.source_entity.clone(),
-                                        id.clone(),
-                                        &cascade_data,
-                                    )?;
-                                    self.collect_delete_operations(
-                                        &cascade_entity,
-                                        storage,
-                                        all_operations,
-                                        visited,
-                                    )?;
-                                }
-                                all_operations.push(DeleteOperation::Cascade(CascadeOperation {
-                                    entity: fk.source_entity.clone(),
-                                    id,
-                                }));
+                    }
+                    OnDeleteAction::Cascade => {
+                        let referencing = Self::find_referencing_entities(
+                            storage,
+                            &fk.source_entity,
+                            &fk.source_field,
+                            &entity.id,
+                        )?;
+                        for id in referencing {
+                            let cascade_key = keys::encode_data_key(&fk.source_entity, &id);
+                            if let Some(cascade_data) = storage.get(&cascade_key)? {
+                                let cascade_entity = Entity::deserialize(
+                                    fk.source_entity.clone(),
+                                    id.clone(),
+                                    &cascade_data,
+                                )?;
+                                self.collect_delete_operations(
+                                    &cascade_entity,
+                                    storage,
+                                    all_operations,
+                                    visited,
+                                )?;
                             }
+                            all_operations.push(DeleteOperation::Cascade(CascadeOperation {
+                                entity: fk.source_entity.clone(),
+                                id,
+                            }));
                         }
-                        OnDeleteAction::SetNull => {
-                            let referencing = self.find_referencing_entities(
-                                storage,
-                                &fk.source_entity,
-                                &fk.source_field,
-                                &entity.id,
-                            )?;
-                            for id in referencing {
-                                all_operations.push(DeleteOperation::SetNull(SetNullOperation {
-                                    entity: fk.source_entity.clone(),
-                                    id,
-                                    field: fk.source_field.clone(),
-                                }));
-                            }
+                    }
+                    OnDeleteAction::SetNull => {
+                        let referencing = Self::find_referencing_entities(
+                            storage,
+                            &fk.source_entity,
+                            &fk.source_field,
+                            &entity.id,
+                        )?;
+                        for id in referencing {
+                            all_operations.push(DeleteOperation::SetNull(SetNullOperation {
+                                entity: fk.source_entity.clone(),
+                                id,
+                                field: fk.source_field.clone(),
+                            }));
                         }
                     }
                 }
@@ -300,7 +303,7 @@ impl ConstraintManager {
         Ok(())
     }
 
-    fn validate_not_null(&self, entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
+    fn validate_not_null(entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {
         match entity.get_field(&constraint.field) {
             Some(value) if !value.is_null() => Ok(()),
             _ => Err(Error::NotNullViolation {
@@ -311,7 +314,6 @@ impl ConstraintManager {
     }
 
     fn validate_unique(
-        &self,
         entity: &Entity,
         constraint: &UniqueConstraint,
         storage: &Storage,
@@ -323,14 +325,14 @@ impl ConstraintManager {
                 let existing = storage.prefix_scan(&prefix)?;
 
                 for (key, _) in existing {
-                    if let Some(existing_id) = Self::extract_id_from_index_key(&key) {
-                        if existing_id != entity.id {
-                            return Err(Error::UniqueViolation {
-                                entity: entity.name.clone(),
-                                field: field.clone(),
-                                value: String::from_utf8_lossy(&value_bytes).to_string(),
-                            });
-                        }
+                    if let Some(existing_id) = Self::extract_id_from_index_key(&key)
+                        && existing_id != entity.id
+                    {
+                        return Err(Error::UniqueViolation {
+                            entity: entity.name.clone(),
+                            field: field.clone(),
+                            value: String::from_utf8_lossy(&value_bytes).to_string(),
+                        });
                     }
                 }
             }
@@ -340,37 +342,33 @@ impl ConstraintManager {
     }
 
     fn validate_unique_update(
-        &self,
         entity: &Entity,
         _old_entity: &Entity,
         constraint: &UniqueConstraint,
         storage: &Storage,
     ) -> Result<()> {
-        self.validate_unique(entity, constraint, storage)
+        Self::validate_unique(entity, constraint, storage)
     }
 
     fn validate_foreign_key(
-        &self,
         entity: &Entity,
         constraint: &ForeignKeyConstraint,
         storage: &Storage,
     ) -> Result<()> {
-        if let Some(fk_value) = entity.get_field(&constraint.source_field) {
-            if !fk_value.is_null() {
-                let target_id = fk_value
-                    .as_str()
-                    .ok_or(Error::InvalidForeignKey)?;
+        if let Some(fk_value) = entity.get_field(&constraint.source_field)
+            && !fk_value.is_null()
+        {
+            let target_id = fk_value.as_str().ok_or(Error::InvalidForeignKey)?;
 
-                let target_key = keys::encode_data_key(&constraint.target_entity, target_id);
+            let target_key = keys::encode_data_key(&constraint.target_entity, target_id);
 
-                if storage.get(&target_key)?.is_none() {
-                    return Err(Error::ForeignKeyViolation {
-                        entity: entity.name.clone(),
-                        field: constraint.source_field.clone(),
-                        target_entity: constraint.target_entity.clone(),
-                        target_id: target_id.to_string(),
-                    });
-                }
+            if storage.get(&target_key)?.is_none() {
+                return Err(Error::ForeignKeyViolation {
+                    entity: entity.name.clone(),
+                    field: constraint.source_field.clone(),
+                    target_entity: constraint.target_entity.clone(),
+                    target_id: target_id.to_string(),
+                });
             }
         }
 
@@ -378,7 +376,6 @@ impl ConstraintManager {
     }
 
     fn find_referencing_entities(
-        &self,
         storage: &Storage,
         source_entity: &str,
         source_field: &str,
@@ -392,16 +389,14 @@ impl ConstraintManager {
         let mut referencing_ids = Vec::new();
 
         for (key, value) in items {
-            if let Ok((_entity, id)) = keys::decode_data_key(&key) {
-                if let Ok(entity) = Entity::deserialize(source_entity.to_string(), id.clone(), &value) {
-                    if let Some(fk_value) = entity.get_field(source_field) {
-                        if let Some(fk_str) = fk_value.as_str() {
-                            if fk_str == target_id {
-                                referencing_ids.push(id);
-                            }
-                        }
-                    }
-                }
+            if let Ok((_entity, id)) = keys::decode_data_key(&key)
+                && let Ok(entity) =
+                    Entity::deserialize(source_entity.to_string(), id.clone(), &value)
+                && let Some(fk_value) = entity.get_field(source_field)
+                && let Some(fk_str) = fk_value.as_str()
+                && fk_str == target_id
+            {
+                referencing_ids.push(id);
             }
         }
 
@@ -416,6 +411,8 @@ impl ConstraintManager {
         }
     }
 
+    /// # Errors
+    /// Returns an error if serialization fails.
     pub fn persist_constraint(
         &self,
         batch: &mut BatchWriter,
@@ -431,6 +428,8 @@ impl ConstraintManager {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error if reading or deserializing constraints fails.
     pub fn load_constraints(&mut self, storage: &Storage) -> Result<()> {
         let prefix = b"meta/constraint/";
         let items = storage.prefix_scan(prefix)?;
@@ -444,16 +443,16 @@ impl ConstraintManager {
     }
 
     pub fn remove_constraint(&mut self, batch: &mut BatchWriter, entity: &str, name: &str) {
-        if let Some(constraints) = self.constraints.get_mut(entity) {
-            if let Some(pos) = constraints.iter().position(|c| c.name() == name) {
-                let constraint = constraints.remove(pos);
-                let key = keys::encode_constraint_key(
-                    constraint.constraint_type(),
-                    constraint.entity(),
-                    constraint.name(),
-                );
-                batch.remove(key);
-            }
+        if let Some(constraints) = self.constraints.get_mut(entity)
+            && let Some(pos) = constraints.iter().position(|c| c.name() == name)
+        {
+            let constraint = constraints.remove(pos);
+            let key = keys::encode_constraint_key(
+                constraint.constraint_type(),
+                constraint.entity(),
+                constraint.name(),
+            );
+            batch.remove(key);
         }
     }
 }
@@ -475,13 +474,8 @@ mod tests {
         assert_eq!(unique.fields, vec!["email"]);
         assert_eq!(unique.name, "users_email_unique");
 
-        let fk = ForeignKeyConstraint::new(
-            "posts",
-            "author_id",
-            "users",
-            "id",
-            OnDeleteAction::Cascade,
-        );
+        let fk =
+            ForeignKeyConstraint::new("posts", "author_id", "users", "id", OnDeleteAction::Cascade);
         assert_eq!(fk.source_entity, "posts");
         assert_eq!(fk.source_field, "author_id");
         assert_eq!(fk.target_entity, "users");
@@ -496,7 +490,8 @@ mod tests {
     fn test_constraint_manager() {
         let mut manager = ConstraintManager::new();
 
-        let constraint = Constraint::Unique(UniqueConstraint::new("users", vec!["email".to_string()]));
+        let constraint =
+            Constraint::Unique(UniqueConstraint::new("users", vec!["email".to_string()]));
         manager.add_constraint(constraint);
 
         let constraints = manager.get_constraints("users");

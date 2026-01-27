@@ -1,9 +1,9 @@
-use crate::events::ChangeEvent;
 use crate::Database;
+use crate::events::ChangeEvent;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Debug, Clone)]
 pub struct ClientSession {
@@ -13,6 +13,7 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    #[must_use]
     pub fn new(id: String) -> Self {
         Self {
             id,
@@ -28,6 +29,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
@@ -37,7 +39,10 @@ impl SessionManager {
 
     pub async fn create_session(&self, client_id: String) -> String {
         let session = ClientSession::new(client_id.clone());
-        self.sessions.write().await.insert(client_id.clone(), session);
+        self.sessions
+            .write()
+            .await
+            .insert(client_id.clone(), session);
         client_id
     }
 
@@ -125,6 +130,7 @@ impl EventRouter {
         }
     }
 
+    #[must_use]
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
         self
@@ -156,52 +162,48 @@ impl EventRouter {
         let sessions = self.sessions.sessions.read().await;
 
         for (client_id, session) in sessions.iter() {
-            if self.event_matches_subscriptions(&event, &session.subscriptions) {
-                if let Some(sender) = senders.get(client_id) {
-                    let _ = sender.try_send(event.clone());
-                }
+            if Self::event_matches_subscriptions(&event, &session.subscriptions)
+                && let Some(sender) = senders.get(client_id)
+            {
+                let _ = sender.try_send(event.clone());
             }
         }
     }
 
-    fn event_matches_subscriptions(
-        &self,
-        event: &ChangeEvent,
-        subscriptions: &HashSet<String>,
-    ) -> bool {
+    fn event_matches_subscriptions(event: &ChangeEvent, subscriptions: &HashSet<String>) -> bool {
         let event_path = format!("{}/{}", event.entity, event.id);
 
         for pattern in subscriptions {
-            if self.pattern_matches(&event_path, pattern) {
+            if Self::pattern_matches(&event_path, pattern) {
                 return true;
             }
         }
         false
     }
 
-    fn pattern_matches(&self, path: &str, pattern: &str) -> bool {
+    fn pattern_matches(path: &str, pattern: &str) -> bool {
         let path_parts: Vec<&str> = path.split('/').collect();
         let pattern_parts: Vec<&str> = pattern.split('/').collect();
 
-        let mut pi = 0;
-        let mut pati = 0;
+        let mut path_idx = 0;
+        let mut pattern_idx = 0;
 
-        while pi < path_parts.len() && pati < pattern_parts.len() {
-            match pattern_parts[pati] {
+        while path_idx < path_parts.len() && pattern_idx < pattern_parts.len() {
+            match pattern_parts[pattern_idx] {
                 "#" => return true,
                 "+" => {
-                    pi += 1;
-                    pati += 1;
+                    path_idx += 1;
+                    pattern_idx += 1;
                 }
-                part if part == path_parts[pi] => {
-                    pi += 1;
-                    pati += 1;
+                part if part == path_parts[path_idx] => {
+                    path_idx += 1;
+                    pattern_idx += 1;
                 }
                 _ => return false,
             }
         }
 
-        pi == path_parts.len() && pati == pattern_parts.len()
+        path_idx == path_parts.len() && pattern_idx == pattern_parts.len()
     }
 
     pub fn database(&self) -> &Database {
@@ -267,14 +269,8 @@ mod tests {
         let removed = manager.destroy_session("client1").await;
         assert_eq!(removed.len(), 2);
 
-        assert!(manager
-            .get_client_for_subscription("sub1")
-            .await
-            .is_none());
-        assert!(manager
-            .get_client_for_subscription("sub2")
-            .await
-            .is_none());
+        assert!(manager.get_client_for_subscription("sub1").await.is_none());
+        assert!(manager.get_client_for_subscription("sub2").await.is_none());
     }
 
     #[tokio::test]
@@ -284,11 +280,12 @@ mod tests {
         let sessions = Arc::new(SessionManager::new());
         let router = EventRouter::new(db, sessions);
 
-        assert!(router.pattern_matches("users/123", "users/123"));
-        assert!(router.pattern_matches("users/123", "users/+"));
-        assert!(router.pattern_matches("users/123", "#"));
-        assert!(router.pattern_matches("users/123/profile", "users/#"));
-        assert!(!router.pattern_matches("users/123", "posts/+"));
-        assert!(!router.pattern_matches("users/123", "users/456"));
+        let _ = router;
+        assert!(EventRouter::pattern_matches("users/123", "users/123"));
+        assert!(EventRouter::pattern_matches("users/123", "users/+"));
+        assert!(EventRouter::pattern_matches("users/123", "#"));
+        assert!(EventRouter::pattern_matches("users/123/profile", "users/#"));
+        assert!(!EventRouter::pattern_matches("users/123", "posts/+"));
+        assert!(!EventRouter::pattern_matches("users/123", "users/456"));
     }
 }

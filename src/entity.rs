@@ -10,18 +10,21 @@ pub struct Entity {
 }
 
 impl Entity {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(name: String, id: String, data: Value) -> Self {
         Self { name, id, data }
     }
 
+    /// # Errors
+    /// Returns an error if the data doesn't have an 'id' field.
     pub fn from_json(name: String, mut data: Value) -> Result<Self> {
         let id = data
             .get("id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .and_then(Value::as_str)
+            .map(std::string::ToString::to_string)
             .or_else(|| {
                 data.get("id")
-                    .and_then(|v| v.as_i64())
+                    .and_then(Value::as_i64)
                     .map(|n| n.to_string())
             })
             .ok_or_else(|| Error::Validation("missing 'id' field".into()))?;
@@ -33,6 +36,7 @@ impl Entity {
         Ok(Self { name, id, data })
     }
 
+    #[must_use]
     pub fn to_json(&self) -> Value {
         let mut data = self.data.clone();
         if let Value::Object(ref mut obj) = data {
@@ -41,39 +45,50 @@ impl Entity {
         data
     }
 
+    #[must_use]
     pub fn key(&self) -> Vec<u8> {
         keys::encode_data_key(&self.name, &self.id)
     }
 
+    /// # Errors
+    /// Returns an error if serialization fails.
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let json_data = serde_json::to_vec(&self.data)?;
         Ok(crate::checksum::encode_with_checksum(&json_data))
     }
 
+    /// # Errors
+    /// Returns an error if checksum verification fails or data is invalid.
     pub fn deserialize(name: String, id: String, data: &[u8]) -> Result<Self> {
         let json_data = crate::checksum::decode_and_verify(data).map_err(|err| {
-            tracing::warn!("checksum verification failed for {}/{}: {}", name, id, err);
+            tracing::warn!("checksum verification failed for {name}/{id}: {err}");
             Error::Corruption {
                 entity: name.clone(),
                 id: id.clone(),
             }
         })?;
         let value: Value = serde_json::from_slice(json_data)?;
-        Ok(Self { name, id, data: value })
+        Ok(Self {
+            name,
+            id,
+            data: value,
+        })
     }
 
+    #[must_use]
     pub fn get_field(&self, field: &str) -> Option<&Value> {
         self.data.get(field)
     }
 
+    #[must_use]
     pub fn extract_index_values(&self, fields: &[String]) -> Vec<(String, Vec<u8>)> {
         let mut values = Vec::new();
 
         for field in fields {
-            if let Some(value) = self.get_field(field) {
-                if let Ok(encoded) = keys::encode_value_for_index(value) {
-                    values.push((field.clone(), encoded));
-                }
+            if let Some(value) = self.get_field(field)
+                && let Ok(encoded) = keys::encode_value_for_index(value)
+            {
+                values.push((field.clone(), encoded));
             }
         }
 
@@ -102,11 +117,7 @@ mod tests {
 
     #[test]
     fn test_entity_to_json() {
-        let entity = Entity::new(
-            "users".into(),
-            "123".into(),
-            json!({"name": "John"}),
-        );
+        let entity = Entity::new("users".into(), "123".into(), json!({"name": "John"}));
 
         let json = entity.to_json();
         assert_eq!(json["id"], "123");

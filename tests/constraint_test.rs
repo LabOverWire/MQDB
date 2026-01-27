@@ -325,19 +325,19 @@ async fn test_foreign_key_cascade_delete_simple() {
     .await
     .unwrap();
 
-    let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
-    let post2 = json!({"title": "Post 2", "author_id": user_id.clone()});
-    db.create("posts".into(), post1).await.unwrap();
-    db.create("posts".into(), post2).await.unwrap();
+    let post_entry1 = json!({"title": "Post 1", "author_id": user_id.clone()});
+    let post_entry2 = json!({"title": "Post 2", "author_id": user_id.clone()});
+    db.create("posts".into(), post_entry1).await.unwrap();
+    db.create("posts".into(), post_entry2).await.unwrap();
 
     let result = db.delete("users".into(), user_id).await;
     assert!(result.is_ok());
 
-    let posts = db
+    let all_posts = db
         .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(posts.len(), 0, "all posts should be cascaded deleted");
+    assert_eq!(all_posts.len(), 0, "all posts should be cascaded deleted");
 }
 
 #[tokio::test]
@@ -373,25 +373,29 @@ async fn test_foreign_key_cascade_delete_multilevel() {
     .await
     .unwrap();
 
-    let comment1 = json!({"text": "Comment 1", "post_id": post_id.clone()});
-    let comment2 = json!({"text": "Comment 2", "post_id": post_id.clone()});
-    db.create("comments".into(), comment1).await.unwrap();
-    db.create("comments".into(), comment2).await.unwrap();
+    let comment_entry1 = json!({"text": "Comment 1", "post_id": post_id.clone()});
+    let comment_entry2 = json!({"text": "Comment 2", "post_id": post_id.clone()});
+    db.create("comments".into(), comment_entry1).await.unwrap();
+    db.create("comments".into(), comment_entry2).await.unwrap();
 
     let result = db.delete("users".into(), user_id).await;
     assert!(result.is_ok());
 
-    let posts = db
+    let all_posts = db
         .list("posts".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(posts.len(), 0, "posts should be cascaded");
+    assert_eq!(all_posts.len(), 0, "posts should be cascaded");
 
-    let comments = db
+    let all_comments = db
         .list("comments".into(), vec![], vec![], None, vec![], None)
         .await
         .unwrap();
-    assert_eq!(comments.len(), 0, "comments should be cascaded from posts");
+    assert_eq!(
+        all_comments.len(),
+        0,
+        "comments should be cascaded from posts"
+    );
 }
 
 #[tokio::test]
@@ -477,7 +481,7 @@ async fn test_schema_default_values() {
 
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String))
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
 
@@ -492,7 +496,9 @@ async fn test_constraint_persistence_unique() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_unique_constraint("users".into(), vec!["email".into()])
             .await
             .unwrap();
@@ -501,7 +507,9 @@ async fn test_constraint_persistence_unique() {
         db.create("users".into(), user).await.unwrap();
     }
 
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"name": "Bob", "email": "alice@example.com"});
     let result = db.create("users".into(), user).await;
@@ -517,13 +525,17 @@ async fn test_constraint_persistence_not_null() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_not_null("users".into(), "email".into())
             .await
             .unwrap();
     }
 
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"name": "Alice"});
     let result = db.create("users".into(), user).await;
@@ -539,7 +551,9 @@ async fn test_constraint_persistence_foreign_key() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         db.add_foreign_key(
             "posts".into(),
             "author_id".into(),
@@ -551,7 +565,9 @@ async fn test_constraint_persistence_foreign_key() {
         .unwrap();
     }
 
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let post = json!({"title": "Hello", "author_id": "nonexistent"});
     let result = db.create("posts".into(), post).await;
@@ -567,13 +583,17 @@ async fn test_schema_persistence() {
     let tmp = TempDir::new().unwrap();
 
     {
-        let db = Database::open(tmp.path()).await.unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
         let schema = Schema::new("users")
             .add_field(FieldDefinition::new("name", FieldType::String).required());
         db.add_schema(schema).await.unwrap();
     }
 
-    let db = Database::open(tmp.path()).await.unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
 
     let user = json!({"age": 30});
     let result = db.create("users".into(), user).await;
@@ -592,7 +612,7 @@ async fn test_combined_schema_and_constraints() {
     let schema = Schema::new("users")
         .add_field(FieldDefinition::new("name", FieldType::String).required())
         .add_field(FieldDefinition::new("email", FieldType::String).required())
-        .add_field(FieldDefinition::new("status", FieldType::String).default(json!("active")));
+        .add_field(FieldDefinition::new("status", FieldType::String).with_default(json!("active")));
 
     db.add_schema(schema).await.unwrap();
     db.add_unique_constraint("users".into(), vec!["email".into()])

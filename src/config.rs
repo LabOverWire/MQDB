@@ -56,6 +56,7 @@ mod native {
         pub max_sort_buffer: usize,
         pub outbox: OutboxConfig,
         pub shared_subscription: SharedSubscriptionConfig,
+        pub spawn_background_tasks: bool,
     }
 
     impl DatabaseConfig {
@@ -71,39 +72,53 @@ mod native {
                 max_sort_buffer: 10_000,
                 outbox: OutboxConfig::default(),
                 shared_subscription: SharedSubscriptionConfig::default(),
+                spawn_background_tasks: true,
             }
         }
 
+        #[must_use]
+        pub fn without_background_tasks(mut self) -> Self {
+            self.spawn_background_tasks = false;
+            self
+        }
+
+        #[must_use]
         pub fn with_durability(mut self, mode: DurabilityMode) -> Self {
             self.durability = mode;
             self
         }
 
+        #[must_use]
         pub fn with_event_capacity(mut self, capacity: usize) -> Self {
             self.event_channel_capacity = capacity;
             self
         }
 
+        #[must_use]
         pub fn with_max_list_results(mut self, max: Option<usize>) -> Self {
             self.max_list_results = max;
             self
         }
 
+        #[must_use]
         pub fn with_max_subscriptions(mut self, max: Option<usize>) -> Self {
             self.max_subscriptions = max;
             self
         }
 
+        #[must_use]
         pub fn with_ttl_cleanup_interval(mut self, interval_secs: Option<u64>) -> Self {
             self.ttl_cleanup_interval_secs = interval_secs;
             self
         }
 
+        #[must_use]
         pub fn with_outbox(mut self, outbox: OutboxConfig) -> Self {
             self.outbox = outbox;
             self
         }
 
+        #[must_use]
         pub fn with_shared_subscription(mut self, config: SharedSubscriptionConfig) -> Self {
             self.shared_subscription = config;
             self

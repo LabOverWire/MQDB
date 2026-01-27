@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user = json!({"name": "Alice"});
     let created_user = db.create("users".into(), user).await?;
     let user_id = created_user["id"].as_str().unwrap();
-    println!("✓ Created user: {}\n", user_id);
+    println!("✓ Created user: {user_id}\n");
 
     println!("Creating 2 posts by this user...");
     let post1 = json!({"title": "First Post", "author_id": user_id});
@@ -39,19 +39,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let post2 = json!({"title": "Second Post", "author_id": user_id});
     let created_post2 = db.create("posts".into(), post2).await?;
     let post2_id = created_post2["id"].as_str().unwrap();
-    println!("✓ Created posts: {}, {}\n", post1_id, post2_id);
+    println!("✓ Created posts: {post1_id}, {post2_id}\n");
 
     println!("Creating 3 comments on posts...");
-    db.create("comments".into(), json!({"text": "Nice!", "post_id": post1_id}))
-        .await?;
-    db.create("comments".into(), json!({"text": "Great!", "post_id": post1_id}))
-        .await?;
-    db.create("comments".into(), json!({"text": "Awesome!", "post_id": post2_id}))
-        .await?;
+    db.create(
+        "comments".into(),
+        json!({"text": "Nice!", "post_id": post1_id}),
+    )
+    .await?;
+    db.create(
+        "comments".into(),
+        json!({"text": "Great!", "post_id": post1_id}),
+    )
+    .await?;
+    db.create(
+        "comments".into(),
+        json!({"text": "Awesome!", "post_id": post2_id}),
+    )
+    .await?;
     println!("✓ Created 3 comments\n");
 
-    let posts_before = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
-    let comments_before = db.list("comments".into(), vec![], vec![], None, vec![], None).await?;
+    let posts_before = db
+        .list("posts".into(), vec![], vec![], None, vec![], None)
+        .await?;
+    let comments_before = db
+        .list("comments".into(), vec![], vec![], None, vec![], None)
+        .await?;
     println!("Before deletion:");
     println!("  Posts: {}", posts_before.len());
     println!("  Comments: {}\n", comments_before.len());
@@ -60,11 +73,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete("users".into(), user_id.to_string()).await?;
     println!("✓ User deleted\n");
 
-    let posts_after = db.list("posts".into(), vec![], vec![], None, vec![], None).await?;
-    let comments_after = db.list("comments".into(), vec![], vec![], None, vec![], None).await?;
+    let posts_after = db
+        .list("posts".into(), vec![], vec![], None, vec![], None)
+        .await?;
+    let comments_after = db
+        .list("comments".into(), vec![], vec![], None, vec![], None)
+        .await?;
     println!("After deletion:");
     println!("  Posts: {} (cascaded)", posts_after.len());
-    println!("  Comments: {} (cascaded from posts)\n", comments_after.len());
+    println!(
+        "  Comments: {} (cascaded from posts)\n",
+        comments_after.len()
+    );
 
     println!("Summary:");
     println!("- CASCADE deletes all referencing entities automatically");

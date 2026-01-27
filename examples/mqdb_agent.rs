@@ -1,13 +1,13 @@
+use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{PublishOptions, PublishProperties};
-use mqdb::{Database, MqdbAgent};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::info;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.connect("127.0.0.1:1884").await?;
     info!("Client connected to MQDB Agent");
 
-    let (event_tx, mut event_rx) = mpsc::channel::<String>(32);
+    let (event_tx, event_rx) = flume::bounded::<String>(32);
     let callback_tx = event_tx.clone();
     client
         .subscribe("$DB/users/events/#", move |msg| {
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     info!("Subscribed to $DB/users/events/#");
 
-    let (response_tx, mut response_rx) = mpsc::channel::<String>(32);
+    let (response_tx, response_rx) = flume::bounded::<String>(32);
     let callback_tx = response_tx.clone();
     client
         .subscribe("client/responses", move |msg| {
@@ -71,28 +71,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({"name": "Alice", "email": "alice@example.com", "age": 30});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
-    if let Some(response) = response_rx.recv().await {
+    if let Ok(response) = response_rx.recv_async().await {
         info!("Create Alice response: {}", response);
     }
 
     let payload = json!({"name": "Bob", "email": "bob@example.com", "age": 25});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
-    if let Some(response) = response_rx.recv().await {
+    if let Ok(response) = response_rx.recv_async().await {
         info!("Create Bob response: {}", response);
     }
 
     let payload = json!({"name": "Charlie", "email": "charlie@example.com", "age": 35});
     client
-        .publish_with_options("$DB/users/create", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/create",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
-    let charlie_id = if let Some(response) = response_rx.recv().await {
+    let charlie_id = if let Ok(response) = response_rx.recv_async().await {
         info!("Create Charlie response: {}", response);
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         parsed["data"]["id"].as_str().unwrap_or("").to_string()
@@ -104,10 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({});
     client
-        .publish_with_options("$DB/users/list", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/list",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
-    if let Some(response) = response_rx.recv().await {
+    if let Ok(response) = response_rx.recv_async().await {
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         if let Some(users) = parsed["data"].as_array() {
             info!("Found {} users:", users.len());
@@ -124,12 +140,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Reading Charlie by ID ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}");
         client
             .publish_with_options(&topic, vec![], opts.clone())
             .await?;
 
-        if let Some(response) = response_rx.recv().await {
+        if let Ok(response) = response_rx.recv_async().await {
             info!("Read Charlie: {}", response);
         }
     }
@@ -137,13 +153,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Updating Charlie's age ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}/update", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}/update");
         let payload = json!({"age": 36});
         client
             .publish_with_options(&topic, serde_json::to_vec(&payload)?, opts.clone())
             .await?;
 
-        if let Some(response) = response_rx.recv().await {
+        if let Ok(response) = response_rx.recv_async().await {
             info!("Update response: {}", response);
         }
     }
@@ -154,10 +170,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "filters": [{"field": "age", "op": "gt", "value": 28}]
     });
     client
-        .publish_with_options("$DB/users/list", serde_json::to_vec(&payload)?, opts.clone())
+        .publish_with_options(
+            "$DB/users/list",
+            serde_json::to_vec(&payload)?,
+            opts.clone(),
+        )
         .await?;
 
-    if let Some(response) = response_rx.recv().await {
+    if let Ok(response) = response_rx.recv_async().await {
         let parsed: serde_json::Value = serde_json::from_str(&response)?;
         if let Some(users) = parsed["data"].as_array() {
             info!("Users older than 28: {}", users.len());
@@ -174,12 +194,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\n=== Deleting Charlie ===");
 
     if !charlie_id.is_empty() {
-        let topic = format!("$DB/users/{}/delete", charlie_id);
+        let topic = format!("$DB/users/{charlie_id}/delete");
         client
             .publish_with_options(&topic, vec![], opts.clone())
             .await?;
 
-        if let Some(response) = response_rx.recv().await {
+        if let Ok(response) = response_rx.recv_async().await {
             info!("Delete response: {}", response);
         }
     }

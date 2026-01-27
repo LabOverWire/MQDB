@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Schema Validation</title>
+    <link rel="stylesheet" href="shared/common.css">
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html" class="active">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+    </nav>
+
+    <h1>Schema Validation</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Define Schema</h2>
+            <div class="row">
+                <label>Entity:</label>
+                <input type="text" id="schemaEntity" value="users">
+            </div>
+            <div class="row">
+                <label>Schema (JSON):</label>
+            </div>
+            <textarea id="schemaDefinition">{
+  "fields": [
+    {"name": "name", "type": "string", "required": true},
+    {"name": "email", "type": "string", "required": true},
+    {"name": "age", "type": "number", "required": false},
+    {"name": "active", "type": "boolean", "default": true}
+  ]
+}</textarea>
+            <div class="row mt-10">
+                <button id="addSchemaBtn" class="success">Add Schema</button>
+                <button id="getSchemaBtn">Get Schema</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Test Data</h2>
+            <div class="row">
+                <label>Entity:</label>
+                <input type="text" id="testEntity" value="users">
+            </div>
+            <div class="row">
+                <label>Data (JSON):</label>
+            </div>
+            <textarea id="testData">{"name": "Alice", "email": "alice@example.com", "age": 30}</textarea>
+            <div class="row mt-10">
+                <button id="validateCreateBtn" class="success">Create (Validates)</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Test Scenarios</h2>
+        <div class="flex gap-10 flex-wrap">
+            <button id="runAllSchemaTests">Run All Tests</button>
+            <button id="testValidData" class="success">Test Valid Data</button>
+            <button id="testWrongType" class="danger">Test Wrong Type</button>
+            <button id="testMissingRequired" class="danger">Test Missing Required</button>
+            <button id="testDefaultValue">Test Default Value</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Current Schemas</h2>
+        <div id="schemasDisplay">
+            <p style="color:#999">No schemas defined yet</p>
+        </div>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        const registeredSchemas = new Set();
+
+        async function main() {
+            await init();
+            db = new WasmDatabase();
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('addSchemaBtn').onclick = addSchema;
+            document.getElementById('getSchemaBtn').onclick = getSchema;
+            document.getElementById('validateCreateBtn').onclick = validateCreate;
+            document.getElementById('runAllSchemaTests').onclick = runAllSchemaTests;
+            document.getElementById('testValidData').onclick = testValidData;
+            document.getElementById('testWrongType').onclick = testWrongType;
+            document.getElementById('testMissingRequired').onclick = testMissingRequired;
+            document.getElementById('testDefaultValue').onclick = testDefaultValue;
+        }
+
+        async function addSchema() {
+            try {
+                const entity = document.getElementById('schemaEntity').value;
+                const schema = JSON.parse(document.getElementById('schemaDefinition').value);
+                log(`Adding schema for ${entity}...`);
+                db.add_schema(entity, schema);
+                registeredSchemas.add(entity);
+                log(`Schema added for ${entity}`, 'success');
+                updateSchemasDisplay();
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function getSchema() {
+            try {
+                const entity = document.getElementById('schemaEntity').value;
+                log(`Getting schema for ${entity}...`);
+                const schema = db.get_schema(entity);
+                if (schema) {
+                    log(`Schema: ${JSON.stringify(schema, null, 2)}`, 'success');
+                    document.getElementById('schemaDefinition').value = JSON.stringify(schema, null, 2);
+                } else {
+                    log(`No schema found for ${entity}`, 'warning');
+                }
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function validateCreate() {
+            try {
+                const entity = document.getElementById('testEntity').value;
+                const data = JSON.parse(document.getElementById('testData').value);
+                log(`Creating ${entity} with validation...`);
+                const result = await db.create(entity, data);
+                log(`Created: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`Validation error: ${e}`, 'error');
+            }
+        }
+
+        async function updateSchemasDisplay() {
+            const container = document.getElementById('schemasDisplay');
+            if (registeredSchemas.size === 0) {
+                container.innerHTML = '<p style="color:#999">No schemas defined yet</p>';
+                return;
+            }
+
+            let html = '';
+            for (const entity of registeredSchemas) {
+                const schema = db.get_schema(entity);
+                if (schema) {
+                    html += `<div class="card">
+                        <h3>${entity}</h3>
+                        <table>
+                            <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th></tr></thead>
+                            <tbody>`;
+                    for (const field of schema.fields) {
+                        html += `<tr>
+                            <td><code>${field.name}</code></td>
+                            <td>${field.type}</td>
+                            <td>${field.required ? 'Yes' : 'No'}</td>
+                            <td>${field.default !== undefined ? JSON.stringify(field.default) : '-'}</td>
+                        </tr>`;
+                    }
+                    html += '</tbody></table></div>';
+                }
+            }
+            container.innerHTML = html;
+        }
+
+        async function runAllSchemaTests() {
+            log('=== Running Schema Tests ===', 'info');
+
+            db.add_schema('test_users', {
+                fields: [
+                    {name: 'name', type: 'string', required: true},
+                    {name: 'email', type: 'string', required: true},
+                    {name: 'age', type: 'number', required: false},
+                    {name: 'active', type: 'boolean', default: true}
+                ]
+            });
+            registeredSchemas.add('test_users');
+            log('Test schema added for test_users', 'success');
+
+            log('Test 1: Create with valid data');
+            try {
+                const result = await db.create('test_users', {name: 'Alice', email: 'alice@test.com', age: 30});
+                log(`  ✓ Created: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`  ✗ Unexpected error: ${e}`, 'error');
+            }
+
+            log('Test 2: Create with wrong type (age as string)');
+            try {
+                await db.create('test_users', {name: 'Bob', email: 'bob@test.com', age: 'thirty'});
+                log('  ✗ Should have thrown validation error', 'error');
+            } catch (e) {
+                log(`  ✓ Correctly rejected: ${e}`, 'success');
+            }
+
+            log('Test 3: Create with missing required field (no email)');
+            try {
+                await db.create('test_users', {name: 'Charlie'});
+                log('  ✗ Should have thrown validation error', 'error');
+            } catch (e) {
+                log(`  ✓ Correctly rejected: ${e}`, 'success');
+            }
+
+            log('Test 4: Create and verify default value applied');
+            try {
+                const result = await db.create('test_users', {name: 'Diana', email: 'diana@test.com'});
+                if (result.active === true) {
+                    log(`  ✓ Default value applied: active=${result.active}`, 'success');
+                } else {
+                    log(`  ✗ Default value not applied: ${JSON.stringify(result)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Unexpected error: ${e}`, 'error');
+            }
+
+            log('Test 5: Retrieve and verify schema');
+            const schema = db.get_schema('test_users');
+            if (schema && schema.fields.length === 4) {
+                log(`  ✓ Schema retrieved with ${schema.fields.length} fields`, 'success');
+            } else {
+                log('  ✗ Schema retrieval failed', 'error');
+            }
+
+            log('=== All Schema Tests Complete ===', 'success');
+            updateSchemasDisplay();
+        }
+
+        async function testValidData() {
+            log('Testing valid data...');
+            db.add_schema('demo', {
+                fields: [
+                    {name: 'title', type: 'string', required: true},
+                    {name: 'count', type: 'number'}
+                ]
+            });
+            registeredSchemas.add('demo');
+            try {
+                const result = await db.create('demo', {title: 'Test', count: 42});
+                log(`✓ Valid data accepted: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`✗ Error: ${e}`, 'error');
+            }
+            updateSchemasDisplay();
+        }
+
+        async function testWrongType() {
+            log('Testing wrong type...');
+            db.add_schema('demo', {
+                fields: [
+                    {name: 'title', type: 'string', required: true},
+                    {name: 'count', type: 'number'}
+                ]
+            });
+            registeredSchemas.add('demo');
+            try {
+                await db.create('demo', {title: 123, count: 'not a number'});
+                log('✗ Should have been rejected', 'error');
+            } catch (e) {
+                log(`✓ Correctly rejected wrong type: ${e}`, 'success');
+            }
+            updateSchemasDisplay();
+        }
+
+        async function testMissingRequired() {
+            log('Testing missing required field...');
+            db.add_schema('demo', {
+                fields: [
+                    {name: 'title', type: 'string', required: true},
+                    {name: 'count', type: 'number'}
+                ]
+            });
+            registeredSchemas.add('demo');
+            try {
+                await db.create('demo', {count: 42});
+                log('✗ Should have been rejected', 'error');
+            } catch (e) {
+                log(`✓ Correctly rejected missing required: ${e}`, 'success');
+            }
+            updateSchemasDisplay();
+        }
+
+        async function testDefaultValue() {
+            log('Testing default value...');
+            db.add_schema('demo', {
+                fields: [
+                    {name: 'title', type: 'string', required: true},
+                    {name: 'status', type: 'string', default: 'pending'}
+                ]
+            });
+            registeredSchemas.add('demo');
+            try {
+                const result = await db.create('demo', {title: 'Test'});
+                if (result.status === 'pending') {
+                    log(`✓ Default value applied: status="${result.status}"`, 'success');
+                } else {
+                    log(`✗ Default not applied: ${JSON.stringify(result)}`, 'error');
+                }
+            } catch (e) {
+                log(`✗ Error: ${e}`, 'error');
+            }
+            updateSchemasDisplay();
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

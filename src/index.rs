@@ -10,6 +10,7 @@ pub struct IndexDefinition {
 }
 
 impl IndexDefinition {
+    #[allow(clippy::must_use_candidate)]
     pub fn new(entity: String, fields: Vec<String>) -> Self {
         Self { entity, fields }
     }
@@ -20,6 +21,7 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    #[allow(clippy::must_use_candidate)]
     pub fn new() -> Self {
         Self {
             indexes: HashMap::new(),
@@ -30,26 +32,32 @@ impl IndexManager {
         self.indexes.insert(definition.entity.clone(), definition);
     }
 
+    #[allow(clippy::must_use_candidate)]
     pub fn get_indexed_fields(&self, entity: &str) -> Option<&Vec<String>> {
         self.indexes.get(entity).map(|idx| &idx.fields)
     }
 
-    pub fn update_indexes(&self, batch: &mut BatchWriter, entity: &Entity, old_entity: Option<&Entity>) {
+    pub fn update_indexes(
+        &self,
+        batch: &mut BatchWriter,
+        entity: &Entity,
+        old_entity: Option<&Entity>,
+    ) {
         if let Some(fields) = self.get_indexed_fields(&entity.name) {
             if let Some(old) = old_entity {
-                self.remove_index_entries(batch, old, fields);
+                Self::remove_index_entries(batch, old, fields);
             }
-            self.add_index_entries(batch, entity, fields);
+            Self::add_index_entries(batch, entity, fields);
         }
     }
 
     pub fn remove_indexes(&self, batch: &mut BatchWriter, entity: &Entity) {
         if let Some(fields) = self.get_indexed_fields(&entity.name) {
-            self.remove_index_entries(batch, entity, fields);
+            Self::remove_index_entries(batch, entity, fields);
         }
     }
 
-    fn add_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
+    fn add_index_entries(batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
         for (field, value) in index_values {
@@ -58,7 +66,7 @@ impl IndexManager {
         }
     }
 
-    fn remove_index_entries(&self, batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
+    fn remove_index_entries(batch: &mut BatchWriter, entity: &Entity, fields: &[String]) {
         let index_values = entity.extract_index_values(fields);
 
         for (field, value) in index_values {
@@ -67,6 +75,8 @@ impl IndexManager {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the storage prefix scan fails.
     pub fn lookup_by_field(
         &self,
         storage: &crate::storage::Storage,
@@ -79,10 +89,10 @@ impl IndexManager {
 
         let mut ids = Vec::new();
         for (key, _) in items {
-            if let Some(id_start) = key.iter().rposition(|&b| b == b'/') {
-                if let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec()) {
-                    ids.push(id);
-                }
+            if let Some(id_start) = key.iter().rposition(|&b| b == b'/')
+                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec())
+            {
+                ids.push(id);
             }
         }
 
