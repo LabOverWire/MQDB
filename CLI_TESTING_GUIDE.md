@@ -1135,6 +1135,36 @@ mqdb db create -p 0 -e items -d '{"via": "node2"}' --broker 127.0.0.1:1884
 mqdb db create -p 0 -e items -d '{"via": "node3"}' --broker 127.0.0.1:1885
 ```
 
+### Cross-Partition JSON Create Forwarding
+
+Verify that JSON creates on non-local partitions are forwarded to the correct primary node:
+
+```bash
+# Start 3-node cluster
+mqdb dev start-cluster --nodes 3 --clean --direct-quic
+sleep 5
+
+# Create entities on each node (with 64 partitions across 3 nodes,
+# ~2/3 of creates will hit non-local partitions and require forwarding)
+mqdb create testfw -d '{"name":"from-node1"}' --broker 127.0.0.1:1883
+mqdb create testfw -d '{"name":"from-node2"}' --broker 127.0.0.1:1884
+mqdb create testfw -d '{"name":"from-node3"}' --broker 127.0.0.1:1885
+
+# Create more records to ensure forwarding paths are exercised
+for i in $(seq 1 10); do
+  mqdb create testfw -d "{\"seq\":$i}" --broker 127.0.0.1:1884
+done
+
+# Verify all records are visible from any node
+mqdb list testfw --broker 127.0.0.1:1883
+mqdb list testfw --broker 127.0.0.1:1885
+
+# Counts should match across all nodes
+mqdb dev kill
+```
+
+**Expected:** All creates succeed (no 503 errors), and listing from any node returns the full set of records.
+
 ### Leader Failover Test
 
 1. Identify the current Raft leader from cluster status

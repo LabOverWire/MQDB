@@ -74,7 +74,20 @@ impl DbRequestHandler {
                 return None;
             }
             DbTopicOperation::JsonCreate { entity } => {
-                self.handle_json_create(controller, &entity, payload).await
+                let resp_topic = response_topic?;
+                let result = self
+                    .handle_json_create(
+                        controller,
+                        &entity,
+                        payload,
+                        resp_topic,
+                        correlation_data,
+                    )
+                    .await;
+                match result {
+                    Some(payload) => payload,
+                    None => return None,
+                }
             }
             DbTopicOperation::JsonRead { entity, id } => {
                 let resp_topic = response_topic?;
@@ -406,19 +419,21 @@ impl DbRequestHandler {
         FkValidateResponse::create(status, request.request_id_str()).to_be_bytes()
     }
 
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
     async fn handle_json_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         payload: &[u8],
-    ) -> Vec<u8> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
         let start = std::time::Instant::now();
         let node_id = controller.node_id().get();
 
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+            Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
         let t_parse = start.elapsed().as_micros() as u64;
 
@@ -438,13 +453,36 @@ impl DbRequestHandler {
         );
 
         if !is_local {
+            let forwarded = controller
+                .forward_json_db_request(
+                    partition,
+                    JsonDbOp::Create,
+                    entity,
+                    None,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
+                .await;
+            if forwarded {
+                tracing::info!(
+                    node = node_id,
+                    partition = partition.get(),
+                    elapsed_us = start.elapsed().as_micros() as u64,
+                    "json_create_forwarded"
+                );
+                return None;
+            }
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
                 elapsed_us = start.elapsed().as_micros() as u64,
-                "json_create_not_local"
+                "json_create_forward_failed"
             );
-            return Self::json_error(503, "partition not local, forwarding not yet implemented");
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -461,14 +499,14 @@ impl DbRequestHandler {
             .check_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
             .await
         {
-            return Self::json_error(
+            return Some(Self::json_error(
                 409,
                 &format!("unique constraint violation on field '{conflict_field}'"),
-            );
+            ));
         }
         let t_constraint = start.elapsed().as_micros() as u64;
 
-        match controller.db_create(entity, &id, &data_bytes, now_ms).await {
+        Some(match controller.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
                 let t_db_create = start.elapsed().as_micros() as u64;
                 controller
@@ -511,7 +549,7 @@ impl DbRequestHandler {
                     .await;
                 Self::json_error(500, "internal error")
             }
-        }
+        })
     }
 
     #[allow(clippy::cast_possible_truncation)]
