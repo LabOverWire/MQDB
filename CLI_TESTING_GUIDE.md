@@ -1904,3 +1904,122 @@ Run through this checklist to verify MQDB works completely:
 ### Performance
 - [ ] Pub/sub benchmark runs successfully
 - [ ] Database benchmark runs successfully
+
+## Authentication & Authorization Testing
+
+### Password Auth (Agent)
+```bash
+# Generate password file
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
+mqdb passwd alice -b alice123 -f /tmp/passwd.txt
+
+# Start agent with password auth
+mqdb agent start --db /tmp/mqdb-auth --passwd /tmp/passwd.txt --acl examples/acl.txt
+
+# Test authenticated connection
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t test -m hello
+mosquitto_sub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t test -C 1
+
+# Test rejected connection (bad password)
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P wrong -t test -m hello
+```
+- [ ] Authenticated client connects successfully
+- [ ] Bad password rejected
+- [ ] Anonymous connection rejected (no --anonymous flag)
+
+### Password Auth (Cluster)
+```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
+mqdb cluster start --node-id 1 --db /tmp/mqdb-c1 --bind 127.0.0.1:1883 \
+    --passwd /tmp/passwd.txt --acl examples/acl.txt \
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --direct-quic
+```
+- [ ] Cluster node starts with password auth
+- [ ] Internal service account connects automatically
+- [ ] External clients authenticate correctly
+
+### SCRAM-SHA-256 Auth
+```bash
+# Generate SCRAM credentials
+mqdb scram admin -b admin123 -f /tmp/scram.txt
+mqdb scram alice -b alice123 -f /tmp/scram.txt
+
+# Start agent with SCRAM auth
+mqdb agent start --db /tmp/mqdb-scram --scram-file /tmp/scram.txt
+
+# Delete a SCRAM user
+mqdb scram alice -D -f /tmp/scram.txt
+```
+- [ ] SCRAM credential file generated correctly
+- [ ] Agent starts with SCRAM auth configured
+- [ ] SCRAM user deletion works
+
+### JWT Auth
+```bash
+# Generate a test HS256 secret
+openssl rand -base64 32 > /tmp/jwt-secret.key
+
+# Start agent with JWT auth
+mqdb agent start --db /tmp/mqdb-jwt \
+    --jwt-algorithm hs256 --jwt-key /tmp/jwt-secret.key \
+    --jwt-issuer myapp --jwt-audience mqdb
+```
+- [ ] Agent starts with JWT auth configured
+- [ ] JWT clock skew setting applied
+
+### Rate Limiting
+```bash
+# Start with default rate limits (enabled with any auth)
+mqdb agent start --db /tmp/mqdb-rl --passwd /tmp/passwd.txt
+
+# Start with custom rate limits
+mqdb agent start --db /tmp/mqdb-rl --passwd /tmp/passwd.txt \
+    --rate-limit-max-attempts 3 --rate-limit-window-secs 30 --rate-limit-lockout-secs 120
+
+# Start with rate limiting disabled
+mqdb agent start --db /tmp/mqdb-rl --passwd /tmp/passwd.txt --no-rate-limit
+```
+- [ ] Rate limiting enabled by default with auth
+- [ ] Custom rate limit values applied
+- [ ] Rate limiting disabled with --no-rate-limit
+
+### ACL Management CLI
+```bash
+# Add user rule
+mqdb acl add admin '$DB/#' readwrite -f /tmp/acl.txt
+
+# Add role
+mqdb acl role-add editor '$DB/users/#' readwrite -f /tmp/acl.txt
+mqdb acl role-add editor '$DB/orders/#' readwrite -f /tmp/acl.txt
+
+# Assign role
+mqdb acl assign alice editor -f /tmp/acl.txt
+
+# List all rules
+mqdb acl list -f /tmp/acl.txt
+
+# List roles
+mqdb acl role-list -f /tmp/acl.txt
+
+# Check permission
+mqdb acl check alice '$DB/users/create' pub -f /tmp/acl.txt
+
+# List user roles
+mqdb acl user-roles alice -f /tmp/acl.txt
+
+# Remove role assignment
+mqdb acl unassign alice editor -f /tmp/acl.txt
+
+# Remove user rule
+mqdb acl remove admin -f /tmp/acl.txt
+
+# Remove role
+mqdb acl role-remove editor -f /tmp/acl.txt
+```
+- [ ] ACL add/remove user rules
+- [ ] ACL role-add/role-remove role rules
+- [ ] ACL assign/unassign roles to users
+- [ ] ACL list shows all rules with optional user filter
+- [ ] ACL role-list shows roles with optional name filter
+- [ ] ACL check verifies pub/sub permissions correctly
+- [ ] ACL user-roles lists assigned roles

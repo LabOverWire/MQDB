@@ -1,5 +1,5 @@
 use bebytes::BeBytes;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use mqdb::cluster::db::DbEntity;
 use mqdb::cluster::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use mqdb::{ClusterConfig, ClusteredAgent, Database, MqdbAgent, PeerConfig};
@@ -44,6 +44,26 @@ enum Commands {
         stdout: bool,
         #[arg(short, long)]
         file: Option<PathBuf>,
+    },
+    #[command(about = "Manage SCRAM-SHA-256 credentials")]
+    Scram {
+        #[arg(help = "Username to add/update/delete")]
+        username: String,
+        #[arg(short, long, help = "Batch mode - password on command line")]
+        batch: Option<String>,
+        #[arg(short = 'D', long, help = "Delete the specified user")]
+        delete: bool,
+        #[arg(short = 'n', long, help = "Output credentials to stdout")]
+        stdout: bool,
+        #[arg(short, long, help = "SCRAM credentials file path")]
+        file: Option<PathBuf>,
+        #[arg(long, short = 'i', default_value = "310000", help = "PBKDF2 iteration count")]
+        iterations: u32,
+    },
+    #[command(about = "Manage ACL rules and roles")]
+    Acl {
+        #[command(subcommand)]
+        action: AclAction,
     },
     Create {
         entity: String,
@@ -509,6 +529,122 @@ enum DurabilityArg {
     None,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum JwtAlgorithmArg {
+    Hs256,
+    Rs256,
+    Es256,
+}
+
+#[derive(Args)]
+struct AuthArgs {
+    #[arg(long, help = "Path to password file")]
+    passwd: Option<PathBuf>,
+    #[arg(long, help = "Path to ACL file")]
+    acl: Option<PathBuf>,
+    #[arg(long, help = "Allow anonymous connections")]
+    anonymous: bool,
+    #[arg(long, help = "Path to SCRAM-SHA-256 credentials file")]
+    scram_file: Option<PathBuf>,
+    #[arg(long, help = "JWT algorithm: hs256, rs256, es256")]
+    jwt_algorithm: Option<JwtAlgorithmArg>,
+    #[arg(long, requires = "jwt_algorithm", help = "Path to JWT secret/key file")]
+    jwt_key: Option<PathBuf>,
+    #[arg(long, help = "JWT issuer claim")]
+    jwt_issuer: Option<String>,
+    #[arg(long, help = "JWT audience claim")]
+    jwt_audience: Option<String>,
+    #[arg(long, default_value = "60", help = "JWT clock skew tolerance in seconds")]
+    jwt_clock_skew: u64,
+    #[arg(long, conflicts_with_all = ["jwt_algorithm"], help = "Path to federated JWT config JSON")]
+    federated_jwt_config: Option<PathBuf>,
+    #[arg(long, help = "Path to certificate auth file")]
+    cert_auth_file: Option<PathBuf>,
+    #[arg(long, help = "Disable authentication rate limiting")]
+    no_rate_limit: bool,
+    #[arg(long, default_value = "5", help = "Rate limit max failed attempts")]
+    rate_limit_max_attempts: u32,
+    #[arg(long, default_value = "60", help = "Rate limit window in seconds")]
+    rate_limit_window_secs: u64,
+    #[arg(long, default_value = "300", help = "Rate limit lockout duration in seconds")]
+    rate_limit_lockout_secs: u64,
+}
+
+#[derive(Subcommand)]
+enum AclAction {
+    #[command(about = "Add a user ACL rule")]
+    Add {
+        username: String,
+        topic: String,
+        permission: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Remove user ACL rules")]
+    Remove {
+        username: String,
+        topic: Option<String>,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Add a role rule")]
+    RoleAdd {
+        role_name: String,
+        topic: String,
+        permission: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Remove a role or role rule")]
+    RoleRemove {
+        role_name: String,
+        topic: Option<String>,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "List roles")]
+    RoleList {
+        role_name: Option<String>,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Assign a role to a user")]
+    Assign {
+        username: String,
+        role: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Unassign a role from a user")]
+    Unassign {
+        username: String,
+        role: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "List ACL rules")]
+    List {
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "Check if a user can perform an action on a topic")]
+    Check {
+        username: String,
+        topic: String,
+        action: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+    #[command(about = "List roles assigned to a user")]
+    UserRoles {
+        username: String,
+        #[arg(short, long)]
+        file: PathBuf,
+    },
+}
+
 #[derive(Subcommand)]
 enum AgentAction {
     Start {
@@ -516,12 +652,8 @@ enum AgentAction {
         bind: SocketAddr,
         #[arg(long)]
         db: PathBuf,
-        #[arg(long)]
-        passwd: Option<PathBuf>,
-        #[arg(long)]
-        acl: Option<PathBuf>,
-        #[arg(long)]
-        anonymous: bool,
+        #[command(flatten)]
+        auth: Box<AuthArgs>,
         #[arg(
             long,
             default_value = "periodic",
@@ -563,10 +695,8 @@ enum ClusterAction {
         db: PathBuf,
         #[arg(long, value_delimiter = ',', help = "Peer nodes: id@host:port,...")]
         peers: Vec<String>,
-        #[arg(long, help = "Path to password file")]
-        passwd: Option<PathBuf>,
-        #[arg(long, help = "Path to ACL file")]
-        acl: Option<PathBuf>,
+        #[command(flatten)]
+        auth: Box<AuthArgs>,
         #[arg(long, help = "Path to QUIC TLS certificate")]
         quic_cert: Option<PathBuf>,
         #[arg(long, help = "Path to QUIC TLS private key")]
@@ -711,9 +841,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentAction::Start {
                 bind,
                 db,
-                passwd,
-                acl,
-                anonymous,
+                auth,
                 durability,
                 durability_ms,
                 quic_cert,
@@ -722,9 +850,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cmd_agent_start(AgentStartArgs {
                     bind,
                     db_path: db,
-                    passwd,
-                    acl,
-                    anonymous,
+                    auth: *auth,
                     durability,
                     durability_ms,
                     quic_cert,
@@ -743,8 +869,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bind,
                 db,
                 peers,
-                passwd,
-                acl,
+                auth,
                 quic_cert,
                 quic_key,
                 no_quic,
@@ -762,8 +887,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bind,
                     db_path: db,
                     peers,
-                    passwd,
-                    acl,
+                    auth: *auth,
                     quic_cert,
                     quic_key,
                     no_quic,
@@ -792,6 +916,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             file,
         } => {
             cmd_passwd(&username, batch, delete, file)?;
+        }
+        Commands::Scram {
+            username,
+            batch,
+            delete,
+            stdout,
+            file,
+            iterations,
+        } => {
+            cmd_scram(&username, batch, delete, stdout, file, iterations)?;
+        }
+        Commands::Acl { action } => {
+            Box::pin(cmd_acl(action)).await?;
         }
         Commands::Create {
             entity,
@@ -1117,9 +1254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct AgentStartArgs {
     bind: SocketAddr,
     db_path: PathBuf,
-    passwd: Option<PathBuf>,
-    acl: Option<PathBuf>,
-    anonymous: bool,
+    auth: AuthArgs,
     durability: DurabilityArg,
     durability_ms: u64,
     quic_cert: Option<PathBuf>,
@@ -1138,17 +1273,11 @@ async fn cmd_agent_start(args: AgentStartArgs) -> Result<(), Box<dyn std::error:
     let config = DatabaseConfig::new(&args.db_path).with_durability(durability_mode);
     let db = Database::open_with_config(config).await?;
 
-    let mut agent = MqdbAgent::new(db).with_bind_address(args.bind);
+    let auth_setup = build_auth_setup_config(&args.auth)?;
+    let mut agent = MqdbAgent::new(db)
+        .with_bind_address(args.bind)
+        .with_auth_setup(auth_setup);
 
-    if let Some(passwd_file) = args.passwd {
-        agent = agent.with_password_file(passwd_file);
-    }
-    if let Some(acl_file) = args.acl {
-        agent = agent.with_acl_file(acl_file);
-    }
-    if !args.anonymous {
-        agent = agent.with_anonymous(false);
-    }
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         agent = agent.with_quic_certs(cert, key);
     }
@@ -1173,8 +1302,7 @@ struct ClusterStartArgs {
     bind: SocketAddr,
     db_path: PathBuf,
     peers: Vec<String>,
-    passwd: Option<PathBuf>,
-    acl: Option<PathBuf>,
+    auth: AuthArgs,
     quic_cert: Option<PathBuf>,
     quic_key: Option<PathBuf>,
     no_quic: bool,
@@ -1198,6 +1326,10 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
         DurabilityArg::None => DurabilityMode::None,
     };
 
+    let passwd_file = args.auth.passwd.clone();
+    let acl_file = args.auth.acl.clone();
+    let auth_setup = build_auth_setup_config(&args.auth)?;
+
     let mut config = ClusterConfig::new(args.node_id, args.db_path, peer_configs);
     config = config.with_bind_address(args.bind);
     config = config.with_stores_durability(stores_durability);
@@ -1205,12 +1337,13 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     if let Some(name) = args.node_name {
         config = config.with_node_name(name);
     }
-    if let Some(passwd_file) = args.passwd {
-        config = config.with_password_file(passwd_file);
+    if let Some(pf) = passwd_file {
+        config = config.with_password_file(pf);
     }
-    if let Some(acl_file) = args.acl {
-        config = config.with_acl_file(acl_file);
+    if let Some(af) = acl_file {
+        config = config.with_acl_file(af);
     }
+    config = config.with_auth_setup(auth_setup);
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         config = config.with_quic_certs(cert, key);
     }
@@ -1454,6 +1587,489 @@ fn cmd_passwd(
         println!("{username}:{hash}");
     }
 
+    Ok(())
+}
+
+fn build_auth_setup_config(
+    auth: &AuthArgs,
+) -> Result<mqdb::auth_config::AuthSetupConfig, Box<dyn std::error::Error>> {
+    use mqtt5::broker::config::{JwtAlgorithm, JwtConfig, RateLimitConfig};
+
+    let jwt_config = if let Some(alg) = auth.jwt_algorithm {
+        let key_path = auth
+            .jwt_key
+            .clone()
+            .ok_or("--jwt-key is required when --jwt-algorithm is set")?;
+        let algorithm = match alg {
+            JwtAlgorithmArg::Hs256 => JwtAlgorithm::HS256,
+            JwtAlgorithmArg::Rs256 => JwtAlgorithm::RS256,
+            JwtAlgorithmArg::Es256 => JwtAlgorithm::ES256,
+        };
+        let mut cfg = JwtConfig::new(algorithm, key_path).with_clock_skew(auth.jwt_clock_skew);
+        if let Some(ref issuer) = auth.jwt_issuer {
+            cfg = cfg.with_issuer(issuer);
+        }
+        if let Some(ref audience) = auth.jwt_audience {
+            cfg = cfg.with_audience(audience);
+        }
+        Some(cfg)
+    } else {
+        None
+    };
+
+    let federated_jwt_config = if let Some(ref path) = auth.federated_jwt_config {
+        let content = std::fs::read_to_string(path)?;
+        let config: mqtt5::broker::config::FederatedJwtConfig = serde_json::from_str(&content)?;
+        Some(config)
+    } else {
+        None
+    };
+
+    let rate_limit = if auth.no_rate_limit {
+        None
+    } else {
+        Some(RateLimitConfig {
+            enabled: true,
+            max_attempts: auth.rate_limit_max_attempts,
+            window_secs: auth.rate_limit_window_secs,
+            lockout_secs: auth.rate_limit_lockout_secs,
+        })
+    };
+
+    Ok(mqdb::auth_config::AuthSetupConfig {
+        password_file: auth.passwd.clone(),
+        acl_file: auth.acl.clone(),
+        allow_anonymous: auth.anonymous,
+        scram_file: auth.scram_file.clone(),
+        jwt_config,
+        federated_jwt_config,
+        cert_auth_file: auth.cert_auth_file.clone(),
+        rate_limit,
+        no_rate_limit: auth.no_rate_limit,
+    })
+}
+
+fn cmd_scram(
+    username: &str,
+    batch: Option<String>,
+    delete: bool,
+    stdout: bool,
+    file: Option<PathBuf>,
+    iterations: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mqtt5::broker::auth_mechanisms::{
+        generate_scram_credential_line, generate_scram_credential_line_with_iterations,
+    };
+    use std::collections::HashMap;
+
+    if username.contains(':') {
+        return Err("username cannot contain ':' character".into());
+    }
+    if iterations < 10000 {
+        return Err("iteration count must be at least 10000".into());
+    }
+
+    if delete {
+        let path = file.ok_or("--file is required for --delete")?;
+        let contents = std::fs::read_to_string(&path)?;
+        let prefix = format!("{username}:");
+        let remaining: Vec<&str> = contents
+            .lines()
+            .filter(|line| !line.starts_with(&prefix))
+            .collect();
+        std::fs::write(&path, remaining.join("\n") + "\n")?;
+        eprintln!("Deleted user '{username}' from {}", path.display());
+        return Ok(());
+    }
+
+    let password = if let Some(p) = batch {
+        p
+    } else {
+        eprint!("Password: ");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        input.trim().to_string()
+    };
+
+    let line = if iterations == 310_000 {
+        generate_scram_credential_line(username, &password)?
+    } else {
+        generate_scram_credential_line_with_iterations(username, &password, iterations)?
+    };
+
+    if stdout || file.is_none() {
+        println!("{line}");
+        return Ok(());
+    }
+
+    let path = file.unwrap();
+    let mut users: HashMap<String, String> = HashMap::new();
+
+    if path.exists() {
+        let contents = std::fs::read_to_string(&path)?;
+        for file_line in contents.lines() {
+            let trimmed = file_line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(uname) = trimmed.split(':').next() {
+                users.insert(uname.to_string(), trimmed.to_string());
+            }
+        }
+    }
+
+    let action = if users.contains_key(username) {
+        "Updated"
+    } else {
+        "Added"
+    };
+    users.insert(username.to_string(), line);
+
+    let mut sorted_names: Vec<&String> = users.keys().collect();
+    sorted_names.sort();
+    let mut output = String::new();
+    for name in sorted_names {
+        if let Some(l) = users.get(name) {
+            output.push_str(l);
+            output.push('\n');
+        }
+    }
+    std::fs::write(&path, &output)?;
+    eprintln!("{action} user '{username}' in {}", path.display());
+
+    Ok(())
+}
+
+async fn cmd_acl(action: AclAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        AclAction::Add {
+            username,
+            topic,
+            permission,
+            file,
+        } => cmd_acl_add(&username, &topic, &permission, &file).await,
+        AclAction::Remove {
+            username,
+            topic,
+            file,
+        } => cmd_acl_remove(&username, topic.as_deref(), &file).await,
+        AclAction::RoleAdd {
+            role_name,
+            topic,
+            permission,
+            file,
+        } => cmd_acl_role_add(&role_name, &topic, &permission, &file).await,
+        AclAction::RoleRemove {
+            role_name,
+            topic,
+            file,
+        } => cmd_acl_role_remove(&role_name, topic.as_deref(), &file).await,
+        AclAction::RoleList { role_name, file } => {
+            cmd_acl_role_list(role_name.as_deref(), &file).await
+        }
+        AclAction::Assign {
+            username,
+            role,
+            file,
+        } => cmd_acl_assign(&username, &role, &file).await,
+        AclAction::Unassign {
+            username,
+            role,
+            file,
+        } => cmd_acl_unassign(&username, &role, &file).await,
+        AclAction::List { user, file } => cmd_acl_list(user.as_deref(), &file).await,
+        AclAction::Check {
+            username,
+            topic,
+            action,
+            file,
+        } => cmd_acl_check(&username, &topic, &action, &file).await,
+        AclAction::UserRoles { username, file } => cmd_acl_user_roles(&username, &file).await,
+    }
+}
+
+async fn read_acl_lines(path: &PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let content = tokio::fs::read_to_string(path).await?;
+    Ok(content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect())
+}
+
+async fn write_acl_lines(
+    path: &PathBuf,
+    lines: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::io::AsyncWriteExt;
+    let mut content = String::new();
+    for line in lines {
+        content.push_str(line);
+        content.push('\n');
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .await?;
+    file.write_all(content.as_bytes()).await?;
+    Ok(())
+}
+
+async fn cmd_acl_add(
+    username: &str,
+    topic: &str,
+    permission: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let valid = ["read", "write", "readwrite", "deny"];
+    if !valid.contains(&permission) {
+        return Err(format!("invalid permission '{permission}': must be read, write, readwrite, or deny").into());
+    }
+    let mut rules = if file.exists() {
+        read_acl_lines(file).await?
+    } else {
+        Vec::new()
+    };
+    let rule = format!("user {username} topic {topic} permission {permission}");
+    if rules.iter().any(|r| r == &rule) {
+        println!("Rule already exists: {rule}");
+        return Ok(());
+    }
+    rules.push(rule.clone());
+    write_acl_lines(file, &rules).await?;
+    println!("Added ACL rule: {rule}");
+    Ok(())
+}
+
+async fn cmd_acl_remove(
+    username: &str,
+    topic: Option<&str>,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rules = read_acl_lines(file).await?;
+    let original = rules.len();
+    rules.retain(|rule| {
+        let parts: Vec<&str> = rule.split_whitespace().collect();
+        if parts.len() != 6 || parts[0] != "user" || parts[2] != "topic" || parts[4] != "permission" {
+            return true;
+        }
+        if parts[1] != username {
+            return true;
+        }
+        if let Some(t) = topic {
+            parts[3] != t
+        } else {
+            false
+        }
+    });
+    let removed = original - rules.len();
+    if removed == 0 {
+        return Err(format!("no rules found for user '{username}'").into());
+    }
+    write_acl_lines(file, &rules).await?;
+    println!("Removed {removed} rule(s) for user '{username}'");
+    Ok(())
+}
+
+async fn cmd_acl_role_add(
+    role_name: &str,
+    topic: &str,
+    permission: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let valid = ["read", "write", "readwrite", "deny"];
+    if !valid.contains(&permission) {
+        return Err(format!("invalid permission '{permission}'").into());
+    }
+    let mut rules = if file.exists() {
+        read_acl_lines(file).await?
+    } else {
+        Vec::new()
+    };
+    let rule = format!("role {role_name} topic {topic} permission {permission}");
+    if rules.iter().any(|r| r == &rule) {
+        println!("Role rule already exists: {rule}");
+        return Ok(());
+    }
+    rules.push(rule.clone());
+    write_acl_lines(file, &rules).await?;
+    println!("Added role rule: {rule}");
+    Ok(())
+}
+
+async fn cmd_acl_role_remove(
+    role_name: &str,
+    topic: Option<&str>,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rules = read_acl_lines(file).await?;
+    let original = rules.len();
+    rules.retain(|rule| {
+        let parts: Vec<&str> = rule.split_whitespace().collect();
+        if parts.len() != 6 || parts[0] != "role" || parts[2] != "topic" || parts[4] != "permission" {
+            return true;
+        }
+        if parts[1] != role_name {
+            return true;
+        }
+        if let Some(t) = topic {
+            parts[3] != t
+        } else {
+            false
+        }
+    });
+    let removed = original - rules.len();
+    if removed == 0 {
+        return Err(format!("no rules found for role '{role_name}'").into());
+    }
+    write_acl_lines(file, &rules).await?;
+    println!("Removed {removed} rule(s) from role '{role_name}'");
+    Ok(())
+}
+
+async fn cmd_acl_role_list(
+    role_name: Option<&str>,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules = read_acl_lines(file).await?;
+    let filtered: Vec<&String> = rules
+        .iter()
+        .filter(|r| {
+            let parts: Vec<&str> = r.split_whitespace().collect();
+            if parts.len() < 2 || parts[0] != "role" {
+                return false;
+            }
+            role_name.is_none_or(|name| parts[1] == name)
+        })
+        .collect();
+    if filtered.is_empty() {
+        println!("No role rules found");
+    } else {
+        for rule in &filtered {
+            println!("  {rule}");
+        }
+        println!("\nTotal: {} rule(s)", filtered.len());
+    }
+    Ok(())
+}
+
+async fn cmd_acl_assign(
+    username: &str,
+    role_name: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rules = if file.exists() {
+        read_acl_lines(file).await?
+    } else {
+        Vec::new()
+    };
+    let line = format!("assign {username} {role_name}");
+    if rules.iter().any(|r| r == &line) {
+        println!("Assignment already exists");
+        return Ok(());
+    }
+    rules.push(line);
+    write_acl_lines(file, &rules).await?;
+    println!("Assigned role '{role_name}' to user '{username}'");
+    Ok(())
+}
+
+async fn cmd_acl_unassign(
+    username: &str,
+    role_name: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut rules = read_acl_lines(file).await?;
+    let line = format!("assign {username} {role_name}");
+    let original = rules.len();
+    rules.retain(|r| r != &line);
+    if rules.len() == original {
+        return Err(format!("no assignment found for user '{username}' with role '{role_name}'").into());
+    }
+    write_acl_lines(file, &rules).await?;
+    println!("Removed role '{role_name}' from user '{username}'");
+    Ok(())
+}
+
+async fn cmd_acl_list(
+    user: Option<&str>,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let rules = read_acl_lines(file).await?;
+    let filtered: Vec<&String> = if let Some(u) = user {
+        rules
+            .iter()
+            .filter(|r| {
+                let parts: Vec<&str> = r.split_whitespace().collect();
+                parts.len() >= 2 && parts[0] == "user" && parts[1] == u
+            })
+            .collect()
+    } else {
+        rules.iter().collect()
+    };
+    if filtered.is_empty() {
+        println!("No ACL rules found");
+    } else {
+        for rule in &filtered {
+            println!("  {rule}");
+        }
+        println!("\nTotal: {} rule(s)", filtered.len());
+    }
+    Ok(())
+}
+
+async fn cmd_acl_check(
+    username: &str,
+    topic: &str,
+    action: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mqtt5::broker::acl::AclManager;
+
+    if action != "read" && action != "write" {
+        return Err(format!("action must be 'read' or 'write', got: {action}").into());
+    }
+    let acl_manager = AclManager::from_file(file).await?;
+    let allowed = if action == "read" {
+        acl_manager.check_subscribe(Some(username), topic).await
+    } else {
+        acl_manager.check_publish(Some(username), topic).await
+    };
+    if allowed {
+        println!("ALLOWED: user '{username}' can {action} topic '{topic}'");
+    } else {
+        println!("DENIED: user '{username}' cannot {action} topic '{topic}'");
+    }
+    Ok(())
+}
+
+async fn cmd_acl_user_roles(
+    username: &str,
+    file: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lines = read_acl_lines(file).await?;
+    let assigned_roles: Vec<&str> = lines
+        .iter()
+        .filter_map(|r| {
+            let parts: Vec<&str> = r.split_whitespace().collect();
+            if parts.len() == 3 && parts[0] == "assign" && parts[1] == username {
+                Some(parts[2])
+            } else {
+                None
+            }
+        })
+        .collect();
+    if assigned_roles.is_empty() {
+        println!("User '{username}' has no assigned roles");
+    } else {
+        println!("Roles for user '{username}':");
+        for role in &assigned_roles {
+            println!("  {role}");
+        }
+    }
     Ok(())
 }
 

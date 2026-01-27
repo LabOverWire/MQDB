@@ -1,6 +1,7 @@
+use crate::auth_config::AuthSetupConfig;
 use crate::{Database, Response};
-use mqtt5::broker::config::QuicConfig;
-use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
+use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig};
+use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -26,9 +27,7 @@ pub struct MqdbAgent {
     db: Arc<Database>,
     bind_address: SocketAddr,
     shutdown_tx: broadcast::Sender<()>,
-    password_file: Option<PathBuf>,
-    acl_file: Option<PathBuf>,
-    allow_anonymous: bool,
+    auth_setup: AuthSetupConfig,
     service_username: Option<String>,
     service_password: Option<String>,
     backup_dir: PathBuf,
@@ -47,9 +46,7 @@ impl MqdbAgent {
             db: Arc::new(db),
             bind_address: "127.0.0.1:1883".parse().unwrap(),
             shutdown_tx,
-            password_file: None,
-            acl_file: None,
-            allow_anonymous: true,
+            auth_setup: AuthSetupConfig::default(),
             service_username: None,
             service_password: None,
             backup_dir,
@@ -66,19 +63,19 @@ impl MqdbAgent {
 
     #[must_use]
     pub fn with_password_file(mut self, path: PathBuf) -> Self {
-        self.password_file = Some(path);
+        self.auth_setup.password_file = Some(path);
         self
     }
 
     #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
-        self.acl_file = Some(path);
+        self.auth_setup.acl_file = Some(path);
         self
     }
 
     #[must_use]
     pub fn with_anonymous(mut self, allow: bool) -> Self {
-        self.allow_anonymous = allow;
+        self.auth_setup.allow_anonymous = allow;
         self
     }
 
@@ -102,6 +99,48 @@ impl MqdbAgent {
         self
     }
 
+    #[must_use]
+    pub fn with_auth_setup(mut self, config: AuthSetupConfig) -> Self {
+        self.auth_setup = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scram_file(mut self, path: PathBuf) -> Self {
+        self.auth_setup.scram_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_jwt_config(mut self, config: JwtConfig) -> Self {
+        self.auth_setup.jwt_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_federated_jwt_config(mut self, config: FederatedJwtConfig) -> Self {
+        self.auth_setup.federated_jwt_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cert_auth_file(mut self, path: PathBuf) -> Self {
+        self.auth_setup.cert_auth_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_rate_limit_config(mut self, config: RateLimitConfig) -> Self {
+        self.auth_setup.rate_limit = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_no_rate_limit(mut self) -> Self {
+        self.auth_setup.no_rate_limit = true;
+        self
+    }
+
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
     #[allow(clippy::too_many_lines)]
@@ -120,38 +159,14 @@ impl MqdbAgent {
             ..Default::default()
         };
 
-        config.auth_config.allow_anonymous = self.allow_anonymous;
-        if let Some(ref path) = self.acl_file {
-            config.auth_config.acl_file = Some(path.clone());
-        }
-
-        let (service_username, service_password, custom_auth_provider) =
-            if let Some(ref path) = self.password_file {
-                if self.service_username.is_none() {
-                    let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
-                    let svc_pass = uuid::Uuid::new_v4().to_string();
-                    let auth_provider = PasswordAuthProvider::from_file(path).await?;
-                    auth_provider.add_user(svc_user.clone(), &svc_pass)?;
-                    (
-                        Some(svc_user),
-                        Some(svc_pass),
-                        Some(Arc::new(auth_provider)),
-                    )
-                } else {
-                    config.auth_config.password_file = Some(path.clone());
-                    (
-                        self.service_username.clone(),
-                        self.service_password.clone(),
-                        None,
-                    )
-                }
-            } else {
-                (
-                    self.service_username.clone(),
-                    self.service_password.clone(),
-                    None,
-                )
-            };
+        let (service_username, service_password) = if self.service_username.is_some() {
+            (self.service_username.clone(), self.service_password.clone())
+        } else {
+            let result =
+                crate::auth_config::configure_broker_auth(&self.auth_setup, &mut config.auth_config)
+                    .await?;
+            (result.service_username, result.service_password)
+        };
 
         if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
             let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
@@ -160,13 +175,7 @@ impl MqdbAgent {
             info!(quic_bind = %self.bind_address, "QUIC listener configured");
         }
 
-        let mut broker = if let Some(provider) = custom_auth_provider {
-            MqttBroker::with_config(config)
-                .await?
-                .with_auth_provider(provider)
-        } else {
-            MqttBroker::with_config(config).await?
-        };
+        let mut broker = MqttBroker::with_config(config).await?;
 
         info!("MQDB Agent listening on {}", self.bind_address);
 

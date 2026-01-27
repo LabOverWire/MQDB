@@ -74,67 +74,43 @@ impl DbRequestHandler {
                 return None;
             }
             DbTopicOperation::JsonCreate { entity } => {
-                let resp_topic = response_topic?;
-                let result = self
-                    .handle_json_create(
-                        controller,
-                        &entity,
-                        payload,
-                        resp_topic,
-                        correlation_data,
-                    )
-                    .await;
-                match result {
-                    Some(payload) => payload,
-                    None => return None,
-                }
+                self.handle_json_create(
+                    controller,
+                    &entity,
+                    payload,
+                    response_topic?,
+                    correlation_data,
+                )
+                .await?
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                let resp_topic = response_topic?;
-                let result = self
-                    .handle_json_read(controller, &entity, &id, resp_topic, correlation_data)
-                    .await;
-                match result {
-                    Some(payload) => payload,
-                    None => return None,
-                }
+                self.handle_json_read(controller, &entity, &id, response_topic?, correlation_data)
+                    .await?
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
-                let resp_topic = response_topic?;
-                let result = self
-                    .handle_json_update(
-                        controller,
-                        &entity,
-                        &id,
-                        payload,
-                        resp_topic,
-                        correlation_data,
-                    )
-                    .await;
-                match result {
-                    Some(payload) => payload,
-                    None => return None,
-                }
+                self.handle_json_update(
+                    controller,
+                    &entity,
+                    &id,
+                    payload,
+                    response_topic?,
+                    correlation_data,
+                )
+                .await?
             }
             DbTopicOperation::JsonDelete { entity, id } => {
-                let resp_topic = response_topic?;
-                let result = self
-                    .handle_json_delete(controller, &entity, &id, resp_topic, correlation_data)
-                    .await;
-                match result {
-                    Some(payload) => payload,
-                    None => return None,
-                }
+                self.handle_json_delete(
+                    controller,
+                    &entity,
+                    &id,
+                    response_topic?,
+                    correlation_data,
+                )
+                .await?
             }
             DbTopicOperation::JsonList { entity } => {
-                let resp_topic = response_topic?;
-                let result = self
-                    .handle_json_list(controller, &entity, payload, resp_topic)
-                    .await;
-                match result {
-                    Some(payload) => payload,
-                    None => return None,
-                }
+                self.handle_json_list(controller, &entity, payload, response_topic?)
+                    .await?
             }
         };
 

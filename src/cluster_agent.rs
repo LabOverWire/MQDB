@@ -11,8 +11,11 @@ use crate::storage::FjallBackend;
 use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
-use mqtt5::broker::config::{ClusterListenerConfig, QuicConfig, StorageBackend, StorageConfig};
-use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
+use mqtt5::broker::config::{
+    ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
+    StorageBackend, StorageConfig,
+};
+use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
@@ -62,6 +65,7 @@ pub struct ClusterConfig {
     pub peers: Vec<PeerConfig>,
     pub password_file: Option<PathBuf>,
     pub acl_file: Option<PathBuf>,
+    pub auth_setup: crate::auth_config::AuthSetupConfig,
     pub use_quic: bool,
     pub quic_insecure: bool,
     pub quic_cert_file: Option<PathBuf>,
@@ -86,6 +90,7 @@ impl ClusterConfig {
             peers,
             password_file: None,
             acl_file: None,
+            auth_setup: crate::auth_config::AuthSetupConfig::default(),
             use_quic: true,
             quic_insecure: false,
             quic_cert_file: None,
@@ -121,6 +126,48 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_acl_file(mut self, path: PathBuf) -> Self {
         self.acl_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_auth_setup(mut self, config: crate::auth_config::AuthSetupConfig) -> Self {
+        self.auth_setup = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scram_file(mut self, path: PathBuf) -> Self {
+        self.auth_setup.scram_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_jwt_config(mut self, config: JwtConfig) -> Self {
+        self.auth_setup.jwt_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_federated_jwt_config(mut self, config: FederatedJwtConfig) -> Self {
+        self.auth_setup.federated_jwt_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cert_auth_file(mut self, path: PathBuf) -> Self {
+        self.auth_setup.cert_auth_file = Some(path);
+        self
+    }
+
+    #[must_use]
+    pub fn with_rate_limit_config(mut self, config: RateLimitConfig) -> Self {
+        self.auth_setup.rate_limit = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_no_rate_limit(mut self) -> Self {
+        self.auth_setup.no_rate_limit = true;
         self
     }
 
@@ -316,6 +363,7 @@ pub struct ClusteredAgent {
     peers: Vec<PeerConfig>,
     password_file: Option<PathBuf>,
     acl_file: Option<PathBuf>,
+    auth_setup: crate::auth_config::AuthSetupConfig,
     use_quic: bool,
     quic_insecure: bool,
     quic_cert_file: Option<PathBuf>,
@@ -470,6 +518,7 @@ impl ClusteredAgent {
             peers: config.peers,
             password_file: config.password_file,
             acl_file: config.acl_file,
+            auth_setup: config.auth_setup,
             use_quic: config.use_quic,
             quic_insecure: config.quic_insecure,
             quic_cert_file: config.quic_cert_file.clone(),
@@ -599,29 +648,23 @@ impl ClusteredAgent {
         .with_storage(storage_config)
         .with_event_handler(event_handler);
 
-        let (service_username, service_password, custom_auth_provider) =
-            if let Some(ref path) = self.password_file {
-                let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
-                let svc_pass = uuid::Uuid::new_v4().to_string();
-                let auth_provider = PasswordAuthProvider::from_file(path)
-                    .await
-                    .map_err(|e| format!("failed to load password file: {e}"))?;
-                auth_provider
-                    .add_user(svc_user.clone(), &svc_pass)
-                    .map_err(|e| format!("failed to add service user: {e}"))?;
-                broker_config.auth_config.allow_anonymous = false;
-                (
-                    Some(svc_user),
-                    Some(svc_pass),
-                    Some(Arc::new(auth_provider)),
-                )
-            } else {
-                (None, None, None)
-            };
-
-        if let Some(ref path) = self.acl_file {
-            broker_config.auth_config.acl_file = Some(path.clone());
-        }
+        let auth_cfg = crate::auth_config::AuthSetupConfig {
+            password_file: self.password_file.clone(),
+            acl_file: self.acl_file.clone(),
+            allow_anonymous: self.password_file.is_none(),
+            scram_file: self.auth_setup.scram_file.clone(),
+            jwt_config: self.auth_setup.jwt_config.clone(),
+            federated_jwt_config: self.auth_setup.federated_jwt_config.clone(),
+            cert_auth_file: self.auth_setup.cert_auth_file.clone(),
+            rate_limit: self.auth_setup.rate_limit.clone(),
+            no_rate_limit: self.auth_setup.no_rate_limit,
+        };
+        let auth_result =
+            crate::auth_config::configure_broker_auth(&auth_cfg, &mut broker_config.auth_config)
+                .await
+                .map_err(|e| format!("auth setup failed: {e}"))?;
+        let (service_username, service_password) =
+            (auth_result.service_username, auth_result.service_password);
 
         if self.use_quic {
             if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
@@ -653,13 +696,7 @@ impl ClusteredAgent {
             info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
         }
 
-        let mut broker = if let Some(provider) = custom_auth_provider {
-            MqttBroker::with_config(broker_config)
-                .await?
-                .with_auth_provider(provider)
-        } else {
-            MqttBroker::with_config(broker_config).await?
-        };
+        let mut broker = MqttBroker::with_config(broker_config).await?;
         let mut ready_rx = broker.ready_receiver();
 
         let router = if use_external_bridge_manager {
