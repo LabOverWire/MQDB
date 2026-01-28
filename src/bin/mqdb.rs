@@ -291,6 +291,8 @@ enum DevAction {
         quic_cert: PathBuf,
         #[arg(long, default_value = "test_certs/server.key")]
         quic_key: PathBuf,
+        #[arg(long, default_value = "test_certs/ca.pem")]
+        quic_ca: PathBuf,
         #[arg(long)]
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
@@ -721,6 +723,8 @@ enum ClusterAction {
         quic_cert: Option<PathBuf>,
         #[arg(long, help = "Path to QUIC TLS private key")]
         quic_key: Option<PathBuf>,
+        #[arg(long, help = "Path to CA certificate for QUIC peer verification")]
+        quic_ca: Option<PathBuf>,
         #[arg(long, help = "Disable QUIC transport")]
         no_quic: bool,
         #[arg(
@@ -850,6 +854,10 @@ enum SubscriptionModeArg {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -896,6 +904,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth,
                 quic_cert,
                 quic_key,
+                quic_ca,
                 no_quic,
                 no_persist_stores,
                 durability,
@@ -916,6 +925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     auth: *auth,
                     quic_cert,
                     quic_key,
+                    quic_ca,
                     no_quic,
                     no_persist_stores,
                     durability,
@@ -1161,6 +1171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 clean,
                 quic_cert,
                 quic_key,
+                quic_ca,
                 no_quic,
                 db_prefix,
                 bind_host,
@@ -1173,6 +1184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     clean,
                     &quic_cert,
                     &quic_key,
+                    &quic_ca,
                     no_quic,
                     &db_prefix,
                     &bind_host,
@@ -1341,6 +1353,7 @@ struct ClusterStartArgs {
     auth: AuthArgs,
     quic_cert: Option<PathBuf>,
     quic_key: Option<PathBuf>,
+    quic_ca: Option<PathBuf>,
     no_quic: bool,
     no_persist_stores: bool,
     durability: DurabilityArg,
@@ -1384,6 +1397,9 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     config = config.with_auth_setup(auth_setup);
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         config = config.with_quic_certs(cert, key);
+    }
+    if let Some(ca) = args.quic_ca {
+        config = config.with_quic_ca(ca);
     }
     if args.no_quic {
         config = config.with_quic(false);
@@ -3762,6 +3778,7 @@ fn cmd_dev_start_cluster(
     clean: bool,
     quic_cert: &std::path::Path,
     quic_key: &std::path::Path,
+    quic_ca: &std::path::Path,
     no_quic: bool,
     db_prefix: &str,
     bind_host: &str,
@@ -3822,6 +3839,9 @@ fn cmd_dev_start_cluster(
                 "--quic-key",
                 quic_key.to_str().unwrap_or(""),
             ]);
+            if quic_ca.exists() {
+                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+            }
             #[cfg(feature = "dev-insecure")]
             cmd.arg("--quic-insecure");
         }

@@ -74,6 +74,7 @@ pub struct ClusterConfig {
     pub quic_insecure: bool,
     pub quic_cert_file: Option<PathBuf>,
     pub quic_key_file: Option<PathBuf>,
+    pub quic_ca_file: Option<PathBuf>,
     pub bridge_out_only: bool,
     pub use_direct_quic: bool,
     pub ws_bind_address: Option<SocketAddr>,
@@ -102,6 +103,7 @@ impl ClusterConfig {
             quic_insecure: false,
             quic_cert_file: None,
             quic_key_file: None,
+            quic_ca_file: None,
             bridge_out_only: false,
             use_direct_quic: true,
             ws_bind_address: None,
@@ -209,6 +211,12 @@ impl ClusterConfig {
     pub fn with_quic_certs(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
         self.quic_cert_file = Some(cert_file);
         self.quic_key_file = Some(key_file);
+        self
+    }
+
+    #[must_use]
+    pub fn with_quic_ca(mut self, ca_file: PathBuf) -> Self {
+        self.quic_ca_file = Some(ca_file);
         self
     }
 
@@ -448,6 +456,9 @@ impl ClusteredAgent {
             let quic_transport = QuicDirectTransport::new(node_id);
             #[cfg(feature = "dev-insecure")]
             quic_transport.set_insecure(config.quic_insecure);
+            if let Some(ca_path) = &config.quic_ca_file {
+                quic_transport.set_ca_file(ca_path.clone());
+            }
             let inbox_rx = quic_transport.inbox_rx();
             (ClusterTransportKind::Quic(quic_transport), inbox_rx)
         } else {

@@ -54,6 +54,7 @@ pub struct QuicDirectTransport {
     server_addr: Arc<RwLock<Option<SocketAddr>>>,
     local_publish_tx: flume::Sender<LocalPublishRequest>,
     local_publish_rx: flume::Receiver<LocalPublishRequest>,
+    ca_file: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
     #[cfg(feature = "dev-insecure")]
     insecure: Arc<AtomicBool>,
 }
@@ -80,6 +81,7 @@ impl Clone for QuicDirectTransport {
             server_addr: self.server_addr.clone(),
             local_publish_tx: self.local_publish_tx.clone(),
             local_publish_rx: self.local_publish_rx.clone(),
+            ca_file: self.ca_file.clone(),
             #[cfg(feature = "dev-insecure")]
             insecure: self.insecure.clone(),
         }
@@ -104,8 +106,15 @@ impl QuicDirectTransport {
             server_addr: Arc::new(RwLock::new(None)),
             local_publish_tx,
             local_publish_rx,
+            ca_file: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "dev-insecure")]
             insecure: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn set_ca_file(&self, ca_path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.ca_file.write() {
+            *guard = Some(ca_path);
         }
     }
 
@@ -184,14 +193,15 @@ impl QuicDirectTransport {
             .as_ref()
             .ok_or(TransportError::NotConnected)?;
 
+        let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
         #[cfg(feature = "dev-insecure")]
         let client_config = if self.insecure.load(Ordering::SeqCst) {
             build_client_config_insecure()?
         } else {
-            build_client_config_secure()?
+            build_client_config_secure(ca_file.as_deref())?
         };
         #[cfg(not(feature = "dev-insecure"))]
-        let client_config = build_client_config_secure()?;
+        let client_config = build_client_config_secure(ca_file.as_deref())?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -828,22 +838,38 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     Ok(server_config)
 }
 
-fn build_client_config_secure() -> Result<quinn::ClientConfig, TransportError> {
+fn build_client_config_secure(ca_file: Option<&Path>) -> Result<quinn::ClientConfig, TransportError> {
     let mut root_store = rustls::RootCertStore::empty();
 
-    let cert_result = rustls_native_certs::load_native_certs();
-    for err in &cert_result.errors {
-        debug!(error = %err, "error loading native certificate");
-    }
-    for cert in cert_result.certs {
-        if let Err(e) = root_store.add(cert) {
-            debug!(error = %e, "failed to add certificate to root store");
+    if let Some(ca_path) = ca_file {
+        let ca_file = std::fs::File::open(ca_path).map_err(|e| {
+            TransportError::SendFailed(format!("failed to open CA file: {e}"))
+        })?;
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| TransportError::SendFailed(format!("failed to parse CA cert: {e}")))?;
+        for cert in certs {
+            root_store.add(cert).map_err(|e| {
+                TransportError::SendFailed(format!("failed to add CA cert: {e}"))
+            })?;
+        }
+        debug!(ca_path = %ca_path.display(), "loaded custom CA certificate");
+    } else {
+        let cert_result = rustls_native_certs::load_native_certs();
+        for err in &cert_result.errors {
+            debug!(error = %err, "error loading native certificate");
+        }
+        for cert in cert_result.certs {
+            if let Err(e) = root_store.add(cert) {
+                debug!(error = %e, "failed to add certificate to root store");
+            }
         }
     }
 
     if root_store.is_empty() {
         return Err(TransportError::SendFailed(
-            "no trusted root certificates found - use --quic-insecure for self-signed certs"
+            "no trusted root certificates found - use --quic-ca to specify a CA certificate"
                 .to_string(),
         ));
     }
