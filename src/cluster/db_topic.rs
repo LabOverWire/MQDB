@@ -20,6 +20,24 @@ pub enum DbTopicOperation {
     JsonList { entity: String },
 }
 
+impl DbTopicOperation {
+    #[must_use]
+    pub fn is_binary(&self) -> bool {
+        matches!(
+            self,
+            Self::Create { .. }
+                | Self::Read { .. }
+                | Self::Update { .. }
+                | Self::Delete { .. }
+                | Self::IndexUpdate
+                | Self::UniqueReserve
+                | Self::UniqueCommit
+                | Self::UniqueRelease
+                | Self::FkValidate
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedDbTopic {
     pub partition: Option<PartitionId>,

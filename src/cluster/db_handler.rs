@@ -40,87 +40,85 @@ impl DbRequestHandler {
         let parsed = ParsedDbTopic::parse(topic)?;
 
         let response_payload = match parsed.operation {
-            DbTopicOperation::Create { entity } => {
-                self.handle_create(controller, parsed.partition?, &entity, payload)
-                    .await
-            }
-            DbTopicOperation::Read { entity, id } => {
-                self.handle_read(controller, parsed.partition?, &entity, &id, payload)
-            }
-            DbTopicOperation::Update { entity, id } => {
-                self.handle_update(controller, parsed.partition?, &entity, &id, payload)
-                    .await
-            }
-            DbTopicOperation::Delete { entity, id } => {
-                self.handle_delete(controller, parsed.partition?, &entity, &id)
-                    .await
-            }
-            DbTopicOperation::IndexUpdate => {
-                self.handle_index_update(controller, parsed.partition?, payload)
-            }
-            DbTopicOperation::UniqueReserve => {
-                self.handle_unique_reserve(controller, parsed.partition?, payload)
-            }
-            DbTopicOperation::UniqueCommit => {
-                self.handle_unique_commit(controller, parsed.partition?, payload)
-            }
-            DbTopicOperation::UniqueRelease => {
-                self.handle_unique_release(controller, parsed.partition?, payload)
-            }
-            DbTopicOperation::FkValidate => {
-                self.handle_fk_validate(controller, parsed.partition?, payload)
-            }
             DbTopicOperation::QueryRequest { .. } | DbTopicOperation::QueryResponse { .. } => {
                 return None;
             }
-            DbTopicOperation::JsonCreate { entity } => {
-                self.handle_json_create(
-                    controller,
-                    &entity,
-                    payload,
-                    response_topic?,
-                    correlation_data,
-                )
-                .await?
-            }
-            DbTopicOperation::JsonRead { entity, id } => {
-                self.handle_json_read(controller, &entity, &id, response_topic?, correlation_data)
+            ref op if op.is_binary() => {
+                self.handle_binary_operation(controller, &parsed, payload)
                     .await?
             }
-            DbTopicOperation::JsonUpdate { entity, id } => {
-                self.handle_json_update(
-                    controller,
-                    &entity,
-                    &id,
-                    payload,
-                    response_topic?,
-                    correlation_data,
-                )
-                .await?
-            }
-            DbTopicOperation::JsonDelete { entity, id } => {
-                self.handle_json_delete(
-                    controller,
-                    &entity,
-                    &id,
-                    response_topic?,
-                    correlation_data,
-                )
-                .await?
-            }
-            DbTopicOperation::JsonList { entity } => {
-                self.handle_json_list(controller, &entity, payload, response_topic?)
+            ref op => {
+                self.handle_json_operation(controller, op, payload, response_topic?, correlation_data)
                     .await?
             }
         };
 
         let resp_topic = response_topic?;
-
         Some(DbPublishResponse {
             topic: resp_topic.to_string(),
             payload: response_payload,
             correlation_data: correlation_data.map(<[u8]>::to_vec),
         })
+    }
+
+    async fn handle_binary_operation<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        parsed: &ParsedDbTopic,
+        payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let partition = parsed.partition?;
+        Some(match &parsed.operation {
+            DbTopicOperation::Create { entity } => {
+                self.handle_create(controller, partition, entity, payload).await
+            }
+            DbTopicOperation::Read { entity, id } => {
+                self.handle_read(controller, partition, entity, id, payload)
+            }
+            DbTopicOperation::Update { entity, id } => {
+                self.handle_update(controller, partition, entity, id, payload).await
+            }
+            DbTopicOperation::Delete { entity, id } => {
+                self.handle_delete(controller, partition, entity, id).await
+            }
+            DbTopicOperation::IndexUpdate => self.handle_index_update(controller, partition, payload),
+            DbTopicOperation::UniqueReserve => self.handle_unique_reserve(controller, partition, payload),
+            DbTopicOperation::UniqueCommit => self.handle_unique_commit(controller, partition, payload),
+            DbTopicOperation::UniqueRelease => self.handle_unique_release(controller, partition, payload),
+            DbTopicOperation::FkValidate => self.handle_fk_validate(controller, partition, payload),
+            _ => return None,
+        })
+    }
+
+    async fn handle_json_operation<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        operation: &DbTopicOperation,
+        payload: &[u8],
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        match operation {
+            DbTopicOperation::JsonCreate { entity } => {
+                self.handle_json_create(controller, entity, payload, response_topic, correlation_data)
+                    .await
+            }
+            DbTopicOperation::JsonRead { entity, id } => {
+                self.handle_json_read(controller, entity, id, response_topic, correlation_data).await
+            }
+            DbTopicOperation::JsonUpdate { entity, id } => {
+                self.handle_json_update(controller, entity, id, payload, response_topic, correlation_data)
+                    .await
+            }
+            DbTopicOperation::JsonDelete { entity, id } => {
+                self.handle_json_delete(controller, entity, id, response_topic, correlation_data)
+                    .await
+            }
+            DbTopicOperation::JsonList { entity } => {
+                self.handle_json_list(controller, entity, payload, response_topic).await
+            }
+            _ => None,
+        }
     }
 
     async fn handle_create<T: ClusterTransport>(
@@ -395,7 +393,7 @@ impl DbRequestHandler {
         FkValidateResponse::create(status, request.request_id_str()).to_be_bytes()
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -404,125 +402,74 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
-        let start = std::time::Instant::now();
-        let node_id = controller.node_id().get();
-
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
-        let t_parse = start.elapsed().as_micros() as u64;
 
         let partition = controller.pick_partition_for_create();
         let id = self.generate_id_for_partition(entity, partition, payload);
-        let is_local = controller.is_local_partition(partition);
-        let t_partition = start.elapsed().as_micros() as u64;
 
-        tracing::debug!(
-            node = node_id,
-            partition = partition.get(),
-            is_local,
-            entity,
-            t_parse,
-            t_partition,
-            "json_create_start"
-        );
-
-        if !is_local {
-            let forwarded = controller
-                .forward_json_db_request(
-                    partition,
-                    JsonDbOp::Create,
-                    entity,
-                    None,
-                    payload,
-                    response_topic,
-                    correlation_data,
-                )
+        if !controller.is_local_partition(partition) {
+            return self
+                .try_forward_create(controller, partition, entity, payload, response_topic, correlation_data)
                 .await;
-            if forwarded {
-                tracing::info!(
-                    node = node_id,
-                    partition = partition.get(),
-                    elapsed_us = start.elapsed().as_micros() as u64,
-                    "json_create_forwarded"
-                );
-                return None;
-            }
-            tracing::warn!(
-                node = node_id,
-                partition = partition.get(),
-                elapsed_us = start.elapsed().as_micros() as u64,
-                "json_create_forward_failed"
-            );
-            return Some(Self::json_error(
-                503,
-                "partition not local and forwarding failed",
-            ));
         }
 
-        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-        let now_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(u64::MAX);
-        let t_serialize = start.elapsed().as_micros() as u64;
+        self.execute_local_create(controller, entity, &id, &data, partition)
+            .await
+    }
 
+    async fn try_forward_create<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        partition: PartitionId,
+        entity: &str,
+        payload: &[u8],
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> Option<Vec<u8>> {
+        let forwarded = controller
+            .forward_json_db_request(partition, JsonDbOp::Create, entity, None, payload, response_topic, correlation_data)
+            .await;
+        if forwarded {
+            tracing::debug!(partition = partition.get(), "json_create_forwarded");
+            None
+        } else {
+            Some(Self::json_error(503, "partition not local and forwarding failed"))
+        }
+    }
+
+    async fn execute_local_create<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        data: &Value,
+        partition: PartitionId,
+    ) -> Option<Vec<u8>> {
+        let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+        let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
+
         if let Err(conflict_field) = controller
-            .check_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
+            .check_unique_constraints(entity, id, data, partition, &request_id, now_ms)
             .await
         {
-            return Some(Self::json_error(
-                409,
-                &format!("unique constraint violation on field '{conflict_field}'"),
-            ));
+            return Some(Self::json_error(409, &format!("unique constraint violation on field '{conflict_field}'")));
         }
-        let t_constraint = start.elapsed().as_micros() as u64;
 
-        Some(match controller.db_create(entity, &id, &data_bytes, now_ms).await {
+        Some(match controller.db_create(entity, id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
-                let t_db_create = start.elapsed().as_micros() as u64;
-                controller
-                    .commit_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
-                    .await;
-                let t_commit = start.elapsed().as_micros() as u64;
-                let json_result = json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": data
-                });
-                let response = serde_json::to_vec(&json_result).unwrap_or_default();
-                let t_response = start.elapsed().as_micros() as u64;
-
-                tracing::info!(
-                    node = node_id,
-                    partition = partition.get(),
-                    t_parse,
-                    t_partition,
-                    t_serialize,
-                    t_constraint,
-                    t_db_create,
-                    t_commit,
-                    t_response,
-                    "json_create_timing"
-                );
-
-                response
+                controller.commit_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
+                Self::json_success(entity, db_entity.id_str(), data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
-                controller
-                    .release_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
-                    .await;
+                controller.release_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
                 Self::json_error(409, "entity already exists")
             }
             Err(_) => {
-                controller
-                    .release_unique_constraints(entity, &id, &data, partition, &request_id, now_ms)
-                    .await;
+                controller.release_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
                 Self::json_error(500, "internal error")
             }
         })
@@ -578,10 +525,7 @@ impl DbRequestHandler {
                 elapsed_us = start.elapsed().as_micros() as u64,
                 "json_read_forward_failed"
             );
-            return Some(Self::json_error(
-                503,
-                "partition not local and forwarding failed",
-            ));
+            return Some(Self::json_error(503, "partition not local and forwarding failed"));
         }
 
         let result = match controller.db_get(entity, id) {
@@ -593,12 +537,9 @@ impl DbRequestHandler {
                     "entity": entity,
                     "data": data
                 });
-                Some(serde_json::to_vec(&result).unwrap_or_default())
+                serde_json::to_vec(&result).unwrap_or_default()
             }
-            None => Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            )),
+            None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
         };
 
         tracing::info!(
@@ -609,10 +550,9 @@ impl DbRequestHandler {
             "json_read_complete"
         );
 
-        result
+        Some(result)
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -622,111 +562,68 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
-        let start = std::time::Instant::now();
-        let node_id = controller.node_id().get();
-
-        let data: Value = match serde_json::from_slice(payload) {
+        let updates: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
 
         let partition = data_partition(entity, id);
-        let is_local = controller.is_local_partition(partition);
 
-        tracing::info!(
-            node = node_id,
-            partition = partition.get(),
-            is_local,
-            entity,
-            "json_update_start"
-        );
-
-        if !is_local {
+        if !controller.is_local_partition(partition) {
             let forwarded = controller
-                .forward_json_db_request(
-                    partition,
-                    JsonDbOp::Update,
-                    entity,
-                    Some(id),
-                    payload,
-                    response_topic,
-                    correlation_data,
-                )
+                .forward_json_db_request(partition, JsonDbOp::Update, entity, Some(id), payload, response_topic, correlation_data)
                 .await;
-            if forwarded {
-                tracing::info!(
-                    node = node_id,
-                    partition = partition.get(),
-                    elapsed_us = start.elapsed().as_micros() as u64,
-                    "json_update_forwarded"
-                );
-                return None;
-            }
-            tracing::warn!(
-                node = node_id,
-                partition = partition.get(),
-                elapsed_us = start.elapsed().as_micros() as u64,
-                "json_update_forward_failed"
-            );
-            return Some(Self::json_error(
-                503,
-                "partition not local and forwarding failed",
-            ));
+            return if forwarded { None } else { Some(Self::json_error(503, "partition not local and forwarding failed")) };
         }
 
-        let merged_data = if let Some(existing) = controller.db_get(entity, id) {
-            let mut existing_data: Value = serde_json::from_slice(&existing.data)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
+        self.execute_local_update(controller, entity, id, updates).await
+    }
 
-            if let (Value::Object(existing_obj), Value::Object(updates)) =
-                (&mut existing_data, data)
-            {
-                for (key, value) in updates {
-                    existing_obj.insert(key, value);
-                }
-            }
-            existing_data
-        } else {
-            return Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            ));
+    async fn execute_local_update<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        updates: Value,
+    ) -> Option<Vec<u8>> {
+        let merged_data = match self.merge_with_existing(controller, entity, id, updates) {
+            Ok(data) => data,
+            Err(response) => return Some(response),
         };
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-        let now_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis()),
-        )
-        .unwrap_or(u64::MAX);
+        let now_ms = Self::current_time_ms();
 
-        let result = match controller.db_update(entity, id, &data_bytes, now_ms).await {
-            Ok(db_entity) => {
-                let result = json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": merged_data
-                });
-                Some(serde_json::to_vec(&result).unwrap_or_default())
+        Some(match controller.db_update(entity, id, &data_bytes, now_ms).await {
+            Ok(db_entity) => Self::json_success(entity, db_entity.id_str(), &merged_data),
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(super::db::DbDataStoreError::NotFound) => Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            )),
-            Err(_) => Some(Self::json_error(500, "internal error")),
+            Err(_) => Self::json_error(500, "internal error"),
+        })
+    }
+
+    fn merge_with_existing<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        updates: Value,
+    ) -> Result<Value, Vec<u8>> {
+        let Some(existing) = controller.db_get(entity, id) else {
+            return Err(Self::json_error(404, &format!("entity not found: {entity} id={id}")));
         };
 
-        tracing::info!(
-            node = node_id,
-            partition = partition.get(),
-            elapsed_us = start.elapsed().as_micros() as u64,
-            forwarded = false,
-            "json_update_complete"
-        );
+        let mut existing_data: Value =
+            serde_json::from_slice(&existing.data).unwrap_or(Value::Object(serde_json::Map::new()));
 
-        result
+        if let (Value::Object(existing_obj), Value::Object(update_obj)) = (&mut existing_data, updates) {
+            for (key, value) in update_obj {
+                existing_obj.insert(key, value);
+            }
+        }
+
+        Ok(existing_data)
     }
 
     async fn handle_json_delete<T: ClusterTransport>(
@@ -754,10 +651,7 @@ impl DbRequestHandler {
             if forwarded {
                 return None;
             }
-            return Some(Self::json_error(
-                503,
-                "partition not local and forwarding failed",
-            ));
+            return Some(Self::json_error(503, "partition not local and forwarding failed"));
         }
 
         match controller.db_delete(entity, id).await {
@@ -770,10 +664,9 @@ impl DbRequestHandler {
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            Err(super::db::DbDataStoreError::NotFound) => Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            )),
+            Err(super::db::DbDataStoreError::NotFound) => {
+                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
+            }
             Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }
@@ -823,6 +716,7 @@ impl DbRequestHandler {
             "status": "ok",
             "data": items
         });
+
         Some(serde_json::to_vec(&result).unwrap_or_default())
     }
 
@@ -833,6 +727,20 @@ impl DbRequestHandler {
             "message": message
         });
         serde_json::to_vec(&result).unwrap_or_default()
+    }
+
+    fn json_success(entity: &str, id: &str, data: &Value) -> Vec<u8> {
+        let result = json!({ "status": "ok", "id": id, "entity": entity, "data": data });
+        serde_json::to_vec(&result).unwrap_or_default()
+    }
+
+    fn current_time_ms() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(u64::MAX)
     }
 
     fn generate_id_for_partition(
