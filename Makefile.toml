@@ -19,6 +19,7 @@ echo "Building:"
 echo "  cargo make build         Build all targets (debug)"
 echo "  cargo make build-release Build release binary"
 echo "  cargo make build-profiling Build with profiling profile"
+echo "  cargo make wasm-build    Build WASM package (pkg/)"
 echo ""
 echo "Testing:"
 echo "  cargo make test          Run all tests"
@@ -158,3 +159,17 @@ args = ["run", "--release", "--", "dev", "profile", "db"]
 description = "Build with profiling profile"
 command = "cargo"
 args = ["build", "--profile=profiling"]
+
+[tasks.wasm-build]
+description = "Build WASM package (pkg/)"
+dependencies = ["wasm-compile", "wasm-bindgen"]
+
+[tasks.wasm-compile]
+description = "Compile WASM binary"
+command = "cargo"
+args = ["build", "--target", "wasm32-unknown-unknown", "--release", "--manifest-path", "crates/mqdb-wasm/Cargo.toml"]
+
+[tasks.wasm-bindgen]
+description = "Generate JS bindings"
+command = "wasm-bindgen"
+args = ["--target", "web", "--out-dir", "crates/mqdb-wasm/pkg", "crates/mqdb-wasm/target/wasm32-unknown-unknown/release/mqdb_wasm.wasm"]
