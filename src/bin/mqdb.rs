@@ -542,7 +542,8 @@ struct AuthArgs {
     passwd: Option<PathBuf>,
     #[arg(long, help = "Path to ACL file")]
     acl: Option<PathBuf>,
-    #[arg(long, help = "Allow anonymous connections")]
+    #[cfg(feature = "dev-insecure")]
+    #[arg(long, help = "Allow anonymous connections (dev only)")]
     anonymous: bool,
     #[arg(long, help = "Path to SCRAM-SHA-256 credentials file")]
     scram_file: Option<PathBuf>,
@@ -693,7 +694,7 @@ enum AgentAction {
         #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
         ws_bind: Option<SocketAddr>,
         #[command(flatten)]
-        oauth: OAuthArgs,
+        oauth: Box<OAuthArgs>,
     },
     Status {
         #[command(flatten)]
@@ -760,9 +761,10 @@ enum ClusterAction {
             help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
         )]
         direct_quic: bool,
+        #[cfg(feature = "dev-insecure")]
         #[arg(
             long,
-            help = "Skip TLS certificate verification for direct QUIC (use with self-signed certs)"
+            help = "Skip TLS certificate verification for direct QUIC (dev only)"
         )]
         quic_insecure: bool,
         #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
@@ -886,7 +888,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     quic_cert,
                     quic_key,
                     ws_bind,
-                    oauth,
+                    oauth: *oauth,
                 })
                 .await?;
             }
@@ -911,6 +913,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bridge_out,
                 cluster_port_offset,
                 direct_quic,
+                #[cfg(feature = "dev-insecure")]
                 quic_insecure,
                 ws_bind,
                 oauth,
@@ -931,6 +934,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bridge_out,
                     cluster_port_offset,
                     direct_quic,
+                    #[cfg(feature = "dev-insecure")]
                     quic_insecure,
                     ws_bind,
                     oauth: *oauth,
@@ -1358,6 +1362,7 @@ struct ClusterStartArgs {
     bridge_out: bool,
     cluster_port_offset: u16,
     direct_quic: bool,
+    #[cfg(feature = "dev-insecure")]
     quic_insecure: bool,
     ws_bind: Option<SocketAddr>,
     oauth: OAuthArgs,
@@ -1408,6 +1413,7 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     if args.direct_quic {
         config = config.with_direct_quic(true);
     }
+    #[cfg(feature = "dev-insecure")]
     if args.quic_insecure {
         config = config.with_quic_insecure(true);
     }
@@ -1691,10 +1697,15 @@ fn build_auth_setup_config(
         })
     };
 
+    #[cfg(feature = "dev-insecure")]
+    let allow_anonymous = auth.anonymous;
+    #[cfg(not(feature = "dev-insecure"))]
+    let allow_anonymous = false;
+
     Ok(mqdb::auth_config::AuthSetupConfig {
         password_file: auth.passwd.clone(),
         acl_file: auth.acl.clone(),
-        allow_anonymous: auth.anonymous,
+        allow_anonymous,
         scram_file: auth.scram_file.clone(),
         jwt_config,
         federated_jwt_config,
@@ -3834,6 +3845,7 @@ fn cmd_dev_start_cluster(
 
         if direct_quic {
             cmd.arg("--direct-quic");
+            #[cfg(feature = "dev-insecure")]
             cmd.arg("--quic-insecure");
         }
 
@@ -5472,16 +5484,13 @@ fn start_agent_for_bench(
     std::fs::create_dir_all(db)?;
     let log_file = std::fs::File::create(format!("{db}/mqdb.log"))?;
 
+    #[cfg(feature = "dev-insecure")]
+    let args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    #[cfg(not(feature = "dev-insecure"))]
+    let args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
+
     Command::new(exe)
-        .args([
-            "agent",
-            "start",
-            "--db",
-            db,
-            "--bind",
-            "127.0.0.1:1883",
-            "--anonymous",
-        ])
+        .args(&args)
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
         .spawn()?;
@@ -5880,6 +5889,11 @@ fn profile_with_samply(
     let symbol_dir = cwd.join("target/profiling");
     println!("Starting agent under samply profiler...");
 
+    #[cfg(feature = "dev-insecure")]
+    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    #[cfg(not(feature = "dev-insecure"))]
+    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
+
     let mut samply = Command::new("samply")
         .args([
             "record",
@@ -5892,15 +5906,7 @@ fn profile_with_samply(
             "--",
         ])
         .arg(&profiling_exe)
-        .args([
-            "agent",
-            "start",
-            "--db",
-            db,
-            "--bind",
-            "127.0.0.1:1883",
-            "--anonymous",
-        ])
+        .args(&agent_args)
         .spawn()?;
 
     std::thread::sleep(Duration::from_secs(3));
@@ -5942,21 +5948,20 @@ fn profile_with_flamegraph(
 
     println!("Starting agent under flamegraph profiler...\n");
 
+    let output_str = output_path.to_str().unwrap_or("flamegraph.svg");
+    #[cfg(feature = "dev-insecure")]
+    let flamegraph_args = vec![
+        "flamegraph", "--profile=profiling", "-o", output_str, "--",
+        "agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous",
+    ];
+    #[cfg(not(feature = "dev-insecure"))]
+    let flamegraph_args = vec![
+        "flamegraph", "--profile=profiling", "-o", output_str, "--",
+        "agent", "start", "--db", db, "--bind", "127.0.0.1:1883",
+    ];
+
     let mut flamegraph = Command::new("cargo")
-        .args([
-            "flamegraph",
-            "--profile=profiling",
-            "-o",
-            output_path.to_str().unwrap_or("flamegraph.svg"),
-            "--",
-            "agent",
-            "start",
-            "--db",
-            db,
-            "--bind",
-            "127.0.0.1:1883",
-            "--anonymous",
-        ])
+        .args(&flamegraph_args)
         .spawn()?;
 
     std::thread::sleep(Duration::from_secs(2));
@@ -5997,16 +6002,13 @@ fn profile_with_sample(
     let profiling_exe = cwd.join("target/profiling/mqdb");
 
     println!("Starting agent...");
+    #[cfg(feature = "dev-insecure")]
+    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    #[cfg(not(feature = "dev-insecure"))]
+    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
+
     let mut agent = Command::new(&profiling_exe)
-        .args([
-            "agent",
-            "start",
-            "--db",
-            db,
-            "--bind",
-            "127.0.0.1:1883",
-            "--anonymous",
-        ])
+        .args(&agent_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;

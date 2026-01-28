@@ -54,6 +54,7 @@ pub struct QuicDirectTransport {
     server_addr: Arc<RwLock<Option<SocketAddr>>>,
     local_publish_tx: flume::Sender<LocalPublishRequest>,
     local_publish_rx: flume::Receiver<LocalPublishRequest>,
+    #[cfg(feature = "dev-insecure")]
     insecure: Arc<AtomicBool>,
 }
 
@@ -79,6 +80,7 @@ impl Clone for QuicDirectTransport {
             server_addr: self.server_addr.clone(),
             local_publish_tx: self.local_publish_tx.clone(),
             local_publish_rx: self.local_publish_rx.clone(),
+            #[cfg(feature = "dev-insecure")]
             insecure: self.insecure.clone(),
         }
     }
@@ -102,10 +104,12 @@ impl QuicDirectTransport {
             server_addr: Arc::new(RwLock::new(None)),
             local_publish_tx,
             local_publish_rx,
+            #[cfg(feature = "dev-insecure")]
             insecure: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    #[cfg(feature = "dev-insecure")]
     pub fn set_insecure(&self, insecure: bool) {
         self.insecure.store(insecure, Ordering::SeqCst);
         if insecure {
@@ -180,11 +184,14 @@ impl QuicDirectTransport {
             .as_ref()
             .ok_or(TransportError::NotConnected)?;
 
+        #[cfg(feature = "dev-insecure")]
         let client_config = if self.insecure.load(Ordering::SeqCst) {
             build_client_config_insecure()?
         } else {
             build_client_config_secure()?
         };
+        #[cfg(not(feature = "dev-insecure"))]
+        let client_config = build_client_config_secure()?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -192,10 +199,17 @@ impl QuicDirectTransport {
             .await
             .map_err(|e| TransportError::SendFailed(format!("connection to peer failed: {e}")))?;
 
+        #[cfg(feature = "dev-insecure")]
         info!(
             peer = peer_id.get(),
             addr = %peer_addr,
             insecure = self.insecure.load(Ordering::SeqCst),
+            "connected to peer via QUIC"
+        );
+        #[cfg(not(feature = "dev-insecure"))]
+        info!(
+            peer = peer_id.get(),
+            addr = %peer_addr,
             "connected to peer via QUIC"
         );
 
@@ -845,6 +859,7 @@ fn build_client_config_secure() -> Result<quinn::ClientConfig, TransportError> {
     Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
+#[cfg(feature = "dev-insecure")]
 fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError> {
     let crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -858,9 +873,11 @@ fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError>
     Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
+#[cfg(feature = "dev-insecure")]
 #[derive(Debug)]
 struct SkipServerVerification;
 
+#[cfg(feature = "dev-insecure")]
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,

@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 const WINDOW_SECS: u64 = 60;
+const MAX_RATE_LIMIT_ENTRIES: usize = 10_000;
 
 pub struct RateLimiter {
-    requests: RwLock<HashMap<String, Vec<Instant>>>,
+    requests: RwLock<LruCache<String, Vec<Instant>>>,
     max_requests: u32,
     window: Duration,
 }
@@ -14,7 +16,9 @@ impl RateLimiter {
     #[must_use]
     pub fn new(max_requests_per_minute: u32) -> Self {
         Self {
-            requests: RwLock::new(HashMap::new()),
+            requests: RwLock::new(LruCache::new(
+                NonZeroUsize::new(MAX_RATE_LIMIT_ENTRIES).expect("non-zero constant"),
+            )),
             max_requests: max_requests_per_minute,
             window: Duration::from_secs(WINDOW_SECS),
         }
@@ -26,11 +30,11 @@ impl RateLimiter {
             return true;
         };
 
-        let Ok(mut requests) = self.requests.write() else {
+        let Ok(mut cache) = self.requests.write() else {
             return true;
         };
 
-        let timestamps = requests.entry(key.to_string()).or_default();
+        let timestamps = cache.get_or_insert_mut(key.to_string(), Vec::new);
         timestamps.retain(|&t| t > cutoff);
 
         if timestamps.len() >= self.max_requests as usize {
@@ -71,5 +75,15 @@ mod tests {
         assert!(!limiter.check_and_record("user1"));
         assert!(limiter.check_and_record("user2"));
         assert!(limiter.check_and_record("user2"));
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let limiter = RateLimiter::new(100);
+        for i in 0..MAX_RATE_LIMIT_ENTRIES + 100 {
+            assert!(limiter.check_and_record(&format!("user{i}")));
+        }
+        let cache = limiter.requests.read().unwrap();
+        assert_eq!(cache.len(), MAX_RATE_LIMIT_ENTRIES);
     }
 }

@@ -68,6 +68,7 @@ pub struct ClusterConfig {
     pub acl_file: Option<PathBuf>,
     pub auth_setup: crate::auth_config::AuthSetupConfig,
     pub use_quic: bool,
+    #[cfg(feature = "dev-insecure")]
     pub quic_insecure: bool,
     pub quic_cert_file: Option<PathBuf>,
     pub quic_key_file: Option<PathBuf>,
@@ -95,6 +96,7 @@ impl ClusterConfig {
             acl_file: None,
             auth_setup: crate::auth_config::AuthSetupConfig::default(),
             use_quic: true,
+            #[cfg(feature = "dev-insecure")]
             quic_insecure: false,
             quic_cert_file: None,
             quic_key_file: None,
@@ -194,6 +196,7 @@ impl ClusterConfig {
         self
     }
 
+    #[cfg(feature = "dev-insecure")]
     #[must_use]
     pub fn with_quic_insecure(mut self, insecure: bool) -> Self {
         self.quic_insecure = insecure;
@@ -382,6 +385,7 @@ pub struct ClusteredAgent {
     acl_file: Option<PathBuf>,
     auth_setup: crate::auth_config::AuthSetupConfig,
     use_quic: bool,
+    #[cfg(feature = "dev-insecure")]
     quic_insecure: bool,
     quic_cert_file: Option<PathBuf>,
     quic_key_file: Option<PathBuf>,
@@ -433,6 +437,7 @@ impl ClusteredAgent {
 
         let (transport, transport_inbox_rx) = if config.use_direct_quic {
             let quic_transport = QuicDirectTransport::new(node_id);
+            #[cfg(feature = "dev-insecure")]
             quic_transport.set_insecure(config.quic_insecure);
             let inbox_rx = quic_transport.inbox_rx();
             (ClusterTransportKind::Quic(quic_transport), inbox_rx)
@@ -539,6 +544,7 @@ impl ClusteredAgent {
             acl_file: config.acl_file,
             auth_setup: config.auth_setup,
             use_quic: config.use_quic,
+            #[cfg(feature = "dev-insecure")]
             quic_insecure: config.quic_insecure,
             quic_cert_file: config.quic_cert_file.clone(),
             quic_key_file: config.quic_key_file.clone(),
@@ -597,6 +603,7 @@ impl ClusteredAgent {
                     config.quic_flow_headers = Some(true);
                     config.quic_datagrams = Some(true);
                     config.fallback_tcp = true;
+                    #[cfg(feature = "dev-insecure")]
                     if self.quic_insecure {
                         config.insecure = Some(true);
                     }

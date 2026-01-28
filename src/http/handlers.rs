@@ -18,6 +18,21 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, warn};
 
+fn escape_html(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 pub struct ServerState {
     pub oauth_config: OAuthConfig,
     pub jwt_config: JwtSigningConfig,
@@ -187,8 +202,9 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
 
     let Some(code) = params.get("code") else {
         if let Some(err) = params.get("error") {
+            let escaped = escape_html(err);
             return html_response(400, format!(
-                "<html><body><h1>OAuth Error</h1><p>{err}</p></body></html>"
+                "<html><body><h1>OAuth Error</h1><p>{escaped}</p></body></html>"
             ));
         }
         return json_response(400, &json!({"error": "missing code parameter"}));
@@ -219,8 +235,12 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         return json_response(502, &json!({"error": "no id_token in response"}));
     };
 
-    let Some(id_payload) = oauth::decode_id_token(id_token) else {
-        return json_response(502, &json!({"error": "failed to decode id_token"}));
+    let id_payload = match oauth::verify_id_token(id_token, &state.oauth_config.client_id).await {
+        Ok(payload) => payload,
+        Err(e) => {
+            error!(error = %e, "ID token verification failed");
+            return json_response(401, &json!({"error": format!("id_token verification failed: {e}")}));
+        }
     };
 
     if let Some(refresh_token) = &token_response.refresh_token {
