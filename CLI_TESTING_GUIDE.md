@@ -1141,7 +1141,7 @@ Verify that JSON creates on non-local partitions are forwarded to the correct pr
 
 ```bash
 # Start 3-node cluster
-mqdb dev start-cluster --nodes 3 --clean --direct-quic
+mqdb dev start-cluster --nodes 3 --clean
 sleep 5
 
 # Create entities on each node (with 64 partitions across 3 nodes,
@@ -1932,7 +1932,7 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P wrong -t test -m hello
 mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb cluster start --node-id 1 --db /tmp/mqdb-c1 --bind 127.0.0.1:1883 \
     --passwd /tmp/passwd.txt --acl examples/acl.txt \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --direct-quic
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
 ```
 - [ ] Cluster node starts with password auth
 - [ ] Internal service account connects automatically

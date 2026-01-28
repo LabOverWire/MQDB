@@ -485,33 +485,30 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 | `--peers` | Peer nodes to join (format: id@host:port) |
 | `--quic-cert` | TLS certificate for QUIC transport |
 | `--quic-key` | TLS private key for QUIC transport |
-| `--no-quic` | Disable QUIC (use MQTT bridges only) |
-| `--direct-quic` | Use raw QUIC streams instead of MQTT bridges (recommended) |
+| `--no-quic` | Disable QUIC and cluster communication (standalone mode) |
 | `--no-persist-stores` | Disable store persistence (data lost on restart) |
 
-### Cluster Transport Options
+### Cluster Transport
 
-MQDB supports two transport modes for inter-node cluster communication:
-
-**MQTT Bridges (default):** Routes cluster traffic through MQTT pub/sub. Simple but can cause contention with client traffic on busy nodes.
-
-**Direct QUIC (`--direct-quic`):** Uses raw QUIC streams for cluster communication, bypassing the MQTT broker entirely. Recommended for production workloads.
+MQDB uses QUIC streams for all inter-node cluster communication. This provides:
+- Direct node-to-node communication without broker overhead
+- Multiplexed streams with built-in flow control
+- TLS encryption for all cluster traffic
 
 ```bash
-# Start cluster with direct QUIC transport (recommended)
-mqdb dev start-cluster --nodes 3 --clean --direct-quic
+# Start a 3-node cluster (QUIC transport is the default)
+mqdb dev start-cluster --nodes 3 --clean
 ```
 
-**Performance comparison (DB insert throughput):**
+**Performance (DB insert throughput):**
 
-| Topology | Transport | Node 1 | Node 2 | Node 3 |
-|----------|-----------|--------|--------|--------|
-| Partial Mesh | MQTT Bridges | 2,902 ops/s | 3,343 ops/s | 1,456 ops/s |
-| Partial Mesh | Direct QUIC | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
-| Full Mesh | MQTT Bridges | 3,001 ops/s | 3,309 ops/s | 1,596 ops/s |
-| Full Mesh | Direct QUIC | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
+| Topology | Node 1 | Node 2 | Node 3 |
+|----------|--------|--------|--------|
+| Partial Mesh | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
+| Full Mesh | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
 
-Direct QUIC provides 1.2-2.5x throughput improvement, with the biggest gains on nodes that would otherwise have heavy MQTT bridge traffic.
+> **Note:** MQTT bridge transport is deprecated and retained only for historical reference.
+> All production deployments should use the default QUIC transport.
 
 ### Data Persistence
 

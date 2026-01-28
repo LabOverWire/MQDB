@@ -1,4 +1,6 @@
+#[allow(deprecated)]
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
+#[allow(deprecated)]
 use crate::cluster::{
     ClusterEventHandler, ClusterMessage, ClusterTransport, DedicatedExecutor, ForwardTarget,
     ForwardedPublish, InboundMessage, LwtPublisher, MessageProcessor, MqttTransport,
@@ -101,7 +103,7 @@ impl ClusterConfig {
             quic_cert_file: None,
             quic_key_file: None,
             bridge_out_only: false,
-            use_direct_quic: false,
+            use_direct_quic: true,
             ws_bind_address: None,
             http_config: None,
         }
@@ -243,20 +245,25 @@ impl ClusterConfig {
 
 #[derive(Debug, Clone)]
 pub enum ClusterTransportKind {
-    Mqtt(MqttTransport),
+    #[deprecated(since = "0.2.0", note = "use Quic variant instead")]
+    Mqtt(#[allow(deprecated)] MqttTransport),
     Quic(QuicDirectTransport),
 }
 
 impl ClusterTransportKind {
+    #[deprecated(since = "0.2.0", note = "MQTT transport is deprecated, use QUIC")]
     #[must_use]
+    #[allow(deprecated)]
     pub fn as_mqtt(&self) -> Option<&MqttTransport> {
         match self {
+            #[allow(deprecated)]
             Self::Mqtt(t) => Some(t),
             Self::Quic(_) => None,
         }
     }
 
     #[must_use]
+    #[allow(deprecated)]
     pub fn as_quic(&self) -> Option<&QuicDirectTransport> {
         match self {
             Self::Mqtt(_) => None,
@@ -271,6 +278,7 @@ impl ClusterTransportKind {
     }
 }
 
+#[allow(deprecated)]
 impl ClusterTransport for ClusterTransportKind {
     fn local_node(&self) -> NodeId {
         match self {
@@ -435,6 +443,7 @@ impl ClusteredAgent {
         let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
         let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
 
+        #[allow(deprecated)]
         let (transport, transport_inbox_rx) = if config.use_direct_quic {
             let quic_transport = QuicDirectTransport::new(node_id);
             #[cfg(feature = "dev-insecure")]
@@ -876,6 +885,7 @@ impl ClusteredAgent {
             info!("admin MQTT client connected");
             admin_mqtt_client
         } else {
+            #[allow(deprecated)]
             let mqtt_transport = transport.as_mqtt().expect("expected MQTT transport");
             info!(broker_addr = %broker_addr, "connecting transport to local broker");
             Box::pin(mqtt_transport.connect_with_credentials(

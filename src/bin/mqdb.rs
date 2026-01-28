@@ -317,11 +317,6 @@ enum DevAction {
             help = "Use Both bridge direction even for full topology (may cause amplification)"
         )]
         no_bridge_out: bool,
-        #[arg(
-            long,
-            help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
-        )]
-        direct_quic: bool,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {
@@ -756,11 +751,6 @@ enum ClusterAction {
             help = "Port offset for cluster listener (bridges connect to main_port + offset)"
         )]
         cluster_port_offset: u16,
-        #[arg(
-            long,
-            help = "Use raw QUIC streams instead of MQTT bridges for cluster communication"
-        )]
-        direct_quic: bool,
         #[cfg(feature = "dev-insecure")]
         #[arg(
             long,
@@ -912,7 +902,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durability_ms,
                 bridge_out,
                 cluster_port_offset,
-                direct_quic,
                 #[cfg(feature = "dev-insecure")]
                 quic_insecure,
                 ws_bind,
@@ -933,7 +922,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     durability_ms,
                     bridge_out,
                     cluster_port_offset,
-                    direct_quic,
                     #[cfg(feature = "dev-insecure")]
                     quic_insecure,
                     ws_bind,
@@ -1179,7 +1167,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 topology,
                 bridge_out,
                 no_bridge_out,
-                direct_quic,
             } => {
                 cmd_dev_start_cluster(
                     nodes,
@@ -1192,7 +1179,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     topology.as_deref(),
                     bridge_out,
                     no_bridge_out,
-                    direct_quic,
                 )?;
             }
             DevAction::Bench {
@@ -1361,7 +1347,6 @@ struct ClusterStartArgs {
     durability_ms: u64,
     bridge_out: bool,
     cluster_port_offset: u16,
-    direct_quic: bool,
     #[cfg(feature = "dev-insecure")]
     quic_insecure: bool,
     ws_bind: Option<SocketAddr>,
@@ -1410,9 +1395,6 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
         config = config.with_bridge_out_only(true);
     }
     config = config.with_cluster_port_offset(args.cluster_port_offset);
-    if args.direct_quic {
-        config = config.with_direct_quic(true);
-    }
     #[cfg(feature = "dev-insecure")]
     if args.quic_insecure {
         config = config.with_quic_insecure(true);
@@ -3786,7 +3768,6 @@ fn cmd_dev_start_cluster(
     topology: Option<&str>,
     bridge_out: bool,
     no_bridge_out: bool,
-    direct_quic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -3841,10 +3822,6 @@ fn cmd_dev_start_cluster(
                 "--quic-key",
                 quic_key.to_str().unwrap_or(""),
             ]);
-        }
-
-        if direct_quic {
-            cmd.arg("--direct-quic");
             #[cfg(feature = "dev-insecure")]
             cmd.arg("--quic-insecure");
         }
@@ -3857,13 +3834,7 @@ fn cmd_dev_start_cluster(
         cmd.stdout(log_file.try_clone()?);
         cmd.stderr(log_file);
 
-        let transport_mode = if direct_quic {
-            " (Direct QUIC)"
-        } else if no_quic {
-            " (TCP)"
-        } else {
-            " (MQTT bridges)"
-        };
+        let transport_mode = if no_quic { " (TCP)" } else { " (QUIC)" };
         println!("Starting node {node_id} on port {port}{transport_mode}...");
 
         cmd.spawn()?;

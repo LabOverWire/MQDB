@@ -6,12 +6,12 @@
 
 ## Overview
 
-MQDB is a distributed MQTT broker with embedded database capabilities. The cluster supports two transport modes: MQTT bridges (default) and Direct QUIC (`--direct-quic`), with Raft consensus for partition management.
+MQDB is a distributed MQTT broker with embedded database capabilities. The cluster uses Direct QUIC transport (default since v0.2.0) with Raft consensus for partition management. MQTT bridges are deprecated but retained for historical reference.
 
 **Design Foundations** (specified before implementation):
 - **BeBytes crate** for all protocol encoding/decoding (custom, modifiable as needed)
 - **QUIC preferred** for inter-node transport (UDP port mirrors TCP port 1883)
-- **Two transport modes**: MQTT bridges (default) or Direct QUIC (bypasses broker, recommended for production)
+- **Direct QUIC transport**: Default transport that bypasses MQTT broker for cluster traffic (MQTT bridges deprecated)
 - **64 fixed partitions** (never changes)
 - **Replication Factor = 2** (primary + one replica)
 
@@ -583,9 +583,11 @@ Use **partial** or **upper** topology for production until this is resolved.
 - **Agent mode is fastest**: No replication overhead, 6-9k DB ops/s, 155k pubsub msg/s
 - **Full mesh unstable**: Raft flapping makes it unsuitable for production (Issue 11.16)
 
-### A6.5 Direct QUIC Transport (`--direct-quic`)
+### A6.5 Direct QUIC Transport (Default)
 
-The bridge overhead problem (A6.4) is caused by cluster traffic competing with client connections on the same MQTT broker event loop. The `--direct-quic` flag enables an alternative transport that bypasses MQTT bridges entirely.
+> **Note**: As of v0.2.0, Direct QUIC is the default transport for all cluster deployments. MQTT bridges are deprecated and retained only for historical reference.
+
+The bridge overhead problem (A6.4) was caused by cluster traffic competing with client connections on the same MQTT broker event loop. Direct QUIC transport bypasses MQTT bridges entirely and is now the default.
 
 **Architecture**:
 ```
@@ -649,11 +651,11 @@ struct QuicDirectTransport {
 
 **Usage**:
 ```bash
-mqdb dev start-cluster --nodes 3 --clean --direct-quic
+mqdb dev start-cluster --nodes 3 --clean
 
 # Or manually:
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/n1 \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --direct-quic
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
 ```
 
 **Key Files**: `quic_transport.rs`, `cluster_agent.rs` (transport selection)
@@ -1593,7 +1595,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Root Cause**: MQTT bridges share the broker's event loop with client connections. Each bridge creates bidirectional MQTT sessions that compete for processing time.
 
-**Mitigation**: Use `--direct-quic` transport which bypasses bridges entirely and provides uniform performance across all nodes (see A6.5).
+**Mitigation**: Use Direct QUIC transport (now the default) which bypasses bridges entirely and provides uniform performance across all nodes (see A6.5).
 
 ### 11.16 Raft Leader Flapping in Full-Mesh Topology
 
@@ -1603,7 +1605,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Root Cause**: With `BridgeDirection::Out` in full mesh, heartbeats are sent by leader but not reliably received by followers. Election timeout (3-5s) expires, triggering new elections.
 
-**Mitigation**: Use **partial** or **upper** topology with MQTT bridges, OR use `--direct-quic` transport.
+**Mitigation**: Use Direct QUIC transport (now the default). MQTT bridges are deprecated and should not be used in production.
 
 ### 11.17 Single-Node Cluster Partition Initialization
 

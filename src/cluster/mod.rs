@@ -132,6 +132,7 @@ pub use migration::{
     MigrationCheckpoint, MigrationError, MigrationManager, MigrationPhase, MigrationState,
 };
 #[cfg(feature = "native")]
+#[allow(deprecated)]
 pub use mqtt_transport::MqttTransport;
 #[cfg(feature = "native")]
 pub use node_controller::{NodeController, RaftMessage, TickOutput};
