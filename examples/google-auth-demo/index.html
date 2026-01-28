@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB Google Auth Demo</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-weight: 500;
+        }
+        .status.disconnected { background: #ffebee; color: #c62828; }
+        .status.connecting { background: #fff3e0; color: #ef6c00; }
+        .status.connected { background: #e8f5e9; color: #2e7d32; }
+        .status.error { background: #ffebee; color: #c62828; }
+        input, button, textarea {
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        input, textarea { width: 100%; margin: 5px 0; }
+        button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin: 5px 5px 5px 0;
+        }
+        button:hover { background: #1557b0; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.danger { background: #d32f2f; }
+        button.danger:hover { background: #b71c1c; }
+        .token-display {
+            background: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            max-height: 80px;
+            overflow-y: auto;
+        }
+        .log {
+            background: #263238;
+            color: #aed581;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            height: 250px;
+            overflow-y: auto;
+        }
+        .log .error { color: #ef5350; }
+        .log .info { color: #4fc3f7; }
+        .log .success { color: #aed581; }
+        .log .warn { color: #ffb74d; }
+        label { display: block; margin-top: 10px; font-weight: 500; }
+        .row { display: flex; gap: 10px; }
+        .row > * { flex: 1; }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        .user-info img {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+        }
+        .hidden { display: none; }
+        pre { margin: 0; white-space: pre-wrap; }
+        .user-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 12px;
+            margin: 8px 0;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .user-card img {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+        }
+        .event-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            color: white;
+        }
+        .event-badge.created { background: #4caf50; }
+        .event-badge.updated { background: #2196f3; }
+        .event-badge.deleted { background: #f44336; }
+        .google-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            background: white;
+            color: #444;
+            border: 1px solid #ddd;
+            padding: 10px 20px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            text-decoration: none;
+        }
+        .google-btn:hover { background: #f5f5f5; }
+        .google-btn svg { width: 18px; height: 18px; }
+    </style>
+</head>
+<body>
+    <h1>MQDB Google Auth Demo</h1>
+    <p>Sign in with Google via OAuth 2.0 (PKCE). MQDB handles the entire flow and issues JWTs for MQTT.</p>
+
+    <div class="card">
+        <h2>1. Configuration</h2>
+        <div id="configStatus" class="status connecting">Loading configuration...</div>
+        <label>Broker WebSocket URL</label>
+        <input type="text" id="brokerUrl" value="ws://localhost:8080/mqtt">
+    </div>
+
+    <div class="card">
+        <h2>2. Google Sign-In</h2>
+        <a id="googleSignInBtn" class="google-btn" href="#">
+            <svg viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+            Sign in with Google
+        </a>
+        <button id="logoutBtn" onclick="logout()" class="hidden danger">Sign Out</button>
+        <div id="userInfo" class="user-info hidden"></div>
+    </div>
+
+    <div class="card">
+        <h2>3. MQTT Connection</h2>
+        <div id="mqttStatus" class="status disconnected">Disconnected</div>
+        <div class="row">
+            <button id="connectBtn" onclick="connectMqtt()" disabled>Connect with Ticket</button>
+            <button id="disconnectBtn" onclick="disconnectMqtt()" disabled>Disconnect</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>4. User Profile</h2>
+        <div id="profileStatus" class="status disconnected">Connect to MQTT first</div>
+        <div id="profileSection" class="hidden">
+            <label>Name</label>
+            <input type="text" id="profileName" placeholder="Your name">
+            <label>Bio</label>
+            <input type="text" id="profileBio" placeholder="Tell us about yourself">
+            <label>Email</label>
+            <input type="text" id="profileEmail" disabled>
+            <button id="saveProfileBtn" onclick="saveProfile()">Save Profile</button>
+            <button id="deleteProfileBtn" onclick="deleteProfile()" class="danger">Delete Account</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>5. All Users</h2>
+        <button id="listUsersBtn" onclick="listUsers()" disabled>List All Users</button>
+        <button id="watchUsersBtn" onclick="watchUsers()" disabled>Watch Changes</button>
+        <div id="usersList"></div>
+    </div>
+
+    <div class="card">
+        <h2>6. Log</h2>
+        <div id="log" class="log"></div>
+        <button onclick="clearLog()">Clear Log</button>
+    </div>
+
+    <script>
+        var userPayload = null;
+        var mqttClient = null;
+        var currentUserId = null;
+        var requestQueue = [];
+        var responseTopic = '$DB/_responses/' + Math.random().toString(36).substring(2, 10);
+        var oauthUrl = '';
+        var httpServerUrl = '';
+
+        function log(message, type) {
+            type = type || 'info';
+            var logEl = document.getElementById('log');
+            var time = new Date().toLocaleTimeString();
+            logEl.innerHTML += '<div class="' + type + '">[' + time + '] ' + message + '</div>';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        function setMqttStatus(status, text) {
+            var el = document.getElementById('mqttStatus');
+            el.className = 'status ' + status;
+            el.textContent = text;
+        }
+
+        function setProfileStatus(status, text) {
+            var el = document.getElementById('profileStatus');
+            el.className = 'status ' + status;
+            el.textContent = text;
+        }
+
+        function mqdbRequest(topic, payload) {
+            return new Promise(function(resolve, reject) {
+                if (!mqttClient || !mqttClient.connected) {
+                    reject(new Error('Not connected'));
+                    return;
+                }
+
+                var timeoutId = setTimeout(function() {
+                    var idx = requestQueue.indexOf(resolve);
+                    if (idx !== -1) requestQueue.splice(idx, 1);
+                    reject(new Error('Request timeout'));
+                }, 10000);
+
+                var wrappedResolve = function(data) {
+                    clearTimeout(timeoutId);
+                    resolve(data);
+                };
+                requestQueue.push(wrappedResolve);
+
+                var pubPayload = payload ? JSON.stringify(payload) : '{}';
+                mqttClient.publish(topic, pubPayload, {
+                    qos: 1,
+                    properties: {
+                        responseTopic: responseTopic
+                    }
+                });
+            });
+        }
+
+        function handleMqdbResponse(topic, message) {
+            if (topic !== responseTopic) return false;
+            if (requestQueue.length === 0) return false;
+
+            var resolve = requestQueue.shift();
+            try {
+                resolve(JSON.parse(message.toString()));
+            } catch (e) {
+                resolve({ status: 'error', error: 'invalid JSON' });
+            }
+            return true;
+        }
+
+        function parseFragment() {
+            var hash = window.location.hash.substring(1);
+            if (!hash) return null;
+            var params = {};
+            hash.split('&').forEach(function(pair) {
+                var idx = pair.indexOf('=');
+                if (idx > 0) params[pair.substring(0, idx)] = pair.substring(idx + 1);
+            });
+            return params;
+        }
+
+        async function checkSession() {
+            try {
+                var resp = await fetch(httpServerUrl + '/auth/session', {
+                    method: 'GET',
+                    credentials: 'include'
+                });
+                if (resp.ok) {
+                    var data = await resp.json();
+                    if (data.authenticated) {
+                        userPayload = data.user;
+                        showLoggedInState(data.user);
+                        log('Session active for ' + (data.user.email || data.user.google_sub), 'success');
+                        return true;
+                    }
+                }
+            } catch (e) {
+                log('Session check failed: ' + e.message, 'warn');
+            }
+            return false;
+        }
+
+        function showLoggedInState(user) {
+            document.getElementById('userInfo').innerHTML =
+                (user.picture ? '<img src="' + user.picture + '" alt="Profile" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'">' : '') +
+                '<div><strong>' + (user.name || user.email || 'User') + '</strong><br>' +
+                '<small>' + (user.email || '') + '</small></div>';
+            document.getElementById('userInfo').classList.remove('hidden');
+            document.getElementById('connectBtn').disabled = false;
+            document.getElementById('googleSignInBtn').textContent = 'Signed in';
+            document.getElementById('googleSignInBtn').style.pointerEvents = 'none';
+            document.getElementById('logoutBtn').classList.remove('hidden');
+        }
+
+        async function getTicket() {
+            var resp = await fetch(httpServerUrl + '/auth/ticket', {
+                method: 'POST',
+                credentials: 'include'
+            });
+            if (!resp.ok) {
+                var err = await resp.json().catch(function() { return {}; });
+                throw new Error(err.error || 'Failed to get ticket');
+            }
+            var data = await resp.json();
+            log('Got ticket JWT (expires in ' + data.expires_in + 's)', 'success');
+            return data.ticket;
+        }
+
+        async function connectMqtt() {
+            if (!userPayload) {
+                log('Sign in with Google first', 'error');
+                return;
+            }
+
+            setMqttStatus('connecting', 'Getting ticket...');
+
+            var ticket;
+            try {
+                ticket = await getTicket();
+            } catch (e) {
+                setMqttStatus('error', 'Failed to get ticket');
+                log('Ticket error: ' + e.message, 'error');
+                return;
+            }
+
+            var brokerUrl = document.getElementById('brokerUrl').value.trim();
+            setMqttStatus('connecting', 'Connecting...');
+            log('Connecting to ' + brokerUrl + '...', 'info');
+
+            var sub = userPayload.google_sub || userPayload.email || 'anon';
+            var clientId = 'web-' + sub.substring(0, 8) + '-' + Date.now();
+
+            try {
+                mqttClient = mqtt.connect(brokerUrl, {
+                    clientId: clientId,
+                    protocolVersion: 5,
+                    clean: true,
+                    properties: {
+                        authenticationMethod: 'JWT',
+                        authenticationData: new TextEncoder().encode(ticket)
+                    }
+                });
+
+                mqttClient.on('connect', function() {
+                    setMqttStatus('connected', 'Connected');
+                    log('Connected to MQTT broker', 'success');
+                    document.getElementById('connectBtn').disabled = true;
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('listUsersBtn').disabled = false;
+                    document.getElementById('watchUsersBtn').disabled = false;
+
+                    mqttClient.subscribe(responseTopic, { qos: 1 });
+                    log('Subscribed to response topic', 'info');
+
+                    lookupOrCreateUser();
+                });
+
+                mqttClient.on('error', function(err) {
+                    setMqttStatus('error', 'Error: ' + err.message);
+                    log('MQTT Error: ' + err.message, 'error');
+                });
+
+                mqttClient.on('close', function() {
+                    setMqttStatus('disconnected', 'Disconnected');
+                    log('Connection closed', 'warn');
+                    document.getElementById('connectBtn').disabled = false;
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('listUsersBtn').disabled = true;
+                    document.getElementById('watchUsersBtn').disabled = true;
+                    document.getElementById('profileSection').classList.add('hidden');
+                    setProfileStatus('disconnected', 'Connect to MQTT first');
+                    currentUserId = null;
+                });
+
+                mqttClient.on('message', function(topic, message) {
+                    if (handleMqdbResponse(topic, message)) return;
+
+                    if (topic.indexOf('$DB/users/events/') === 0) {
+                        handleUserEvent(message);
+                    } else {
+                        log('Message on ' + topic + ': ' + message.toString(), 'info');
+                    }
+                });
+
+            } catch (err) {
+                setMqttStatus('error', 'Connection failed');
+                log('Connection error: ' + err.message, 'error');
+            }
+        }
+
+        function disconnectMqtt() {
+            if (mqttClient) {
+                mqttClient.end();
+                mqttClient = null;
+            }
+        }
+
+        async function logout() {
+            try {
+                await fetch(httpServerUrl + '/auth/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+                log('Logged out', 'success');
+            } catch (e) {
+                log('Logout error: ' + e.message, 'warn');
+            }
+
+            disconnectMqtt();
+            userPayload = null;
+            document.getElementById('userInfo').classList.add('hidden');
+            document.getElementById('logoutBtn').classList.add('hidden');
+            document.getElementById('connectBtn').disabled = true;
+            document.getElementById('googleSignInBtn').textContent = 'Sign in with Google';
+            document.getElementById('googleSignInBtn').style.pointerEvents = 'auto';
+            window.location.reload();
+        }
+
+        async function lookupOrCreateUser() {
+            setProfileStatus('connecting', 'Looking up your account...');
+            var googleSub = userPayload ? (userPayload.google_sub || userPayload.email) : null;
+            log('Looking up user by google_sub=' + googleSub, 'info');
+
+            try {
+                var listResult = await mqdbRequest('$DB/users/list', {
+                    filters: [{ field: 'google_sub', op: 'eq', value: googleSub }]
+                });
+
+                if (listResult.status === 'ok' && listResult.data && listResult.data.length > 0) {
+                    var user = listResult.data[0];
+                    currentUserId = user.id;
+                    setProfileStatus('connected', 'Welcome back, ' + (user.name || userPayload.email || 'User') + '!');
+                    log('Found existing user: ' + user.id, 'success');
+                    populateProfile(user);
+                } else {
+                    log('No existing user found, creating account...', 'info');
+                    var createResult = await mqdbRequest('$DB/users/create', {
+                        email: userPayload.email || '',
+                        name: userPayload.name || '',
+                        picture: userPayload.picture || '',
+                        google_sub: googleSub,
+                        bio: ''
+                    });
+
+                    if (createResult.status === 'ok' && createResult.data) {
+                        currentUserId = createResult.data.id;
+                        setProfileStatus('connected', 'Welcome! Account created for ' + (userPayload.name || userPayload.email));
+                        log('Created new user: ' + currentUserId, 'success');
+                        populateProfile(createResult.data);
+                    } else {
+                        setProfileStatus('error', 'Failed to create account');
+                        log('Create failed: ' + JSON.stringify(createResult), 'error');
+                    }
+                }
+
+                document.getElementById('profileSection').classList.remove('hidden');
+            } catch (err) {
+                setProfileStatus('error', 'Error: ' + err.message);
+                log('Profile lookup error: ' + err.message, 'error');
+            }
+        }
+
+        function populateProfile(user) {
+            document.getElementById('profileName').value = user.name || '';
+            document.getElementById('profileBio').value = user.bio || '';
+            document.getElementById('profileEmail').value = user.email || '';
+        }
+
+        async function saveProfile() {
+            if (!currentUserId) return;
+
+            var data = {
+                name: document.getElementById('profileName').value,
+                bio: document.getElementById('profileBio').value
+            };
+
+            log('Updating profile ' + currentUserId + '...', 'info');
+            try {
+                var result = await mqdbRequest('$DB/users/' + currentUserId + '/update', data);
+                if (result.status === 'ok') {
+                    setProfileStatus('connected', 'Profile saved!');
+                    log('Profile updated', 'success');
+                } else {
+                    log('Update failed: ' + (result.error || JSON.stringify(result)), 'error');
+                }
+            } catch (err) {
+                log('Update error: ' + err.message, 'error');
+            }
+        }
+
+        async function deleteProfile() {
+            if (!currentUserId) return;
+            if (!confirm('Delete your account? This cannot be undone.')) return;
+
+            log('Deleting user ' + currentUserId + '...', 'warn');
+            try {
+                var result = await mqdbRequest('$DB/users/' + currentUserId + '/delete', {});
+                if (result.status === 'ok') {
+                    setProfileStatus('disconnected', 'Account deleted');
+                    log('Account deleted', 'success');
+                    document.getElementById('profileSection').classList.add('hidden');
+                    currentUserId = null;
+                } else {
+                    log('Delete failed: ' + (result.error || JSON.stringify(result)), 'error');
+                }
+            } catch (err) {
+                log('Delete error: ' + err.message, 'error');
+            }
+        }
+
+        async function listUsers() {
+            log('Listing all users...', 'info');
+            try {
+                var result = await mqdbRequest('$DB/users/list', {});
+                var container = document.getElementById('usersList');
+                if (result.status === 'ok' && result.data) {
+                    var html = '';
+                    for (var i = 0; i < result.data.length; i++) {
+                        var u = result.data[i];
+                        html += '<div class="user-card">';
+                        if (u.picture) {
+                            html += '<img src="' + u.picture + '" alt="" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'" loading="lazy">';
+                        }
+                        html += '<div><strong>' + (u.name || 'unnamed') + '</strong>';
+                        if (u.email) html += '<br><small>' + u.email + '</small>';
+                        if (u.bio) html += '<br><em>' + u.bio + '</em>';
+                        html += '<br><small style="color:#999">id: ' + u.id + '</small>';
+                        html += '</div></div>';
+                    }
+                    container.innerHTML = html || '<p>No users found</p>';
+                    log('Found ' + result.data.length + ' user(s)', 'success');
+                } else {
+                    container.innerHTML = '<p>Error loading users</p>';
+                    log('List failed: ' + JSON.stringify(result), 'error');
+                }
+            } catch (err) {
+                log('List error: ' + err.message, 'error');
+            }
+        }
+
+        function watchUsers() {
+            if (!mqttClient || !mqttClient.connected) return;
+            mqttClient.subscribe('$DB/users/events/#', { qos: 1 }, function(err) {
+                if (err) {
+                    log('Watch subscribe error: ' + err.message, 'error');
+                } else {
+                    log('Watching user changes (subscribed to $DB/users/events/#)', 'success');
+                }
+            });
+        }
+
+        function handleUserEvent(message) {
+            try {
+                var event = JSON.parse(message.toString());
+                var badgeClass = event.operation || 'updated';
+                log('<span class="event-badge ' + badgeClass + '">' + badgeClass.toUpperCase() + '</span> ' +
+                    'User ' + (event.id || '?') + ' in entity "' + (event.entity || '?') + '"', 'info');
+                if (event.data) {
+                    log('<pre>' + JSON.stringify(event.data, null, 2) + '</pre>', 'info');
+                }
+                listUsers();
+            } catch (e) {
+                log('User event: ' + message.toString(), 'info');
+            }
+        }
+
+        async function loadConfig() {
+            try {
+                var response = await fetch('/config.json');
+                if (response.ok) {
+                    var config = await response.json();
+                    if (config.brokerUrl) {
+                        document.getElementById('brokerUrl').value = config.brokerUrl;
+                    }
+                    if (config.oauthUrl) {
+                        oauthUrl = config.oauthUrl;
+                        document.getElementById('googleSignInBtn').href = oauthUrl;
+                    }
+                    if (config.httpServerUrl) {
+                        httpServerUrl = config.httpServerUrl;
+                    }
+                    document.getElementById('configStatus').className = 'status connected';
+                    document.getElementById('configStatus').textContent = 'Configuration loaded';
+                    log('Configuration loaded from server', 'success');
+                } else {
+                    document.getElementById('configStatus').className = 'status disconnected';
+                    document.getElementById('configStatus').textContent = 'No config found - using defaults';
+                    log('No config.json found. Using defaults.', 'warn');
+                }
+            } catch (e) {
+                document.getElementById('configStatus').className = 'status disconnected';
+                document.getElementById('configStatus').textContent = 'No config found - using defaults';
+                log('Could not load config: ' + e.message, 'warn');
+            }
+
+            if (!oauthUrl) {
+                oauthUrl = 'http://localhost:8081/oauth/authorize';
+                document.getElementById('googleSignInBtn').href = oauthUrl;
+            }
+            if (!httpServerUrl) {
+                httpServerUrl = 'http://localhost:8081';
+            }
+
+            var fragment = parseFragment();
+            var justLoggedIn = false;
+            if (fragment && fragment.user) {
+                try {
+                    var decoded = atob(fragment.user.replace(/-/g, '+').replace(/_/g, '/'));
+                    var user = JSON.parse(decoded);
+                    log('Logged in as ' + (user.email || user.name), 'success');
+                    userPayload = user;
+                    showLoggedInState(user);
+                    justLoggedIn = true;
+                } catch (e) {
+                    log('Failed to decode user fragment', 'warn');
+                }
+                window.history.replaceState(null, '', window.location.pathname);
+            }
+
+            if (justLoggedIn) {
+                setTimeout(connectMqtt, 100);
+            } else {
+                var isLoggedIn = await checkSession();
+                if (isLoggedIn) {
+                    setTimeout(connectMqtt, 100);
+                }
+            }
+        }
+
+        loadConfig();
+    </script>
+</body>
+</html>

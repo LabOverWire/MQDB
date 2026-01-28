@@ -13,9 +13,10 @@ use mqtt5::QoS;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
     ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
-    StorageBackend, StorageConfig,
+    StorageBackend, StorageConfig, WebSocketConfig,
 };
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::auth::CompositeAuthProvider;
+use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
@@ -72,6 +73,8 @@ pub struct ClusterConfig {
     pub quic_key_file: Option<PathBuf>,
     pub bridge_out_only: bool,
     pub use_direct_quic: bool,
+    pub ws_bind_address: Option<SocketAddr>,
+    pub http_config: Option<crate::http::HttpServerConfig>,
 }
 
 impl ClusterConfig {
@@ -97,6 +100,8 @@ impl ClusterConfig {
             quic_key_file: None,
             bridge_out_only: false,
             use_direct_quic: false,
+            ws_bind_address: None,
+            http_config: None,
         }
     }
 
@@ -217,6 +222,18 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_direct_quic(mut self, use_direct_quic: bool) -> Self {
         self.use_direct_quic = use_direct_quic;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ws_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.ws_bind_address = Some(addr);
+        self
+    }
+
+    #[must_use]
+    pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
+        self.http_config = Some(config);
         self
     }
 }
@@ -377,6 +394,8 @@ pub struct ClusteredAgent {
     rx_main_queue: Option<flume::Receiver<InboundMessage>>,
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
     use_direct_quic: bool,
+    ws_bind_address: Option<SocketAddr>,
+    http_config: Option<crate::http::HttpServerConfig>,
 }
 
 impl ClusteredAgent {
@@ -531,6 +550,8 @@ impl ClusteredAgent {
             rx_main_queue: Some(rx_main_queue),
             rx_batch: Some(rx_batch),
             use_direct_quic: config.use_direct_quic,
+            ws_bind_address: config.ws_bind_address,
+            http_config: config.http_config,
         })
     }
 
@@ -663,8 +684,11 @@ impl ClusteredAgent {
             crate::auth_config::configure_broker_auth(&auth_cfg, &mut broker_config.auth_config)
                 .await
                 .map_err(|e| format!("auth setup failed: {e}"))?;
-        let (service_username, service_password) =
-            (auth_result.service_username, auth_result.service_password);
+        let (service_username, service_password, needs_composite) = (
+            auth_result.service_username,
+            auth_result.service_password,
+            auth_result.needs_composite,
+        );
 
         if self.use_quic {
             if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
@@ -677,6 +701,12 @@ impl ClusteredAgent {
                     "QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener"
                 );
             }
+        }
+
+        if let Some(ws_addr) = self.ws_bind_address {
+            let ws_config = WebSocketConfig::new().with_bind_addresses(vec![ws_addr]);
+            broker_config = broker_config.with_websocket(ws_config);
+            info!(ws_bind = %ws_addr, "WebSocket listener configured");
         }
 
         let cluster_addr: SocketAddr =
@@ -697,6 +727,20 @@ impl ClusteredAgent {
         }
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
+
+        if needs_composite
+            && let (Some(svc_user), Some(svc_pass)) = (&service_username, &service_password)
+        {
+            let primary = broker.auth_provider();
+            let fallback = PasswordAuthProvider::new();
+            fallback
+                .add_user(svc_user.clone(), svc_pass)
+                .map_err(|e| format!("failed to create service account: {e}"))?;
+            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
+            broker = broker.with_auth_provider(Arc::new(composite));
+            info!("composite auth provider configured for internal service clients");
+        }
+
         let mut ready_rx = broker.ready_receiver();
 
         let router = if use_external_bridge_manager {
@@ -955,6 +999,53 @@ impl ClusteredAgent {
             ctrl.transport()
                 .as_quic()
                 .map(QuicDirectTransport::local_publish_rx)
+        } else {
+            None
+        };
+
+        let _http_task = if let Some(http_config) = self.http_config.take() {
+            let http_bind = http_config.bind_address;
+            let http_shutdown_rx = self.shutdown_tx.subscribe();
+
+            let http_mqtt_client = mqtt5::MqttClient::new("mqdb-http-oauth");
+            let http_connect_ip = if self.bind_address.ip().is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                self.bind_address.ip()
+            };
+            let http_addr = format!("{}:{}", http_connect_ip, self.bind_address.port());
+
+            let http_svc_user = service_username.clone();
+            let http_svc_pass = service_password.clone();
+
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                let connect_result = if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
+                    let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
+                        .with_credentials(user, pass);
+                    Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
+                        .await
+                        .map(|_| ())
+                } else {
+                    http_mqtt_client.connect(&http_addr).await
+                };
+
+                if let Err(e) = connect_result {
+                    tracing::error!("Failed to connect HTTP OAuth MQTT client: {}", e);
+                    return;
+                }
+
+                info!(addr = %http_bind, "starting HTTP OAuth server");
+                let server = crate::http::HttpServer::new(
+                    http_config,
+                    std::sync::Arc::new(http_mqtt_client),
+                    http_shutdown_rx,
+                );
+                if let Err(e) = server.run().await {
+                    tracing::error!("HTTP server error: {}", e);
+                }
+            }))
         } else {
             None
         };

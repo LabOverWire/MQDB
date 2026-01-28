@@ -36,6 +36,7 @@ impl Default for AuthSetupConfig {
 pub struct AuthSetupResult {
     pub service_username: Option<String>,
     pub service_password: Option<String>,
+    pub needs_composite: bool,
 }
 
 /// # Errors
@@ -56,6 +57,11 @@ pub async fn configure_broker_auth(
     } else {
         AuthMethod::None
     };
+
+    let uses_enhanced_auth = matches!(
+        auth_method,
+        AuthMethod::ScramSha256 | AuthMethod::Jwt | AuthMethod::JwtFederated
+    );
 
     let mut service_username = None;
     let mut service_password = None;
@@ -79,6 +85,12 @@ pub async fn configure_broker_auth(
         service_username = Some(svc_user);
         service_password = Some(svc_pass);
         info!("password authentication configured with service account");
+    } else if uses_enhanced_auth {
+        let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
+        let svc_pass = uuid::Uuid::new_v4().to_string();
+        service_username = Some(svc_user);
+        service_password = Some(svc_pass);
+        auth_config.allow_anonymous = false;
     } else {
         auth_config.allow_anonymous = config.allow_anonymous;
     }
@@ -89,19 +101,16 @@ pub async fn configure_broker_auth(
 
     if let Some(ref path) = config.scram_file {
         auth_config.scram_file = Some(path.clone());
-        auth_config.allow_anonymous = true;
         info!("SCRAM-SHA-256 authentication configured");
     }
 
     if let Some(ref jwt) = config.jwt_config {
         auth_config.jwt_config = Some(jwt.clone());
-        auth_config.allow_anonymous = true;
         info!("JWT authentication configured");
     }
 
     if let Some(ref fed) = config.federated_jwt_config {
         auth_config.federated_jwt_config = Some(fed.clone());
-        auth_config.allow_anonymous = true;
         info!("federated JWT authentication configured");
     }
 
@@ -121,5 +130,6 @@ pub async fn configure_broker_auth(
     Ok(AuthSetupResult {
         service_username,
         service_password,
+        needs_composite: uses_enhanced_auth,
     })
 }

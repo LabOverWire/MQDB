@@ -8,6 +8,7 @@ pub const WILDCARDS: &str = "_wildcards";
 pub const OFFSETS: &str = "_offsets";
 pub const IDEMPOTENCY: &str = "_idemp";
 pub const CLIENT_LOCATIONS: &str = "_client_loc";
+pub const OAUTH_TOKENS: &str = "_oauth_tokens";
 
 pub const DB_DATA: &str = "_db_data";
 pub const DB_SCHEMA: &str = "_db_schema";

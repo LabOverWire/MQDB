@@ -33,6 +33,8 @@ pub mod database;
 pub mod dedup;
 #[cfg(feature = "native")]
 pub mod dispatcher;
+#[cfg(feature = "native")]
+pub mod http;
 pub mod outbox;
 #[cfg(feature = "native")]
 pub mod session;

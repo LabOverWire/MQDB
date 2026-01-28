@@ -570,6 +570,26 @@ struct AuthArgs {
     rate_limit_lockout_secs: u64,
 }
 
+#[derive(Args, Clone)]
+struct OAuthArgs {
+    #[arg(long, help = "HTTP server bind address for OAuth (e.g. 0.0.0.0:8081)")]
+    http_bind: Option<SocketAddr>,
+    #[arg(long, help = "Path to file containing Google OAuth client secret")]
+    oauth_client_secret: Option<PathBuf>,
+    #[arg(long, help = "OAuth redirect URI (default: http://localhost:{http_port}/oauth/callback)")]
+    oauth_redirect_uri: Option<String>,
+    #[arg(long, help = "URI to redirect browser after OAuth completes")]
+    oauth_frontend_redirect: Option<String>,
+    #[arg(long, default_value = "30", help = "Ticket JWT expiry in seconds (default: 30)")]
+    ticket_expiry_secs: u64,
+    #[arg(long, help = "Set Secure flag on session cookies (requires HTTPS)")]
+    cookie_secure: bool,
+    #[arg(long, help = "CORS allowed origin for auth endpoints (e.g. http://localhost:8000)")]
+    cors_origin: Option<String>,
+    #[arg(long, default_value = "10", help = "Max ticket requests per minute per session")]
+    ticket_rate_limit: u32,
+}
+
 #[derive(Subcommand)]
 enum AclAction {
     #[command(about = "Add a user ACL rule")]
@@ -670,6 +690,10 @@ enum AgentAction {
         quic_cert: Option<PathBuf>,
         #[arg(long, help = "Path to QUIC/TLS private key file (PEM format)")]
         quic_key: Option<PathBuf>,
+        #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
+        ws_bind: Option<SocketAddr>,
+        #[command(flatten)]
+        oauth: OAuthArgs,
     },
     Status {
         #[command(flatten)]
@@ -741,6 +765,10 @@ enum ClusterAction {
             help = "Skip TLS certificate verification for direct QUIC (use with self-signed certs)"
         )]
         quic_insecure: bool,
+        #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
+        ws_bind: Option<SocketAddr>,
+        #[command(flatten)]
+        oauth: Box<OAuthArgs>,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {
@@ -846,6 +874,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 durability_ms,
                 quic_cert,
                 quic_key,
+                ws_bind,
+                oauth,
             } => {
                 cmd_agent_start(AgentStartArgs {
                     bind,
@@ -855,6 +885,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     durability_ms,
                     quic_cert,
                     quic_key,
+                    ws_bind,
+                    oauth,
                 })
                 .await?;
             }
@@ -880,6 +912,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cluster_port_offset,
                 direct_quic,
                 quic_insecure,
+                ws_bind,
+                oauth,
             } => {
                 Box::pin(cmd_cluster_start(ClusterStartArgs {
                     node_id,
@@ -898,6 +932,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cluster_port_offset,
                     direct_quic,
                     quic_insecure,
+                    ws_bind,
+                    oauth: *oauth,
                 }))
                 .await?;
             }
@@ -1259,6 +1295,8 @@ struct AgentStartArgs {
     durability_ms: u64,
     quic_cert: Option<PathBuf>,
     quic_key: Option<PathBuf>,
+    ws_bind: Option<SocketAddr>,
+    oauth: OAuthArgs,
 }
 
 async fn cmd_agent_start(args: AgentStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1280,6 +1318,14 @@ async fn cmd_agent_start(args: AgentStartArgs) -> Result<(), Box<dyn std::error:
 
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         agent = agent.with_quic_certs(cert, key);
+    }
+    if let Some(ws_addr) = args.ws_bind {
+        agent = agent.with_ws_bind_address(ws_addr);
+    }
+
+    if let Some(http_bind) = args.oauth.http_bind {
+        let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
+        agent = agent.with_http_config(http_config);
     }
 
     let agent = Arc::new(agent);
@@ -1313,6 +1359,8 @@ struct ClusterStartArgs {
     cluster_port_offset: u16,
     direct_quic: bool,
     quic_insecure: bool,
+    ws_bind: Option<SocketAddr>,
+    oauth: OAuthArgs,
 }
 
 async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -1362,6 +1410,13 @@ async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::er
     }
     if args.quic_insecure {
         config = config.with_quic_insecure(true);
+    }
+    if let Some(ws_addr) = args.ws_bind {
+        config = config.with_ws_bind_address(ws_addr);
+    }
+    if let Some(http_bind) = args.oauth.http_bind {
+        let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
+        config = config.with_http_config(http_config);
     }
 
     let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
@@ -1646,6 +1701,69 @@ fn build_auth_setup_config(
         cert_auth_file: auth.cert_auth_file.clone(),
         rate_limit,
         no_rate_limit: auth.no_rate_limit,
+    })
+}
+
+fn build_http_config(
+    http_bind: SocketAddr,
+    auth: &AuthArgs,
+    oauth: &OAuthArgs,
+) -> Result<mqdb::http::HttpServerConfig, Box<dyn std::error::Error>> {
+    let client_secret = match oauth.oauth_client_secret.as_ref() {
+        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
+        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
+    };
+
+    let jwt_key_path = auth
+        .jwt_key
+        .as_ref()
+        .ok_or("--jwt-key is required for OAuth JWT signing")?;
+    let jwt_key_bytes = std::fs::read_to_string(jwt_key_path)?.trim().as_bytes().to_vec();
+
+    let client_id = if let Some(ref fed_config_path) = auth.federated_jwt_config {
+        let content = std::fs::read_to_string(fed_config_path)?;
+        let config: serde_json::Value = serde_json::from_str(&content)?;
+        config
+            .get("providers")
+            .and_then(|p| p.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|p| p.get("audience"))
+            .and_then(|a| a.as_str())
+            .map(String::from)
+            .ok_or("federated JWT config must have providers[0].audience for OAuth client_id")?
+    } else if let Some(ref aud) = auth.jwt_audience {
+        aud.clone()
+    } else {
+        return Err("--jwt-audience or --federated-jwt-config required for OAuth client_id".into());
+    };
+
+    let redirect_uri = oauth.oauth_redirect_uri.as_ref().map_or_else(
+        || format!("http://localhost:{}/oauth/callback", http_bind.port()),
+        String::from,
+    );
+
+    let issuer = auth.jwt_issuer.clone().unwrap_or_else(|| "mqdb".to_string());
+    let audience = auth.jwt_audience.clone().or_else(|| Some(client_id.clone()));
+
+    Ok(mqdb::http::HttpServerConfig {
+        bind_address: http_bind,
+        oauth_config: mqdb::http::OAuthConfig {
+            client_id,
+            client_secret,
+            redirect_uri,
+        },
+        jwt_config: mqdb::http::JwtSigningConfig {
+            algorithm: mqdb::http::JwtSigningAlgorithm::HS256,
+            key_bytes: jwt_key_bytes,
+            issuer,
+            audience,
+            expiry_secs: 3600,
+        },
+        frontend_redirect_uri: oauth.oauth_frontend_redirect.clone(),
+        ticket_expiry_secs: oauth.ticket_expiry_secs,
+        cookie_secure: oauth.cookie_secure,
+        cors_origin: oauth.cors_origin.clone(),
+        ticket_rate_limit: oauth.ticket_rate_limit,
     })
 }
 

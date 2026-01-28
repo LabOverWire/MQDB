@@ -1,7 +1,10 @@
 use crate::auth_config::AuthSetupConfig;
 use crate::{Database, Response};
-use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig};
-use mqtt5::broker::{BrokerConfig, MqttBroker};
+use mqtt5::broker::config::{
+    FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig, WebSocketConfig,
+};
+use mqtt5::broker::auth::CompositeAuthProvider;
+use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -33,6 +36,8 @@ pub struct MqdbAgent {
     backup_dir: PathBuf,
     quic_cert_file: Option<PathBuf>,
     quic_key_file: Option<PathBuf>,
+    ws_bind_address: Option<SocketAddr>,
+    http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
 }
 
 impl MqdbAgent {
@@ -52,6 +57,8 @@ impl MqdbAgent {
             backup_dir,
             quic_cert_file: None,
             quic_key_file: None,
+            ws_bind_address: None,
+            http_config: std::sync::Mutex::new(None),
         }
     }
 
@@ -100,6 +107,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_ws_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.ws_bind_address = Some(addr);
+        self
+    }
+
+    #[must_use]
     pub fn with_auth_setup(mut self, config: AuthSetupConfig) -> Self {
         self.auth_setup = config;
         self
@@ -141,6 +154,13 @@ impl MqdbAgent {
         self
     }
 
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn with_http_config(self, config: crate::http::HttpServerConfig) -> Self {
+        *self.http_config.lock().expect("http_config lock") = Some(config);
+        self
+    }
+
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
     #[allow(clippy::too_many_lines)]
@@ -159,14 +179,15 @@ impl MqdbAgent {
             ..Default::default()
         };
 
-        let (service_username, service_password) = if self.service_username.is_some() {
-            (self.service_username.clone(), self.service_password.clone())
-        } else {
-            let result =
-                crate::auth_config::configure_broker_auth(&self.auth_setup, &mut config.auth_config)
-                    .await?;
-            (result.service_username, result.service_password)
-        };
+        let (service_username, service_password, needs_composite) =
+            if self.service_username.is_some() {
+                (self.service_username.clone(), self.service_password.clone(), false)
+            } else {
+                let result =
+                    crate::auth_config::configure_broker_auth(&self.auth_setup, &mut config.auth_config)
+                        .await?;
+                (result.service_username, result.service_password, result.needs_composite)
+            };
 
         if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
             let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
@@ -175,7 +196,24 @@ impl MqdbAgent {
             info!(quic_bind = %self.bind_address, "QUIC listener configured");
         }
 
+        if let Some(ws_addr) = self.ws_bind_address {
+            let ws_config = WebSocketConfig::new().with_bind_addresses(vec![ws_addr]);
+            config = config.with_websocket(ws_config);
+            info!(ws_bind = %ws_addr, "WebSocket listener configured");
+        }
+
         let mut broker = MqttBroker::with_config(config).await?;
+
+        if needs_composite
+            && let (Some(svc_user), Some(svc_pass)) = (&service_username, &service_password)
+        {
+            let primary = broker.auth_provider();
+            let fallback = PasswordAuthProvider::new();
+            fallback.add_user(svc_user.clone(), svc_pass)?;
+            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
+            broker = broker.with_auth_provider(Arc::new(composite));
+            info!("composite auth provider configured for internal service clients");
+        }
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
@@ -332,11 +370,59 @@ impl MqdbAgent {
             }
         });
 
+        let http_task = if let Some(http_config) = self.http_config.lock().ok().and_then(|mut guard| guard.take()) {
+            let http_bind = http_config.bind_address;
+            let http_shutdown_rx = self.shutdown_tx.subscribe();
+
+            let http_mqtt_client = MqttClient::new("mqdb-http-oauth");
+            let http_connect_ip = if bind_addr.ip().is_unspecified() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                bind_addr.ip()
+            };
+            let http_addr = format!("{}:{}", http_connect_ip, bind_addr.port());
+            let http_creds = (service_username.clone(), service_password.clone());
+
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(mqtt5::time::Duration::from_millis(300)).await;
+
+                let connect_result = if let (Some(user), Some(pass)) = http_creds {
+                    let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
+                        .with_credentials(user, pass);
+                    Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
+                        .await
+                        .map(|_| ())
+                } else {
+                    http_mqtt_client.connect(&http_addr).await
+                };
+
+                if let Err(e) = connect_result {
+                    error!("Failed to connect HTTP OAuth MQTT client: {}", e);
+                    return;
+                }
+
+                info!(addr = %http_bind, "starting HTTP OAuth server");
+                let server = crate::http::HttpServer::new(
+                    http_config,
+                    Arc::new(http_mqtt_client),
+                    http_shutdown_rx,
+                );
+                if let Err(e) = server.run().await {
+                    error!("HTTP server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
+
         broker.run().await?;
 
         let _ = self.shutdown_tx.send(());
         let _ = handler_task.await;
         let _ = event_task.await;
+        if let Some(http) = http_task {
+            let _ = http.await;
+        }
 
         Ok(())
     }

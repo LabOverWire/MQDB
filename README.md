@@ -361,17 +361,59 @@ agent.run().await?;
 
 ### ACL Configuration
 
+ACL rules control per-user topic access. MQDB supports direct user rules, RBAC roles, and role assignment.
+
 ```
-# Admin has full access
+# Direct user rules
 user admin topic $DB/# permission readwrite
 
-# Alice can only access users
-user alice topic $DB/users/# permission readwrite
-user alice topic $DB/# permission deny
+# Role-based access control (RBAC)
+role editor topic $DB/users/# permission readwrite
+role editor topic $DB/orders/# permission readwrite
 
-# Restrict admin operations
-user * topic $DB/_admin/# permission deny
-user admin topic $DB/_admin/# permission readwrite
+role viewer topic $DB/+/list permission write
+role viewer topic $DB/+/read permission write
+role viewer topic $DB/# permission deny
+
+# Assign roles to users
+assign alice editor
+assign bob viewer
+
+# Wildcard rules (apply to all users)
+user * topic $DB/+/events/# permission read
+user * topic +/responses permission readwrite
+```
+
+Permission values: `readwrite`, `read` (subscribe only), `write` (publish only), `deny`.
+
+### Authentication
+
+MQDB supports multiple authentication methods, configurable via agent/cluster start flags:
+
+**Password file** (`--passwd`): Simple username:password file (bcrypt hashed via `mqdb passwd`).
+
+**SCRAM-SHA-256** (`--scram-file`): Challenge-response authentication without transmitting passwords. Generate credentials with `mqdb scram`.
+
+**JWT** (`--jwt-algorithm`, `--jwt-key`): Token-based authentication using the MQTT password field. Supports HS256, RS256, ES256 algorithms with optional issuer/audience validation.
+
+**Federated JWT** (`--federated-jwt-config`): Multiple JWT issuers with per-issuer keys and validation rules, configured via a JSON file.
+
+**Rate limiting** (enabled by default): Protects against brute-force attacks. Configurable via `--rate-limit-max-attempts`, `--rate-limit-window-secs`, `--rate-limit-lockout-secs`. Disable with `--no-rate-limit`.
+
+```bash
+# Agent with password + ACL auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb --passwd passwd.txt --acl acl.txt
+
+# Agent with SCRAM + ACL auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb --scram-file scram.txt --acl acl.txt
+
+# Agent with JWT auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
+    --jwt-algorithm hs256 --jwt-key secret.key --jwt-issuer myapp --acl acl.txt
+
+# Agent with federated JWT (multiple issuers)
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
+    --federated-jwt-config jwt_providers.json --acl acl.txt
 ```
 
 ## Distributed Clustering
@@ -492,7 +534,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 - Cross-node pub/sub with automatic routing
 - TTL expiration (60-second cleanup interval)
 - Schema validation and registration
-- Authentication with password file (auto-generated internal credentials)
+- Authentication (password file, SCRAM-SHA-256, JWT, federated JWT, rate limiting; auto-generated internal credentials for inter-node traffic)
 
 **Limited Support:**
 - **Backups**: Creates per-node backup only (not cluster-wide snapshot)
@@ -518,8 +560,8 @@ cargo build --release --bin mqdb
 ### Commands
 
 ```bash
-# Start agent
-mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb
+# Start agent (with optional auth)
+mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl acl.txt
 
 # CRUD operations
 mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
@@ -553,6 +595,25 @@ mqdb constraint list users
 mqdb backup create --name daily_backup
 mqdb backup list
 mqdb restore --name daily_backup
+
+# Password management
+mqdb passwd admin -b admin123 -f passwd.txt
+mqdb passwd admin --delete -f passwd.txt
+
+# SCRAM credential management
+mqdb scram admin -b admin123 -f scram.txt
+mqdb scram admin -b admin123 -f scram.txt -i 8192
+
+# ACL management
+mqdb acl add admin '$DB/#' readwrite -f acl.txt
+mqdb acl remove admin -f acl.txt
+mqdb acl role-add editor '$DB/users/#' readwrite -f acl.txt
+mqdb acl role-remove editor -f acl.txt
+mqdb acl assign alice editor -f acl.txt
+mqdb acl unassign alice editor -f acl.txt
+mqdb acl check alice '$DB/users/create' pub -f acl.txt
+mqdb acl list -f acl.txt
+mqdb acl user-roles alice -f acl.txt
 ```
 
 ### Filter Syntax
@@ -652,7 +713,12 @@ cargo run --example parking_lot
 ### Phase 6: MQTT Integration ✓
 - [x] Embedded MQTT broker (MqdbAgent)
 - [x] Authentication with password file
-- [x] ACL-based authorization
+- [x] SCRAM-SHA-256 challenge-response authentication
+- [x] JWT authentication (HS256, RS256, ES256)
+- [x] Federated JWT (multiple issuers)
+- [x] Authentication rate limiting (brute-force protection)
+- [x] ACL-based authorization with RBAC roles
+- [x] ACL CLI management (add/remove/role-add/assign/check/list)
 - [x] CRUD operations via MQTT topics
 - [x] Admin topics for schema/constraint/backup
 - [x] CLI tool with all operations
