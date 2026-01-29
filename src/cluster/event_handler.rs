@@ -59,6 +59,281 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
         let _ = ctrl.transport().broadcast(msg).await;
     }
+
+    fn resolve_connected_node(ctrl: &NodeController<T>, client_id: &str) -> Option<NodeId> {
+        ctrl.stores().client_locations.get(client_id).or_else(|| {
+            ctrl.stores()
+                .sessions
+                .get(client_id)
+                .filter(|s| s.connected == 1)
+                .and_then(|s| NodeId::validated(s.connected_node))
+        })
+    }
+
+    fn collect_remote_targets(
+        ctrl: &NodeController<T>,
+        targets: impl IntoIterator<Item = ForwardTarget>,
+        local_node: NodeId,
+    ) -> HashMap<NodeId, Vec<ForwardTarget>> {
+        let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+        for target in targets {
+            let connected_node = Self::resolve_connected_node(ctrl, &target.client_id);
+            if let Some(target_node) = connected_node
+                && target_node != local_node
+            {
+                remote_nodes.entry(target_node).or_default().push(target);
+            }
+        }
+        remote_nodes
+    }
+
+    async fn forward_publish_to_remotes(
+        transport: &T,
+        origin: NodeId,
+        topic: &str,
+        qos: u8,
+        retain: bool,
+        payload: &[u8],
+        remote_nodes: HashMap<NodeId, Vec<ForwardTarget>>,
+    ) {
+        for (target_node, targets) in remote_nodes {
+            let fwd = ForwardedPublish::new(
+                origin,
+                topic.to_string(),
+                qos,
+                retain,
+                payload.to_vec(),
+                targets,
+            );
+            let fwd_msg = ClusterMessage::ForwardedPublish(fwd);
+            if let Err(e) = transport.send(target_node, fwd_msg).await {
+                warn!(target = target_node.get(), error = %e, "failed to forward publish");
+            } else {
+                debug!(
+                    target = target_node.get(),
+                    topic, "forwarded publish to node"
+                );
+            }
+        }
+    }
+
+    async fn handle_wildcard_subscribe(
+        ctrl: &mut NodeController<T>,
+        topic: &str,
+        client_id: &str,
+        qos: u8,
+    ) {
+        let client_partition = crate::cluster::session_partition(client_id);
+        let result = ctrl.stores_mut().subscribe_wildcard_replicated(
+            topic,
+            client_id,
+            client_partition,
+            qos,
+            SubscriptionType::Mqtt,
+        );
+        if result.is_ok() {
+            let broadcast = WildcardBroadcast::subscribe(
+                topic,
+                client_id,
+                client_partition,
+                qos,
+                SubscriptionType::Mqtt as u8,
+            );
+            let msg = ClusterMessage::WildcardBroadcast(broadcast);
+            let _ = ctrl.transport().broadcast(msg).await;
+            debug!(
+                topic,
+                client_id, "broadcast wildcard subscription to cluster"
+            );
+        }
+    }
+
+    async fn handle_topic_subscribe(
+        ctrl: &mut NodeController<T>,
+        topic: &str,
+        client_id: &str,
+        qos: u8,
+    ) {
+        let client_partition = crate::cluster::session_partition(client_id);
+        let topic_partition = crate::cluster::topic_partition(topic);
+        debug!(
+            client_id,
+            topic,
+            ?topic_partition,
+            ?client_partition,
+            "adding topic subscription"
+        );
+        let _ = ctrl
+            .stores_mut()
+            .topics
+            .subscribe(topic, client_id, client_partition, qos);
+        let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
+        if is_response_topic {
+            trace!(topic, client_id, "skipping broadcast for response topic");
+        } else {
+            let broadcast =
+                TopicSubscriptionBroadcast::subscribe(topic, client_id, client_partition, qos);
+            Self::broadcast_topic_subscription(ctrl, broadcast).await;
+            debug!(topic, client_id, "broadcast topic subscription to cluster");
+        }
+    }
+
+    async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
+        debug!(topic = %event.topic, "handling $DB/ request");
+        let start = std::time::Instant::now();
+        let mut ctrl = self.controller.write().await;
+        #[allow(clippy::cast_possible_truncation)]
+        let t_lock = start.elapsed().as_micros() as u64;
+        if let Some(response) = self
+            .db_handler
+            .handle_publish(
+                &mut ctrl,
+                event.topic.as_ref(),
+                &event.payload,
+                event.response_topic.as_deref(),
+                event.correlation_data.as_deref(),
+            )
+            .await
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            let t_handle = start.elapsed().as_micros() as u64;
+            ctrl.transport()
+                .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                .await;
+            #[allow(clippy::cast_possible_truncation)]
+            let t_queue = start.elapsed().as_micros() as u64;
+            tracing::info!(
+                node = node_id.get(),
+                t_lock,
+                t_handle,
+                t_queue,
+                "db_event_timing"
+            );
+        }
+    }
+
+    async fn route_and_forward_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
+        let (ctrl, try_read_success) = match self.controller.try_read() {
+            Ok(guard) => (guard, true),
+            Err(_) => (self.controller.read().await, false),
+        };
+        tracing::debug!(try_read_success, "publish_routing_lock");
+        let topic = event.topic.as_ref();
+
+        let wildcards = ctrl.stores().wildcards.match_topic(topic);
+        let router = PublishRouter::new(&ctrl.stores().topics);
+        let targets = router.route_targets(topic, &wildcards);
+
+        debug!(
+            topic,
+            target_count = targets.len(),
+            wildcard_matches = wildcards.len(),
+            "routing publish"
+        );
+
+        let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+        for target in targets {
+            let connected_node = Self::resolve_connected_node(&ctrl, &target.client_id);
+            let is_local = connected_node == Some(node_id);
+
+            debug!(
+                client_id = %target.client_id,
+                client_partition = ?target.client_partition,
+                ?connected_node,
+                is_local,
+                "routing target"
+            );
+
+            if let Some(target_node) = connected_node
+                && target_node != node_id
+            {
+                remote_nodes
+                    .entry(target_node)
+                    .or_default()
+                    .push(ForwardTarget::new(target.client_id, target.qos));
+            }
+        }
+
+        if remote_nodes.is_empty() {
+            drop(ctrl);
+        } else {
+            let transport = ctrl.transport().clone();
+            drop(ctrl);
+
+            Self::forward_publish_to_remotes(
+                &transport,
+                node_id,
+                topic,
+                qos_to_u8(event.qos),
+                event.retain,
+                &event.payload,
+                remote_nodes,
+            )
+            .await;
+        }
+    }
+
+    fn prepare_lwt_forwarding(
+        ctrl: &NodeController<T>,
+        node_id: NodeId,
+        client_id: &str,
+    ) -> Option<LwtForwardingData<T>> {
+        let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
+        let prepared = lwt_publisher.prepare_lwt(client_id);
+
+        debug!(
+            client_id,
+            has_lwt = prepared.as_ref().is_ok_and(Option::is_some),
+            "checking LWT conditions"
+        );
+
+        let Ok(Some(lwt)) = prepared else {
+            return None;
+        };
+
+        debug!(client_id, topic = %lwt.topic, qos = lwt.qos, "routing LWT to subscribers");
+
+        let wildcards = ctrl.stores().wildcards.match_topic(&lwt.topic);
+        let router = PublishRouter::new(&ctrl.stores().topics);
+        let route = router.route_with_wildcards(&lwt.topic, &wildcards);
+
+        let remote_nodes = Self::collect_remote_targets(
+            ctrl,
+            route
+                .targets
+                .into_iter()
+                .map(|t| ForwardTarget::new(t.client_id, t.qos)),
+            node_id,
+        );
+
+        let is_clean_session = ctrl
+            .stores()
+            .sessions
+            .get(client_id)
+            .is_some_and(|s| s.is_clean_session());
+
+        Some(LwtForwardingData {
+            transport: ctrl.transport().clone(),
+            topic: lwt.topic,
+            qos: lwt.qos,
+            retain: lwt.retain,
+            payload: lwt.payload,
+            token: lwt.token,
+            remote_nodes,
+            is_clean_session,
+        })
+    }
+}
+
+struct LwtForwardingData<T: ClusterTransport> {
+    transport: T,
+    topic: String,
+    qos: u8,
+    retain: bool,
+    payload: Vec<u8>,
+    token: [u8; 16],
+    remote_nodes: HashMap<NodeId, Vec<ForwardTarget>>,
+    is_clean_session: bool,
 }
 
 impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T> {
@@ -158,7 +433,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     fn on_client_disconnect<'a>(
         &'a self,
         event: ClientDisconnectEvent,
@@ -184,7 +458,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
                 s.set_connected(false, node_id, timestamp);
             });
-
             if let Ok((_session, write)) = result {
                 ctrl.write_or_forward(write).await;
             }
@@ -201,112 +474,47 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             );
             ctrl.write_or_forward(location_delete).await;
 
-            if event.unexpected {
+            if event.unexpected
+                && let Some(lwt_data) = Self::prepare_lwt_forwarding(&ctrl, node_id, client_id)
+            {
+                let is_clean = lwt_data.is_clean_session;
+                let token = lwt_data.token;
+                drop(ctrl);
+
+                Self::forward_publish_to_remotes(
+                    &lwt_data.transport,
+                    node_id,
+                    &lwt_data.topic,
+                    lwt_data.qos,
+                    lwt_data.retain,
+                    &lwt_data.payload,
+                    lwt_data.remote_nodes,
+                )
+                .await;
+
+                let mut ctrl = self.controller.write().await;
                 let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
-                let prepared = lwt_publisher.prepare_lwt(client_id);
-
-                debug!(
-                    client_id,
-                    has_lwt = prepared.as_ref().is_ok_and(Option::is_some),
-                    "checking LWT conditions"
-                );
-
-                if let Ok(Some(lwt)) = prepared {
-                    debug!(client_id, topic = %lwt.topic, qos = lwt.qos, "routing LWT to subscribers");
-
-                    let wildcards = ctrl.stores().wildcards.match_topic(&lwt.topic);
-                    let router = PublishRouter::new(&ctrl.stores().topics);
-                    let route = router.route_with_wildcards(&lwt.topic, &wildcards);
-
-                    let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
-                    for target in route.targets {
-                        let connected_node = ctrl
-                            .stores()
-                            .client_locations
-                            .get(&target.client_id)
-                            .or_else(|| {
-                                ctrl.stores()
-                                    .sessions
-                                    .get(&target.client_id)
-                                    .filter(|s| s.connected == 1)
-                                    .and_then(|s| NodeId::validated(s.connected_node))
-                            });
-
-                        if let Some(target_node) = connected_node
-                            && target_node != node_id
-                        {
-                            remote_nodes
-                                .entry(target_node)
-                                .or_default()
-                                .push(ForwardTarget::new(target.client_id, target.qos));
-                        }
-                    }
-
-                    let transport = ctrl.transport().clone();
-                    let session = ctrl.stores().sessions.get(client_id);
-                    let is_clean_session = session.is_some_and(|s| s.is_clean_session());
-                    drop(ctrl);
-
-                    for (target_node, targets) in remote_nodes {
-                        let fwd = ForwardedPublish::new(
-                            node_id,
-                            lwt.topic.clone(),
-                            lwt.qos,
-                            lwt.retain,
-                            lwt.payload.clone(),
-                            targets,
-                        );
-                        let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
-                        if let Err(e) = transport.send(target_node, fwd_msg).await {
-                            warn!(target = target_node.get(), error = %e, "failed to forward LWT");
-                        } else {
-                            debug!(target = target_node.get(), topic = %lwt.topic, "forwarded LWT to node");
-                        }
-                    }
-
-                    let mut ctrl = self.controller.write().await;
-                    let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
-                    if let Err(e) = lwt_publisher.complete_lwt(client_id, lwt.token) {
-                        warn!(client_id, error = %e, "failed to mark LWT as published");
-                    } else {
-                        debug!(client_id, "marked LWT as published");
-                    }
-
-                    if is_clean_session {
-                        debug!(
-                            client_id,
-                            "clean_session disconnect - clearing subscriptions"
-                        );
-                        clear_client_subscriptions(&mut ctrl, client_id).await;
-                        let _ = ctrl.stores_mut().remove_session_replicated(client_id);
-                    }
-                    return;
+                if let Err(e) = lwt_publisher.complete_lwt(client_id, token) {
+                    warn!(client_id, error = %e, "failed to mark LWT as published");
+                } else {
+                    debug!(client_id, "marked LWT as published");
                 }
-            }
 
-            let session = ctrl.stores().sessions.get(client_id);
-            if let Some(session) = session {
-                if session.is_clean_session() {
+                if is_clean {
                     debug!(
                         client_id,
                         "clean_session disconnect - clearing subscriptions"
                     );
                     clear_client_subscriptions(&mut ctrl, client_id).await;
                     let _ = ctrl.stores_mut().remove_session_replicated(client_id);
-                } else {
-                    debug!(
-                        client_id,
-                        clean_session = session.clean_session,
-                        "session is NOT clean_session, skipping subscription cleanup"
-                    );
                 }
-            } else {
-                debug!(client_id, "session not found for disconnect");
+                return;
             }
+
+            handle_clean_session_cleanup(&mut ctrl, client_id).await;
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     fn on_client_subscribe<'a>(
         &'a self,
         event: ClientSubscribeEvent,
@@ -324,7 +532,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 "client subscribed"
             );
 
-            let mut retained_to_deliver: Vec<super::retained_store::RetainedMessage> = Vec::new();
             let mut pending_queries: Vec<(
                 String,
                 tokio::sync::oneshot::Receiver<Vec<super::retained_store::RetainedMessage>>,
@@ -348,14 +555,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     let is_wildcard = topic.contains('+') || topic.contains('#');
                     let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
 
-                    if is_wildcard {
-                        trace!(
-                            topic,
-                            "wildcard subscription - broker handles local retained"
-                        );
-                    } else if is_response_topic {
-                        trace!(topic, "response topic - skipping retained query");
-                    } else {
+                    if !is_wildcard && !is_response_topic {
                         trace!(topic, "broker handles local retained delivery natively");
                         if let Some(rx) = ctrl.start_async_retained_query(topic).await {
                             debug!(topic, "started remote retained query");
@@ -366,103 +566,24 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     let (_snapshot, write) = ctrl
                         .stores_mut()
                         .add_subscription_replicated(client_id, topic, qos);
-
                     ctrl.write_or_forward(write).await;
 
                     if is_wildcard {
-                        let client_partition = crate::cluster::session_partition(client_id);
-                        let result = ctrl.stores_mut().subscribe_wildcard_replicated(
-                            topic,
-                            client_id,
-                            client_partition,
-                            qos,
-                            SubscriptionType::Mqtt,
-                        );
-                        if result.is_ok() {
-                            let broadcast = WildcardBroadcast::subscribe(
-                                topic,
-                                client_id,
-                                client_partition,
-                                qos,
-                                SubscriptionType::Mqtt as u8,
-                            );
-                            let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                            let _ = ctrl.transport().broadcast(msg).await;
-                            debug!(
-                                topic,
-                                client_id, "broadcast wildcard subscription to cluster"
-                            );
-                        }
+                        Self::handle_wildcard_subscribe(&mut ctrl, topic, client_id, qos).await;
                     } else {
-                        let client_partition = crate::cluster::session_partition(client_id);
-                        let topic_partition = crate::cluster::topic_partition(topic);
-                        debug!(
-                            client_id,
-                            topic,
-                            ?topic_partition,
-                            ?client_partition,
-                            "adding topic subscription"
-                        );
-                        let _ = ctrl.stores_mut().topics.subscribe(
-                            topic,
-                            client_id,
-                            client_partition,
-                            qos,
-                        );
-                        if is_response_topic {
-                            trace!(topic, client_id, "skipping broadcast for response topic");
-                        } else {
-                            let broadcast = TopicSubscriptionBroadcast::subscribe(
-                                topic,
-                                client_id,
-                                client_partition,
-                                qos,
-                            );
-                            Self::broadcast_topic_subscription(&ctrl, broadcast).await;
-                            debug!(topic, client_id, "broadcast topic subscription to cluster");
-                        }
+                        Self::handle_topic_subscribe(&mut ctrl, topic, client_id, qos).await;
                     }
                 }
             }
 
-            for (topic, rx) in pending_queries {
-                match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-                    Ok(Ok(messages)) => {
-                        debug!(
-                            topic,
-                            count = messages.len(),
-                            "received remote retained messages"
-                        );
-                        retained_to_deliver.extend(messages);
-                    }
-                    Ok(Err(_)) => {
-                        warn!(topic, "retained query channel closed");
-                    }
-                    Err(_) => {
-                        warn!(topic, "retained query timed out");
-                    }
-                }
-            }
+            let retained_to_deliver = collect_pending_retained(pending_queries).await;
 
             if !retained_to_deliver.is_empty() {
                 let ctrl = self.controller.read().await;
                 let transport = ctrl.transport().clone();
                 drop(ctrl);
 
-                let mut synced = synced_topics.write().await;
-                for msg in retained_to_deliver {
-                    let topic = msg.topic_str().to_string();
-                    synced.insert(topic.clone(), Instant::now());
-                    debug!(
-                        topic,
-                        qos = msg.qos,
-                        payload_len = msg.payload.len(),
-                        "delivering retained message to subscriber"
-                    );
-                    transport
-                        .queue_local_publish_retained(topic, msg.payload.clone(), msg.qos)
-                        .await;
-                }
+                deliver_retained_messages(&transport, &synced_topics, retained_to_deliver).await;
             }
         })
     }
@@ -536,7 +657,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         })
     }
 
-    #[allow(clippy::too_many_lines)]
     fn on_client_publish<'a>(
         &'a self,
         event: ClientPublishEvent,
@@ -562,120 +682,11 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             }
 
             if event.topic.starts_with("$DB/") {
-                debug!(topic = %event.topic, "handling $DB/ request");
-                let start = std::time::Instant::now();
-                let mut ctrl = self.controller.write().await;
-                #[allow(clippy::cast_possible_truncation)]
-                let t_lock = start.elapsed().as_micros() as u64;
-                if let Some(response) = self
-                    .db_handler
-                    .handle_publish(
-                        &mut ctrl,
-                        event.topic.as_ref(),
-                        &event.payload,
-                        event.response_topic.as_deref(),
-                        event.correlation_data.as_deref(),
-                    )
-                    .await
-                {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let t_handle = start.elapsed().as_micros() as u64;
-                    ctrl.transport()
-                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
-                        .await;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let t_queue = start.elapsed().as_micros() as u64;
-                    tracing::info!(
-                        node = node_id.get(),
-                        t_lock,
-                        t_handle,
-                        t_queue,
-                        "db_event_timing"
-                    );
-                }
+                self.handle_db_publish(node_id, &event).await;
                 return;
             }
 
-            let (ctrl, try_read_success) = match self.controller.try_read() {
-                Ok(guard) => (guard, true),
-                Err(_) => (self.controller.read().await, false),
-            };
-            tracing::debug!(try_read_success, "publish_routing_lock");
-            let topic = event.topic.as_ref();
-
-            let wildcards = ctrl.stores().wildcards.match_topic(topic);
-            let router = PublishRouter::new(&ctrl.stores().topics);
-            let targets = router.route_targets(topic, &wildcards);
-
-            debug!(
-                topic,
-                target_count = targets.len(),
-                wildcard_matches = wildcards.len(),
-                "routing publish"
-            );
-
-            let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
-            for target in targets {
-                let connected_node = ctrl
-                    .stores()
-                    .client_locations
-                    .get(&target.client_id)
-                    .or_else(|| {
-                        ctrl.stores()
-                            .sessions
-                            .get(&target.client_id)
-                            .filter(|s| s.connected == 1)
-                            .and_then(|s| NodeId::validated(s.connected_node))
-                    });
-
-                let is_local = connected_node == Some(node_id);
-
-                debug!(
-                    client_id = %target.client_id,
-                    client_partition = ?target.client_partition,
-                    ?connected_node,
-                    is_local,
-                    "routing target"
-                );
-
-                if let Some(target_node) = connected_node
-                    && target_node != node_id
-                {
-                    remote_nodes
-                        .entry(target_node)
-                        .or_default()
-                        .push(ForwardTarget::new(target.client_id, target.qos));
-                }
-            }
-
-            if remote_nodes.is_empty() {
-                drop(ctrl);
-            } else {
-                let transport = ctrl.transport().clone();
-                let fwd_topic = topic.to_string();
-                let fwd_qos = qos_to_u8(event.qos);
-                let fwd_payload = event.payload.to_vec();
-                let fwd_retain = event.retain;
-
-                drop(ctrl);
-
-                for (target_node, targets) in remote_nodes {
-                    let fwd = ForwardedPublish::new(
-                        node_id,
-                        fwd_topic.clone(),
-                        fwd_qos,
-                        fwd_retain,
-                        fwd_payload.clone(),
-                        targets,
-                    );
-                    let fwd_msg = super::transport::ClusterMessage::ForwardedPublish(fwd);
-                    if let Err(e) = transport.send(target_node, fwd_msg).await {
-                        warn!(target = target_node.get(), error = %e, "failed to forward publish");
-                    } else {
-                        debug!(target = target_node.get(), topic = %fwd_topic, "forwarded publish to node");
-                    }
-                }
-            }
+            self.route_and_forward_publish(node_id, &event).await;
 
             if event.qos == QoS::ExactlyOnce
                 && let Some(packet_id) = event.packet_id
@@ -879,5 +890,79 @@ async fn clear_client_subscriptions<T: ClusterTransport + 'static>(
         .clear_inflight_client_replicated(client_id)
     {
         ctrl.write_or_forward(write).await;
+    }
+}
+
+async fn handle_clean_session_cleanup<T: ClusterTransport + 'static>(
+    ctrl: &mut NodeController<T>,
+    client_id: &str,
+) {
+    let session = ctrl.stores().sessions.get(client_id);
+    if let Some(session) = session {
+        if session.is_clean_session() {
+            debug!(
+                client_id,
+                "clean_session disconnect - clearing subscriptions"
+            );
+            clear_client_subscriptions(ctrl, client_id).await;
+            let _ = ctrl.stores_mut().remove_session_replicated(client_id);
+        } else {
+            debug!(
+                client_id,
+                clean_session = session.clean_session,
+                "session is NOT clean_session, skipping subscription cleanup"
+            );
+        }
+    } else {
+        debug!(client_id, "session not found for disconnect");
+    }
+}
+
+async fn collect_pending_retained(
+    pending_queries: Vec<(
+        String,
+        tokio::sync::oneshot::Receiver<Vec<super::retained_store::RetainedMessage>>,
+    )>,
+) -> Vec<super::retained_store::RetainedMessage> {
+    let mut retained = Vec::new();
+    for (topic, rx) in pending_queries {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+            Ok(Ok(messages)) => {
+                debug!(
+                    topic,
+                    count = messages.len(),
+                    "received remote retained messages"
+                );
+                retained.extend(messages);
+            }
+            Ok(Err(_)) => {
+                warn!(topic, "retained query channel closed");
+            }
+            Err(_) => {
+                warn!(topic, "retained query timed out");
+            }
+        }
+    }
+    retained
+}
+
+async fn deliver_retained_messages<T: ClusterTransport>(
+    transport: &T,
+    synced_topics: &RwLock<HashMap<String, Instant>>,
+    retained: Vec<super::retained_store::RetainedMessage>,
+) {
+    let mut synced = synced_topics.write().await;
+    for msg in retained {
+        let topic = msg.topic_str().to_string();
+        synced.insert(topic.clone(), Instant::now());
+        debug!(
+            topic,
+            qos = msg.qos,
+            payload_len = msg.payload.len(),
+            "delivering retained message to subscriber"
+        );
+        transport
+            .queue_local_publish_retained(topic, msg.payload.clone(), msg.qos)
+            .await;
     }
 }

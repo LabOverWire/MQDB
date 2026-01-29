@@ -76,7 +76,7 @@ impl StorageBackend for FjallBackend {
         Box::new(FjallBatch {
             db: self.db.clone(),
             keyspace: self.keyspace.clone(),
-            durability: self.durability.clone(),
+            durability: self.durability,
             operations: Vec::new(),
             preconditions: Vec::new(),
         })

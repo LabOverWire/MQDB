@@ -313,7 +313,7 @@ mod tests {
 
         let mut map = PartitionMap::new();
         map.set(
-            PartitionId::new(0).unwrap(),
+            PartitionId::ZERO,
             PartitionAssignment::new(local, vec![], Epoch::new(1)),
         );
         mgr.update_partition_map(map);

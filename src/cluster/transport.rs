@@ -11,6 +11,7 @@ use super::raft::{
 };
 use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::{NodeId, PartitionId};
+use bebytes::BeBytes;
 use std::fmt::Debug;
 
 #[derive(Debug, Clone)]
@@ -134,11 +135,165 @@ impl ClusterMessage {
     }
 }
 
+impl ClusterMessage {
+    #[must_use]
+    pub fn decode_from_wire(msg_type: u8, data: &[u8]) -> Option<Self> {
+        match msg_type {
+            0 => {
+                let (hb, _) = Heartbeat::try_from_be_bytes(data).ok()?;
+                Some(Self::Heartbeat(hb))
+            }
+            2 => Self::decode_node_id_message(data, |n| Self::DeathNotice { node_id: n }),
+            3 => Self::decode_node_id_message(data, |n| Self::DrainNotification { node_id: n }),
+            10 => Some(Self::Write(ReplicationWrite::from_bytes(data)?)),
+            11 => {
+                let (ack, _) = ReplicationAck::try_from_be_bytes(data).ok()?;
+                Some(Self::Ack(ack))
+            }
+            12 => {
+                let (req, _) = CatchupRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::CatchupRequest(req))
+            }
+            13 => Some(Self::CatchupResponse(CatchupResponse::from_bytes(data)?)),
+            15 => Some(Self::WriteRequest(ReplicationWrite::from_bytes(data)?)),
+            20 => {
+                let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::RequestVote(req))
+            }
+            21 => {
+                let (resp, _) = RequestVoteResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::RequestVoteResponse(resp))
+            }
+            22 => Some(Self::AppendEntries(AppendEntriesRequest::from_bytes(data)?)),
+            23 => {
+                let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::AppendEntriesResponse(resp))
+            }
+            30 => Some(Self::ForwardedPublish(ForwardedPublish::from_bytes(data)?)),
+            40 => {
+                let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::SnapshotRequest(req))
+            }
+            41 => Some(Self::SnapshotChunk(SnapshotChunk::from_bytes(data)?)),
+            42 => {
+                let (complete, _) = SnapshotComplete::try_from_be_bytes(data).ok()?;
+                Some(Self::SnapshotComplete(complete))
+            }
+            50 => Self::decode_partitioned_request(data, |p, d| {
+                QueryRequest::from_bytes(d).map(|r| Self::QueryRequest {
+                    partition: p,
+                    request: r,
+                })
+            }),
+            51 => Some(Self::QueryResponse(QueryResponse::from_bytes(data)?)),
+            52 => Some(Self::BatchReadRequest(BatchReadRequest::from_bytes(data)?)),
+            53 => Some(Self::BatchReadResponse(BatchReadResponse::from_bytes(
+                data,
+            )?)),
+            54 => Self::decode_partitioned_request(data, |p, d| {
+                JsonDbRequest::from_bytes(d).map(|r| Self::JsonDbRequest {
+                    partition: p,
+                    request: r,
+                })
+            }),
+            55 => Some(Self::JsonDbResponse(JsonDbResponse::from_bytes(data)?)),
+            60 => {
+                let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
+                Some(Self::WildcardBroadcast(broadcast))
+            }
+            61 => {
+                let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(data).ok()?;
+                Some(Self::TopicSubscriptionBroadcast(broadcast))
+            }
+            70 => {
+                let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
+                Some(Self::PartitionUpdate(update))
+            }
+            80 => {
+                let (req, _) = UniqueReserveRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReserveRequest(req))
+            }
+            81 => {
+                let (resp, _) = UniqueReserveResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReserveResponse(resp))
+            }
+            82 => {
+                let (req, _) = UniqueCommitRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueCommitRequest(req))
+            }
+            83 => {
+                let (resp, _) = UniqueCommitResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueCommitResponse(resp))
+            }
+            84 => {
+                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReleaseRequest(req))
+            }
+            85 => {
+                let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReleaseResponse(resp))
+            }
+            _ => None,
+        }
+    }
+
+    fn decode_node_id_message(data: &[u8], f: fn(NodeId) -> Self) -> Option<Self> {
+        if data.len() < 2 {
+            return None;
+        }
+        let id = u16::from_be_bytes([data[0], data[1]]);
+        NodeId::validated(id).map(f)
+    }
+
+    fn decode_partitioned_request(
+        data: &[u8],
+        f: impl FnOnce(PartitionId, &[u8]) -> Option<Self>,
+    ) -> Option<Self> {
+        if data.len() < 2 {
+            return None;
+        }
+        let partition_id = u16::from_be_bytes([data[0], data[1]]);
+        let partition = PartitionId::new(partition_id)?;
+        f(partition, &data[2..])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
     pub from: NodeId,
     pub message: ClusterMessage,
     pub received_at: u64,
+}
+
+impl InboundMessage {
+    #[must_use]
+    pub fn parse_from_payload(payload: &[u8], local_node: NodeId) -> Option<Self> {
+        if payload.len() < 3 {
+            return None;
+        }
+
+        let from_id = u16::from_be_bytes([payload[0], payload[1]]);
+        let from = NodeId::validated(from_id)?;
+
+        if from == local_node {
+            return None;
+        }
+
+        let msg_type = payload[2];
+        let data = &payload[3..];
+        let message = ClusterMessage::decode_from_wire(msg_type, data)?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let received_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+
+        Some(Self {
+            from,
+            message,
+            received_at,
+        })
+    }
 }
 
 pub trait ClusterTransport: Send + Sync + Debug + Clone {

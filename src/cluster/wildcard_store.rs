@@ -340,9 +340,7 @@ impl WildcardStore {
                     Self::deserialize_entry(data).ok_or(WildcardStoreError::SerializationError)?;
                 let subscriber = WildcardSubscriber {
                     client_id: client_id.to_string(),
-                    client_partition: entry
-                        .partition()
-                        .unwrap_or_else(|| PartitionId::new(0).unwrap()),
+                    client_partition: entry.partition().unwrap_or(PartitionId::ZERO),
                     qos: entry.qos,
                     subscription_type: entry.sub_type(),
                 };
@@ -448,9 +446,7 @@ impl WildcardStore {
             if let Some(entry) = Self::deserialize_entry(entry_data) {
                 let subscriber = WildcardSubscriber {
                     client_id: client_id.to_string(),
-                    client_partition: entry
-                        .partition()
-                        .unwrap_or_else(|| PartitionId::new(0).unwrap()),
+                    client_partition: entry.partition().unwrap_or(PartitionId::ZERO),
                     qos: entry.qos,
                     subscription_type: entry.sub_type(),
                 };

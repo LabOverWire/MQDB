@@ -66,11 +66,9 @@ impl SessionData {
         std::str::from_utf8(&self.client_id).unwrap_or("")
     }
 
-    /// # Panics
-    /// Panics if partition ID 0 is invalid (should not happen).
     #[must_use]
     pub fn partition(&self) -> PartitionId {
-        PartitionId::new(self.session_partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
+        PartitionId::new(self.session_partition).unwrap_or(PartitionId::ZERO)
     }
 
     #[must_use]

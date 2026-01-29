@@ -83,11 +83,9 @@ impl UniqueReservation {
         std::str::from_utf8(&self.request_id).unwrap_or("")
     }
 
-    /// # Panics
-    /// Never panics: partition 0 is always valid as a fallback.
     #[must_use]
     pub fn data_partition(&self) -> PartitionId {
-        PartitionId::new(self.data_partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
+        PartitionId::new(self.data_partition).unwrap_or(PartitionId::ZERO)
     }
 
     #[must_use]

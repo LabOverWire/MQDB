@@ -353,11 +353,9 @@ impl ReplicationAck {
         }
     }
 
-    /// # Panics
-    /// Panics if partition ID 0 is invalid (should not happen).
     #[must_use]
     pub fn partition(&self) -> PartitionId {
-        PartitionId::new(self.partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
+        PartitionId::new(self.partition).unwrap_or(PartitionId::ZERO)
     }
 
     #[must_use]
@@ -409,11 +407,9 @@ impl CatchupRequest {
         }
     }
 
-    /// # Panics
-    /// Panics if partition ID 0 is invalid (should not happen).
     #[must_use]
     pub fn partition(&self) -> PartitionId {
-        PartitionId::new(self.partition).unwrap_or_else(|| PartitionId::new(0).unwrap())
+        PartitionId::new(self.partition).unwrap_or(PartitionId::ZERO)
     }
 
     #[must_use]
@@ -1954,7 +1950,7 @@ mod tests {
         let node = NodeId::validated(1).unwrap();
         let mut hb = Heartbeat::create(node, 1000);
 
-        let p0 = PartitionId::new(0).unwrap();
+        let p0 = PartitionId::ZERO;
         let p5 = PartitionId::new(5).unwrap();
         let p63 = PartitionId::new(63).unwrap();
 
@@ -2011,7 +2007,7 @@ mod tests {
 
     #[test]
     fn replication_ack_statuses() {
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let epoch = Epoch::new(5);
         let node = NodeId::validated(1).unwrap();
 
@@ -2105,7 +2101,7 @@ mod tests {
 
     #[test]
     fn catchup_response_empty() {
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let responder = NodeId::validated(1).unwrap();
 
         let resp = CatchupResponse::empty(partition, responder);

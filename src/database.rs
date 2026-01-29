@@ -65,7 +65,7 @@ impl Database {
     /// # Errors
     /// Returns an error if the database cannot be opened or initialized.
     pub async fn open_with_config(config: DatabaseConfig) -> Result<Self> {
-        let storage = Arc::new(Storage::open(&config.path, config.durability.clone())?);
+        let storage = Arc::new(Storage::open(&config.path, config.durability)?);
         Self::init_with_storage(storage, config).await
     }
 
@@ -79,7 +79,6 @@ impl Database {
         Self::init_with_storage(storage, config).await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn init_with_storage(storage: Arc<Storage>, config: DatabaseConfig) -> Result<Self> {
         let registry = Arc::new(SubscriptionRegistry::new(Arc::clone(&storage)));
         let consumer_groups = Arc::new(RwLock::new(HashMap::new()));
@@ -104,79 +103,15 @@ impl Database {
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let mut handles = Vec::new();
-
-        if config.spawn_background_tasks {
-            if config.outbox.enabled {
-                let pending_count = outbox.pending_count().unwrap_or(0);
-                if pending_count > 0 {
-                    tracing::info!(
-                        pending = pending_count,
-                        "found pending outbox entries, starting processor"
-                    );
-                }
-
-                let mut processor = OutboxProcessor::new(
-                    Arc::clone(&outbox),
-                    Arc::clone(&dispatcher),
-                    config.outbox.clone(),
-                    shutdown_rx.clone(),
-                );
-                handles.push(tokio::spawn(async move {
-                    processor.run().await;
-                }));
-            }
-
-            if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
-                let storage_clone = Arc::clone(&storage);
-                let dispatcher_clone = Arc::clone(&dispatcher);
-                let outbox_clone = Arc::clone(&outbox);
-                let index_manager_clone = Arc::clone(&index_manager);
-
-                handles.push(tokio::spawn(async move {
-                    ttl_cleanup_task(
-                        storage_clone,
-                        dispatcher_clone,
-                        outbox_clone,
-                        index_manager_clone,
-                        interval_secs,
-                    )
-                    .await;
-                }));
-            }
-
-            if config.shared_subscription.consumer_timeout_ms > 0 {
-                let consumer_groups_clone = Arc::clone(&consumer_groups);
-                let timeout_ms = config.shared_subscription.consumer_timeout_ms;
-                let mut shutdown_rx_clone = shutdown_rx.clone();
-
-                handles.push(tokio::spawn(async move {
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
-                    loop {
-                        tokio::select! {
-                            _ = interval.tick() => {
-                                let mut groups = consumer_groups_clone.write().await;
-                                for (name, group) in groups.iter_mut() {
-                                    let stale = group.remove_stale_members(timeout_ms);
-                                    if !stale.is_empty() {
-                                        tracing::info!(
-                                            group = %name,
-                                            removed = ?stale,
-                                            "removed stale consumers"
-                                        );
-                                    }
-                                }
-                            }
-                            _ = shutdown_rx_clone.changed() => {
-                                tracing::debug!("heartbeat cleanup task shutting down");
-                                break;
-                            }
-                        }
-                    }
-                }));
-            }
-        }
+        let handles = Self::spawn_background_tasks(
+            &config,
+            &outbox,
+            &dispatcher,
+            &storage,
+            &index_manager,
+            &consumer_groups,
+            &shutdown_rx,
+        );
 
         Ok(Self {
             storage,
@@ -192,6 +127,135 @@ impl Database {
             config: Arc::new(config),
             shutdown_tx,
             background_handles: Arc::new(std::sync::Mutex::new(handles)),
+        })
+    }
+
+    fn spawn_background_tasks(
+        config: &DatabaseConfig,
+        outbox: &Arc<Outbox>,
+        dispatcher: &Arc<EventDispatcher>,
+        storage: &Arc<Storage>,
+        index_manager: &Arc<RwLock<IndexManager>>,
+        consumer_groups: &Arc<RwLock<HashMap<String, ConsumerGroup>>>,
+        shutdown_rx: &watch::Receiver<bool>,
+    ) -> Vec<JoinHandle<()>> {
+        let mut handles = Vec::new();
+
+        if !config.spawn_background_tasks {
+            return handles;
+        }
+
+        if config.outbox.enabled {
+            handles.push(Self::spawn_outbox_processor(
+                outbox,
+                dispatcher,
+                &config.outbox,
+                shutdown_rx,
+            ));
+        }
+
+        if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
+            handles.push(Self::spawn_ttl_cleanup(
+                storage,
+                dispatcher,
+                outbox,
+                index_manager,
+                interval_secs,
+            ));
+        }
+
+        if config.shared_subscription.consumer_timeout_ms > 0 {
+            handles.push(Self::spawn_consumer_timeout_cleanup(
+                consumer_groups,
+                config.shared_subscription.consumer_timeout_ms,
+                shutdown_rx,
+            ));
+        }
+
+        handles
+    }
+
+    fn spawn_outbox_processor(
+        outbox: &Arc<Outbox>,
+        dispatcher: &Arc<EventDispatcher>,
+        outbox_config: &crate::config::OutboxConfig,
+        shutdown_rx: &watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
+        let pending_count = outbox.pending_count().unwrap_or(0);
+        if pending_count > 0 {
+            tracing::info!(
+                pending = pending_count,
+                "found pending outbox entries, starting processor"
+            );
+        }
+
+        let mut processor = OutboxProcessor::new(
+            Arc::clone(outbox),
+            Arc::clone(dispatcher),
+            outbox_config.clone(),
+            shutdown_rx.clone(),
+        );
+        tokio::spawn(async move {
+            processor.run().await;
+        })
+    }
+
+    fn spawn_ttl_cleanup(
+        storage: &Arc<Storage>,
+        dispatcher: &Arc<EventDispatcher>,
+        outbox: &Arc<Outbox>,
+        index_manager: &Arc<RwLock<IndexManager>>,
+        interval_secs: u64,
+    ) -> JoinHandle<()> {
+        let storage_clone = Arc::clone(storage);
+        let dispatcher_clone = Arc::clone(dispatcher);
+        let outbox_clone = Arc::clone(outbox);
+        let index_manager_clone = Arc::clone(index_manager);
+
+        tokio::spawn(async move {
+            ttl_cleanup_task(
+                storage_clone,
+                dispatcher_clone,
+                outbox_clone,
+                index_manager_clone,
+                interval_secs,
+            )
+            .await;
+        })
+    }
+
+    fn spawn_consumer_timeout_cleanup(
+        consumer_groups: &Arc<RwLock<HashMap<String, ConsumerGroup>>>,
+        timeout_ms: u64,
+        shutdown_rx: &watch::Receiver<bool>,
+    ) -> JoinHandle<()> {
+        let consumer_groups_clone = Arc::clone(consumer_groups);
+        let mut shutdown_rx_clone = shutdown_rx.clone();
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_millis(timeout_ms / 2));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let mut groups = consumer_groups_clone.write().await;
+                        for (name, group) in groups.iter_mut() {
+                            let stale = group.remove_stale_members(timeout_ms);
+                            if !stale.is_empty() {
+                                tracing::info!(
+                                    group = %name,
+                                    removed = ?stale,
+                                    "removed stale consumers"
+                                );
+                            }
+                        }
+                    }
+                    _ = shutdown_rx_clone.changed() => {
+                        tracing::debug!("heartbeat cleanup task shutting down");
+                        break;
+                    }
+                }
+            }
         })
     }
 

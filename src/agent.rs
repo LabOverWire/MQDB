@@ -3,7 +3,8 @@ use crate::topic_protection::TopicProtectionAuthProvider;
 use crate::{Database, Response};
 use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::config::{
-    FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig, WebSocketConfig,
+    ChangeOnlyDeliveryConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
+    WebSocketConfig,
 };
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
@@ -171,8 +172,64 @@ impl MqdbAgent {
 
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
-    #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (mut config, service_username, service_password, needs_composite, admin_users) =
+            self.build_broker_config().await?;
+
+        self.apply_transport_config(&mut config);
+
+        let broker = MqttBroker::with_config(config).await?;
+        let mut broker = Self::apply_auth_providers(
+            broker,
+            needs_composite,
+            service_username.as_ref(),
+            service_password.as_ref(),
+            &admin_users,
+        )?;
+
+        info!("MQDB Agent listening on {}", self.bind_address);
+
+        let bind_addr = self.bind_address;
+        let handler_task = self.spawn_handler_task(
+            bind_addr,
+            service_username.clone(),
+            service_password.clone(),
+        );
+        let event_task = self.spawn_event_task(
+            bind_addr,
+            service_username.clone(),
+            service_password.clone(),
+        );
+        let http_task = self.spawn_http_task(
+            bind_addr,
+            service_username.as_ref(),
+            service_password.as_ref(),
+        );
+
+        broker.run().await?;
+
+        let _ = self.shutdown_tx.send(());
+        let _ = handler_task.await;
+        let _ = event_task.await;
+        if let Some(http) = http_task {
+            let _ = http.await;
+        }
+
+        Ok(())
+    }
+
+    async fn build_broker_config(
+        &self,
+    ) -> Result<
+        (
+            BrokerConfig,
+            Option<String>,
+            Option<String>,
+            bool,
+            HashSet<String>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
@@ -184,6 +241,10 @@ impl MqdbAgent {
             subscription_identifier_available: true,
             shared_subscription_available: true,
             topic_alias_maximum: 100,
+            change_only_delivery_config: ChangeOnlyDeliveryConfig {
+                enabled: true,
+                topic_patterns: vec!["$DB/+/events/#".to_string()],
+            },
             ..Default::default()
         };
 
@@ -209,23 +270,39 @@ impl MqdbAgent {
                 )
             };
 
+        Ok((
+            config,
+            service_username,
+            service_password,
+            needs_composite,
+            admin_users,
+        ))
+    }
+
+    fn apply_transport_config(&self, config: &mut BrokerConfig) {
         if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
             let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
                 .with_bind_address(self.bind_address);
-            config = config.with_quic(quic_config);
+            *config = std::mem::take(config).with_quic(quic_config);
             info!(quic_bind = %self.bind_address, "QUIC listener configured");
         }
 
         if let Some(ws_addr) = self.ws_bind_address {
             let ws_config = WebSocketConfig::new().with_bind_addresses(vec![ws_addr]);
-            config = config.with_websocket(ws_config);
+            *config = std::mem::take(config).with_websocket(ws_config);
             info!(ws_bind = %ws_addr, "WebSocket listener configured");
         }
+    }
 
-        let mut broker = MqttBroker::with_config(config).await?;
-
+    fn apply_auth_providers(
+        mut broker: MqttBroker,
+        needs_composite: bool,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+        admin_users: &HashSet<String>,
+    ) -> Result<MqttBroker, Box<dyn std::error::Error + Send + Sync>> {
         if needs_composite
-            && let (Some(svc_user), Some(svc_pass)) = (&service_username, &service_password)
+            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
         {
             let primary = broker.auth_provider();
             let fallback = PasswordAuthProvider::new();
@@ -238,7 +315,7 @@ impl MqdbAgent {
         let current_provider = broker.auth_provider();
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
-                .with_internal_service_username(service_username.clone());
+                .with_internal_service_username(service_username.cloned());
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");
@@ -249,25 +326,24 @@ impl MqdbAgent {
             );
         }
 
-        info!("MQDB Agent listening on {}", self.bind_address);
+        Ok(broker)
+    }
 
+    fn spawn_handler_task(
+        &self,
+        bind_addr: SocketAddr,
+        handler_username: Option<String>,
+        handler_password: Option<String>,
+    ) -> tokio::task::JoinHandle<()> {
         let db = Arc::clone(&self.db);
-        let bind_addr = self.bind_address;
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let backup_dir = self.backup_dir.clone();
-        let handler_username = service_username.clone();
-        let handler_password = service_password.clone();
 
-        let handler_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let client = MqttClient::new("mqdb-internal-handler");
-            let connect_ip = if bind_addr.ip().is_unspecified() {
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            } else {
-                bind_addr.ip()
-            };
-            let addr = format!("{}:{}", connect_ip, bind_addr.port());
+            let addr = resolve_connect_address(bind_addr);
 
             let response_creds = (handler_username.clone(), handler_password.clone());
             let connect_result = if let Some(user) = handler_username {
@@ -281,7 +357,7 @@ impl MqdbAgent {
             };
 
             if let Err(e) = connect_result {
-                error!("Failed to connect internal handler: {}", e);
+                error!("Failed to connect internal handler: {e}");
                 return;
             }
 
@@ -294,25 +370,23 @@ impl MqdbAgent {
                 })
                 .await
             {
-                error!("Failed to subscribe to $DB/#: {}", e);
+                error!("Failed to subscribe to $DB/#: {e}");
                 return;
             }
 
             info!("Internal handler subscribed to $DB/#");
 
             let response_client = MqttClient::new("mqdb-response-publisher");
-            let response_connect = if let (Some(user), Some(pass)) = response_creds {
-                let options = mqtt5::types::ConnectOptions::new("mqdb-response-publisher")
-                    .with_credentials(user, pass);
-                Box::pin(response_client.connect_with_options(&addr, options))
-                    .await
-                    .map(|_| ())
-            } else {
-                response_client.connect(&addr).await
-            };
-
-            if let Err(e) = response_connect {
-                error!("Failed to connect response publisher: {}", e);
+            if let Err(e) = connect_mqtt_client(
+                &response_client,
+                "mqdb-response-publisher",
+                &addr,
+                response_creds.0,
+                response_creds.1,
+            )
+            .await
+            {
+                error!("Failed to connect response publisher: {e}");
                 return;
             }
 
@@ -332,35 +406,35 @@ impl MqdbAgent {
                     }
                 }
             }
-        });
+        })
+    }
 
+    fn spawn_event_task(
+        &self,
+        event_addr: SocketAddr,
+        event_service_username: Option<String>,
+        event_service_password: Option<String>,
+    ) -> tokio::task::JoinHandle<()> {
         let event_db = Arc::clone(&self.db);
-        let event_addr = self.bind_address;
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
-        let event_service_username = service_username.clone();
-        let event_service_password = service_password.clone();
         let num_partitions = self.db.num_partitions();
 
-        let event_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
 
             let client = MqttClient::new("mqdb-event-publisher");
             let addr = format!("{}:{}", event_addr.ip(), event_addr.port());
 
-            let connect_result = if let (Some(user), Some(pass)) =
-                (event_service_username, event_service_password)
+            if let Err(e) = connect_mqtt_client(
+                &client,
+                "mqdb-event-publisher",
+                &addr,
+                event_service_username,
+                event_service_password,
+            )
+            .await
             {
-                let options = mqtt5::types::ConnectOptions::new("mqdb-event-publisher")
-                    .with_credentials(user, pass);
-                Box::pin(client.connect_with_options(&addr, options))
-                    .await
-                    .map(|_| ())
-            } else {
-                client.connect(&addr).await
-            };
-
-            if let Err(e) = connect_result {
-                error!("Failed to connect event publisher: {}", e);
+                error!("Failed to connect event publisher: {e}");
                 return;
             }
 
@@ -380,17 +454,17 @@ impl MqdbAgent {
                                 let payload = match serde_json::to_vec(&change_event) {
                                     Ok(p) => p,
                                     Err(e) => {
-                                        error!("Failed to serialize event: {}", e);
+                                        error!("Failed to serialize event: {e}");
                                         continue;
                                     }
                                 };
 
                                 if let Err(e) = client.publish_qos1(&topic, payload).await {
-                                    warn!("Failed to publish event: {}", e);
+                                    warn!("Failed to publish event: {e}");
                                 }
                             }
                             Err(e) => {
-                                error!("Event channel error: {}", e);
+                                error!("Event channel error: {e}");
                                 break;
                             }
                         }
@@ -401,72 +475,83 @@ impl MqdbAgent {
                     }
                 }
             }
-        });
+        })
+    }
 
-        let http_task = if let Some(http_config) = self
+    fn spawn_http_task(
+        &self,
+        bind_addr: SocketAddr,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let http_config = self
             .http_config
             .lock()
             .ok()
-            .and_then(|mut guard| guard.take())
-        {
-            let http_bind = http_config.bind_address;
-            let http_shutdown_rx = self.shutdown_tx.subscribe();
+            .and_then(|mut guard| guard.take())?;
+
+        let http_bind = http_config.bind_address;
+        let http_shutdown_rx = self.shutdown_tx.subscribe();
+        let http_addr = resolve_connect_address(bind_addr);
+        let http_creds = (service_username.cloned(), service_password.cloned());
+
+        Some(tokio::spawn(async move {
+            tokio::time::sleep(mqtt5::time::Duration::from_millis(300)).await;
 
             let http_mqtt_client = MqttClient::new("mqdb-http-oauth");
-            let http_connect_ip = if bind_addr.ip().is_unspecified() {
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            } else {
-                bind_addr.ip()
-            };
-            let http_addr = format!("{}:{}", http_connect_ip, bind_addr.port());
-            let http_creds = (service_username.clone(), service_password.clone());
+            if let Err(e) = connect_mqtt_client(
+                &http_mqtt_client,
+                "mqdb-http-oauth",
+                &http_addr,
+                http_creds.0,
+                http_creds.1,
+            )
+            .await
+            {
+                error!("Failed to connect HTTP OAuth MQTT client: {e}");
+                return;
+            }
 
-            Some(tokio::spawn(async move {
-                tokio::time::sleep(mqtt5::time::Duration::from_millis(300)).await;
-
-                let connect_result = if let (Some(user), Some(pass)) = http_creds {
-                    let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
-                        .with_credentials(user, pass);
-                    Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
-                        .await
-                        .map(|_| ())
-                } else {
-                    http_mqtt_client.connect(&http_addr).await
-                };
-
-                if let Err(e) = connect_result {
-                    error!("Failed to connect HTTP OAuth MQTT client: {}", e);
-                    return;
-                }
-
-                info!(addr = %http_bind, "starting HTTP OAuth server");
-                let server = crate::http::HttpServer::new(
-                    http_config,
-                    Arc::new(http_mqtt_client),
-                    http_shutdown_rx,
-                );
-                if let Err(e) = server.run().await {
-                    error!("HTTP server error: {}", e);
-                }
-            }))
-        } else {
-            None
-        };
-
-        broker.run().await?;
-
-        let _ = self.shutdown_tx.send(());
-        let _ = handler_task.await;
-        let _ = event_task.await;
-        if let Some(http) = http_task {
-            let _ = http.await;
-        }
-
-        Ok(())
+            info!(addr = %http_bind, "starting HTTP OAuth server");
+            let server = crate::http::HttpServer::new(
+                http_config,
+                Arc::new(http_mqtt_client),
+                http_shutdown_rx,
+            );
+            if let Err(e) = server.run().await {
+                error!("HTTP server error: {e}");
+            }
+        }))
     }
 
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
+    }
+}
+
+fn resolve_connect_address(bind_addr: SocketAddr) -> String {
+    let connect_ip = if bind_addr.ip().is_unspecified() {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    } else {
+        bind_addr.ip()
+    };
+    format!("{connect_ip}:{}", bind_addr.port())
+}
+
+async fn connect_mqtt_client(
+    client: &MqttClient,
+    client_id: &str,
+    addr: &str,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<(), mqtt5::MqttError> {
+    if let (Some(user), Some(pass)) = (username, password) {
+        let options = mqtt5::types::ConnectOptions::new(client_id).with_credentials(user, pass);
+        Box::pin(client.connect_with_options(addr, options))
+            .await
+            .map(|_| ())
+    } else {
+        client.connect(addr).await
     }
 }
 
@@ -545,7 +630,6 @@ async fn handle_message(db: &Database, client: &MqttClient, message: Message, ba
     }
 }
 
-#[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(
     db: &Database,
     client: &MqttClient,
@@ -553,9 +637,6 @@ async fn handle_admin_operation(
     op: AdminOperation,
     backup_dir: &Path,
 ) {
-    use crate::constraint::OnDeleteAction;
-    use serde_json::json;
-
     let payload: Value = if message.payload.is_empty() {
         Value::Null
     } else {
@@ -574,243 +655,294 @@ async fn handle_admin_operation(
     };
 
     let response = match op {
-        AdminOperation::SchemaSet { entity } => {
-            match serde_json::from_value::<crate::schema::Schema>(payload) {
-                Ok(mut schema) => {
-                    schema.entity = entity;
-                    match db.add_schema(schema).await {
-                        Ok(()) => Response::ok(json!({"message": "schema set"})),
-                        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-                    }
-                }
-                Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
-            }
-        }
-        AdminOperation::SchemaGet { entity } => match db.get_schema(&entity).await {
-            Some(schema) => Response::ok(serde_json::to_value(schema).unwrap_or(Value::Null)),
-            None => Response::error(
-                crate::ErrorCode::NotFound,
-                format!("no schema for entity: {entity}"),
-            ),
-        },
+        AdminOperation::SchemaSet { entity } => handle_schema_set(db, entity, payload).await,
+        AdminOperation::SchemaGet { entity } => handle_schema_get(db, &entity).await,
         AdminOperation::ConstraintAdd { entity } => {
-            let constraint_type = payload.get("type").and_then(|v| v.as_str());
-
-            let result =
-                match constraint_type {
-                    Some("unique") => {
-                        let fields: Vec<String> = payload
-                            .get("fields")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        if fields.is_empty() {
-                            Err("unique constraint requires fields array".to_string())
-                        } else {
-                            db.add_unique_constraint(entity, fields)
-                                .await
-                                .map_err(|e| e.to_string())
-                        }
-                    }
-                    Some("not_null") => {
-                        let field = payload
-                            .get("field")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-
-                        match field {
-                            Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
-                            None => Err("not_null constraint requires field".to_string()),
-                        }
-                    }
-                    Some("foreign_key") => {
-                        let source_field = payload.get("field").and_then(|v| v.as_str());
-                        let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
-                        let target_field = payload.get("target_field").and_then(|v| v.as_str());
-                        let on_delete = payload
-                            .get("on_delete")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("restrict");
-
-                        let action = match on_delete {
-                            "cascade" => OnDeleteAction::Cascade,
-                            "set_null" => OnDeleteAction::SetNull,
-                            _ => OnDeleteAction::Restrict,
-                        };
-
-                        match (source_field, target_entity, target_field) {
-                            (Some(sf), Some(te), Some(tf)) => db
-                                .add_foreign_key(
-                                    entity,
-                                    sf.to_string(),
-                                    te.to_string(),
-                                    tf.to_string(),
-                                    action,
-                                )
-                                .await
-                                .map_err(|e| e.to_string()),
-                            _ => Err("foreign_key requires field, target_entity, target_field"
-                                .to_string()),
-                        }
-                    }
-                    _ => Err(format!("unknown constraint type: {constraint_type:?}")),
-                };
-
-            match result {
-                Ok(()) => Response::ok(json!({"message": "constraint added"})),
-                Err(e) => Response::error(crate::ErrorCode::BadRequest, e),
-            }
+            handle_constraint_add(db, entity, &payload).await
         }
-        AdminOperation::ConstraintList { entity } => {
-            let constraints = db.list_constraints(&entity).await;
-            let data: Vec<Value> = constraints
-                .into_iter()
-                .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
-                .collect();
-            Response::ok(json!(data))
-        }
-        AdminOperation::Backup => {
-            let name = payload
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("backup");
-
-            if !is_valid_backup_name(name) {
-                Response::error(
-                    crate::ErrorCode::BadRequest,
-                    "invalid backup name: must be alphanumeric, underscore, or hyphen only",
-                )
-            } else if let Err(e) = tokio::fs::create_dir_all(backup_dir).await {
-                Response::error(
-                    crate::ErrorCode::Internal,
-                    format!("failed to create backup directory: {e}"),
-                )
-            } else {
-                let backup_path = backup_dir.join(name);
-                match db.backup(&backup_path) {
-                    Ok(()) => Response::ok(json!({"message": format!("backup created: {name}")})),
-                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-                }
-            }
-        }
+        AdminOperation::ConstraintList { entity } => handle_constraint_list(db, &entity).await,
+        AdminOperation::Backup => handle_backup(db, &payload, backup_dir).await,
         AdminOperation::Restore => Response::error(
             crate::ErrorCode::Internal,
             "restore requires agent restart - use CLI with --restore flag",
         ),
-        AdminOperation::BackupList => {
-            if backup_dir.exists() {
-                match tokio::fs::read_dir(backup_dir).await {
-                    Ok(mut entries) => {
-                        let mut backups = Vec::new();
-                        while let Ok(Some(entry)) = entries.next_entry().await {
-                            if entry.path().is_dir()
-                                && let Ok(name) = entry.file_name().into_string()
-                            {
-                                backups.push(name);
-                            }
-                        }
-                        Response::ok(json!(backups))
-                    }
-                    Err(e) => Response::error(
-                        crate::ErrorCode::Internal,
-                        format!("failed to read backup directory: {e}"),
-                    ),
-                }
-            } else {
-                Response::ok(json!(Vec::<String>::new()))
-            }
-        }
-        AdminOperation::Subscribe => {
-            use crate::subscription::SubscriptionMode;
-
-            let pattern = payload
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let entity = payload
-                .get("entity")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let group = payload
-                .get("group")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let mode_str = payload
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("broadcast");
-
-            let mode = match mode_str {
-                "load-balanced" | "load_balanced" => SubscriptionMode::LoadBalanced,
-                "ordered" => SubscriptionMode::Ordered,
-                _ => SubscriptionMode::Broadcast,
-            };
-
-            if let Some(group) = group {
-                match db.subscribe_shared(pattern, entity, group, mode).await {
-                    Ok(result) => Response::ok(json!({
-                        "id": result.id,
-                        "partitions": result.assigned_partitions
-                    })),
-                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-                }
-            } else {
-                match db.subscribe(pattern, entity).await {
-                    Ok(id) => Response::ok(json!({"id": id})),
-                    Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-                }
-            }
-        }
-        AdminOperation::Heartbeat { sub_id } => match db.heartbeat(&sub_id).await {
-            Ok(()) => Response::ok(json!({"ok": true})),
-            Err(e) => Response::error(crate::ErrorCode::NotFound, e.to_string()),
-        },
-        AdminOperation::Unsubscribe { sub_id } => match db.unsubscribe(&sub_id).await {
-            Ok(()) => Response::ok(json!({"ok": true})),
-            Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-        },
-        AdminOperation::ConsumerGroupList => {
-            let groups = db.list_consumer_groups().await;
-            Response::ok(serde_json::to_value(groups).unwrap_or(Value::Null))
-        }
-        AdminOperation::ConsumerGroupShow { name } => match db.get_consumer_group(&name).await {
-            Some(details) => Response::ok(serde_json::to_value(details).unwrap_or(Value::Null)),
-            None => Response::error(
-                crate::ErrorCode::NotFound,
-                format!("consumer group not found: {name}"),
-            ),
-        },
-        AdminOperation::Health => Response::ok(json!({
-            "status": "healthy",
-            "ready": true,
-            "mode": "agent",
-            "details": {
-                "partitions": db.num_partitions()
-            }
-        })),
+        AdminOperation::BackupList => handle_backup_list(backup_dir).await,
+        AdminOperation::Subscribe => handle_subscribe(db, &payload).await,
+        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(db, &sub_id).await,
+        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(db, &sub_id).await,
+        AdminOperation::ConsumerGroupList => handle_consumer_group_list(db).await,
+        AdminOperation::ConsumerGroupShow { name } => handle_consumer_group_show(db, &name).await,
+        AdminOperation::Health => handle_health(db),
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
                 if let Err(e) = client.publish_qos1(response_topic, payload).await {
-                    error!(
-                        "Failed to publish admin response to {}: {}",
-                        response_topic, e
-                    );
+                    error!("Failed to publish admin response to {response_topic}: {e}");
                 }
             }
             Err(e) => {
-                error!("Failed to serialize admin response: {}", e);
+                error!("Failed to serialize admin response: {e}");
             }
         }
     }
+}
+
+async fn handle_schema_set(db: &Database, entity: String, payload: Value) -> Response {
+    use serde_json::json;
+    match serde_json::from_value::<crate::schema::Schema>(payload) {
+        Ok(mut schema) => {
+            schema.entity = entity;
+            match db.add_schema(schema).await {
+                Ok(()) => Response::ok(json!({"message": "schema set"})),
+                Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+            }
+        }
+        Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+    }
+}
+
+async fn handle_schema_get(db: &Database, entity: &str) -> Response {
+    match db.get_schema(entity).await {
+        Some(schema) => Response::ok(serde_json::to_value(schema).unwrap_or(Value::Null)),
+        None => Response::error(
+            crate::ErrorCode::NotFound,
+            format!("no schema for entity: {entity}"),
+        ),
+    }
+}
+
+async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let constraint_type = payload.get("type").and_then(|v| v.as_str());
+
+    let result = match constraint_type {
+        Some("unique") => {
+            let fields: Vec<String> = payload
+                .get("fields")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if fields.is_empty() {
+                Err("unique constraint requires fields array".to_string())
+            } else {
+                db.add_unique_constraint(entity, fields)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
+        Some("not_null") => {
+            let field = payload
+                .get("field")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            match field {
+                Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
+                None => Err("not_null constraint requires field".to_string()),
+            }
+        }
+        Some("foreign_key") => handle_foreign_key_constraint(db, entity, payload).await,
+        _ => Err(format!("unknown constraint type: {constraint_type:?}")),
+    };
+
+    match result {
+        Ok(()) => Response::ok(json!({"message": "constraint added"})),
+        Err(e) => Response::error(crate::ErrorCode::BadRequest, e),
+    }
+}
+
+async fn handle_foreign_key_constraint(
+    db: &Database,
+    entity: String,
+    payload: &Value,
+) -> Result<(), String> {
+    use crate::constraint::OnDeleteAction;
+
+    let source_field = payload.get("field").and_then(|v| v.as_str());
+    let target_entity = payload.get("target_entity").and_then(|v| v.as_str());
+    let target_field = payload.get("target_field").and_then(|v| v.as_str());
+    let on_delete = payload
+        .get("on_delete")
+        .and_then(|v| v.as_str())
+        .unwrap_or("restrict");
+
+    let action = match on_delete {
+        "cascade" => OnDeleteAction::Cascade,
+        "set_null" => OnDeleteAction::SetNull,
+        _ => OnDeleteAction::Restrict,
+    };
+
+    match (source_field, target_entity, target_field) {
+        (Some(sf), Some(te), Some(tf)) => db
+            .add_foreign_key(
+                entity,
+                sf.to_string(),
+                te.to_string(),
+                tf.to_string(),
+                action,
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        _ => Err("foreign_key requires field, target_entity, target_field".to_string()),
+    }
+}
+
+async fn handle_constraint_list(db: &Database, entity: &str) -> Response {
+    use serde_json::json;
+    let constraints = db.list_constraints(entity).await;
+    let data: Vec<Value> = constraints
+        .into_iter()
+        .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+        .collect();
+    Response::ok(json!(data))
+}
+
+async fn handle_backup(db: &Database, payload: &Value, backup_dir: &Path) -> Response {
+    use serde_json::json;
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("backup");
+
+    if !is_valid_backup_name(name) {
+        return Response::error(
+            crate::ErrorCode::BadRequest,
+            "invalid backup name: must be alphanumeric, underscore, or hyphen only",
+        );
+    }
+
+    if let Err(e) = tokio::fs::create_dir_all(backup_dir).await {
+        return Response::error(
+            crate::ErrorCode::Internal,
+            format!("failed to create backup directory: {e}"),
+        );
+    }
+
+    let backup_path = backup_dir.join(name);
+    match db.backup(&backup_path) {
+        Ok(()) => Response::ok(json!({"message": format!("backup created: {name}")})),
+        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+    }
+}
+
+async fn handle_backup_list(backup_dir: &Path) -> Response {
+    use serde_json::json;
+    if !backup_dir.exists() {
+        return Response::ok(json!(Vec::<String>::new()));
+    }
+
+    match tokio::fs::read_dir(backup_dir).await {
+        Ok(mut entries) => {
+            let mut backups = Vec::new();
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path().is_dir()
+                    && let Ok(name) = entry.file_name().into_string()
+                {
+                    backups.push(name);
+                }
+            }
+            Response::ok(json!(backups))
+        }
+        Err(e) => Response::error(
+            crate::ErrorCode::Internal,
+            format!("failed to read backup directory: {e}"),
+        ),
+    }
+}
+
+async fn handle_subscribe(db: &Database, payload: &Value) -> Response {
+    use crate::subscription::SubscriptionMode;
+    use serde_json::json;
+
+    let pattern = payload
+        .get("pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let entity = payload
+        .get("entity")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let group = payload
+        .get("group")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let mode_str = payload
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("broadcast");
+
+    let mode = match mode_str {
+        "load-balanced" | "load_balanced" => SubscriptionMode::LoadBalanced,
+        "ordered" => SubscriptionMode::Ordered,
+        _ => SubscriptionMode::Broadcast,
+    };
+
+    if let Some(group) = group {
+        match db.subscribe_shared(pattern, entity, group, mode).await {
+            Ok(result) => Response::ok(json!({
+                "id": result.id,
+                "partitions": result.assigned_partitions
+            })),
+            Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+        }
+    } else {
+        match db.subscribe(pattern, entity).await {
+            Ok(id) => Response::ok(json!({"id": id})),
+            Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+        }
+    }
+}
+
+async fn handle_heartbeat(db: &Database, sub_id: &str) -> Response {
+    use serde_json::json;
+    match db.heartbeat(sub_id).await {
+        Ok(()) => Response::ok(json!({"ok": true})),
+        Err(e) => Response::error(crate::ErrorCode::NotFound, e.to_string()),
+    }
+}
+
+async fn handle_unsubscribe(db: &Database, sub_id: &str) -> Response {
+    use serde_json::json;
+    match db.unsubscribe(sub_id).await {
+        Ok(()) => Response::ok(json!({"ok": true})),
+        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+    }
+}
+
+async fn handle_consumer_group_list(db: &Database) -> Response {
+    let groups = db.list_consumer_groups().await;
+    Response::ok(serde_json::to_value(groups).unwrap_or(Value::Null))
+}
+
+async fn handle_consumer_group_show(db: &Database, name: &str) -> Response {
+    match db.get_consumer_group(name).await {
+        Some(details) => Response::ok(serde_json::to_value(details).unwrap_or(Value::Null)),
+        None => Response::error(
+            crate::ErrorCode::NotFound,
+            format!("consumer group not found: {name}"),
+        ),
+    }
+}
+
+fn handle_health(db: &Database) -> Response {
+    use serde_json::json;
+    Response::ok(json!({
+        "status": "healthy",
+        "ready": true,
+        "mode": "agent",
+        "details": {
+            "partitions": db.num_partitions()
+        }
+    }))
 }
 
 fn is_valid_backup_name(name: &str) -> bool {

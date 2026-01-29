@@ -280,8 +280,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        let data_partition = PartitionId::new(request.data_partition)
-            .unwrap_or_else(|| PartitionId::new(0).unwrap());
+        let data_partition = PartitionId::new(request.data_partition).unwrap_or(PartitionId::ZERO);
 
         let entry = super::db::IndexEntry::create(
             request.entity_str(),
@@ -311,8 +310,7 @@ impl DbRequestHandler {
             return UniqueReserveResponse::create(UniqueReserveStatus::Error).to_be_bytes();
         }
 
-        let data_partition = PartitionId::new(request.data_partition)
-            .unwrap_or_else(|| PartitionId::new(0).unwrap());
+        let data_partition = PartitionId::new(request.data_partition).unwrap_or(PartitionId::ZERO);
 
         let result = controller.stores_mut().db_unique.reserve(
             request.entity_str(),
@@ -1067,7 +1065,7 @@ mod tests {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let mut ctrl = setup_controller_with_partition(partition);
 
         let request = DbWriteRequest::create(b"data", 1000);
@@ -1091,7 +1089,7 @@ mod tests {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let mut ctrl = setup_controller_with_partition(partition);
 
         let request = DbWriteRequest::create(b"data", 1000);
@@ -1111,7 +1109,7 @@ mod tests {
         let node1 = NodeId::validated(1).unwrap();
         let handler = DbRequestHandler::new(node1);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let mut ctrl = setup_controller_with_partition(partition);
 
         let response = handler

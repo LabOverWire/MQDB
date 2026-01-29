@@ -6,6 +6,8 @@ pub const NUM_PARTITIONS: u16 = 64;
 pub struct PartitionId(u16);
 
 impl PartitionId {
+    pub const ZERO: Self = Self(0);
+
     #[allow(clippy::must_use_candidate)]
     pub fn new(id: u16) -> Option<Self> {
         if id < NUM_PARTITIONS {

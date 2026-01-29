@@ -16,8 +16,8 @@ use mqtt5::QoS;
 use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
-    ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
-    StorageBackend, StorageConfig, WebSocketConfig,
+    ChangeOnlyDeliveryConfig, ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig,
+    RateLimitConfig, StorageBackend, StorageConfig, WebSocketConfig,
 };
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
@@ -57,6 +57,15 @@ impl PeerConfig {
     }
 }
 
+struct MessageProcessorChannels {
+    tx_raft_messages: flume::Sender<crate::cluster::RaftMessage>,
+    tx_raft_events: flume::Sender<RaftEvent>,
+    tx_main_queue: flume::Sender<InboundMessage>,
+    transport_inbox_rx: flume::Receiver<InboundMessage>,
+    rx_tick: flume::Receiver<u64>,
+    tx_batch: flume::Sender<ProcessingBatch>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct ClusterConfig {
     pub node_id: u16,
@@ -90,7 +99,7 @@ impl ClusterConfig {
         Self {
             node_id,
             node_name: format!("node-{node_id}"),
-            bind_address: "0.0.0.0:1883".parse().expect("valid default address"),
+            bind_address: SocketAddr::from(([0, 0, 0, 0], 1883)),
             cluster_port_offset: 100,
             db_path,
             persist_stores: true,
@@ -426,40 +435,30 @@ pub struct ClusteredAgent {
 }
 
 impl ClusteredAgent {
-    /// # Errors
-    /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
-    #[allow(clippy::too_many_lines)]
-    pub fn new(config: ClusterConfig) -> Result<Self, String> {
-        use crate::storage::StorageBackend;
-
-        let node_id =
-            NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
-
-        let stores_backend: Option<Arc<dyn StorageBackend>> = if config.persist_stores {
+    fn open_stores_backend(
+        config: &ClusterConfig,
+    ) -> Result<Option<Arc<dyn crate::storage::StorageBackend>>, String> {
+        if config.persist_stores {
             let stores_path = config.db_path.join("stores");
-            Some(Arc::new(
+            Ok(Some(Arc::new(
                 FjallBackend::open(&stores_path, config.stores_durability).map_err(|e| {
                     format!(
                         "failed to open stores storage at {}: {e}",
                         stores_path.display()
                     )
                 })?,
-            ))
+            )))
         } else {
-            None
-        };
+            Ok(None)
+        }
+    }
 
-        let (tx_raft_messages, rx_raft_messages) = flume::bounded(RAFT_CHANNEL_CAPACITY);
-        let (tx_raft_events, rx_raft_events) = flume::bounded(RAFT_CHANNEL_CAPACITY);
-        let tx_raft_events_clone = tx_raft_events.clone();
-        let tx_raft_messages_for_processor = tx_raft_messages.clone();
-        let tx_raft_events_for_processor = tx_raft_events.clone();
-        let (tx_raft_admin, rx_raft_admin) = flume::bounded(RAFT_CHANNEL_CAPACITY);
-        let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
-        let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
-
-        #[allow(deprecated)]
-        let (transport, transport_inbox_rx) = if config.use_direct_quic {
+    #[allow(deprecated)]
+    fn build_transport(
+        node_id: NodeId,
+        config: &ClusterConfig,
+    ) -> (ClusterTransportKind, flume::Receiver<InboundMessage>) {
+        if config.use_direct_quic {
             let quic_transport = QuicDirectTransport::new(node_id);
             #[cfg(feature = "dev-insecure")]
             quic_transport.set_insecure(config.quic_insecure);
@@ -472,15 +471,78 @@ impl ClusteredAgent {
             let mqtt_transport = MqttTransport::new(node_id);
             let inbox_rx = mqtt_transport.inbox_rx();
             (ClusterTransportKind::Mqtt(mqtt_transport), inbox_rx)
-        };
+        }
+    }
+
+    fn open_raft(
+        node_id: NodeId,
+        db_path: &std::path::Path,
+        transport: ClusterTransportKind,
+    ) -> Result<RaftCoordinator<ClusterTransportKind>, String> {
+        let raft_path = db_path.join("raft");
+        let raft_backend = Arc::new(
+            FjallBackend::open(&raft_path, DurabilityMode::Immediate).map_err(|e| {
+                format!(
+                    "failed to open raft storage at {}: {e}",
+                    raft_path.display()
+                )
+            })?,
+        );
+        RaftCoordinator::new_with_storage(node_id, transport, RaftConfig::default(), raft_backend)
+            .map_err(|e| format!("failed to initialize raft coordinator: {e}"))
+    }
+
+    fn spawn_message_processor(
+        node_id: NodeId,
+        transport_config: TransportConfig,
+        peers: &[PeerConfig],
+        channels: MessageProcessorChannels,
+    ) -> DedicatedExecutor {
+        let mut processor = MessageProcessor::new(
+            node_id,
+            transport_config,
+            channels.tx_raft_messages,
+            channels.tx_raft_events,
+            channels.tx_main_queue,
+            channels.transport_inbox_rx,
+            channels.rx_tick,
+        );
+        for peer in peers {
+            if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                processor.register_peer(peer_node_id);
+            }
+        }
+        let executor = DedicatedExecutor::new("msg-processor", 2);
+        executor.handle().spawn(async move {
+            processor.run(channels.tx_batch).await;
+        });
+        info!("started message processor on dedicated executor");
+        executor
+    }
+
+    /// # Errors
+    /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
+    pub fn new(config: ClusterConfig) -> Result<Self, String> {
+        let node_id =
+            NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
+        let stores_backend = Self::open_stores_backend(&config)?;
+
+        let (tx_raft_messages, rx_raft_messages) = flume::bounded(RAFT_CHANNEL_CAPACITY);
+        let (tx_raft_events, rx_raft_events) = flume::bounded(RAFT_CHANNEL_CAPACITY);
+        let tx_raft_events_clone = tx_raft_events.clone();
+        let (tx_raft_admin, rx_raft_admin) = flume::bounded(RAFT_CHANNEL_CAPACITY);
+        let (tx_partition_map, rx_partition_map) = watch::channel(PartitionMap::default());
+        let (tx_raft_status, rx_raft_status) = watch::channel(RaftStatus::default());
+
+        let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
         let controller = NodeController::new_with_storage(
             node_id,
             transport.clone(),
             transport_config,
             stores_backend,
-            tx_raft_messages,
-            tx_raft_events,
+            tx_raft_messages.clone(),
+            tx_raft_events.clone(),
         );
 
         if controller.stores().has_persistence() {
@@ -503,51 +565,27 @@ impl ClusteredAgent {
             }
         }
 
-        let raft_path = config.db_path.join("raft");
-        let raft_backend = Arc::new(
-            FjallBackend::open(&raft_path, DurabilityMode::Immediate).map_err(|e| {
-                format!(
-                    "failed to open raft storage at {}: {e}",
-                    raft_path.display()
-                )
-            })?,
-        );
-
-        let raft = RaftCoordinator::new_with_storage(
-            node_id,
-            transport,
-            RaftConfig::default(),
-            raft_backend,
-        )
-        .map_err(|e| format!("failed to initialize raft coordinator: {e}"))?;
-
+        let raft = Self::open_raft(node_id, &config.db_path, transport)?;
         let (shutdown_tx, _) = broadcast::channel(1);
 
         let (tx_tick, rx_tick) = flume::bounded(1);
         let (tx_main_queue, rx_main_queue) = flume::bounded(MAIN_QUEUE_CAPACITY);
         let (tx_batch, rx_batch) = flume::bounded(BATCH_QUEUE_CAPACITY);
 
-        let mut processor = MessageProcessor::new(
-            node_id,
-            transport_config,
-            tx_raft_messages_for_processor,
-            tx_raft_events_for_processor,
+        let processor_channels = MessageProcessorChannels {
+            tx_raft_messages,
+            tx_raft_events,
             tx_main_queue,
             transport_inbox_rx,
             rx_tick,
+            tx_batch,
+        };
+        let processor_executor = Self::spawn_message_processor(
+            node_id,
+            transport_config,
+            &config.peers,
+            processor_channels,
         );
-
-        for peer in &config.peers {
-            if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
-                processor.register_peer(peer_node_id);
-            }
-        }
-
-        let processor_executor = DedicatedExecutor::new("msg-processor", 2);
-        processor_executor.handle().spawn(async move {
-            processor.run(tx_batch).await;
-        });
-        info!("started message processor on dedicated executor");
 
         Ok(Self {
             node_id,
@@ -643,11 +681,53 @@ impl ClusteredAgent {
 
     /// # Errors
     /// Returns an error if broker startup, transport connection, or address parsing fails.
-    ///
-    /// # Panics
-    /// Panics if `run()` is called more than once (internal fields moved on first call).
-    #[allow(clippy::too_many_lines)]
+    /// Also returns an error if `run()` is called more than once.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let synced_retained_topics = self.initialize_event_handler().await;
+
+        let (bridge_configs, use_external_bridge_manager) = self.prepare_bridges()?;
+
+        let (broker_config, service_username, service_password, needs_composite, admin_users) =
+            self.configure_broker_with_event_handler(&bridge_configs, use_external_bridge_manager)
+                .await?;
+
+        let broker = self
+            .build_broker(
+                broker_config,
+                needs_composite,
+                service_username.as_ref(),
+                service_password.as_ref(),
+                &admin_users,
+            )
+            .await?;
+
+        let (broker_handle, _bridge_manager) = self
+            .start_broker(broker, &bridge_configs, use_external_bridge_manager)
+            .await;
+
+        let admin_client = self
+            .connect_transport(service_username.as_ref(), service_password.as_ref())
+            .await?;
+
+        let (admin_tx, admin_rx) = flume::bounded::<AdminRequest>(32);
+        subscribe_admin_topics(&admin_client, &admin_tx).await?;
+
+        self.setup_and_spawn_raft().await?;
+
+        self.run_event_loop(
+            synced_retained_topics,
+            broker_handle,
+            admin_client,
+            admin_rx,
+            service_username.as_ref(),
+            service_password.as_ref(),
+        )
+        .await
+    }
+
+    async fn initialize_event_handler(
+        &self,
+    ) -> Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>> {
         let event_handler = Arc::new(ClusterEventHandler::new(
             self.node_id,
             self.controller.clone(),
@@ -658,31 +738,593 @@ impl ClusteredAgent {
             let mut ctrl = self.controller.write().await;
             ctrl.set_synced_retained_topics(synced_retained_topics.clone());
         }
+        synced_retained_topics
+    }
 
+    async fn configure_broker_with_event_handler(
+        &self,
+        bridge_configs: &[BridgeConfig],
+        use_external_bridge_manager: bool,
+    ) -> Result<
+        (
+            BrokerConfig,
+            Option<String>,
+            Option<String>,
+            bool,
+            std::collections::HashSet<String>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let event_handler = Arc::new(ClusterEventHandler::new(
+            self.node_id,
+            self.controller.clone(),
+        ));
+        self.configure_broker(event_handler, bridge_configs, use_external_bridge_manager)
+            .await
+    }
+
+    async fn build_broker(
+        &self,
+        broker_config: BrokerConfig,
+        needs_composite: bool,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+        admin_users: &std::collections::HashSet<String>,
+    ) -> Result<MqttBroker, Box<dyn std::error::Error + Send + Sync>> {
+        let broker_config = self.apply_quic_config(broker_config);
+        let broker_config = self.apply_ws_config(broker_config);
+        let broker_config = self.apply_cluster_listener(broker_config)?;
+
+        let mut broker = MqttBroker::with_config(broker_config).await?;
+
+        if needs_composite
+            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
+        {
+            let primary = broker.auth_provider();
+            let fallback = PasswordAuthProvider::new();
+            fallback
+                .add_user(svc_user.clone(), svc_pass)
+                .map_err(|e| format!("failed to create service account: {e}"))?;
+            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
+            broker = broker.with_auth_provider(Arc::new(composite));
+            info!("composite auth provider configured for internal service clients");
+        }
+
+        let current_provider = broker.auth_provider();
+        let protected_provider =
+            TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
+                .with_internal_service_username(service_username.cloned());
+        broker = broker.with_auth_provider(Arc::new(protected_provider));
+        if admin_users.is_empty() {
+            info!("topic protection enabled (no admin users configured)");
+        } else {
+            info!(
+                admin_users = ?admin_users,
+                "topic protection enabled with admin users"
+            );
+        }
+
+        Ok(broker)
+    }
+
+    async fn setup_and_spawn_raft(
+        &mut self,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let all_nodes: Vec<NodeId> = {
+            let mut nodes: Vec<NodeId> = self
+                .peers
+                .iter()
+                .filter_map(|p| NodeId::validated(p.node_id))
+                .collect();
+            nodes.push(self.node_id);
+            nodes.sort_by_key(|n| n.get());
+            nodes
+        };
+
+        let mut raft = self
+            .raft
+            .take()
+            .ok_or("run() called twice: raft already taken")?;
+        {
+            let mut ctrl = self.controller.write().await;
+            for peer in &self.peers {
+                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                    ctrl.register_peer(peer_node_id);
+                    raft.add_peer(peer_node_id);
+                    info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
+                }
+            }
+        }
+
+        let raft_task = RaftTask::new(
+            raft,
+            self.rx_raft_messages
+                .take()
+                .ok_or("run() called twice: rx_raft_messages already taken")?,
+            self.rx_raft_events
+                .take()
+                .ok_or("run() called twice: rx_raft_events already taken")?,
+            self.rx_raft_admin
+                .take()
+                .ok_or("run() called twice: rx_raft_admin already taken")?,
+            self.tx_partition_map
+                .take()
+                .ok_or("run() called twice: tx_partition_map already taken")?,
+            self.tx_raft_status
+                .take()
+                .ok_or("run() called twice: tx_raft_status already taken")?,
+            self.shutdown_tx.subscribe(),
+            all_nodes,
+        );
+        tokio::spawn(async move {
+            raft_task.run().await;
+        });
+        info!("spawned Raft task");
+
+        Ok(())
+    }
+
+    async fn take_local_publish_receiver(
+        &self,
+    ) -> Option<flume::Receiver<crate::cluster::LocalPublishRequest>> {
+        if self.use_direct_quic {
+            let ctrl = self.controller.read().await;
+            ctrl.transport()
+                .as_quic()
+                .map(QuicDirectTransport::local_publish_rx)
+        } else {
+            None
+        }
+    }
+
+    fn spawn_http_task(
+        &mut self,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let http_config = self.http_config.take()?;
+        let http_bind = http_config.bind_address;
+        let http_shutdown_rx = self.shutdown_tx.subscribe();
+
+        let http_mqtt_client = mqtt5::MqttClient::new("mqdb-http-oauth");
+        let http_connect_ip = if self.bind_address.ip().is_unspecified() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        } else {
+            self.bind_address.ip()
+        };
+        let http_addr = format!("{}:{}", http_connect_ip, self.bind_address.port());
+
+        let http_svc_user = service_username.cloned();
+        let http_svc_pass = service_password.cloned();
+
+        Some(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            let connect_result = if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
+                let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
+                    .with_credentials(user, pass);
+                Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
+                    .await
+                    .map(|_| ())
+            } else {
+                http_mqtt_client.connect(&http_addr).await
+            };
+
+            if let Err(e) = connect_result {
+                tracing::error!("Failed to connect HTTP OAuth MQTT client: {}", e);
+                return;
+            }
+
+            info!(addr = %http_bind, "starting HTTP OAuth server");
+            let server = crate::http::HttpServer::new(
+                http_config,
+                std::sync::Arc::new(http_mqtt_client),
+                http_shutdown_rx,
+            );
+            if let Err(e) = server.run().await {
+                tracing::error!("HTTP server error: {}", e);
+            }
+        }))
+    }
+
+    async fn run_event_loop(
+        &mut self,
+        synced_retained_topics: Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>>,
+        broker_handle: tokio::task::JoinHandle<()>,
+        admin_client: mqtt5::MqttClient,
+        admin_rx: flume::Receiver<AdminRequest>,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut tick_interval = interval(Duration::from_millis(10));
+        let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
+        let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
+        let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
+        let mut retained_sync_cleanup_interval =
+            interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let tx_tick = self
+            .tx_tick
+            .take()
+            .ok_or("run() called twice: tx_tick already taken")?;
+        let rx_main_queue = self
+            .rx_main_queue
+            .take()
+            .ok_or("run() called twice: rx_main_queue already taken")?;
+        let rx_batch = self
+            .rx_batch
+            .take()
+            .ok_or("run() called twice: rx_batch already taken")?;
+
+        let rx_local_publish = self.take_local_publish_receiver().await;
+
+        let _http_task = self.spawn_http_task(service_username, service_password);
+
+        self.recover_pending_lwts().await;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = tick_interval.tick() => {
+                    self.handle_tick(&tx_tick).await;
+                }
+                Ok(batch) = rx_batch.recv_async() => {
+                    self.handle_processing_batch(batch).await;
+                }
+                Ok(msg) = rx_main_queue.recv_async() => {
+                    self.handle_main_queue_message(msg, &rx_main_queue).await;
+                }
+                _ = ttl_cleanup_interval.tick() => {
+                    self.handle_ttl_cleanup().await;
+                }
+                _ = cleanup_interval.tick() => {
+                    self.handle_session_cleanup().await;
+                }
+                _ = wildcard_reconciliation_interval.tick() => {
+                    self.handle_wildcard_reconciliation().await;
+                }
+                _ = subscription_reconciliation_interval.tick() => {
+                    self.handle_subscription_reconciliation().await;
+                }
+                _ = retained_sync_cleanup_interval.tick() => {
+                    Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
+                }
+                Ok(req) = admin_rx.recv_async() => {
+                    self.handle_admin_request(&admin_client, req).await;
+                }
+                Some(Ok(req)) = async {
+                    match &rx_local_publish {
+                        Some(rx) => Some(rx.recv_async().await),
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    Self::handle_local_publish(&admin_client, req, rx_local_publish.as_ref()).await;
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("cluster node shutting down");
+                    break;
+                }
+            }
+        }
+
+        broker_handle.abort();
+        Ok(())
+    }
+
+    async fn handle_tick(&self, tx_tick: &flume::Sender<u64>) {
+        let now = current_time_ms();
+        let _ = tx_tick.try_send(now);
+
+        let raft_partition_map = self.rx_partition_map.borrow().clone();
+
+        let mut ctrl = self.controller.write().await;
+        let current_map = ctrl.partition_map().clone();
+        let mut became_primary = false;
+        if current_map != raft_partition_map {
+            let mut changes = 0u32;
+            for partition in PartitionId::all() {
+                let new_assignment = raft_partition_map.get(partition);
+                let old_assignment = current_map.get(partition);
+
+                if new_assignment != old_assignment {
+                    let is_primary = new_assignment.primary == Some(self.node_id);
+                    let is_replica = new_assignment.replicas.contains(&self.node_id);
+                    let was_primary = old_assignment.primary == Some(self.node_id);
+
+                    if is_primary {
+                        ctrl.become_primary(partition, new_assignment.epoch);
+                        if !was_primary {
+                            became_primary = true;
+                        }
+                    } else if is_replica {
+                        ctrl.become_replica(partition, new_assignment.epoch, 0);
+                    }
+                    changes += 1;
+                    if changes.is_multiple_of(8) {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+            ctrl.update_partition_map(raft_partition_map);
+        }
+        if became_primary {
+            let stores = ctrl.stores();
+            let result = stores
+                .subscriptions
+                .reconcile(&stores.topics, &stores.wildcards);
+            if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+                info!(
+                    clients = result.clients_checked,
+                    added = result.subscriptions_added,
+                    removed = result.subscriptions_removed,
+                    "reconciled subscriptions after partition takeover"
+                );
+            }
+        }
+        ctrl.transport().log_queue_stats();
+    }
+
+    async fn handle_processing_batch(&self, batch: ProcessingBatch) {
+        if let Some(hb) = batch.heartbeat_to_send {
+            let ctrl = self.controller.read().await;
+            let _ = ctrl.transport().broadcast(hb).await;
+        }
+
+        if !batch.heartbeat_updates.is_empty() {
+            let mut ctrl = self.controller.write().await;
+            ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
+        }
+
+        if !batch.dead_nodes.is_empty() {
+            let mut ctrl = self.controller.write().await;
+            ctrl.apply_dead_nodes(&batch.dead_nodes);
+            let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
+
+            for dead_node in &dead_nodes {
+                let affected_sessions = ctrl.stores().sessions.sessions_on_node(*dead_node);
+                if !affected_sessions.is_empty() {
+                    info!(
+                        node = dead_node.get(),
+                        sessions = affected_sessions.len(),
+                        "marking sessions disconnected due to node death"
+                    );
+                    let now = current_time_ms();
+                    let mut session_count = 0u32;
+                    for session in affected_sessions {
+                        let client_id = session.client_id_str();
+                        let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
+                            s.set_connected(false, *dead_node, now);
+                        });
+                        if let Ok((_session, write)) = result {
+                            ctrl.write_or_forward(write).await;
+                        }
+                        session_count += 1;
+                        if session_count.is_multiple_of(8) {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_main_queue_message(
+        &self,
+        msg: InboundMessage,
+        rx_main_queue: &flume::Receiver<InboundMessage>,
+    ) {
+        const BATCH_SIZE: u32 = 8;
+        let mut ctrl = self.controller.write().await;
+        ctrl.handle_filtered_message(msg).await;
+        let mut count = 1u32;
+        while let Ok(msg) = rx_main_queue.try_recv() {
+            ctrl.handle_filtered_message(msg).await;
+            count += 1;
+            if count.is_multiple_of(BATCH_SIZE) {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    async fn handle_ttl_cleanup(&self) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let ctrl = self.controller.read().await;
+        let expired_ttl = ctrl.stores().db_data.cleanup_expired_ttl(now_secs);
+        if !expired_ttl.is_empty() {
+            info!(count = expired_ttl.len(), "cleaned up TTL-expired entities");
+        }
+    }
+
+    async fn handle_session_cleanup(&self) {
+        let now = current_time_ms();
+        let expired_sessions = {
+            let ctrl = self.controller.read().await;
+            let expired_idempotency = ctrl.stores().idempotency.cleanup_expired(now);
+            if expired_idempotency > 0 {
+                info!(
+                    expired_idempotency,
+                    "cleaned up expired idempotency records"
+                );
+            }
+            let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
+            if stale_offsets > 0 {
+                info!(stale_offsets, "cleaned up stale consumer offsets");
+            }
+            let expired_unique = ctrl.stores().unique_cleanup_expired(now);
+            if expired_unique > 0 {
+                info!(expired_unique, "cleaned up expired unique reservations");
+            }
+            ctrl.stores().cleanup_expired_sessions(now)
+        };
+        if !expired_sessions.is_empty() {
+            info!(
+                count = expired_sessions.len(),
+                "cleaning up expired sessions and subscriptions"
+            );
+            let mut ctrl = self.controller.write().await;
+            for session in &expired_sessions {
+                let client_id = session.client_id_str();
+                clear_expired_session_subscriptions(&mut ctrl, client_id).await;
+            }
+        }
+    }
+
+    async fn handle_wildcard_reconciliation(&self) {
+        let now = current_time_ms();
+        let ctrl = self.controller.read().await;
+        let pending_store = &ctrl.stores().wildcard_pending;
+        if pending_store.needs_reconciliation(now) {
+            let pending = pending_store.get_pending_for_retry();
+            if !pending.is_empty() {
+                debug!(
+                    count = pending.len(),
+                    "retrying pending wildcard broadcasts"
+                );
+                for p in &pending {
+                    let broadcast = p.to_broadcast();
+                    let msg = ClusterMessage::WildcardBroadcast(broadcast);
+                    let _ = ctrl.transport().broadcast(msg).await;
+                    pending_store.mark_retried(&p.pattern, &p.client_id);
+                }
+                info!(
+                    count = pending.len(),
+                    "rebroadcast pending wildcard subscriptions"
+                );
+            }
+            pending_store.mark_reconciliation(now);
+            let max_age_ms = 5 * 60 * 1000;
+            let removed = pending_store.clear_old_entries(now, max_age_ms);
+            if removed > 0 {
+                debug!(removed, "cleared old wildcard pending entries");
+            }
+        }
+    }
+
+    async fn handle_subscription_reconciliation(&self) {
+        let now = current_time_ms();
+        let ctrl = self.controller.read().await;
+        let stores = ctrl.stores();
+        if stores.subscriptions.needs_reconciliation(now) {
+            let result = stores
+                .subscriptions
+                .reconcile(&stores.topics, &stores.wildcards);
+            if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+                info!(
+                    clients = result.clients_checked,
+                    added = result.subscriptions_added,
+                    removed = result.subscriptions_removed,
+                    "reconciled subscription cache"
+                );
+            }
+            stores.subscriptions.mark_reconciliation(now);
+        }
+    }
+
+    async fn handle_retained_sync_cleanup(
+        synced_retained_topics: &Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>>,
+    ) {
+        let ttl = std::time::Duration::from_secs(RETAINED_SYNC_TTL_SECS);
+        let mut synced = synced_retained_topics.write().await;
+        let before_len = synced.len();
+        synced.retain(|_, insert_time| insert_time.elapsed() < ttl);
+        let removed = before_len - synced.len();
+        if removed > 0 {
+            debug!(
+                removed,
+                remaining = synced.len(),
+                "cleaned up stale retained sync entries"
+            );
+        }
+    }
+
+    async fn handle_local_publish(
+        admin_client: &mqtt5::MqttClient,
+        req: crate::cluster::LocalPublishRequest,
+        rx_local_publish: Option<&flume::Receiver<crate::cluster::LocalPublishRequest>>,
+    ) {
+        const BATCH_SIZE: u32 = 64;
+        let options = mqtt5::PublishOptions {
+            qos: mqtt5::QoS::from(req.qos),
+            retain: req.retain,
+            ..Default::default()
+        };
+        if let Err(e) = admin_client
+            .publish_with_options(&req.topic, req.payload, options)
+            .await
+        {
+            warn!(error = %e, topic = %req.topic, "failed to publish local request");
+        }
+
+        if let Some(rx) = rx_local_publish {
+            let mut count = 1u32;
+            while let Ok(req) = rx.try_recv() {
+                let options = mqtt5::PublishOptions {
+                    qos: mqtt5::QoS::from(req.qos),
+                    retain: req.retain,
+                    ..Default::default()
+                };
+                if let Err(e) = admin_client
+                    .publish_with_options(&req.topic, req.payload, options)
+                    .await
+                {
+                    warn!(error = %e, topic = %req.topic, "failed to publish local request");
+                }
+                count += 1;
+                if count.is_multiple_of(BATCH_SIZE) {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+
+    fn prepare_bridges(
+        &mut self,
+    ) -> Result<(Vec<BridgeConfig>, bool), Box<dyn std::error::Error + Send + Sync>> {
+        if self.use_direct_quic {
+            return Ok((vec![], false));
+        }
+        if !self.peers.is_empty() && self.bridge_executor.is_none() {
+            let worker_threads = (self.peers.len() + 1).clamp(2, 8);
+            self.bridge_executor = Some(DedicatedExecutor::new("bridge-io", worker_threads));
+            info!(
+                workers = worker_threads,
+                bridges = self.peers.len(),
+                "created dedicated bridge executor"
+            );
+        }
+        let configs = self.create_bridge_configs()?;
+        let use_external = self.bridge_executor.is_some() && !configs.is_empty();
+        Ok((configs, use_external))
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn configure_broker(
+        &self,
+        event_handler: Arc<ClusterEventHandler<ClusterTransportKind>>,
+        bridge_configs: &[BridgeConfig],
+        use_external_bridge_manager: bool,
+    ) -> Result<
+        (
+            BrokerConfig,
+            Option<String>,
+            Option<String>,
+            bool,
+            std::collections::HashSet<String>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
             enable_persistence: true,
             ..Default::default()
         };
 
-        let (bridge_configs, use_external_bridge_manager) = if self.use_direct_quic {
-            (vec![], false)
-        } else {
-            if !self.peers.is_empty() && self.bridge_executor.is_none() {
-                let worker_threads = (self.peers.len() + 1).clamp(2, 8);
-                self.bridge_executor = Some(DedicatedExecutor::new("bridge-io", worker_threads));
-                info!(
-                    workers = worker_threads,
-                    bridges = self.peers.len(),
-                    "created dedicated bridge executor"
-                );
-            }
-            let configs = self.create_bridge_configs()?;
-            let use_external = self.bridge_executor.is_some() && !configs.is_empty();
-            (configs, use_external)
-        };
-
-        let mut broker_config = BrokerConfig {
+        let broker_config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
             max_packet_size: BROKER_MAX_PACKET_SIZE,
@@ -696,7 +1338,11 @@ impl ClusteredAgent {
             bridges: if use_external_bridge_manager {
                 vec![]
             } else {
-                bridge_configs.clone()
+                bridge_configs.to_vec()
+            },
+            change_only_delivery_config: ChangeOnlyDeliveryConfig {
+                enabled: true,
+                topic_patterns: vec!["$DB/+/events/#".to_string()],
             },
             ..Default::default()
         }
@@ -715,82 +1361,74 @@ impl ClusteredAgent {
             no_rate_limit: self.auth_setup.no_rate_limit,
             admin_users: self.auth_setup.admin_users.clone(),
         };
+        let mut config = broker_config;
         let auth_result =
-            crate::auth_config::configure_broker_auth(&auth_cfg, &mut broker_config.auth_config)
+            crate::auth_config::configure_broker_auth(&auth_cfg, &mut config.auth_config)
                 .await
                 .map_err(|e| format!("auth setup failed: {e}"))?;
-        let (service_username, service_password, needs_composite, admin_users) = (
+
+        Ok((
+            config,
             auth_result.service_username,
             auth_result.service_password,
             auth_result.needs_composite,
             auth_result.admin_users,
-        );
+        ))
+    }
 
+    fn apply_quic_config(&self, broker_config: BrokerConfig) -> BrokerConfig {
         if self.use_quic {
             if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
                 let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
                     .with_bind_address(self.bind_address);
-                broker_config = broker_config.with_quic(quic_config);
                 info!(quic_bind = %self.bind_address, "QUIC listener configured (same port as TCP)");
-            } else {
-                info!(
-                    "QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener"
-                );
+                return broker_config.with_quic(quic_config);
             }
+            info!(
+                "QUIC enabled but no certs provided - bridges will use QUIC, but no QUIC listener"
+            );
         }
+        broker_config
+    }
 
+    fn apply_ws_config(&self, broker_config: BrokerConfig) -> BrokerConfig {
         if let Some(ws_addr) = self.ws_bind_address {
             let ws_config = WebSocketConfig::new().with_bind_addresses(vec![ws_addr]);
-            broker_config = broker_config.with_websocket(ws_config);
             info!(ws_bind = %ws_addr, "WebSocket listener configured");
+            return broker_config.with_websocket(ws_config);
         }
+        broker_config
+    }
 
+    fn apply_cluster_listener(
+        &self,
+        broker_config: BrokerConfig,
+    ) -> Result<BrokerConfig, Box<dyn std::error::Error + Send + Sync>> {
+        if self.use_direct_quic {
+            return Ok(broker_config);
+        }
         let cluster_addr: SocketAddr =
             format!("{}:{}", self.bind_address.ip(), self.cluster_port())
                 .parse()
                 .map_err(|e| format!("invalid cluster address: {e}"))?;
 
-        if !self.use_direct_quic {
-            let cluster_listener = if let (Some(cert_file), Some(key_file)) =
-                (&self.quic_cert_file, &self.quic_key_file)
-            {
-                ClusterListenerConfig::quic(vec![cluster_addr], cert_file.clone(), key_file.clone())
-            } else {
-                ClusterListenerConfig::new(vec![cluster_addr])
-            };
-            broker_config = broker_config.with_cluster_listener(cluster_listener);
-            info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
-        }
-
-        let mut broker = MqttBroker::with_config(broker_config).await?;
-
-        if needs_composite
-            && let (Some(svc_user), Some(svc_pass)) = (&service_username, &service_password)
+        let cluster_listener = if let (Some(cert_file), Some(key_file)) =
+            (&self.quic_cert_file, &self.quic_key_file)
         {
-            let primary = broker.auth_provider();
-            let fallback = PasswordAuthProvider::new();
-            fallback
-                .add_user(svc_user.clone(), svc_pass)
-                .map_err(|e| format!("failed to create service account: {e}"))?;
-            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
-            broker = broker.with_auth_provider(Arc::new(composite));
-            info!("composite auth provider configured for internal service clients");
-        }
-
-        let current_provider = broker.auth_provider();
-        let protected_provider =
-            TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
-                .with_internal_service_username(service_username.clone());
-        broker = broker.with_auth_provider(Arc::new(protected_provider));
-        if admin_users.is_empty() {
-            info!("topic protection enabled (no admin users configured)");
+            ClusterListenerConfig::quic(vec![cluster_addr], cert_file.clone(), key_file.clone())
         } else {
-            info!(
-                admin_users = ?admin_users,
-                "topic protection enabled with admin users"
-            );
-        }
+            ClusterListenerConfig::new(vec![cluster_addr])
+        };
+        info!(cluster_port = %cluster_addr, "cluster listener configured (skip_bridge_forwarding=true)");
+        Ok(broker_config.with_cluster_listener(cluster_listener))
+    }
 
+    async fn start_broker(
+        &self,
+        mut broker: MqttBroker,
+        bridge_configs: &[BridgeConfig],
+        use_external_bridge_manager: bool,
+    ) -> (tokio::task::JoinHandle<()>, Option<Arc<BridgeManager>>) {
         let mut ready_rx = broker.ready_receiver();
 
         let router = if use_external_bridge_manager {
@@ -807,26 +1445,26 @@ impl ClusteredAgent {
         let _ = ready_rx.changed().await;
         info!("broker ready signal received");
 
-        let _bridge_manager =
-            if let (Some(router), Some(executor)) = (router, &self.bridge_executor) {
-                let manager = Arc::new(BridgeManager::with_runtime(
-                    router.clone(),
-                    executor.handle(),
-                ));
-                router.set_bridge_manager(manager.clone()).await;
-                for config in &bridge_configs {
-                    if let Err(e) = manager.add_bridge(config.clone()) {
-                        warn!(bridge = %config.name, error = %e, "failed to add bridge");
-                    }
+        let bridge_manager = if let (Some(router), Some(executor)) = (router, &self.bridge_executor)
+        {
+            let manager = Arc::new(BridgeManager::with_runtime(
+                router.clone(),
+                executor.handle(),
+            ));
+            router.set_bridge_manager(manager.clone()).await;
+            for config in bridge_configs {
+                if let Err(e) = manager.add_bridge(config.clone()) {
+                    warn!(bridge = %config.name, error = %e, "failed to add bridge");
                 }
-                info!(
-                    bridges = bridge_configs.len(),
-                    "started bridges on dedicated executor"
-                );
-                Some(manager)
-            } else {
-                None
-            };
+            }
+            info!(
+                bridges = bridge_configs.len(),
+                "started bridges on dedicated executor"
+            );
+            Some(manager)
+        } else {
+            None
+        };
 
         info!(
             node_id = self.node_id.get(),
@@ -836,542 +1474,144 @@ impl ClusteredAgent {
             "cluster node started"
         );
 
+        (broker_handle, bridge_manager)
+    }
+
+    async fn connect_transport(
+        &self,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Result<mqtt5::MqttClient, Box<dyn std::error::Error + Send + Sync>> {
         let connect_ip = if self.bind_address.ip().is_unspecified() {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         } else {
             self.bind_address.ip()
         };
-        let broker_addr = format!("{}:{}", connect_ip, self.bind_address.port());
+        let broker_addr = format!("{connect_ip}:{}", self.bind_address.port());
 
         let transport = {
             let ctrl = self.controller.read().await;
             ctrl.transport().clone()
         };
 
-        let admin_client = if self.use_direct_quic {
-            let quic_transport = transport
-                .as_quic()
-                .ok_or("expected QUIC transport but found MQTT transport")?;
-            let cluster_addr: SocketAddr =
-                format!("{}:{}", self.bind_address.ip(), self.cluster_port())
-                    .parse()
-                    .map_err(|e| format!("invalid cluster address: {e}"))?;
-
-            let (cert_file, key_file) = match (&self.quic_cert_file, &self.quic_key_file) {
-                (Some(c), Some(k)) => (c.clone(), k.clone()),
-                _ => return Err("QUIC cert and key files required for direct QUIC mode".into()),
-            };
-
-            quic_transport
-                .bind(cluster_addr, &cert_file, &key_file)
-                .await
-                .map_err(|e| format!("failed to bind QUIC transport: {e}"))?;
-            info!(addr = %cluster_addr, "QUIC direct transport bound");
-
-            for peer in &self.peers {
-                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
-                    let peer_addr: SocketAddr = match peer.address.parse() {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            warn!(peer = peer_node_id.get(), address = %peer.address, error = %e, "invalid peer address");
-                            continue;
-                        }
-                    };
-                    let peer_cluster_addr: SocketAddr = match format!(
-                        "{}:{}",
-                        peer_addr.ip(),
-                        peer_addr.port() + self.cluster_port_offset
-                    )
-                    .parse()
-                    {
-                        Ok(addr) => addr,
-                        Err(e) => {
-                            warn!(peer = peer_node_id.get(), error = %e, "invalid peer cluster address");
-                            continue;
-                        }
-                    };
-                    if let Err(e) = quic_transport
-                        .connect_to_peer(peer_node_id, peer_cluster_addr)
-                        .await
-                    {
-                        warn!(peer = peer_node_id.get(), addr = %peer_cluster_addr, error = %e, "failed to connect to peer via QUIC");
-                    } else {
-                        info!(peer = peer_node_id.get(), addr = %peer_cluster_addr, "connected to peer via QUIC");
-                    }
-                }
-            }
-
-            info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");
-            let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());
-            let admin_mqtt_client = mqtt5::MqttClient::new(&admin_client_id);
-            if let Some(user) = &service_username {
-                let options = mqtt5::types::ConnectOptions::new(&admin_client_id)
-                    .with_credentials(user, service_password.as_deref().unwrap_or(""));
-                Box::pin(admin_mqtt_client.connect_with_options(&broker_addr, options))
-                    .await
-                    .map_err(|e| format!("failed to connect admin client: {e}"))?;
-            } else {
-                admin_mqtt_client
-                    .connect(&broker_addr)
-                    .await
-                    .map_err(|e| format!("failed to connect admin client: {e}"))?;
-            }
-            info!("admin MQTT client connected");
-            admin_mqtt_client
-        } else {
-            #[allow(deprecated)]
-            let mqtt_transport = transport.as_mqtt().expect("expected MQTT transport");
-            info!(broker_addr = %broker_addr, "connecting transport to local broker");
-            Box::pin(mqtt_transport.connect_with_credentials(
+        if self.use_direct_quic {
+            self.connect_quic_transport(
+                &transport,
                 &broker_addr,
-                service_username.as_deref(),
-                service_password.as_deref(),
-            ))
+                service_username,
+                service_password,
+            )
             .await
-            .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
-            info!("transport connected to local broker");
-            mqtt_transport.client().clone()
+        } else {
+            self.connect_mqtt_transport(
+                &transport,
+                &broker_addr,
+                service_username,
+                service_password,
+            )
+            .await
+        }
+    }
+
+    async fn connect_quic_transport(
+        &self,
+        transport: &ClusterTransportKind,
+        broker_addr: &str,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Result<mqtt5::MqttClient, Box<dyn std::error::Error + Send + Sync>> {
+        let quic_transport = transport
+            .as_quic()
+            .ok_or("expected QUIC transport but found MQTT transport")?;
+        let cluster_addr: SocketAddr =
+            format!("{}:{}", self.bind_address.ip(), self.cluster_port())
+                .parse()
+                .map_err(|e| format!("invalid cluster address: {e}"))?;
+
+        let (cert_file, key_file) = match (&self.quic_cert_file, &self.quic_key_file) {
+            (Some(c), Some(k)) => (c.clone(), k.clone()),
+            _ => return Err("QUIC cert and key files required for direct QUIC mode".into()),
         };
 
-        let (admin_tx, admin_rx) = flume::bounded::<AdminRequest>(32);
-        admin_client
-            .subscribe("$SYS/mqdb/cluster/#", {
-                let tx = admin_tx.clone();
-                move |msg: Message| {
-                    let req = AdminRequest {
-                        topic: msg.topic.clone(),
-                        response_topic: msg.properties.response_topic.clone(),
-                        payload: msg.payload.clone(),
-                    };
-                    let _ = tx.try_send(req);
-                }
-            })
+        quic_transport
+            .bind(cluster_addr, &cert_file, &key_file)
             .await
-            .map_err(|e| format!("failed to subscribe to admin topics: {e}"))?;
+            .map_err(|e| format!("failed to bind QUIC transport: {e}"))?;
+        info!(addr = %cluster_addr, "QUIC direct transport bound");
 
-        admin_client
-            .subscribe("$DB/_health", {
-                let tx = admin_tx.clone();
-                move |msg: Message| {
-                    let req = AdminRequest {
-                        topic: msg.topic.clone(),
-                        response_topic: msg.properties.response_topic.clone(),
-                        payload: msg.payload.clone(),
-                    };
-                    let _ = tx.try_send(req);
-                }
-            })
-            .await
-            .map_err(|e| format!("failed to subscribe to health topic: {e}"))?;
-
-        admin_client
-            .subscribe("$DB/_admin/#", {
-                let tx = admin_tx.clone();
-                move |msg: Message| {
-                    let req = AdminRequest {
-                        topic: msg.topic.clone(),
-                        response_topic: msg.properties.response_topic.clone(),
-                        payload: msg.payload.clone(),
-                    };
-                    let _ = tx.try_send(req);
-                }
-            })
-            .await
-            .map_err(|e| format!("failed to subscribe to db admin topics: {e}"))?;
-
-        info!("subscribed to admin topics");
-
-        let all_nodes: Vec<NodeId> = {
-            let mut nodes: Vec<NodeId> = self
-                .peers
-                .iter()
-                .filter_map(|p| NodeId::validated(p.node_id))
-                .collect();
-            nodes.push(self.node_id);
-            nodes.sort_by_key(|n| n.get());
-            nodes
-        };
-
-        let mut raft = self.raft.take().expect("raft already taken");
-        {
-            let mut ctrl = self.controller.write().await;
-            for peer in &self.peers {
-                if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
-                    ctrl.register_peer(peer_node_id);
-                    raft.add_peer(peer_node_id);
-                    info!(peer_id = peer.node_id, address = %peer.address, "registered peer");
+        for peer in &self.peers {
+            if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
+                let peer_addr: SocketAddr = match peer.address.parse() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        warn!(peer = peer_node_id.get(), address = %peer.address, error = %e, "invalid peer address");
+                        continue;
+                    }
+                };
+                let peer_cluster_addr: SocketAddr = match format!(
+                    "{}:{}",
+                    peer_addr.ip(),
+                    peer_addr.port() + self.cluster_port_offset
+                )
+                .parse()
+                {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        warn!(peer = peer_node_id.get(), error = %e, "invalid peer cluster address");
+                        continue;
+                    }
+                };
+                if let Err(e) = quic_transport
+                    .connect_to_peer(peer_node_id, peer_cluster_addr)
+                    .await
+                {
+                    warn!(peer = peer_node_id.get(), addr = %peer_cluster_addr, error = %e, "failed to connect to peer via QUIC");
+                } else {
+                    info!(peer = peer_node_id.get(), addr = %peer_cluster_addr, "connected to peer via QUIC");
                 }
             }
         }
 
-        let raft_task = RaftTask::new(
-            raft,
-            self.rx_raft_messages
-                .take()
-                .expect("rx_raft_messages already taken"),
-            self.rx_raft_events
-                .take()
-                .expect("rx_raft_events already taken"),
-            self.rx_raft_admin
-                .take()
-                .expect("rx_raft_admin already taken"),
-            self.tx_partition_map
-                .take()
-                .expect("tx_partition_map already taken"),
-            self.tx_raft_status
-                .take()
-                .expect("tx_raft_status already taken"),
-            self.shutdown_tx.subscribe(),
-            all_nodes,
-        );
-        tokio::spawn(async move {
-            raft_task.run().await;
-        });
-        info!("spawned Raft task");
-
-        let mut tick_interval = interval(Duration::from_millis(10));
-        let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
-        let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
-        let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
-        let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
-        let mut retained_sync_cleanup_interval =
-            interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-
-        let tx_tick = self.tx_tick.take().expect("tx_tick already taken");
-        let rx_main_queue = self
-            .rx_main_queue
-            .take()
-            .expect("rx_main_queue already taken");
-        let rx_batch = self.rx_batch.take().expect("rx_batch already taken");
-
-        let rx_local_publish = if self.use_direct_quic {
-            let ctrl = self.controller.read().await;
-            ctrl.transport()
-                .as_quic()
-                .map(QuicDirectTransport::local_publish_rx)
+        info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");
+        let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());
+        let admin_mqtt_client = mqtt5::MqttClient::new(&admin_client_id);
+        if let Some(user) = service_username {
+            let options = mqtt5::types::ConnectOptions::new(&admin_client_id)
+                .with_credentials(user, service_password.map_or("", String::as_str));
+            Box::pin(admin_mqtt_client.connect_with_options(broker_addr, options))
+                .await
+                .map_err(|e| format!("failed to connect admin client: {e}"))?;
         } else {
-            None
-        };
-
-        let _http_task = if let Some(http_config) = self.http_config.take() {
-            let http_bind = http_config.bind_address;
-            let http_shutdown_rx = self.shutdown_tx.subscribe();
-
-            let http_mqtt_client = mqtt5::MqttClient::new("mqdb-http-oauth");
-            let http_connect_ip = if self.bind_address.ip().is_unspecified() {
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            } else {
-                self.bind_address.ip()
-            };
-            let http_addr = format!("{}:{}", http_connect_ip, self.bind_address.port());
-
-            let http_svc_user = service_username.clone();
-            let http_svc_pass = service_password.clone();
-
-            Some(tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-
-                let connect_result =
-                    if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
-                        let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
-                            .with_credentials(user, pass);
-                        Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
-                            .await
-                            .map(|_| ())
-                    } else {
-                        http_mqtt_client.connect(&http_addr).await
-                    };
-
-                if let Err(e) = connect_result {
-                    tracing::error!("Failed to connect HTTP OAuth MQTT client: {}", e);
-                    return;
-                }
-
-                info!(addr = %http_bind, "starting HTTP OAuth server");
-                let server = crate::http::HttpServer::new(
-                    http_config,
-                    std::sync::Arc::new(http_mqtt_client),
-                    http_shutdown_rx,
-                );
-                if let Err(e) = server.run().await {
-                    tracing::error!("HTTP server error: {}", e);
-                }
-            }))
-        } else {
-            None
-        };
-
-        self.recover_pending_lwts().await;
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = tick_interval.tick() => {
-                    let now = current_time_ms();
-                    let _ = tx_tick.try_send(now);
-
-                    let raft_partition_map = self.rx_partition_map.borrow().clone();
-
-                    let mut ctrl = self.controller.write().await;
-                    let current_map = ctrl.partition_map().clone();
-                    let mut became_primary = false;
-                    if current_map != raft_partition_map {
-                        let mut changes = 0u32;
-                        for partition in PartitionId::all() {
-                            let new_assignment = raft_partition_map.get(partition);
-                            let old_assignment = current_map.get(partition);
-
-                            if new_assignment != old_assignment {
-                                let is_primary = new_assignment.primary == Some(self.node_id);
-                                let is_replica = new_assignment.replicas.contains(&self.node_id);
-                                let was_primary = old_assignment.primary == Some(self.node_id);
-
-                                if is_primary {
-                                    ctrl.become_primary(partition, new_assignment.epoch);
-                                    if !was_primary {
-                                        became_primary = true;
-                                    }
-                                } else if is_replica {
-                                    ctrl.become_replica(partition, new_assignment.epoch, 0);
-                                }
-                                changes += 1;
-                                if changes.is_multiple_of(8) {
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                        }
-                        ctrl.update_partition_map(raft_partition_map);
-                    }
-                    if became_primary {
-                        let stores = ctrl.stores();
-                        let result = stores.subscriptions.reconcile(
-                            &stores.topics,
-                            &stores.wildcards,
-                        );
-                        if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
-                            info!(
-                                clients = result.clients_checked,
-                                added = result.subscriptions_added,
-                                removed = result.subscriptions_removed,
-                                "reconciled subscriptions after partition takeover"
-                            );
-                        }
-                    }
-                    ctrl.transport().log_queue_stats();
-                }
-
-                Ok(batch) = rx_batch.recv_async() => {
-                    if let Some(hb) = batch.heartbeat_to_send {
-                        let ctrl = self.controller.read().await;
-                        let _ = ctrl.transport().broadcast(hb).await;
-                    }
-
-                    if !batch.heartbeat_updates.is_empty() {
-                        let mut ctrl = self.controller.write().await;
-                        ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
-                    }
-
-                    if !batch.dead_nodes.is_empty() {
-                        let mut ctrl = self.controller.write().await;
-                        ctrl.apply_dead_nodes(&batch.dead_nodes);
-                        let dead_nodes: Vec<NodeId> = ctrl.drain_dead_nodes_for_session_update().collect();
-
-                        for dead_node in &dead_nodes {
-                            let affected_sessions = ctrl.stores().sessions.sessions_on_node(*dead_node);
-                            if !affected_sessions.is_empty() {
-                                info!(
-                                    node = dead_node.get(),
-                                    sessions = affected_sessions.len(),
-                                    "marking sessions disconnected due to node death"
-                                );
-                                let now = current_time_ms();
-                                let mut session_count = 0u32;
-                                for session in affected_sessions {
-                                    let client_id = session.client_id_str();
-                                    let result = ctrl.stores_mut().update_session_replicated(
-                                        client_id,
-                                        |s| s.set_connected(false, *dead_node, now),
-                                    );
-                                    if let Ok((_session, write)) = result {
-                                        ctrl.write_or_forward(write).await;
-                                    }
-                                    session_count += 1;
-                                    if session_count.is_multiple_of(8) {
-                                        tokio::task::yield_now().await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Ok(msg) = rx_main_queue.recv_async() => {
-                    const BATCH_SIZE: u32 = 8;
-                    let mut ctrl = self.controller.write().await;
-                    ctrl.handle_filtered_message(msg).await;
-                    let mut count = 1u32;
-                    while let Ok(msg) = rx_main_queue.try_recv() {
-                        ctrl.handle_filtered_message(msg).await;
-                        count += 1;
-                        if count.is_multiple_of(BATCH_SIZE) {
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                }
-                _ = ttl_cleanup_interval.tick() => {
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let ctrl = self.controller.read().await;
-                    let expired_ttl = ctrl.stores().db_data.cleanup_expired_ttl(now_secs);
-                    if !expired_ttl.is_empty() {
-                        info!(count = expired_ttl.len(), "cleaned up TTL-expired entities");
-                    }
-                }
-                _ = cleanup_interval.tick() => {
-                    let now = current_time_ms();
-                    let expired_sessions = {
-                        let ctrl = self.controller.read().await;
-                        let expired_idempotency = ctrl.stores().idempotency.cleanup_expired(now);
-                        if expired_idempotency > 0 {
-                            info!(expired_idempotency, "cleaned up expired idempotency records");
-                        }
-                        let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
-                        if stale_offsets > 0 {
-                            info!(stale_offsets, "cleaned up stale consumer offsets");
-                        }
-                        let expired_unique = ctrl.stores().unique_cleanup_expired(now);
-                        if expired_unique > 0 {
-                            info!(expired_unique, "cleaned up expired unique reservations");
-                        }
-                        ctrl.stores().cleanup_expired_sessions(now)
-                    };
-                    if !expired_sessions.is_empty() {
-                        info!(count = expired_sessions.len(), "cleaning up expired sessions and subscriptions");
-                        let mut ctrl = self.controller.write().await;
-                        for session in &expired_sessions {
-                            let client_id = session.client_id_str();
-                            clear_expired_session_subscriptions(&mut ctrl, client_id).await;
-                        }
-                    }
-                }
-                _ = wildcard_reconciliation_interval.tick() => {
-                    let now = current_time_ms();
-                    let ctrl = self.controller.read().await;
-                    let pending_store = &ctrl.stores().wildcard_pending;
-                    if pending_store.needs_reconciliation(now) {
-                        let pending = pending_store.get_pending_for_retry();
-                        if !pending.is_empty() {
-                            debug!(
-                                count = pending.len(),
-                                "retrying pending wildcard broadcasts"
-                            );
-                            for p in &pending {
-                                let broadcast = p.to_broadcast();
-                                let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                                let _ = ctrl.transport().broadcast(msg).await;
-                                pending_store.mark_retried(&p.pattern, &p.client_id);
-                            }
-                            info!(
-                                count = pending.len(),
-                                "rebroadcast pending wildcard subscriptions"
-                            );
-                        }
-                        pending_store.mark_reconciliation(now);
-                        let max_age_ms = 5 * 60 * 1000;
-                        let removed = pending_store.clear_old_entries(now, max_age_ms);
-                        if removed > 0 {
-                            debug!(removed, "cleared old wildcard pending entries");
-                        }
-                    }
-                }
-                _ = subscription_reconciliation_interval.tick() => {
-                    let now = current_time_ms();
-                    let ctrl = self.controller.read().await;
-                    let stores = ctrl.stores();
-                    if stores.subscriptions.needs_reconciliation(now) {
-                        let result = stores.subscriptions.reconcile(
-                            &stores.topics,
-                            &stores.wildcards,
-                        );
-                        if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
-                            info!(
-                                clients = result.clients_checked,
-                                added = result.subscriptions_added,
-                                removed = result.subscriptions_removed,
-                                "reconciled subscription cache"
-                            );
-                        }
-                        stores.subscriptions.mark_reconciliation(now);
-                    }
-                }
-                _ = retained_sync_cleanup_interval.tick() => {
-                    let ttl = std::time::Duration::from_secs(RETAINED_SYNC_TTL_SECS);
-                    let mut synced = synced_retained_topics.write().await;
-                    let before_len = synced.len();
-                    synced.retain(|_, insert_time| insert_time.elapsed() < ttl);
-                    let removed = before_len - synced.len();
-                    if removed > 0 {
-                        debug!(removed, remaining = synced.len(), "cleaned up stale retained sync entries");
-                    }
-                }
-                Ok(req) = admin_rx.recv_async() => {
-                    self.handle_admin_request(&admin_client, req).await;
-                }
-                Some(Ok(req)) = async {
-                    match &rx_local_publish {
-                        Some(rx) => Some(rx.recv_async().await),
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    const BATCH_SIZE: u32 = 64;
-                    let options = mqtt5::PublishOptions {
-                        qos: mqtt5::QoS::from(req.qos),
-                        retain: req.retain,
-                        ..Default::default()
-                    };
-                    if let Err(e) = admin_client.publish_with_options(
-                        &req.topic,
-                        req.payload,
-                        options,
-                    ).await {
-                        warn!(error = %e, topic = %req.topic, "failed to publish local request");
-                    }
-
-                    if let Some(rx) = &rx_local_publish {
-                        let mut count = 1u32;
-                        while let Ok(req) = rx.try_recv() {
-                            let options = mqtt5::PublishOptions {
-                                qos: mqtt5::QoS::from(req.qos),
-                                retain: req.retain,
-                                ..Default::default()
-                            };
-                            if let Err(e) = admin_client.publish_with_options(
-                                &req.topic,
-                                req.payload,
-                                options,
-                            ).await {
-                                warn!(error = %e, topic = %req.topic, "failed to publish local request");
-                            }
-                            count += 1;
-                            if count.is_multiple_of(BATCH_SIZE) {
-                                tokio::task::yield_now().await;
-                            }
-                        }
-                    }
-                }
-                _ = shutdown_rx.recv() => {
-                    info!("cluster node shutting down");
-                    break;
-                }
-            }
+            admin_mqtt_client
+                .connect(broker_addr)
+                .await
+                .map_err(|e| format!("failed to connect admin client: {e}"))?;
         }
+        info!("admin MQTT client connected");
+        Ok(admin_mqtt_client)
+    }
 
-        broker_handle.abort();
-        Ok(())
+    #[allow(deprecated)]
+    async fn connect_mqtt_transport(
+        &self,
+        transport: &ClusterTransportKind,
+        broker_addr: &str,
+        service_username: Option<&String>,
+        service_password: Option<&String>,
+    ) -> Result<mqtt5::MqttClient, Box<dyn std::error::Error + Send + Sync>> {
+        let mqtt_transport = transport
+            .as_mqtt()
+            .ok_or("expected MQTT transport but found QUIC")?;
+        info!(broker_addr = %broker_addr, "connecting transport to local broker");
+        Box::pin(mqtt_transport.connect_with_credentials(
+            broker_addr,
+            service_username.map(String::as_str),
+            service_password.map(String::as_str),
+        ))
+        .await
+        .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
+        info!("transport connected to local broker");
+        Ok(mqtt_transport.client().clone())
     }
 
     async fn handle_admin_request(&self, client: &mqtt5::client::MqttClient, req: AdminRequest) {
@@ -1840,6 +2080,32 @@ impl ClusteredAgent {
             }
         }
     }
+}
+
+async fn subscribe_admin_topics(
+    client: &mqtt5::MqttClient,
+    tx: &flume::Sender<AdminRequest>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (topic, label) in [
+        ("$SYS/mqdb/cluster/#", "admin topics"),
+        ("$DB/_health", "health topic"),
+        ("$DB/_admin/#", "db admin topics"),
+    ] {
+        let tx = tx.clone();
+        client
+            .subscribe(topic, move |msg: Message| {
+                let req = AdminRequest {
+                    topic: msg.topic.clone(),
+                    response_topic: msg.properties.response_topic.clone(),
+                    payload: msg.payload.clone(),
+                };
+                let _ = tx.try_send(req);
+            })
+            .await
+            .map_err(|e| format!("failed to subscribe to {label}: {e}"))?;
+    }
+    info!("subscribed to admin topics");
+    Ok(())
 }
 
 fn current_time_ms() -> u64 {

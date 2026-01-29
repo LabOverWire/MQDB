@@ -22,9 +22,6 @@ impl IndexedDbBackend {
     ///
     /// # Errors
     /// Returns an error if `IndexedDB` is not available or the database cannot be opened.
-    ///
-    /// # Panics
-    /// Panics if event targets or database results are unexpectedly null during setup.
     pub async fn open(db_name: &str) -> Result<Self> {
         let window = web_sys::window().ok_or_else(|| Error::Internal("no window".into()))?;
         let idb: IdbFactory = window
@@ -41,14 +38,18 @@ impl IndexedDbBackend {
 
         let onupgradeneeded =
             Closure::once(Box::new(move |event: web_sys::IdbVersionChangeEvent| {
-                let target = event.target().unwrap();
+                let Some(target) = event.target() else {
+                    return;
+                };
                 let request: IdbOpenDbRequest = target.unchecked_into();
-                let db: IdbDatabase = request.result().unwrap().unchecked_into();
+                let Ok(result) = request.result() else {
+                    return;
+                };
+                let db: IdbDatabase = result.unchecked_into();
 
                 if !db.object_store_names().contains(STORE_NAME) {
                     let params = IdbObjectStoreParameters::new();
-                    db.create_object_store_with_optional_parameters(STORE_NAME, &params)
-                        .unwrap();
+                    let _ = db.create_object_store_with_optional_parameters(STORE_NAME, &params);
                 }
             }) as Box<dyn FnOnce(_)>);
 
@@ -60,9 +61,20 @@ impl IndexedDbBackend {
 
         let tx_success = Rc::clone(&tx);
         let onsuccess = Closure::once(Box::new(move |event: web_sys::Event| {
-            let target = event.target().unwrap();
+            let Some(target) = event.target() else {
+                if let Some(sender) = tx_success.borrow_mut().take() {
+                    let _ = sender.send(Err(Error::Internal("missing event target".into())));
+                }
+                return;
+            };
             let request: IdbOpenDbRequest = target.unchecked_into();
-            let db: IdbDatabase = request.result().unwrap().unchecked_into();
+            let Ok(result) = request.result() else {
+                if let Some(sender) = tx_success.borrow_mut().take() {
+                    let _ = sender.send(Err(Error::Internal("failed to get IDB result".into())));
+                }
+                return;
+            };
+            let db: IdbDatabase = result.unchecked_into();
             *db_cell_success.borrow_mut() = Some(db);
             if let Some(sender) = tx_success.borrow_mut().take() {
                 let _ = sender.send(Ok(()));
@@ -224,9 +236,21 @@ impl AsyncStorageBackend for IndexedDbBackend {
 
         let tx_success = Rc::clone(&tx);
         let onsuccess = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().unwrap();
+            let send_err = |msg: &str| {
+                if let Some(sender) = tx_success.borrow_mut().take() {
+                    let _ = sender.send(Err(Error::Internal(msg.into())));
+                }
+            };
+
+            let Some(target) = event.target() else {
+                send_err("missing cursor event target");
+                return;
+            };
             let request: IdbRequest = target.unchecked_into();
-            let result = request.result().unwrap();
+            let Ok(result) = request.result() else {
+                send_err("failed to get cursor result");
+                return;
+            };
 
             if result.is_null() || result.is_undefined() {
                 if let Some(sender) = tx_success.borrow_mut().take() {
@@ -236,8 +260,14 @@ impl AsyncStorageBackend for IndexedDbBackend {
             }
 
             let cursor: web_sys::IdbCursorWithValue = result.unchecked_into();
-            let key_js = cursor.key().unwrap();
-            let value_js = cursor.value().unwrap();
+            let Ok(key_js) = cursor.key() else {
+                send_err("failed to get cursor key");
+                return;
+            };
+            let Ok(value_js) = cursor.value() else {
+                send_err("failed to get cursor value");
+                return;
+            };
 
             let key_arr = Uint8Array::new(&key_js);
             let key_bytes = key_arr.to_vec();
@@ -246,7 +276,7 @@ impl AsyncStorageBackend for IndexedDbBackend {
                 let value_arr = Uint8Array::new(&value_js);
                 let value_bytes = value_arr.to_vec();
                 results_clone.borrow_mut().push((key_bytes, value_bytes));
-                cursor.continue_().unwrap();
+                let _ = cursor.continue_();
             } else if let Some(sender) = tx_success.borrow_mut().take() {
                 let _ = sender.send(Ok(()));
             }
@@ -294,9 +324,21 @@ impl AsyncStorageBackend for IndexedDbBackend {
 
         let tx_success = Rc::clone(&tx);
         let onsuccess = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            let target = event.target().unwrap();
+            let send_err = |msg: &str| {
+                if let Some(sender) = tx_success.borrow_mut().take() {
+                    let _ = sender.send(Err(Error::Internal(msg.into())));
+                }
+            };
+
+            let Some(target) = event.target() else {
+                send_err("missing cursor event target");
+                return;
+            };
             let request: IdbRequest = target.unchecked_into();
-            let result = request.result().unwrap();
+            let Ok(result) = request.result() else {
+                send_err("failed to get cursor result");
+                return;
+            };
 
             if result.is_null() || result.is_undefined() {
                 if let Some(sender) = tx_success.borrow_mut().take() {
@@ -306,8 +348,14 @@ impl AsyncStorageBackend for IndexedDbBackend {
             }
 
             let cursor: web_sys::IdbCursorWithValue = result.unchecked_into();
-            let key_js = cursor.key().unwrap();
-            let value_js = cursor.value().unwrap();
+            let Ok(key_js) = cursor.key() else {
+                send_err("failed to get cursor key");
+                return;
+            };
+            let Ok(value_js) = cursor.value() else {
+                send_err("failed to get cursor value");
+                return;
+            };
 
             let key_arr = Uint8Array::new(&key_js);
             let key_bytes = key_arr.to_vec();
@@ -316,7 +364,7 @@ impl AsyncStorageBackend for IndexedDbBackend {
                 let value_arr = Uint8Array::new(&value_js);
                 let value_bytes = value_arr.to_vec();
                 results_clone.borrow_mut().push((key_bytes, value_bytes));
-                cursor.continue_().unwrap();
+                let _ = cursor.continue_();
             } else if let Some(sender) = tx_success.borrow_mut().take() {
                 let _ = sender.send(Ok(()));
             }

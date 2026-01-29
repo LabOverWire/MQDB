@@ -56,6 +56,16 @@ pub struct PendingScatterRequest {
     pub sorts: Vec<crate::SortOrder>,
 }
 
+struct UniqueReservationParams<'a> {
+    entity: &'a str,
+    field: &'a str,
+    value: &'a [u8],
+    id: &'a str,
+    request_id: &'a str,
+    partition: PartitionId,
+    now_ms: u64,
+}
+
 #[derive(Debug)]
 pub enum RaftMessage {
     RequestVote {
@@ -237,7 +247,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 return partition;
             }
         }
-        PartitionId::new(0).expect("partition 0 should always be valid")
+        PartitionId::ZERO
     }
 
     pub fn register_peer(&mut self, peer: NodeId) {
@@ -588,7 +598,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines, clippy::match_same_arms)]
     pub async fn handle_filtered_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(_)
@@ -631,119 +640,82 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::ForwardedPublish(ref fwd) => {
                 self.handle_forwarded_publish_no_dedup(msg.from, fwd).await;
             }
-            ClusterMessage::SnapshotRequest(ref req) => {
-                self.handle_snapshot_request(msg.from, req).await;
-            }
-            ClusterMessage::SnapshotChunk(ref chunk) => {
-                self.handle_snapshot_chunk(msg.from, chunk).await;
-            }
-            ClusterMessage::SnapshotComplete(ref complete) => {
-                self.handle_snapshot_complete(msg.from, complete);
-            }
-            ClusterMessage::QueryRequest {
-                partition,
-                ref request,
-            } => {
-                let response = self.handle_query_request(partition, request);
-                let response_msg = ClusterMessage::QueryResponse(response);
-                let _ = self.transport.send(msg.from, response_msg).await;
-            }
-            ClusterMessage::QueryResponse(ref response) => {
-                if self
-                    .pending_retained_queries
-                    .contains_key(&response.query_id)
-                {
-                    let results = Self::parse_retained_query_response(response);
-                    self.complete_retained_query(response.query_id, results);
-                } else if let Some(result) =
-                    self.query_coordinator.receive_response(response.clone())
-                {
-                    tracing::debug!(
-                        query_id = result.query_id,
-                        partial = result.partial,
-                        "query completed"
-                    );
-                }
-            }
-            ClusterMessage::BatchReadRequest(ref request) => {
-                let response = self.handle_batch_read_request(request);
-                let response_msg = ClusterMessage::BatchReadResponse(response);
-                let _ = self.transport.send(msg.from, response_msg).await;
-            }
-            ClusterMessage::BatchReadResponse(_) => {}
-            ClusterMessage::WildcardBroadcast(ref broadcast) => {
-                self.handle_wildcard_broadcast(msg.from, broadcast);
-            }
-            ClusterMessage::TopicSubscriptionBroadcast(ref broadcast) => {
-                self.handle_topic_subscription_broadcast(msg.from, broadcast);
-            }
-            ClusterMessage::PartitionUpdate(ref update) => {
-                if let (Some(partition), Some(primary)) = (
-                    PartitionId::new(u16::from(update.partition)),
-                    NodeId::validated(update.primary),
-                ) {
-                    let epoch = Epoch::new(u64::from(update.epoch));
-
-                    if primary == self.node_id {
-                        self.become_primary(partition, epoch);
-                    } else if NodeId::validated(update.replica1) == Some(self.node_id)
-                        || NodeId::validated(update.replica2) == Some(self.node_id)
-                    {
-                        let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
-                            matches!(
-                                s.role(),
-                                ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
-                            ) && s.epoch() >= epoch
-                        });
-                        if !dominated {
-                            self.become_replica_with_snapshot(partition, epoch, primary)
-                                .await;
-                        }
-                    } else {
-                        self.step_down(partition);
-                    }
-                }
-
-                self.partition_map.apply_update(update);
-                self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self
-                    .tx_raft_events
-                    .try_send(RaftEvent::ExternalUpdate(*update));
-                tracing::info!(
-                    partition = update.partition,
-                    primary = update.primary,
-                    "received partition update from cluster"
-                );
-            }
-            ClusterMessage::JsonDbRequest {
-                partition,
-                ref request,
-            } => {
-                self.handle_json_db_request(msg.from, partition, request)
-                    .await;
-            }
-            ClusterMessage::JsonDbResponse(ref response) => {
-                self.handle_json_db_response(response).await;
-            }
-            ClusterMessage::UniqueReserveRequest(ref req) => {
-                self.handle_unique_reserve_request(msg.from, req).await;
-            }
-            ClusterMessage::UniqueReserveResponse(ref resp) => {
-                self.handle_unique_reserve_response(resp);
-            }
-            ClusterMessage::UniqueCommitRequest(ref req) => {
-                self.handle_unique_commit_request(msg.from, req).await;
-            }
-            ClusterMessage::UniqueCommitResponse(ref resp) => {
-                self.handle_unique_commit_response(resp);
-            }
-            ClusterMessage::UniqueReleaseRequest(ref req) => {
-                self.handle_unique_release_request(msg.from, req).await;
-            }
-            ClusterMessage::UniqueReleaseResponse(ref resp) => {
-                self.handle_unique_release_response(resp);
+            ref data_plane => {
+                self.dispatch_data_plane_message(msg.from, data_plane).await;
             }
         }
+    }
+
+    async fn handle_partition_update_received(&mut self, update: &super::raft::PartitionUpdate) {
+        if let (Some(partition), Some(primary)) = (
+            PartitionId::new(u16::from(update.partition)),
+            NodeId::validated(update.primary),
+        ) {
+            let epoch = Epoch::new(u64::from(update.epoch));
+
+            if primary == self.node_id {
+                self.become_primary(partition, epoch);
+            } else if NodeId::validated(update.replica1) == Some(self.node_id)
+                || NodeId::validated(update.replica2) == Some(self.node_id)
+            {
+                let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
+                    matches!(
+                        s.role(),
+                        ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
+                    ) && s.epoch() >= epoch
+                });
+                if !dominated {
+                    self.become_replica_with_snapshot(partition, epoch, primary)
+                        .await;
+                }
+            } else {
+                self.step_down(partition);
+            }
+        }
+
+        self.partition_map.apply_update(update);
+        self.heartbeat.partition_map_mut().apply_update(update);
+        let _ = self
+            .tx_raft_events
+            .try_send(RaftEvent::ExternalUpdate(*update));
+        tracing::info!(
+            partition = update.partition,
+            primary = update.primary,
+            "received partition update from cluster"
+        );
+    }
+
+    fn handle_query_response_received(&mut self, response: &QueryResponse) {
+        if self
+            .pending_retained_queries
+            .contains_key(&response.query_id)
+        {
+            let results = Self::parse_retained_query_response(response);
+            self.complete_retained_query(response.query_id, results);
+        } else if let Some(result) = self.query_coordinator.receive_response(response.clone()) {
+            tracing::debug!(
+                query_id = result.query_id,
+                partial = result.partial,
+                "query completed"
+            );
+        }
+    }
+
+    async fn handle_query_request_and_respond(
+        &mut self,
+        from: NodeId,
+        partition: PartitionId,
+        request: &QueryRequest,
+    ) {
+        let response = self.handle_query_request(partition, request);
+        let response_msg = ClusterMessage::QueryResponse(response);
+        let _ = self.transport.send(from, response_msg).await;
+    }
+
+    async fn handle_batch_read_and_respond(&mut self, from: NodeId, request: &BatchReadRequest) {
+        let response = self.handle_batch_read_request(request);
+        let response_msg = ClusterMessage::BatchReadResponse(response);
+        let _ = self.transport.send(from, response_msg).await;
     }
 
     async fn handle_forwarded_publish_no_dedup(&mut self, from: NodeId, fwd: &ForwardedPublish) {
@@ -764,7 +736,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
@@ -791,32 +762,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     .try_send(RaftEvent::DrainNotification(node_id));
             }
             ClusterMessage::RequestVote(req) => {
-                let _ = self.tx_raft_messages.try_send(RaftMessage::RequestVote {
-                    from: msg.from,
-                    request: req,
-                });
+                self.forward_raft_vote(msg.from, req);
             }
             ClusterMessage::RequestVoteResponse(resp) => {
-                let _ = self
-                    .tx_raft_messages
-                    .try_send(RaftMessage::RequestVoteResponse {
-                        from: msg.from,
-                        response: resp,
-                    });
+                self.forward_raft_vote_response(msg.from, resp);
             }
             ClusterMessage::AppendEntries(req) => {
-                let _ = self.tx_raft_messages.try_send(RaftMessage::AppendEntries {
-                    from: msg.from,
-                    request: req,
-                });
+                self.forward_raft_append(msg.from, req);
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
-                let _ = self
-                    .tx_raft_messages
-                    .try_send(RaftMessage::AppendEntriesResponse {
-                        from: msg.from,
-                        response: resp,
-                    });
+                self.forward_raft_append_response(msg.from, resp);
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -833,118 +788,95 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::ForwardedPublish(ref fwd) => {
                 self.handle_forwarded_publish(msg.from, fwd).await;
             }
-            ClusterMessage::SnapshotRequest(ref req) => {
-                self.handle_snapshot_request(msg.from, req).await;
+            ref data_plane => {
+                self.dispatch_data_plane_message(msg.from, data_plane).await;
             }
-            ClusterMessage::SnapshotChunk(ref chunk) => {
-                self.handle_snapshot_chunk(msg.from, chunk).await;
-            }
-            ClusterMessage::SnapshotComplete(ref complete) => {
-                self.handle_snapshot_complete(msg.from, complete);
-            }
-            ClusterMessage::QueryRequest {
-                partition,
-                ref request,
-            } => {
-                let response = self.handle_query_request(partition, request);
-                let response_msg = ClusterMessage::QueryResponse(response);
-                let _ = self.transport.send(msg.from, response_msg).await;
-            }
-            ClusterMessage::QueryResponse(ref response) => {
-                if self
-                    .pending_retained_queries
-                    .contains_key(&response.query_id)
-                {
-                    let results = Self::parse_retained_query_response(response);
-                    self.complete_retained_query(response.query_id, results);
-                } else if let Some(result) =
-                    self.query_coordinator.receive_response(response.clone())
-                {
-                    tracing::debug!(
-                        query_id = result.query_id,
-                        partial = result.partial,
-                        "query completed"
-                    );
-                }
-            }
-            ClusterMessage::BatchReadRequest(ref request) => {
-                let response = self.handle_batch_read_request(request);
-                let response_msg = ClusterMessage::BatchReadResponse(response);
-                let _ = self.transport.send(msg.from, response_msg).await;
-            }
-            ClusterMessage::BatchReadResponse(_) => {}
-            ClusterMessage::WildcardBroadcast(ref broadcast) => {
-                self.handle_wildcard_broadcast(msg.from, broadcast);
-            }
-            ClusterMessage::TopicSubscriptionBroadcast(ref broadcast) => {
-                self.handle_topic_subscription_broadcast(msg.from, broadcast);
-            }
-            ClusterMessage::PartitionUpdate(ref update) => {
-                if let (Some(partition), Some(primary)) = (
-                    PartitionId::new(u16::from(update.partition)),
-                    NodeId::validated(update.primary),
-                ) {
-                    let epoch = Epoch::new(u64::from(update.epoch));
+        }
+    }
 
-                    if primary == self.node_id {
-                        self.become_primary(partition, epoch);
-                    } else if NodeId::validated(update.replica1) == Some(self.node_id)
-                        || NodeId::validated(update.replica2) == Some(self.node_id)
-                    {
-                        let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
-                            matches!(
-                                s.role(),
-                                ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
-                            ) && s.epoch() >= epoch
-                        });
-                        if !dominated {
-                            self.become_replica_with_snapshot(partition, epoch, primary)
-                                .await;
-                        }
-                    } else {
-                        self.step_down(partition);
-                    }
-                }
+    fn forward_raft_vote(&self, from: NodeId, request: super::raft::RequestVoteRequest) {
+        let _ = self
+            .tx_raft_messages
+            .try_send(RaftMessage::RequestVote { from, request });
+    }
 
-                self.partition_map.apply_update(update);
-                self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self
-                    .tx_raft_events
-                    .try_send(RaftEvent::ExternalUpdate(*update));
-                tracing::info!(
-                    partition = update.partition,
-                    primary = update.primary,
-                    "received partition update from cluster"
-                );
+    fn forward_raft_vote_response(&self, from: NodeId, response: super::raft::RequestVoteResponse) {
+        let _ = self
+            .tx_raft_messages
+            .try_send(RaftMessage::RequestVoteResponse { from, response });
+    }
+
+    fn forward_raft_append(&self, from: NodeId, request: super::raft::AppendEntriesRequest) {
+        let _ = self
+            .tx_raft_messages
+            .try_send(RaftMessage::AppendEntries { from, request });
+    }
+
+    fn forward_raft_append_response(
+        &self,
+        from: NodeId,
+        response: super::raft::AppendEntriesResponse,
+    ) {
+        let _ = self
+            .tx_raft_messages
+            .try_send(RaftMessage::AppendEntriesResponse { from, response });
+    }
+
+    async fn dispatch_data_plane_message(&mut self, from: NodeId, message: &ClusterMessage) {
+        match message {
+            ClusterMessage::SnapshotRequest(req) => {
+                self.handle_snapshot_request(from, req).await;
             }
-            ClusterMessage::JsonDbRequest {
-                partition,
-                ref request,
-            } => {
-                self.handle_json_db_request(msg.from, partition, request)
+            ClusterMessage::SnapshotChunk(chunk) => {
+                self.handle_snapshot_chunk(from, chunk).await;
+            }
+            ClusterMessage::SnapshotComplete(complete) => {
+                self.handle_snapshot_complete(from, complete);
+            }
+            ClusterMessage::QueryRequest { partition, request } => {
+                self.handle_query_request_and_respond(from, *partition, request)
                     .await;
             }
-            ClusterMessage::JsonDbResponse(ref response) => {
+            ClusterMessage::QueryResponse(response) => {
+                self.handle_query_response_received(response);
+            }
+            ClusterMessage::BatchReadRequest(request) => {
+                self.handle_batch_read_and_respond(from, request).await;
+            }
+            ClusterMessage::WildcardBroadcast(broadcast) => {
+                self.handle_wildcard_broadcast(from, broadcast);
+            }
+            ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
+                self.handle_topic_subscription_broadcast(from, broadcast);
+            }
+            ClusterMessage::PartitionUpdate(update) => {
+                self.handle_partition_update_received(update).await;
+            }
+            ClusterMessage::JsonDbRequest { partition, request } => {
+                self.handle_json_db_request(from, *partition, request).await;
+            }
+            ClusterMessage::JsonDbResponse(response) => {
                 self.handle_json_db_response(response).await;
             }
-            ClusterMessage::UniqueReserveRequest(ref req) => {
-                self.handle_unique_reserve_request(msg.from, req).await;
+            ClusterMessage::UniqueReserveRequest(req) => {
+                self.handle_unique_reserve_request(from, req).await;
             }
-            ClusterMessage::UniqueReserveResponse(ref resp) => {
+            ClusterMessage::UniqueReserveResponse(resp) => {
                 self.handle_unique_reserve_response(resp);
             }
-            ClusterMessage::UniqueCommitRequest(ref req) => {
-                self.handle_unique_commit_request(msg.from, req).await;
+            ClusterMessage::UniqueCommitRequest(req) => {
+                self.handle_unique_commit_request(from, req).await;
             }
-            ClusterMessage::UniqueCommitResponse(ref resp) => {
+            ClusterMessage::UniqueCommitResponse(resp) => {
                 self.handle_unique_commit_response(resp);
             }
-            ClusterMessage::UniqueReleaseRequest(ref req) => {
-                self.handle_unique_release_request(msg.from, req).await;
+            ClusterMessage::UniqueReleaseRequest(req) => {
+                self.handle_unique_release_request(from, req).await;
             }
-            ClusterMessage::UniqueReleaseResponse(ref resp) => {
+            ClusterMessage::UniqueReleaseResponse(resp) => {
                 self.handle_unique_release_response(resp);
             }
+            _ => {}
         }
     }
 
@@ -1687,7 +1619,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let schema = self.stores.db_schema.register(entity, schema_data)?;
         let serialized = super::db::SchemaStore::serialize(&schema);
         let write = ReplicationWrite::new(
-            PartitionId::new(0).unwrap(),
+            PartitionId::ZERO,
             super::protocol::Operation::Insert,
             Epoch::ZERO,
             0,
@@ -1712,7 +1644,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let schema = self.stores.db_schema.update(entity, schema_data)?;
         let serialized = super::db::SchemaStore::serialize(&schema);
         let write = ReplicationWrite::new(
-            PartitionId::new(0).unwrap(),
+            PartitionId::ZERO,
             super::protocol::Operation::Update,
             Epoch::ZERO,
             0,
@@ -2689,7 +2621,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
@@ -2701,20 +2632,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
         };
 
-        if let serde_json::Value::Object(ref mut obj) = data
-            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(serde_json::Value::as_u64)
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let expires_at = now + ttl_secs;
-            obj.insert(
-                "_expires_at".to_string(),
-                serde_json::Value::Number(expires_at.into()),
-            );
-            obj.remove("ttl_secs");
-        }
+        Self::apply_ttl_expiry(&mut data);
 
         let id = self.generate_id_for_partition(entity, partition, payload);
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -2730,74 +2648,27 @@ impl<T: ClusterTransport> NodeController<T> {
                 None => continue,
             };
 
-            let unique_part = super::db::unique_partition(entity, field, &value);
-            let primary = self.partition_map.primary(unique_part);
-
-            let is_conflict = if primary == Some(self.node_id) {
-                let (result, write) = self.stores.unique_reserve_replicated(
-                    entity,
-                    field,
-                    &value,
-                    &id,
-                    &request_id,
-                    partition,
-                    30_000,
-                    now_ms,
-                );
-
-                match result {
-                    super::db::ReserveResult::Reserved => {
-                        if let Some(w) = write {
-                            self.write_or_forward(w).await;
-                        }
-                        local_reserved.push((field.clone(), value));
-                        false
-                    }
-                    super::db::ReserveResult::AlreadyReservedBySameRequest => {
-                        local_reserved.push((field.clone(), value));
-                        false
-                    }
-                    super::db::ReserveResult::Conflict => true,
-                }
-            } else if let Some(target_node) = primary {
-                let result = self
-                    .send_unique_reserve_request(
-                        target_node,
-                        entity,
-                        field,
-                        &value,
-                        &id,
-                        &request_id,
-                        partition,
-                        30_000,
-                    )
-                    .await;
-
-                match result {
-                    Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved) => {
-                        remote_reserved.push((field.clone(), value, target_node));
-                        false
-                    }
-                    Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => true,
-                }
-            } else {
-                true
+            let params = UniqueReservationParams {
+                entity,
+                field,
+                value: &value,
+                id: &id,
+                request_id: &request_id,
+                partition,
+                now_ms,
             };
+            let is_conflict = self
+                .reserve_unique_field(&params, &mut local_reserved, &mut remote_reserved)
+                .await;
 
             if is_conflict {
-                for (f, v) in &local_reserved {
-                    if let Some(w) =
-                        self.stores
-                            .unique_release_replicated(entity, f, v, &request_id)
-                    {
-                        self.write_or_forward(w).await;
-                    }
-                }
-                for (f, v, target) in &remote_reserved {
-                    let _ = self
-                        .send_unique_release_request(*target, entity, f, v, &request_id)
-                        .await;
-                }
+                self.release_all_reservations(
+                    entity,
+                    &request_id,
+                    &local_reserved,
+                    &remote_reserved,
+                )
+                .await;
                 return Self::json_error(
                     409,
                     &format!("unique constraint violation on field '{field}'"),
@@ -2809,20 +2680,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
         match self.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
-                for (field, value) in &local_reserved {
-                    if let Ok((_, w)) =
-                        self.stores
-                            .unique_commit_replicated(entity, field, value, &request_id)
-                    {
-                        self.write_or_forward(w).await;
-                    }
-                }
-                for (field, value, target) in &remote_reserved {
-                    let _ = self
-                        .send_unique_commit_request(*target, entity, field, value, &request_id)
-                        .await;
-                }
-
+                self.commit_all_reservations(
+                    entity,
+                    &request_id,
+                    &local_reserved,
+                    &remote_reserved,
+                )
+                .await;
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -2832,37 +2696,165 @@ impl<T: ClusterTransport> NodeController<T> {
                 serde_json::to_vec(&result).unwrap_or_default()
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
-                for (f, v) in &local_reserved {
-                    if let Some(w) =
-                        self.stores
-                            .unique_release_replicated(entity, f, v, &request_id)
-                    {
-                        self.write_or_forward(w).await;
-                    }
-                }
-                for (f, v, target) in &remote_reserved {
-                    let _ = self
-                        .send_unique_release_request(*target, entity, f, v, &request_id)
-                        .await;
-                }
+                self.release_all_reservations(
+                    entity,
+                    &request_id,
+                    &local_reserved,
+                    &remote_reserved,
+                )
+                .await;
                 Self::json_error(409, "entity already exists")
             }
             Err(_) => {
-                for (f, v) in &local_reserved {
-                    if let Some(w) =
-                        self.stores
-                            .unique_release_replicated(entity, f, v, &request_id)
-                    {
-                        self.write_or_forward(w).await;
-                    }
-                }
-                for (f, v, target) in &remote_reserved {
-                    let _ = self
-                        .send_unique_release_request(*target, entity, f, v, &request_id)
-                        .await;
-                }
+                self.release_all_reservations(
+                    entity,
+                    &request_id,
+                    &local_reserved,
+                    &remote_reserved,
+                )
+                .await;
                 Self::json_error(500, "internal error")
             }
+        }
+    }
+
+    fn apply_ttl_expiry(data: &mut serde_json::Value) {
+        if let serde_json::Value::Object(obj) = data
+            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(serde_json::Value::as_u64)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let expires_at = now + ttl_secs;
+            obj.insert(
+                "_expires_at".to_string(),
+                serde_json::Value::Number(expires_at.into()),
+            );
+            obj.remove("ttl_secs");
+        }
+    }
+
+    async fn reserve_unique_field(
+        &mut self,
+        params: &UniqueReservationParams<'_>,
+        local_reserved: &mut Vec<(String, Vec<u8>)>,
+        remote_reserved: &mut Vec<(String, Vec<u8>, NodeId)>,
+    ) -> bool {
+        let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
+        let primary = self.partition_map.primary(unique_part);
+
+        if primary == Some(self.node_id) {
+            self.reserve_unique_local(params, local_reserved).await
+        } else if let Some(target_node) = primary {
+            self.reserve_unique_remote(params, target_node, remote_reserved)
+                .await
+        } else {
+            true
+        }
+    }
+
+    async fn reserve_unique_local(
+        &mut self,
+        params: &UniqueReservationParams<'_>,
+        local_reserved: &mut Vec<(String, Vec<u8>)>,
+    ) -> bool {
+        let (result, write) = self.stores.unique_reserve_replicated(
+            params.entity,
+            params.field,
+            params.value,
+            params.id,
+            params.request_id,
+            params.partition,
+            30_000,
+            params.now_ms,
+        );
+
+        match result {
+            super::db::ReserveResult::Reserved => {
+                if let Some(w) = write {
+                    self.write_or_forward(w).await;
+                }
+                local_reserved.push((params.field.to_owned(), params.value.to_vec()));
+                false
+            }
+            super::db::ReserveResult::AlreadyReservedBySameRequest => {
+                local_reserved.push((params.field.to_owned(), params.value.to_vec()));
+                false
+            }
+            super::db::ReserveResult::Conflict => true,
+        }
+    }
+
+    async fn reserve_unique_remote(
+        &mut self,
+        params: &UniqueReservationParams<'_>,
+        target_node: NodeId,
+        remote_reserved: &mut Vec<(String, Vec<u8>, NodeId)>,
+    ) -> bool {
+        let result = self
+            .send_unique_reserve_request(
+                target_node,
+                params.entity,
+                params.field,
+                params.value,
+                params.id,
+                params.request_id,
+                params.partition,
+                30_000,
+            )
+            .await;
+
+        match result {
+            Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved) => {
+                remote_reserved.push((params.field.to_owned(), params.value.to_vec(), target_node));
+                false
+            }
+            Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => true,
+        }
+    }
+
+    async fn release_all_reservations(
+        &mut self,
+        entity: &str,
+        request_id: &str,
+        local_reserved: &[(String, Vec<u8>)],
+        remote_reserved: &[(String, Vec<u8>, NodeId)],
+    ) {
+        for (f, v) in local_reserved {
+            if let Some(w) = self
+                .stores
+                .unique_release_replicated(entity, f, v, request_id)
+            {
+                self.write_or_forward(w).await;
+            }
+        }
+        for (f, v, target) in remote_reserved {
+            let _ = self
+                .send_unique_release_request(*target, entity, f, v, request_id)
+                .await;
+        }
+    }
+
+    async fn commit_all_reservations(
+        &mut self,
+        entity: &str,
+        request_id: &str,
+        local_reserved: &[(String, Vec<u8>)],
+        remote_reserved: &[(String, Vec<u8>, NodeId)],
+    ) {
+        for (field, value) in local_reserved {
+            if let Ok((_, w)) = self
+                .stores
+                .unique_commit_replicated(entity, field, value, request_id)
+            {
+                self.write_or_forward(w).await;
+            }
+        }
+        for (field, value, target) in remote_reserved {
+            let _ = self
+                .send_unique_commit_request(*target, entity, field, value, request_id)
+                .await;
         }
     }
 
@@ -3209,7 +3201,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
 
             let msg = ClusterMessage::JsonDbRequest {
-                partition: PartitionId::new(0).expect("partition 0 is always valid"),
+                partition: PartitionId::ZERO,
                 request,
             };
 
@@ -3804,7 +3796,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
@@ -3820,7 +3812,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         let write = ReplicationWrite::new(
@@ -3870,7 +3862,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_replica(partition, Epoch::new(1), 0);
 
         let write = ReplicationWrite::new(
@@ -3930,7 +3922,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         let write = ReplicationWrite::new(
@@ -3959,7 +3951,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let writes = ctrl
             .subscribe_wildcard_broadcast("sensors/+/temp", "client1", partition, 1)
             .unwrap();
@@ -3980,7 +3972,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let mut map = PartitionMap::default();
         map.set(
             partition,
@@ -4065,7 +4057,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         let session_data = crate::cluster::session::SessionData::create("test-client", node1);
@@ -4106,7 +4098,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         let session_data = crate::cluster::session::SessionData::create("async-client", node1);
@@ -4182,7 +4174,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         ctrl.become_primary(partition, Epoch::new(1));
 
         let idem_key = "req-123";
@@ -4222,7 +4214,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let ctrl = create_test_controller(node1, transport);
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
 
         let idem_key = "req-456";
         let entity = "orders";

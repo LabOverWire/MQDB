@@ -641,7 +641,7 @@ impl StoreManager {
         let serialized = ConstraintStore::serialize(constraint);
 
         let write = ReplicationWrite::new(
-            PartitionId::new(0).expect("0 is valid"),
+            PartitionId::ZERO,
             Operation::Insert,
             Epoch::ZERO,
             0,
@@ -669,7 +669,7 @@ impl StoreManager {
         }
 
         let write = ReplicationWrite::new(
-            PartitionId::new(0).expect("0 is valid"),
+            PartitionId::ZERO,
             Operation::Delete,
             Epoch::ZERO,
             0,
@@ -1820,7 +1820,7 @@ mod tests {
     }
 
     fn partition() -> PartitionId {
-        PartitionId::new(0).unwrap()
+        PartitionId::ZERO
     }
 
     #[test]

@@ -943,7 +943,7 @@ mod tests {
         let transport = MockTransport::new(node1);
         let mut coord = RaftCoordinator::new(node1, transport, test_config());
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let cmd = RaftCommand::update_partition(partition, node1, &[], Epoch::new(1));
 
         let result = coord.propose_partition_update(cmd).await;
@@ -976,7 +976,7 @@ mod tests {
         coord1.handle_request_vote_response(node2, response).await;
         assert!(coord1.is_leader());
 
-        let partition = PartitionId::new(0).unwrap();
+        let partition = PartitionId::ZERO;
         let cmd = RaftCommand::update_partition(partition, node2, &[node3], Epoch::new(1));
         coord1.propose_partition_update(cmd).await.unwrap();
 

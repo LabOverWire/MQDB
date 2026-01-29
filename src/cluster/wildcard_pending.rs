@@ -48,7 +48,7 @@ impl PendingWildcard {
         Self {
             pattern: pattern.to_string(),
             client_id: client_id.to_string(),
-            client_partition: PartitionId::new(0).unwrap(),
+            client_partition: PartitionId::ZERO,
             qos: 0,
             subscription_type: SubscriptionType::Mqtt,
             operation: Operation::Delete,
