@@ -3,7 +3,7 @@ mod common;
 use common::next_test_port;
 use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
-use mqtt5::types::{PublishOptions, PublishProperties};
+use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -67,6 +67,19 @@ async fn start_agent(port: u16) -> (TempDir, MqdbAgent) {
     (tmp, agent)
 }
 
+async fn start_agent_with_admin(port: u16, admin_user: &str) -> (TempDir, MqdbAgent) {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let mut admin_users = std::collections::HashSet::new();
+    admin_users.insert(admin_user.to_string());
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(addr)
+        .with_anonymous(true)
+        .with_admin_users(admin_users);
+    (tmp, agent)
+}
+
 async fn wait_for_ready(client: &MqttClient, max_attempts: u32) -> bool {
     for _ in 0..max_attempts {
         if let Some(resp) = mqtt_request_response(client, "$DB/_health", b"{}", 1000).await
@@ -126,7 +139,7 @@ async fn test_health_endpoint_agent_mode() {
 #[tokio::test]
 async fn test_admin_schema_set_and_get() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent(port).await;
+    let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
 
     let agent_handle = tokio::spawn(async move {
         let _ = agent.run().await;
@@ -135,8 +148,8 @@ async fn test_admin_schema_set_and_get() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let client = MqttClient::new("test-schema-ops");
-    client
-        .connect(&format!("mqtt://127.0.0.1:{port}"))
+    let options = ConnectOptions::new("test-schema-ops").with_credentials("admin", "");
+    Box::pin(client.connect_with_options(&format!("mqtt://127.0.0.1:{port}"), options))
         .await
         .unwrap();
 
@@ -180,7 +193,7 @@ async fn test_admin_schema_set_and_get() {
 #[tokio::test]
 async fn test_admin_constraint_add_and_list() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent(port).await;
+    let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
 
     let agent_handle = tokio::spawn(async move {
         let _ = agent.run().await;
@@ -189,8 +202,8 @@ async fn test_admin_constraint_add_and_list() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let client = MqttClient::new("test-constraint-ops");
-    client
-        .connect(&format!("mqtt://127.0.0.1:{port}"))
+    let options = ConnectOptions::new("test-constraint-ops").with_credentials("admin", "");
+    Box::pin(client.connect_with_options(&format!("mqtt://127.0.0.1:{port}"), options))
         .await
         .unwrap();
 

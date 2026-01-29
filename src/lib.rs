@@ -24,6 +24,10 @@ pub mod auth_config;
 #[cfg(feature = "native")]
 pub mod cluster_agent;
 #[cfg(feature = "native")]
+pub mod topic_protection;
+#[cfg(feature = "native")]
+pub mod topic_rules;
+#[cfg(feature = "native")]
 pub mod consumer_group;
 #[cfg(feature = "native")]
 pub mod cursor;

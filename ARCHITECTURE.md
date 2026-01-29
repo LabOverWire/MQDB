@@ -1604,7 +1604,118 @@ db.backup_logical(format!("backups/logical_{}.jsonl", timestamp)).await?;
 
 ---
 
-## 15. Conclusion
+## 15. Security: Topic Protection
+
+### Overview
+
+Topic protection provides defense-in-depth security by enforcing access controls at the broker level, independent of ACL configuration. Even with a permissive ACL like `$DB/#`, internal topics remain protected.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     MQTT Client Request                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              TopicProtectionAuthProvider                         │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  1. Check if internal client (mqdb-* prefix)            │   │
+│  │     → Yes: Bypass protection, delegate to inner         │   │
+│  │  2. Check against PROTECTED_TOPICS rules                │   │
+│  │     → BlockAll: Return denied                           │   │
+│  │     → ReadOnly: Deny publish, allow subscribe           │   │
+│  │     → AdminRequired: Check admin_users set              │   │
+│  │  3. Check internal entity access ($DB/_*)               │   │
+│  │  4. Delegate to inner AuthProvider (ACL)                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              CompositeAuthProvider (ACL)                         │
+│              - Password/SCRAM/JWT authentication                 │
+│              - ACL rule evaluation                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Protection Rules
+
+Located in `src/topic_rules.rs`:
+
+| Pattern | Tier | Purpose |
+|---------|------|---------|
+| `_mqdb/#` | BlockAll | Cluster heartbeat, coordination |
+| `$DB/_idx/#` | BlockAll | Secondary index data |
+| `$DB/_unique/#` | BlockAll | Unique constraint enforcement |
+| `$DB/_fk/#` | BlockAll | Foreign key validation |
+| `$DB/_query/#` | BlockAll | Query execution internals |
+| `$DB/p+/#` | BlockAll | Partition-specific topics (p0, p1, ..., p63) |
+| `$SYS/#` | ReadOnly | Broker statistics, monitoring |
+| `$DB/_admin/#` | AdminRequired | Schema, constraints, backup operations |
+| `$DB/_oauth_tokens/#` | AdminRequired | OAuth token storage |
+
+### Pattern Matching
+
+The `matches_pattern` function supports:
+- `#` - Multi-level wildcard (matches any number of levels)
+- `+` - Single-level wildcard (matches exactly one level)
+- `p+` - Prefix wildcard (matches `p` followed by digits: `p0`, `p63`)
+
+Example: `$DB/p+/#` matches `$DB/p0/users/create` but NOT `$DB/posts/create`
+
+### Admin User Management
+
+Admin users are configured via:
+1. CLI: `--admin-users alice,bob`
+2. Config: `auth_config.admin_users: HashSet<String>`
+
+Admin status is checked by matching the MQTT username against the admin_users set.
+
+### Internal Service Exemption
+
+Internal MQDB components authenticate using a randomly-generated service username (`mqdb-internal-<uuid>`) created at broker startup. Topic protection checks the authenticated user identity (not client ID) to grant bypass access. This prevents malicious clients from spoofing internal access by using a `mqdb-` client ID prefix.
+
+### Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/topic_rules.rs` | Protection rules, pattern matching, tier definitions |
+| `src/topic_protection.rs` | AuthProvider wrapper implementation |
+| `src/auth_config.rs` | Admin user configuration |
+| `src/agent.rs` | Wraps broker auth with protection (agent mode) |
+| `src/cluster_agent.rs` | Wraps broker auth with protection (cluster mode) |
+
+### Block Reasons
+
+When topic protection blocks access, internal logging captures:
+
+| Reason | Description |
+|--------|-------------|
+| `InternalTopicBlocked` | Tier BlockAll - completely blocked |
+| `ReadOnlyTopic` | Tier ReadOnly - publish attempt blocked |
+| `AdminRequired` | Tier AdminRequired - non-admin user |
+| `InternalEntityAccess` | Entity starting with `_` accessed by non-admin |
+
+### Integration with ACL
+
+Topic protection runs **before** ACL evaluation:
+
+1. **Topic Protection** (hardcoded, cannot override):
+   - Blocks internal topics regardless of ACL rules
+   - Enforces read-only on `$SYS/#`
+   - Requires admin for sensitive topics
+
+2. **ACL Layer** (user-configured):
+   - Evaluates user rules, role rules, assignments
+   - Applies `readwrite`, `read`, `write`, `deny` permissions
+
+This layered approach ensures that even if an ACL grants broad access like `user * topic # permission readwrite`, internal MQDB topics remain protected.
+
+---
+
+## 16. Conclusion
 
 ### MQDB is Optimized For:
 

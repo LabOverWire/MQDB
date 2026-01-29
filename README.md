@@ -386,6 +386,58 @@ user * topic +/responses permission readwrite
 
 Permission values: `readwrite`, `read` (subscribe only), `write` (publish only), `deny`.
 
+### Topic Protection
+
+MQDB enforces hardcoded protection on internal topics that cannot be overridden by ACL configuration. This prevents misconfigured ACLs from exposing internal machinery.
+
+#### Protection Tiers
+
+| Tier | Topics | Behavior |
+|------|--------|----------|
+| BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
+| ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
+| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#` | Requires admin user |
+
+#### Internal Entity Protection
+
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exception: `$DB/_health` is always accessible.
+
+#### Admin User Configuration
+
+```bash
+# Start agent with admin users
+mqdb agent start --db /path/to/db --admin-users alice,bob
+
+# Start cluster with admin users
+mqdb cluster start --node-id 1 --db /path/to/db --admin-users alice,bob \
+    --quic-cert server.pem --quic-key server.key
+```
+
+Admin users can:
+- Access `$DB/_admin/*` topics (schema, constraints, backup)
+- Access `$DB/_oauth_tokens/*` topics
+- Access internal entities (`_sessions`, `_mqtt_subs`, etc.)
+
+#### Internal Service Bypass
+
+Internal MQDB components authenticate using a randomly-generated service username (`mqdb-internal-<uuid>`) created at startup. This username is only known to the server itself. Topic protection checks the authenticated user identity (not client ID) to grant internal components unrestricted access to cluster topics.
+
+#### Protection Flow
+
+```
+Client Request
+     │
+     ▼
+┌─────────────────────────────────┐
+│  Topic Protection Layer         │ ← Hardcoded blocks (cannot override)
+└─────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────┐
+│  ACL Layer                      │ ← User-configured permissions
+└─────────────────────────────────┘
+```
+
 ### Authentication
 
 MQDB supports multiple authentication methods, configurable via agent/cluster start flags:

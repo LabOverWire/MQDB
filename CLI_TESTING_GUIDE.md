@@ -2023,3 +2023,230 @@ mqdb acl role-remove editor -f /tmp/acl.txt
 - [ ] ACL role-list shows roles with optional name filter
 - [ ] ACL check verifies pub/sub permissions correctly
 - [ ] ACL user-roles lists assigned roles
+
+---
+
+## 21. Topic Protection Testing
+
+Topic protection enforces hardcoded security rules independent of ACL configuration.
+
+### Prerequisites
+
+```bash
+# Generate password and ACL files
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
+mqdb passwd alice -b alice123 -f /tmp/passwd.txt
+
+# Start agent with admin user configured
+mqdb agent start --db /tmp/mqdb-topic-prot --bind 127.0.0.1:1883 \
+    --passwd /tmp/passwd.txt --admin-users admin
+```
+
+### Tier 0: BlockAll Topics
+
+These topics are completely blocked for all external clients:
+
+```bash
+# Internal cluster topic - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t '_mqdb/test' -m 'payload'
+# Expected: Publish fails (not authorized)
+
+# Index topic - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t '$DB/_idx/users/email' -m '{}'
+# Expected: Publish fails
+
+# Partition topic - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t '$DB/p0/users/create' -m '{}'
+# Expected: Publish fails
+
+# Subscribe to index topics - should fail
+mosquitto_sub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t '$DB/_idx/#' -C 1 -W 2
+# Expected: Subscribe fails or no messages received
+```
+
+**Verification checklist:**
+- [ ] `_mqdb/#` blocked for all clients (including admin)
+- [ ] `$DB/_idx/#` blocked for all clients
+- [ ] `$DB/_unique/#` blocked for all clients
+- [ ] `$DB/_fk/#` blocked for all clients
+- [ ] `$DB/_query/#` blocked for all clients
+- [ ] `$DB/p0/...` through `$DB/p63/...` blocked for all clients
+
+### Tier 1: ReadOnly Topics
+
+`$SYS/#` topics allow subscribe but not publish:
+
+```bash
+# Subscribe to $SYS - should succeed
+mosquitto_sub -h 127.0.0.1 -p 1883 -u alice -P alice123 -t '$SYS/#' -C 1 -W 5 &
+SUB_PID=$!
+sleep 1
+
+# Publish to $SYS - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u alice -P alice123 -t '$SYS/test' -m 'payload'
+# Expected: Publish fails
+
+kill $SUB_PID 2>/dev/null
+```
+
+**Verification checklist:**
+- [ ] Subscribe to `$SYS/#` succeeds
+- [ ] Publish to `$SYS/...` fails (even for admin)
+
+### Tier 2: AdminRequired Topics
+
+Admin topics require authenticated admin user:
+
+```bash
+# Without admin role - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u alice -P alice123 \
+    -t '$DB/_admin/backup' -m '{}'
+# Expected: Publish fails (admin required)
+
+# With admin role - should succeed
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/backup' -e 'r' -m '{"name":"test_backup"}' -W 5
+# Expected: Backup created or appropriate response
+
+# OAuth tokens without admin - should fail
+mosquitto_pub -h 127.0.0.1 -p 1883 -u alice -P alice123 \
+    -t '$DB/_oauth_tokens/abc123' -m '{}'
+# Expected: Publish fails
+
+# OAuth tokens with admin - should succeed
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_oauth_tokens/abc123' -m '{"token":"test"}'
+# Expected: Publish succeeds (or appropriate DB response)
+```
+
+**Verification checklist:**
+- [ ] `$DB/_admin/#` blocked for non-admin users
+- [ ] `$DB/_admin/#` accessible for admin users
+- [ ] `$DB/_oauth_tokens/#` blocked for non-admin users
+- [ ] `$DB/_oauth_tokens/#` accessible for admin users
+
+### Internal Entity Protection
+
+Entities starting with `_` require admin access:
+
+```bash
+# List internal entity without admin - should fail
+mosquitto_rr -h 127.0.0.1 -p 1883 -u alice -P alice123 \
+    -t '$DB/_sessions/list' -e 'r' -m '{}' -W 3
+# Expected: Access denied or empty response
+
+# List internal entity with admin - should succeed
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_sessions/list' -e 'r' -m '{}' -W 3
+# Expected: Success with session list (may be empty)
+
+# Access _mqtt_subs without admin - should fail
+mosquitto_rr -h 127.0.0.1 -p 1883 -u alice -P alice123 \
+    -t '$DB/_mqtt_subs/list' -e 'r' -m '{}' -W 3
+# Expected: Access denied
+```
+
+**Verification checklist:**
+- [ ] `$DB/_sessions/*` blocked for non-admin
+- [ ] `$DB/_mqtt_subs/*` blocked for non-admin
+- [ ] `$DB/_topic_index/*` blocked for non-admin
+- [ ] Internal entities accessible for admin users
+
+### Health Endpoint Exception
+
+`$DB/_health` is always accessible (no admin required):
+
+```bash
+# Health check without auth (if anonymous allowed)
+mosquitto_rr -h 127.0.0.1 -p 1883 -t '$DB/_health' -e 'r' -m '{}' -W 3
+# Expected: {"status":"ok","data":{"ready":true,...}}
+
+# Health check with regular user
+mosquitto_rr -h 127.0.0.1 -p 1883 -u alice -P alice123 \
+    -t '$DB/_health' -e 'r' -m '{}' -W 3
+# Expected: {"status":"ok","data":{"ready":true,...}}
+```
+
+**Verification checklist:**
+- [ ] `$DB/_health` accessible without admin role
+- [ ] `$DB/_health` returns ready status
+
+### Regular Topics Unaffected
+
+Non-protected topics follow normal ACL rules:
+
+```bash
+# Create entity - should succeed (if ACL allows)
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/users/create' -e 'r' -m '{"name":"Alice"}'
+# Expected: Success with created entity
+
+# Pub/sub on custom topics
+mosquitto_sub -h 127.0.0.1 -p 1883 -u alice -P alice123 -t 'sensors/#' -C 1 -W 3 &
+sleep 1
+mosquitto_pub -h 127.0.0.1 -p 1883 -u alice -P alice123 -t 'sensors/temp' -m '22.5'
+# Expected: Message received by subscriber
+```
+
+**Verification checklist:**
+- [ ] `$DB/users/*` accessible (per ACL)
+- [ ] Custom topics like `sensors/#` work normally
+- [ ] ACL rules still apply to non-protected topics
+
+### Cluster Mode Topic Protection
+
+Topic protection also applies in cluster mode:
+
+```bash
+# Start cluster with admin user
+mqdb dev start-cluster --nodes 3 --clean
+# Note: Admin users need to be configured in cluster start
+
+# Test BlockAll topics in cluster
+mosquitto_pub -h 127.0.0.1 -p 1883 -t '$DB/p0/test' -m 'payload'
+# Expected: Fails on all nodes
+
+mosquitto_pub -h 127.0.0.1 -p 1884 -t '_mqdb/cluster/test' -m 'payload'
+# Expected: Fails on all nodes
+
+# Cleanup
+mqdb dev kill
+```
+
+**Verification checklist:**
+- [ ] BlockAll topics blocked on all cluster nodes
+- [ ] AdminRequired topics require admin on all nodes
+- [ ] Internal entity protection works across cluster
+
+### Complete Topic Protection Checklist
+
+Run through this checklist to verify topic protection:
+
+**BlockAll (Tier 0):**
+- [ ] `_mqdb/#` - cluster internal
+- [ ] `$DB/_idx/#` - secondary indexes
+- [ ] `$DB/_unique/#` - unique constraints
+- [ ] `$DB/_fk/#` - foreign keys
+- [ ] `$DB/_query/#` - query internals
+- [ ] `$DB/p+/#` - partition topics (p0-p63)
+
+**ReadOnly (Tier 1):**
+- [ ] `$SYS/#` - subscribe allowed, publish denied
+
+**AdminRequired (Tier 2):**
+- [ ] `$DB/_admin/#` - admin operations
+- [ ] `$DB/_oauth_tokens/#` - OAuth tokens
+
+**Internal Entities:**
+- [ ] `_sessions` - requires admin
+- [ ] `_mqtt_subs` - requires admin
+- [ ] `_topic_index` - requires admin
+- [ ] `_client_loc` - requires admin
+
+**Exceptions:**
+- [ ] `$DB/_health` - always accessible
+- [ ] Internal clients (`mqdb-*`) bypass protection
+
+**Integration:**
+- [ ] Protection runs before ACL evaluation
+- [ ] Permissive ACL cannot override protection

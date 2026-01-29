@@ -17,6 +17,7 @@ use mqtt5::broker::config::{
     ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
     StorageBackend, StorageConfig, WebSocketConfig,
 };
+use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
@@ -179,6 +180,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_no_rate_limit(mut self) -> Self {
         self.auth_setup.no_rate_limit = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_admin_users(mut self, users: std::collections::HashSet<String>) -> Self {
+        self.auth_setup.admin_users = users;
         self
     }
 
@@ -706,15 +713,17 @@ impl ClusteredAgent {
             cert_auth_file: self.auth_setup.cert_auth_file.clone(),
             rate_limit: self.auth_setup.rate_limit.clone(),
             no_rate_limit: self.auth_setup.no_rate_limit,
+            admin_users: self.auth_setup.admin_users.clone(),
         };
         let auth_result =
             crate::auth_config::configure_broker_auth(&auth_cfg, &mut broker_config.auth_config)
                 .await
                 .map_err(|e| format!("auth setup failed: {e}"))?;
-        let (service_username, service_password, needs_composite) = (
+        let (service_username, service_password, needs_composite, admin_users) = (
             auth_result.service_username,
             auth_result.service_password,
             auth_result.needs_composite,
+            auth_result.admin_users,
         );
 
         if self.use_quic {
@@ -766,6 +775,20 @@ impl ClusteredAgent {
             let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
             broker = broker.with_auth_provider(Arc::new(composite));
             info!("composite auth provider configured for internal service clients");
+        }
+
+        let current_provider = broker.auth_provider();
+        let protected_provider =
+            TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
+                .with_internal_service_username(service_username.clone());
+        broker = broker.with_auth_provider(Arc::new(protected_provider));
+        if admin_users.is_empty() {
+            info!("topic protection enabled (no admin users configured)");
+        } else {
+            info!(
+                admin_users = ?admin_users,
+                "topic protection enabled with admin users"
+            );
         }
 
         let mut ready_rx = broker.ready_receiver();
@@ -881,9 +904,9 @@ impl ClusteredAgent {
             info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");
             let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());
             let admin_mqtt_client = mqtt5::MqttClient::new(&admin_client_id);
-            if let (Some(user), Some(pass)) = (&service_username, &service_password) {
+            if let Some(user) = &service_username {
                 let options = mqtt5::types::ConnectOptions::new(&admin_client_id)
-                    .with_credentials(user, pass);
+                    .with_credentials(user, service_password.as_deref().unwrap_or(""));
                 Box::pin(admin_mqtt_client.connect_with_options(&broker_addr, options))
                     .await
                     .map_err(|e| format!("failed to connect admin client: {e}"))?;

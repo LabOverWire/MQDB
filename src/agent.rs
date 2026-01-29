@@ -1,14 +1,16 @@
 use crate::auth_config::AuthSetupConfig;
+use crate::topic_protection::TopicProtectionAuthProvider;
 use crate::{Database, Response};
+use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::config::{
     FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig, WebSocketConfig,
 };
-use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -155,6 +157,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_admin_users(mut self, users: HashSet<String>) -> Self {
+        self.auth_setup.admin_users = users;
+        self
+    }
+
+    #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(self, config: crate::http::HttpServerConfig) -> Self {
         *self.http_config.lock().expect("http_config lock") = Some(config);
@@ -179,14 +187,24 @@ impl MqdbAgent {
             ..Default::default()
         };
 
-        let (service_username, service_password, needs_composite) =
+        let (service_username, service_password, needs_composite, admin_users) =
             if self.service_username.is_some() {
-                (self.service_username.clone(), self.service_password.clone(), false)
+                (
+                    self.service_username.clone(),
+                    self.service_password.clone(),
+                    false,
+                    self.auth_setup.admin_users.clone(),
+                )
             } else {
                 let result =
                     crate::auth_config::configure_broker_auth(&self.auth_setup, &mut config.auth_config)
                         .await?;
-                (result.service_username, result.service_password, result.needs_composite)
+                (
+                    result.service_username,
+                    result.service_password,
+                    result.needs_composite,
+                    result.admin_users,
+                )
             };
 
         if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
@@ -215,6 +233,20 @@ impl MqdbAgent {
             info!("composite auth provider configured for internal service clients");
         }
 
+        let current_provider = broker.auth_provider();
+        let protected_provider =
+            TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
+                .with_internal_service_username(service_username.clone());
+        broker = broker.with_auth_provider(Arc::new(protected_provider));
+        if admin_users.is_empty() {
+            info!("topic protection enabled (no admin users configured)");
+        } else {
+            info!(
+                admin_users = ?admin_users,
+                "topic protection enabled with admin users"
+            );
+        }
+
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let db = Arc::clone(&self.db);
@@ -237,9 +269,9 @@ impl MqdbAgent {
 
             let response_creds = (handler_username.clone(), handler_password.clone());
             let connect_result =
-                if let (Some(user), Some(pass)) = (handler_username, handler_password) {
+                if let Some(user) = handler_username {
                     let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
-                        .with_credentials(user, pass);
+                        .with_credentials(user, handler_password.as_deref().unwrap_or(""));
                     Box::pin(client.connect_with_options(&addr, options))
                         .await
                         .map(|_| ())
