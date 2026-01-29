@@ -57,7 +57,12 @@ enum Commands {
         stdout: bool,
         #[arg(short, long, help = "SCRAM credentials file path")]
         file: Option<PathBuf>,
-        #[arg(long, short = 'i', default_value = "310000", help = "PBKDF2 iteration count")]
+        #[arg(
+            long,
+            short = 'i',
+            default_value = "310000",
+            help = "PBKDF2 iteration count"
+        )]
         iterations: u32,
     },
     #[command(about = "Manage ACL rules and roles")]
@@ -552,7 +557,11 @@ struct AuthArgs {
     jwt_issuer: Option<String>,
     #[arg(long, help = "JWT audience claim")]
     jwt_audience: Option<String>,
-    #[arg(long, default_value = "60", help = "JWT clock skew tolerance in seconds")]
+    #[arg(
+        long,
+        default_value = "60",
+        help = "JWT clock skew tolerance in seconds"
+    )]
     jwt_clock_skew: u64,
     #[arg(long, conflicts_with_all = ["jwt_algorithm"], help = "Path to federated JWT config JSON")]
     federated_jwt_config: Option<PathBuf>,
@@ -564,9 +573,17 @@ struct AuthArgs {
     rate_limit_max_attempts: u32,
     #[arg(long, default_value = "60", help = "Rate limit window in seconds")]
     rate_limit_window_secs: u64,
-    #[arg(long, default_value = "300", help = "Rate limit lockout duration in seconds")]
+    #[arg(
+        long,
+        default_value = "300",
+        help = "Rate limit lockout duration in seconds"
+    )]
     rate_limit_lockout_secs: u64,
-    #[arg(long, value_delimiter = ',', help = "Comma-separated list of admin usernames")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Comma-separated list of admin usernames"
+    )]
     admin_users: Vec<String>,
 }
 
@@ -576,17 +593,31 @@ struct OAuthArgs {
     http_bind: Option<SocketAddr>,
     #[arg(long, help = "Path to file containing Google OAuth client secret")]
     oauth_client_secret: Option<PathBuf>,
-    #[arg(long, help = "OAuth redirect URI (default: http://localhost:{http_port}/oauth/callback)")]
+    #[arg(
+        long,
+        help = "OAuth redirect URI (default: http://localhost:{http_port}/oauth/callback)"
+    )]
     oauth_redirect_uri: Option<String>,
     #[arg(long, help = "URI to redirect browser after OAuth completes")]
     oauth_frontend_redirect: Option<String>,
-    #[arg(long, default_value = "30", help = "Ticket JWT expiry in seconds (default: 30)")]
+    #[arg(
+        long,
+        default_value = "30",
+        help = "Ticket JWT expiry in seconds (default: 30)"
+    )]
     ticket_expiry_secs: u64,
     #[arg(long, help = "Set Secure flag on session cookies (requires HTTPS)")]
     cookie_secure: bool,
-    #[arg(long, help = "CORS allowed origin for auth endpoints (e.g. http://localhost:8000)")]
+    #[arg(
+        long,
+        help = "CORS allowed origin for auth endpoints (e.g. http://localhost:8000)"
+    )]
     cors_origin: Option<String>,
-    #[arg(long, default_value = "10", help = "Max ticket requests per minute per session")]
+    #[arg(
+        long,
+        default_value = "10",
+        help = "Max ticket requests per minute per session"
+    )]
     ticket_rate_limit: u32,
 }
 
@@ -1730,7 +1761,10 @@ fn build_http_config(
         .jwt_key
         .as_ref()
         .ok_or("--jwt-key is required for OAuth JWT signing")?;
-    let jwt_key_bytes = std::fs::read_to_string(jwt_key_path)?.trim().as_bytes().to_vec();
+    let jwt_key_bytes = std::fs::read_to_string(jwt_key_path)?
+        .trim()
+        .as_bytes()
+        .to_vec();
 
     let client_id = if let Some(ref fed_config_path) = auth.federated_jwt_config {
         let content = std::fs::read_to_string(fed_config_path)?;
@@ -1754,8 +1788,14 @@ fn build_http_config(
         String::from,
     );
 
-    let issuer = auth.jwt_issuer.clone().unwrap_or_else(|| "mqdb".to_string());
-    let audience = auth.jwt_audience.clone().or_else(|| Some(client_id.clone()));
+    let issuer = auth
+        .jwt_issuer
+        .clone()
+        .unwrap_or_else(|| "mqdb".to_string());
+    let audience = auth
+        .jwt_audience
+        .clone()
+        .or_else(|| Some(client_id.clone()));
 
     Ok(mqdb::http::HttpServerConfig {
         bind_address: http_bind,
@@ -1956,7 +1996,10 @@ async fn cmd_acl_add(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let valid = ["read", "write", "readwrite", "deny"];
     if !valid.contains(&permission) {
-        return Err(format!("invalid permission '{permission}': must be read, write, readwrite, or deny").into());
+        return Err(format!(
+            "invalid permission '{permission}': must be read, write, readwrite, or deny"
+        )
+        .into());
     }
     let mut rules = if file.exists() {
         read_acl_lines(file).await?
@@ -1983,7 +2026,8 @@ async fn cmd_acl_remove(
     let original = rules.len();
     rules.retain(|rule| {
         let parts: Vec<&str> = rule.split_whitespace().collect();
-        if parts.len() != 6 || parts[0] != "user" || parts[2] != "topic" || parts[4] != "permission" {
+        if parts.len() != 6 || parts[0] != "user" || parts[2] != "topic" || parts[4] != "permission"
+        {
             return true;
         }
         if parts[1] != username {
@@ -2039,7 +2083,8 @@ async fn cmd_acl_role_remove(
     let original = rules.len();
     rules.retain(|rule| {
         let parts: Vec<&str> = rule.split_whitespace().collect();
-        if parts.len() != 6 || parts[0] != "role" || parts[2] != "topic" || parts[4] != "permission" {
+        if parts.len() != 6 || parts[0] != "role" || parts[2] != "topic" || parts[4] != "permission"
+        {
             return true;
         }
         if parts[1] != role_name {
@@ -2117,7 +2162,9 @@ async fn cmd_acl_unassign(
     let original = rules.len();
     rules.retain(|r| r != &line);
     if rules.len() == original {
-        return Err(format!("no assignment found for user '{username}' with role '{role_name}'").into());
+        return Err(
+            format!("no assignment found for user '{username}' with role '{role_name}'").into(),
+        );
     }
     write_acl_lines(file, &rules).await?;
     println!("Removed role '{role_name}' from user '{username}'");
@@ -2351,10 +2398,18 @@ fn matches_filters(data: &Value, filters: &[Value]) -> bool {
         match op {
             "eq" => actual == expected,
             "neq" => actual != expected,
-            "gt" => compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Greater),
-            "lt" => compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Less),
-            "gte" => compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Less),
-            "lte" => compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Greater),
+            "gt" => {
+                compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Greater)
+            }
+            "lt" => {
+                compare_values(&actual, &expected).is_some_and(|o| o == std::cmp::Ordering::Less)
+            }
+            "gte" => {
+                compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Less)
+            }
+            "lte" => {
+                compare_values(&actual, &expected).is_some_and(|o| o != std::cmp::Ordering::Greater)
+            }
             "like" => {
                 if let (Some(a), Some(p)) = (actual.as_str(), expected.as_str()) {
                     glob_match(p, a)
@@ -5487,7 +5542,15 @@ fn start_agent_for_bench(
     let log_file = std::fs::File::create(format!("{db}/mqdb.log"))?;
 
     #[cfg(feature = "dev-insecure")]
-    let args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    let args = vec![
+        "agent",
+        "start",
+        "--db",
+        db,
+        "--bind",
+        "127.0.0.1:1883",
+        "--anonymous",
+    ];
     #[cfg(not(feature = "dev-insecure"))]
     let args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
 
@@ -5892,7 +5955,15 @@ fn profile_with_samply(
     println!("Starting agent under samply profiler...");
 
     #[cfg(feature = "dev-insecure")]
-    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    let agent_args = vec![
+        "agent",
+        "start",
+        "--db",
+        db,
+        "--bind",
+        "127.0.0.1:1883",
+        "--anonymous",
+    ];
     #[cfg(not(feature = "dev-insecure"))]
     let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
 
@@ -5953,18 +6024,35 @@ fn profile_with_flamegraph(
     let output_str = output_path.to_str().unwrap_or("flamegraph.svg");
     #[cfg(feature = "dev-insecure")]
     let flamegraph_args = vec![
-        "flamegraph", "--profile=profiling", "-o", output_str, "--",
-        "agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous",
+        "flamegraph",
+        "--profile=profiling",
+        "-o",
+        output_str,
+        "--",
+        "agent",
+        "start",
+        "--db",
+        db,
+        "--bind",
+        "127.0.0.1:1883",
+        "--anonymous",
     ];
     #[cfg(not(feature = "dev-insecure"))]
     let flamegraph_args = vec![
-        "flamegraph", "--profile=profiling", "-o", output_str, "--",
-        "agent", "start", "--db", db, "--bind", "127.0.0.1:1883",
+        "flamegraph",
+        "--profile=profiling",
+        "-o",
+        output_str,
+        "--",
+        "agent",
+        "start",
+        "--db",
+        db,
+        "--bind",
+        "127.0.0.1:1883",
     ];
 
-    let mut flamegraph = Command::new("cargo")
-        .args(&flamegraph_args)
-        .spawn()?;
+    let mut flamegraph = Command::new("cargo").args(&flamegraph_args).spawn()?;
 
     std::thread::sleep(Duration::from_secs(2));
 
@@ -6005,7 +6093,15 @@ fn profile_with_sample(
 
     println!("Starting agent...");
     #[cfg(feature = "dev-insecure")]
-    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883", "--anonymous"];
+    let agent_args = vec![
+        "agent",
+        "start",
+        "--db",
+        db,
+        "--bind",
+        "127.0.0.1:1883",
+        "--anonymous",
+    ];
     #[cfg(not(feature = "dev-insecure"))]
     let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
 

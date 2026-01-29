@@ -10,15 +10,15 @@ use crate::cluster::{
 };
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
+use crate::topic_protection::TopicProtectionAuthProvider;
 use crate::transport::{ErrorCode, Response};
 use mqtt5::QoS;
+use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
     ClusterListenerConfig, FederatedJwtConfig, JwtConfig, QuicConfig, RateLimitConfig,
     StorageBackend, StorageConfig, WebSocketConfig,
 };
-use crate::topic_protection::TopicProtectionAuthProvider;
-use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
@@ -1072,15 +1072,16 @@ impl ClusteredAgent {
             Some(tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(300)).await;
 
-                let connect_result = if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
-                    let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
-                        .with_credentials(user, pass);
-                    Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
-                        .await
-                        .map(|_| ())
-                } else {
-                    http_mqtt_client.connect(&http_addr).await
-                };
+                let connect_result =
+                    if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
+                        let options = mqtt5::types::ConnectOptions::new("mqdb-http-oauth")
+                            .with_credentials(user, pass);
+                        Box::pin(http_mqtt_client.connect_with_options(&http_addr, options))
+                            .await
+                            .map(|_| ())
+                    } else {
+                        http_mqtt_client.connect(&http_addr).await
+                    };
 
                 if let Err(e) = connect_result {
                     tracing::error!("Failed to connect HTTP OAuth MQTT client: {}", e);

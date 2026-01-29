@@ -196,9 +196,11 @@ impl MqdbAgent {
                     self.auth_setup.admin_users.clone(),
                 )
             } else {
-                let result =
-                    crate::auth_config::configure_broker_auth(&self.auth_setup, &mut config.auth_config)
-                        .await?;
+                let result = crate::auth_config::configure_broker_auth(
+                    &self.auth_setup,
+                    &mut config.auth_config,
+                )
+                .await?;
                 (
                     result.service_username,
                     result.service_password,
@@ -268,16 +270,15 @@ impl MqdbAgent {
             let addr = format!("{}:{}", connect_ip, bind_addr.port());
 
             let response_creds = (handler_username.clone(), handler_password.clone());
-            let connect_result =
-                if let Some(user) = handler_username {
-                    let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
-                        .with_credentials(user, handler_password.as_deref().unwrap_or(""));
-                    Box::pin(client.connect_with_options(&addr, options))
-                        .await
-                        .map(|_| ())
-                } else {
-                    client.connect(&addr).await
-                };
+            let connect_result = if let Some(user) = handler_username {
+                let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
+                    .with_credentials(user, handler_password.as_deref().unwrap_or(""));
+                Box::pin(client.connect_with_options(&addr, options))
+                    .await
+                    .map(|_| ())
+            } else {
+                client.connect(&addr).await
+            };
 
             if let Err(e) = connect_result {
                 error!("Failed to connect internal handler: {}", e);
@@ -402,7 +403,12 @@ impl MqdbAgent {
             }
         });
 
-        let http_task = if let Some(http_config) = self.http_config.lock().ok().and_then(|mut guard| guard.take()) {
+        let http_task = if let Some(http_config) = self
+            .http_config
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+        {
             let http_bind = http_config.bind_address;
             let http_shutdown_rx = self.shutdown_tx.subscribe();
 

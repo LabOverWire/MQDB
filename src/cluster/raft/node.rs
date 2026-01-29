@@ -292,7 +292,8 @@ impl RaftNode {
     }
 
     fn apply_committed(&mut self) -> Vec<RaftOutput> {
-        let commands: Vec<_> = self.state
+        let commands: Vec<_> = self
+            .state
             .pending_commands()
             .into_iter()
             .map(RaftOutput::ApplyCommand)

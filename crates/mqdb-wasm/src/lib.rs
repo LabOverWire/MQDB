@@ -185,7 +185,10 @@ impl WasmDatabase {
             *counter += 1;
             let generated_id = counter.to_string();
             if let serde_json::Value::Object(ref mut obj) = value {
-                obj.insert("id".to_string(), serde_json::Value::String(generated_id.clone()));
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(generated_id.clone()),
+                );
             }
             generated_id
         };

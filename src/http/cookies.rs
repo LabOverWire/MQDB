@@ -34,10 +34,7 @@ mod tests {
 
     #[test]
     fn test_parse_session_id() {
-        assert_eq!(
-            parse_session_id("mqdb_session=abc123"),
-            Some("abc123")
-        );
+        assert_eq!(parse_session_id("mqdb_session=abc123"), Some("abc123"));
         assert_eq!(
             parse_session_id("other=xyz; mqdb_session=def456; another=foo"),
             Some("def456")

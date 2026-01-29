@@ -689,15 +689,12 @@ impl<T: ClusterTransport> NodeController<T> {
                     } else if NodeId::validated(update.replica1) == Some(self.node_id)
                         || NodeId::validated(update.replica2) == Some(self.node_id)
                     {
-                        let dominated = self
-                            .replicas
-                            .get(&partition.get())
-                            .is_some_and(|s| {
-                                matches!(
-                                    s.role(),
-                                    ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
-                                ) && s.epoch() >= epoch
-                            });
+                        let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
+                            matches!(
+                                s.role(),
+                                ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
+                            ) && s.epoch() >= epoch
+                        });
                         if !dominated {
                             self.become_replica_with_snapshot(partition, epoch, primary)
                                 .await;
@@ -709,7 +706,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.partition_map.apply_update(update);
                 self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self.tx_raft_events.try_send(RaftEvent::ExternalUpdate(*update));
+                let _ = self
+                    .tx_raft_events
+                    .try_send(RaftEvent::ExternalUpdate(*update));
                 tracing::info!(
                     partition = update.partition,
                     primary = update.primary,
@@ -892,15 +891,12 @@ impl<T: ClusterTransport> NodeController<T> {
                     } else if NodeId::validated(update.replica1) == Some(self.node_id)
                         || NodeId::validated(update.replica2) == Some(self.node_id)
                     {
-                        let dominated = self
-                            .replicas
-                            .get(&partition.get())
-                            .is_some_and(|s| {
-                                matches!(
-                                    s.role(),
-                                    ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
-                                ) && s.epoch() >= epoch
-                            });
+                        let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
+                            matches!(
+                                s.role(),
+                                ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
+                            ) && s.epoch() >= epoch
+                        });
                         if !dominated {
                             self.become_replica_with_snapshot(partition, epoch, primary)
                                 .await;
@@ -912,7 +908,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.partition_map.apply_update(update);
                 self.heartbeat.partition_map_mut().apply_update(update);
-                let _ = self.tx_raft_events.try_send(RaftEvent::ExternalUpdate(*update));
+                let _ = self
+                    .tx_raft_events
+                    .try_send(RaftEvent::ExternalUpdate(*update));
                 tracing::info!(
                     partition = update.partition,
                     primary = update.primary,

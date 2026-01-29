@@ -24,10 +24,6 @@ pub mod auth_config;
 #[cfg(feature = "native")]
 pub mod cluster_agent;
 #[cfg(feature = "native")]
-pub mod topic_protection;
-#[cfg(feature = "native")]
-pub mod topic_rules;
-#[cfg(feature = "native")]
 pub mod consumer_group;
 #[cfg(feature = "native")]
 pub mod cursor;
@@ -42,6 +38,10 @@ pub mod http;
 pub mod outbox;
 #[cfg(feature = "native")]
 pub mod session;
+#[cfg(feature = "native")]
+pub mod topic_protection;
+#[cfg(feature = "native")]
+pub mod topic_rules;
 pub mod transport;
 
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};

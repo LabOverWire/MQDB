@@ -119,11 +119,13 @@ async fn handle_request(
         (&Method::OPTIONS, _) => handlers::handle_options(),
         (&Method::GET, "/health") => handlers::handle_health(&state),
         (&Method::GET, "/oauth/authorize") => handlers::handle_authorize(&state).await,
-        (&Method::GET, "/oauth/callback") => {
-            handlers::handle_callback(&state, &query).await
-        }
+        (&Method::GET, "/oauth/callback") => handlers::handle_callback(&state, &query).await,
         (&Method::POST, "/oauth/refresh") => {
-            let body = req.collect().await.map(http_body_util::Collected::to_bytes).unwrap_or_default();
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
             handlers::handle_refresh(&state, &body).await
         }
         (&Method::POST, "/auth/ticket") => handlers::handle_ticket(&state, &headers),

@@ -60,7 +60,8 @@ impl AuthProvider for TopicProtectionAuthProvider {
         let username = connect.username.clone();
         Box::pin(async move {
             let result = self.inner.authenticate(connect, client_addr).await?;
-            if result.authenticated && result.user_id.is_none()
+            if result.authenticated
+                && result.user_id.is_none()
                 && let Some(user) = username
             {
                 return Ok(AuthResult::success_with_user(user));
@@ -189,7 +190,11 @@ mod tests {
         let provider = create_test_provider_with_internal("mqdb-internal-abc123");
 
         let result = provider
-            .authorize_publish("any-client-id", Some("mqdb-internal-abc123"), "_mqdb/cluster/heartbeat")
+            .authorize_publish(
+                "any-client-id",
+                Some("mqdb-internal-abc123"),
+                "_mqdb/cluster/heartbeat",
+            )
             .await
             .unwrap();
         assert!(result);
@@ -212,7 +217,11 @@ mod tests {
         assert!(!result);
 
         let result = provider
-            .authorize_publish("mqdb-internal-handler", Some("attacker"), "_mqdb/cluster/heartbeat")
+            .authorize_publish(
+                "mqdb-internal-handler",
+                Some("attacker"),
+                "_mqdb/cluster/heartbeat",
+            )
             .await
             .unwrap();
         assert!(!result);

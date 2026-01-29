@@ -247,7 +247,10 @@ impl RaftState {
             return Some(0);
         }
         let pos = self.log_position(index)?;
-        self.log.get(pos).filter(|e| e.index == index).map(|e| e.term)
+        self.log
+            .get(pos)
+            .filter(|e| e.index == index)
+            .map(|e| e.term)
     }
 
     pub fn add_peer(&mut self, peer: NodeId) {

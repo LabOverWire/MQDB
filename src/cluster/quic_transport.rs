@@ -137,11 +137,7 @@ impl QuicDirectTransport {
         let inbox_len = self.inbox_rx.len();
         let publish_len = self.local_publish_rx.len();
         if inbox_len > 100 || publish_len > 100 {
-            warn!(
-                inbox_len,
-                publish_len,
-                "quic transport queue backlog"
-            );
+            warn!(inbox_len, publish_len, "quic transport queue backlog");
         }
     }
 
@@ -488,7 +484,10 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             retain: true,
         }) {
-            warn!(topic, "local_publish queue full, dropping retained message: {e}");
+            warn!(
+                topic,
+                "local_publish queue full, dropping retained message: {e}"
+            );
         }
     }
 }
@@ -610,7 +609,10 @@ async fn receiver_task(
                     ClusterMessage::SnapshotComplete(_) => "SnapshotComplete",
                     _ => "Other",
                 };
-                warn!(peer = peer_node.get(), msg_type, "inbox queue full, dropping message");
+                warn!(
+                    peer = peer_node.get(),
+                    msg_type, "inbox queue full, dropping message"
+                );
             } else {
                 notify.notify_one();
             }
@@ -838,21 +840,22 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     Ok(server_config)
 }
 
-fn build_client_config_secure(ca_file: Option<&Path>) -> Result<quinn::ClientConfig, TransportError> {
+fn build_client_config_secure(
+    ca_file: Option<&Path>,
+) -> Result<quinn::ClientConfig, TransportError> {
     let mut root_store = rustls::RootCertStore::empty();
 
     if let Some(ca_path) = ca_file {
-        let ca_file = std::fs::File::open(ca_path).map_err(|e| {
-            TransportError::SendFailed(format!("failed to open CA file: {e}"))
-        })?;
+        let ca_file = std::fs::File::open(ca_path)
+            .map_err(|e| TransportError::SendFailed(format!("failed to open CA file: {e}")))?;
         let certs: Vec<CertificateDer<'static>> =
             rustls_pemfile::certs(&mut BufReader::new(ca_file))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| TransportError::SendFailed(format!("failed to parse CA cert: {e}")))?;
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                TransportError::SendFailed(format!("failed to add CA cert: {e}"))
-            })?;
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::SendFailed(format!("failed to add CA cert: {e}")))?;
         }
         debug!(ca_path = %ca_path.display(), "loaded custom CA certificate");
     } else {

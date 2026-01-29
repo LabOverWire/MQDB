@@ -208,8 +208,14 @@ mod tests {
 
     #[test]
     fn matches_pattern_single_wildcard() {
-        assert!(matches_pattern("$DB/p0/users/create", "$DB/p+/users/create"));
-        assert!(matches_pattern("$DB/p63/users/create", "$DB/p+/users/create"));
+        assert!(matches_pattern(
+            "$DB/p0/users/create",
+            "$DB/p+/users/create"
+        ));
+        assert!(matches_pattern(
+            "$DB/p63/users/create",
+            "$DB/p+/users/create"
+        ));
         assert!(!matches_pattern("$DB/users/create", "$DB/p+/users/create"));
     }
 
@@ -274,7 +280,10 @@ mod tests {
 
     #[test]
     fn check_access_sys_read_only() {
-        assert_eq!(check_topic_access("$SYS/broker/uptime", false, false), Ok(()));
+        assert_eq!(
+            check_topic_access("$SYS/broker/uptime", false, false),
+            Ok(())
+        );
         assert_eq!(
             check_topic_access("$SYS/broker/uptime", true, false),
             Err(BlockReason::ReadOnlyTopic)
@@ -315,8 +324,14 @@ mod tests {
     fn check_access_regular_topics_allowed() {
         assert_eq!(check_topic_access("$DB/users/create", true, false), Ok(()));
         assert_eq!(check_topic_access("$DB/posts/abc123", true, false), Ok(()));
-        assert_eq!(check_topic_access("sensors/temperature", true, false), Ok(()));
-        assert_eq!(check_topic_access("app/notifications", false, false), Ok(()));
+        assert_eq!(
+            check_topic_access("sensors/temperature", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("app/notifications", false, false),
+            Ok(())
+        );
     }
 
     #[test]
@@ -371,8 +386,14 @@ mod tests {
     #[test]
     fn check_access_internal_entity_admin_allowed() {
         assert_eq!(check_topic_access("$DB/_sessions/list", true, true), Ok(()));
-        assert_eq!(check_topic_access("$DB/_sessions/abc123", false, true), Ok(()));
-        assert_eq!(check_topic_access("$DB/_mqtt_subs/create", true, true), Ok(()));
+        assert_eq!(
+            check_topic_access("$DB/_sessions/abc123", false, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_mqtt_subs/create", true, true),
+            Ok(())
+        );
     }
 
     #[test]

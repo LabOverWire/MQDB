@@ -40,9 +40,7 @@ impl EventDispatcher {
     /// Returns an error if dispatching fails.
     pub async fn dispatch(&self, event: ChangeEvent) -> Result<()> {
         if let Err(e) = self.sender.send(event.clone()) {
-            tracing::trace!(
-                "no broadcast receivers for event: {e}"
-            );
+            tracing::trace!("no broadcast receivers for event: {e}");
         }
 
         let matching = self.registry.find_matching(&event).await;

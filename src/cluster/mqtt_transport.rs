@@ -27,7 +27,10 @@ const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
 const FORWARD_TOPIC_PREFIX: &str = "_mqdb/forward";
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
-#[deprecated(since = "0.2.0", note = "use QuicDirectTransport instead - MQTT bridges are retained for historical reference only")]
+#[deprecated(
+    since = "0.2.0",
+    note = "use QuicDirectTransport instead - MQTT bridges are retained for historical reference only"
+)]
 #[derive(Clone)]
 pub struct MqttTransport {
     node_id: NodeId,

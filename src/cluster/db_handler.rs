@@ -48,8 +48,14 @@ impl DbRequestHandler {
                     .await?
             }
             ref op => {
-                self.handle_json_operation(controller, op, payload, response_topic?, correlation_data)
-                    .await?
+                self.handle_json_operation(
+                    controller,
+                    op,
+                    payload,
+                    response_topic?,
+                    correlation_data,
+                )
+                .await?
             }
         };
 
@@ -70,21 +76,31 @@ impl DbRequestHandler {
         let partition = parsed.partition?;
         Some(match &parsed.operation {
             DbTopicOperation::Create { entity } => {
-                self.handle_create(controller, partition, entity, payload).await
+                self.handle_create(controller, partition, entity, payload)
+                    .await
             }
             DbTopicOperation::Read { entity, id } => {
                 self.handle_read(controller, partition, entity, id, payload)
             }
             DbTopicOperation::Update { entity, id } => {
-                self.handle_update(controller, partition, entity, id, payload).await
+                self.handle_update(controller, partition, entity, id, payload)
+                    .await
             }
             DbTopicOperation::Delete { entity, id } => {
                 self.handle_delete(controller, partition, entity, id).await
             }
-            DbTopicOperation::IndexUpdate => self.handle_index_update(controller, partition, payload),
-            DbTopicOperation::UniqueReserve => self.handle_unique_reserve(controller, partition, payload),
-            DbTopicOperation::UniqueCommit => self.handle_unique_commit(controller, partition, payload),
-            DbTopicOperation::UniqueRelease => self.handle_unique_release(controller, partition, payload),
+            DbTopicOperation::IndexUpdate => {
+                self.handle_index_update(controller, partition, payload)
+            }
+            DbTopicOperation::UniqueReserve => {
+                self.handle_unique_reserve(controller, partition, payload)
+            }
+            DbTopicOperation::UniqueCommit => {
+                self.handle_unique_commit(controller, partition, payload)
+            }
+            DbTopicOperation::UniqueRelease => {
+                self.handle_unique_release(controller, partition, payload)
+            }
             DbTopicOperation::FkValidate => self.handle_fk_validate(controller, partition, payload),
             _ => return None,
         })
@@ -100,22 +116,37 @@ impl DbRequestHandler {
     ) -> Option<Vec<u8>> {
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
-                self.handle_json_create(controller, entity, payload, response_topic, correlation_data)
-                    .await
+                self.handle_json_create(
+                    controller,
+                    entity,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
+                .await
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                self.handle_json_read(controller, entity, id, response_topic, correlation_data).await
+                self.handle_json_read(controller, entity, id, response_topic, correlation_data)
+                    .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
-                self.handle_json_update(controller, entity, id, payload, response_topic, correlation_data)
-                    .await
+                self.handle_json_update(
+                    controller,
+                    entity,
+                    id,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
+                .await
             }
             DbTopicOperation::JsonDelete { entity, id } => {
                 self.handle_json_delete(controller, entity, id, response_topic, correlation_data)
                     .await
             }
             DbTopicOperation::JsonList { entity } => {
-                self.handle_json_list(controller, entity, payload, response_topic).await
+                self.handle_json_list(controller, entity, payload, response_topic)
+                    .await
             }
             _ => None,
         }
@@ -412,7 +443,14 @@ impl DbRequestHandler {
 
         if !controller.is_local_partition(partition) {
             return self
-                .try_forward_create(controller, partition, entity, payload, response_topic, correlation_data)
+                .try_forward_create(
+                    controller,
+                    partition,
+                    entity,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
                 .await;
         }
 
@@ -430,13 +468,24 @@ impl DbRequestHandler {
         correlation_data: Option<&[u8]>,
     ) -> Option<Vec<u8>> {
         let forwarded = controller
-            .forward_json_db_request(partition, JsonDbOp::Create, entity, None, payload, response_topic, correlation_data)
+            .forward_json_db_request(
+                partition,
+                JsonDbOp::Create,
+                entity,
+                None,
+                payload,
+                response_topic,
+                correlation_data,
+            )
             .await;
         if forwarded {
             tracing::debug!(partition = partition.get(), "json_create_forwarded");
             None
         } else {
-            Some(Self::json_error(503, "partition not local and forwarding failed"))
+            Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ))
         }
     }
 
@@ -456,23 +505,48 @@ impl DbRequestHandler {
             .check_unique_constraints(entity, id, data, partition, &request_id, now_ms)
             .await
         {
-            return Some(Self::json_error(409, &format!("unique constraint violation on field '{conflict_field}'")));
+            return Some(Self::json_error(
+                409,
+                &format!("unique constraint violation on field '{conflict_field}'"),
+            ));
         }
 
-        Some(match controller.db_create(entity, id, &data_bytes, now_ms).await {
-            Ok(db_entity) => {
-                controller.commit_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
-                Self::json_success(entity, db_entity.id_str(), data)
-            }
-            Err(super::db::DbDataStoreError::AlreadyExists) => {
-                controller.release_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
-                Self::json_error(409, "entity already exists")
-            }
-            Err(_) => {
-                controller.release_unique_constraints(entity, id, data, partition, &request_id, now_ms).await;
-                Self::json_error(500, "internal error")
-            }
-        })
+        Some(
+            match controller.db_create(entity, id, &data_bytes, now_ms).await {
+                Ok(db_entity) => {
+                    controller
+                        .commit_unique_constraints(entity, id, data, partition, &request_id, now_ms)
+                        .await;
+                    Self::json_success(entity, db_entity.id_str(), data)
+                }
+                Err(super::db::DbDataStoreError::AlreadyExists) => {
+                    controller
+                        .release_unique_constraints(
+                            entity,
+                            id,
+                            data,
+                            partition,
+                            &request_id,
+                            now_ms,
+                        )
+                        .await;
+                    Self::json_error(409, "entity already exists")
+                }
+                Err(_) => {
+                    controller
+                        .release_unique_constraints(
+                            entity,
+                            id,
+                            data,
+                            partition,
+                            &request_id,
+                            now_ms,
+                        )
+                        .await;
+                    Self::json_error(500, "internal error")
+                }
+            },
+        )
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -525,7 +599,10 @@ impl DbRequestHandler {
                 elapsed_us = start.elapsed().as_micros() as u64,
                 "json_read_forward_failed"
             );
-            return Some(Self::json_error(503, "partition not local and forwarding failed"));
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         let result = match controller.db_get(entity, id) {
@@ -571,12 +648,28 @@ impl DbRequestHandler {
 
         if !controller.is_local_partition(partition) {
             let forwarded = controller
-                .forward_json_db_request(partition, JsonDbOp::Update, entity, Some(id), payload, response_topic, correlation_data)
+                .forward_json_db_request(
+                    partition,
+                    JsonDbOp::Update,
+                    entity,
+                    Some(id),
+                    payload,
+                    response_topic,
+                    correlation_data,
+                )
                 .await;
-            return if forwarded { None } else { Some(Self::json_error(503, "partition not local and forwarding failed")) };
+            return if forwarded {
+                None
+            } else {
+                Some(Self::json_error(
+                    503,
+                    "partition not local and forwarding failed",
+                ))
+            };
         }
 
-        self.execute_local_update(controller, entity, id, updates).await
+        self.execute_local_update(controller, entity, id, updates)
+            .await
     }
 
     async fn execute_local_update<T: ClusterTransport>(
@@ -594,13 +687,15 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
         let now_ms = Self::current_time_ms();
 
-        Some(match controller.db_update(entity, id, &data_bytes, now_ms).await {
-            Ok(db_entity) => Self::json_success(entity, db_entity.id_str(), &merged_data),
-            Err(super::db::DbDataStoreError::NotFound) => {
-                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-            }
-            Err(_) => Self::json_error(500, "internal error"),
-        })
+        Some(
+            match controller.db_update(entity, id, &data_bytes, now_ms).await {
+                Ok(db_entity) => Self::json_success(entity, db_entity.id_str(), &merged_data),
+                Err(super::db::DbDataStoreError::NotFound) => {
+                    Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                }
+                Err(_) => Self::json_error(500, "internal error"),
+            },
+        )
     }
 
     fn merge_with_existing<T: ClusterTransport>(
@@ -611,13 +706,18 @@ impl DbRequestHandler {
         updates: Value,
     ) -> Result<Value, Vec<u8>> {
         let Some(existing) = controller.db_get(entity, id) else {
-            return Err(Self::json_error(404, &format!("entity not found: {entity} id={id}")));
+            return Err(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
         };
 
         let mut existing_data: Value =
             serde_json::from_slice(&existing.data).unwrap_or(Value::Object(serde_json::Map::new()));
 
-        if let (Value::Object(existing_obj), Value::Object(update_obj)) = (&mut existing_data, updates) {
+        if let (Value::Object(existing_obj), Value::Object(update_obj)) =
+            (&mut existing_data, updates)
+        {
             for (key, value) in update_obj {
                 existing_obj.insert(key, value);
             }
@@ -651,7 +751,10 @@ impl DbRequestHandler {
             if forwarded {
                 return None;
             }
-            return Some(Self::json_error(503, "partition not local and forwarding failed"));
+            return Some(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ));
         }
 
         match controller.db_delete(entity, id).await {
@@ -664,9 +767,10 @@ impl DbRequestHandler {
                 });
                 Some(serde_json::to_vec(&result).unwrap_or_default())
             }
-            Err(super::db::DbDataStoreError::NotFound) => {
-                Some(Self::json_error(404, &format!("entity not found: {entity} id={id}")))
-            }
+            Err(super::db::DbDataStoreError::NotFound) => Some(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            )),
             Err(_) => Some(Self::json_error(500, "internal error")),
         }
     }

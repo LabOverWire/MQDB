@@ -6,8 +6,8 @@ use super::rate_limiter::RateLimiter;
 use super::session_store::SessionStore;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use http::header::HeaderMap;
 use http::Response;
+use http::header::HeaderMap;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use mqtt5::client::MqttClient;
@@ -165,10 +165,13 @@ fn json_response_with_cookie(
 
 pub fn handle_health(state: &ServerState) -> HttpResponse {
     let _ = state;
-    json_response(200, &json!({
-        "status": "ok",
-        "oauth_enabled": true
-    }))
+    json_response(
+        200,
+        &json!({
+            "status": "ok",
+            "oauth_enabled": true
+        }),
+    )
 }
 
 pub async fn handle_authorize(state: &ServerState) -> HttpResponse {
@@ -203,9 +206,10 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
     let Some(code) = params.get("code") else {
         if let Some(err) = params.get("error") {
             let escaped = escape_html(err);
-            return html_response(400, format!(
-                "<html><body><h1>OAuth Error</h1><p>{escaped}</p></body></html>"
-            ));
+            return html_response(
+                400,
+                format!("<html><body><h1>OAuth Error</h1><p>{escaped}</p></body></html>"),
+            );
         }
         return json_response(400, &json!({"error": "missing code parameter"}));
     };
@@ -223,11 +227,15 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         return json_response(400, &json!({"error": "invalid or expired state"}));
     };
 
-    let token_response = match oauth::exchange_code(code, &code_verifier, &state.oauth_config).await {
+    let token_response = match oauth::exchange_code(code, &code_verifier, &state.oauth_config).await
+    {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "OAuth token exchange failed");
-            return json_response(502, &json!({"error": format!("token exchange failed: {e}")}));
+            return json_response(
+                502,
+                &json!({"error": format!("token exchange failed: {e}")}),
+            );
         }
     };
 
@@ -239,7 +247,10 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         Ok(payload) => payload,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
-            return json_response(401, &json!({"error": format!("id_token verification failed: {e}")}));
+            return json_response(
+                401,
+                &json!({"error": format!("id_token verification failed: {e}")}),
+            );
         }
     };
 
@@ -323,22 +334,21 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
     };
 
     let stored_refresh_token = match read_oauth_token(&state.mqtt_client, google_sub).await {
-        Some(data) => {
-            match data.get("refresh_token").and_then(|v| v.as_str()) {
-                Some(rt) => rt.to_string(),
-                None => return json_response(404, &json!({"error": "no refresh token stored"})),
-            }
-        }
+        Some(data) => match data.get("refresh_token").and_then(|v| v.as_str()) {
+            Some(rt) => rt.to_string(),
+            None => return json_response(404, &json!({"error": "no refresh token stored"})),
+        },
         None => return json_response(404, &json!({"error": "user not found"})),
     };
 
-    let token_response = match oauth::refresh_token(&stored_refresh_token, &state.oauth_config).await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(error = %e, "Google token refresh failed");
-            return json_response(502, &json!({"error": format!("refresh failed: {e}")}));
-        }
-    };
+    let token_response =
+        match oauth::refresh_token(&stored_refresh_token, &state.oauth_config).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(error = %e, "Google token refresh failed");
+                return json_response(502, &json!({"error": format!("refresh failed: {e}")}));
+            }
+        };
 
     if let Some(new_refresh) = &token_response.refresh_token {
         let update_data = json!({
@@ -352,7 +362,10 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         }
     }
 
-    let email = payload.get("sub").and_then(|v| v.as_str()).unwrap_or(google_sub);
+    let email = payload
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .unwrap_or(google_sub);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -371,10 +384,13 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
 
     let new_jwt = sign_jwt(&new_claims, &state.jwt_config);
 
-    json_response(200, &json!({
-        "token": new_jwt,
-        "expires_in": state.jwt_config.expiry_secs
-    }))
+    json_response(
+        200,
+        &json!({
+            "token": new_jwt,
+            "expires_in": state.jwt_config.expiry_secs
+        }),
+    )
 }
 
 pub fn handle_options() -> HttpResponse {
@@ -401,7 +417,9 @@ pub fn handle_options_with_credentials(cors_origin: Option<&str>) -> HttpRespons
         builder = builder.header("Access-Control-Allow-Credentials", "true");
     }
 
-    builder.body(Full::new(Bytes::new())).expect("static response")
+    builder
+        .body(Full::new(Bytes::new()))
+        .expect("static response")
 }
 
 pub fn handle_ticket(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
@@ -483,11 +501,7 @@ pub fn handle_session_status(state: &ServerState, headers: &HeaderMap) -> HttpRe
         .unwrap_or("");
 
     let Some(session_id) = parse_session_id(cookie_header) else {
-        return json_response_with_credentials(
-            200,
-            &json!({"authenticated": false}),
-            cors,
-        );
+        return json_response_with_credentials(200, &json!({"authenticated": false}), cors);
     };
 
     match state.session_store.get(session_id) {
@@ -504,11 +518,7 @@ pub fn handle_session_status(state: &ServerState, headers: &HeaderMap) -> HttpRe
             }),
             cors,
         ),
-        None => json_response_with_credentials(
-            200,
-            &json!({"authenticated": false}),
-            cors,
-        ),
+        None => json_response_with_credentials(200, &json!({"authenticated": false}), cors),
     }
 }
 
@@ -566,10 +576,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next()?;
             let value = parts.next().unwrap_or("");
-            Some((
-                urldecode(key),
-                urldecode(value),
-            ))
+            Some((urldecode(key), urldecode(value)))
         })
         .collect()
 }

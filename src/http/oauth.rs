@@ -175,13 +175,15 @@ pub async fn verify_id_token(
     validation.set_audience(&[expected_client_id]);
     validation.validate_exp = true;
 
-    let token_data = decode::<IdTokenPayload>(id_token, &decoding_key, &validation)
-        .map_err(|e| match e.kind() {
-            jsonwebtoken::errors::ErrorKind::InvalidSignature => IdTokenError::InvalidSignature,
-            jsonwebtoken::errors::ErrorKind::InvalidIssuer => IdTokenError::InvalidIssuer,
-            jsonwebtoken::errors::ErrorKind::InvalidAudience => IdTokenError::InvalidAudience,
-            jsonwebtoken::errors::ErrorKind::ExpiredSignature => IdTokenError::Expired,
-            _ => IdTokenError::DecodeFailed(e.to_string()),
+    let token_data =
+        decode::<IdTokenPayload>(id_token, &decoding_key, &validation).map_err(|e| {
+            match e.kind() {
+                jsonwebtoken::errors::ErrorKind::InvalidSignature => IdTokenError::InvalidSignature,
+                jsonwebtoken::errors::ErrorKind::InvalidIssuer => IdTokenError::InvalidIssuer,
+                jsonwebtoken::errors::ErrorKind::InvalidAudience => IdTokenError::InvalidAudience,
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => IdTokenError::Expired,
+                _ => IdTokenError::DecodeFailed(e.to_string()),
+            }
         })?;
 
     Ok(token_data.claims)
@@ -202,11 +204,7 @@ pub fn decode_id_token(id_token: &str) -> Option<IdTokenPayload> {
     serde_json::from_slice(&payload_bytes).ok()
 }
 
-pub fn build_authorize_url(
-    config: &OAuthConfig,
-    state: &str,
-    code_challenge: &str,
-) -> String {
+pub fn build_authorize_url(config: &OAuthConfig, state: &str, code_challenge: &str) -> String {
     format!(
         "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
         urlencod(&config.client_id),

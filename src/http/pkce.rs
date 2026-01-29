@@ -25,7 +25,9 @@ impl PkceCache {
     }
 
     fn cleanup(&mut self) {
-        let cutoff = Instant::now().checked_sub(std::time::Duration::from_secs(TTL_SECS)).unwrap();
+        let cutoff = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(TTL_SECS))
+            .unwrap();
         self.entries.retain(|_, (_, created)| *created > cutoff);
     }
 }

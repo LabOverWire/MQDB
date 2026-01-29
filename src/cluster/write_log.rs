@@ -40,7 +40,8 @@ impl BoundedLog {
     fn get_range(&self, from_seq: u64, to_seq: u64) -> Vec<ReplicationWrite> {
         let start = std::time::Instant::now();
 
-        let result: Vec<ReplicationWrite> = self.entries
+        let result: Vec<ReplicationWrite> = self
+            .entries
             .iter()
             .filter(|e| e.sequence >= from_seq && e.sequence <= to_seq)
             .map(|e| e.write.clone())
