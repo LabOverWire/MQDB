@@ -566,6 +566,8 @@ struct AuthArgs {
     rate_limit_window_secs: u64,
     #[arg(long, default_value = "300", help = "Rate limit lockout duration in seconds")]
     rate_limit_lockout_secs: u64,
+    #[arg(long, value_delimiter = ',', help = "Comma-separated list of admin usernames")]
+    admin_users: Vec<String>,
 }
 
 #[derive(Args, Clone)]
@@ -1710,6 +1712,7 @@ fn build_auth_setup_config(
         cert_auth_file: auth.cert_auth_file.clone(),
         rate_limit,
         no_rate_limit: auth.no_rate_limit,
+        admin_users: auth.admin_users.iter().cloned().collect(),
     })
 }
 
@@ -3463,6 +3466,8 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
             &constraint_name,
             "--broker",
             &format!("127.0.0.1:{}", ports[0]),
+            "--user",
+            "admin",
         ])
         .output();
 
@@ -3498,6 +3503,8 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
             r#"{"name": "Widget A", "sku": "SKU-001"}"#,
             "--broker",
             &format!("127.0.0.1:{}", ports[0]),
+            "--user",
+            "admin",
         ])
         .output();
 
@@ -3521,6 +3528,8 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
             r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#,
             "--broker",
             &format!("127.0.0.1:{}", ports[0]),
+            "--user",
+            "admin",
         ])
         .output();
 
@@ -3810,6 +3819,8 @@ fn cmd_dev_start_cluster(
             &format!("{bind_host}:{port}"),
             "--db",
             &db_path,
+            "--admin-users",
+            "admin",
         ]);
 
         let peers: Vec<String> = match topology_name {
