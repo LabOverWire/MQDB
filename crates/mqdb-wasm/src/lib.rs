@@ -177,16 +177,18 @@ impl WasmDatabase {
     pub async fn create(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
         let mut value: serde_json::Value = deserialize_js(&data)?;
 
-        let id = {
+        let id = if let Some(existing_id) = value.get("id").and_then(|v| v.as_str()) {
+            existing_id.to_string()
+        } else {
             let mut inner = self.inner.borrow_mut();
             let counter = inner.id_counters.entry(entity.clone()).or_insert(0);
             *counter += 1;
-            counter.to_string()
+            let generated_id = counter.to_string();
+            if let serde_json::Value::Object(ref mut obj) = value {
+                obj.insert("id".to_string(), serde_json::Value::String(generated_id.clone()));
+            }
+            generated_id
         };
-
-        if let serde_json::Value::Object(ref mut obj) = value {
-            obj.insert("id".to_string(), serde_json::Value::String(id.clone()));
-        }
 
         {
             let inner = self.inner.borrow();
