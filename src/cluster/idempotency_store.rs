@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 const TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const GRACE_PERIOD_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const MAX_PER_PARTITION: usize = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BeBytes, Default)]
@@ -13,6 +14,7 @@ pub enum IdempotencyStatus {
     #[default]
     Processing = 0,
     Committed = 1,
+    Expired = 2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -105,8 +107,23 @@ impl IdempotencyRecord {
     }
 
     #[must_use]
-    pub fn is_expired(&self, now: u64) -> bool {
+    pub fn should_mark_expired(&self, now: u64) -> bool {
         self.is_committed() && now.saturating_sub(self.timestamp) > TTL_MS
+    }
+
+    #[must_use]
+    pub fn should_delete(&self, now: u64) -> bool {
+        self.status == IdempotencyStatus::Expired
+            && now.saturating_sub(self.timestamp) > TTL_MS + GRACE_PERIOD_MS
+    }
+
+    pub fn mark_expired(&mut self) {
+        self.status = IdempotencyStatus::Expired;
+    }
+
+    #[must_use]
+    pub fn is_expired_status(&self) -> bool {
+        self.status == IdempotencyStatus::Expired
     }
 }
 
@@ -116,6 +133,7 @@ pub enum IdempotencyError {
     ParameterMismatch,
     PartitionFull,
     SerializationError,
+    Expired,
 }
 
 impl std::fmt::Display for IdempotencyError {
@@ -129,6 +147,7 @@ impl std::fmt::Display for IdempotencyError {
             }
             Self::PartitionFull => write!(f, "partition has reached maximum idempotency records"),
             Self::SerializationError => write!(f, "serialization error"),
+            Self::Expired => write!(f, "idempotency key has expired and cannot be retried"),
         }
     }
 }
@@ -191,6 +210,9 @@ impl IdempotencyStore {
                 IdempotencyStatus::Processing => {
                     return Err(IdempotencyError::AlreadyProcessing);
                 }
+                IdempotencyStatus::Expired => {
+                    return Err(IdempotencyError::Expired);
+                }
             }
         }
 
@@ -243,8 +265,15 @@ impl IdempotencyStore {
     /// Panics if the internal lock is poisoned.
     pub fn cleanup_expired(&self, now: u64) -> usize {
         let mut records = self.records.write().unwrap();
+
+        for record in records.values_mut() {
+            if record.should_mark_expired(now) {
+                record.mark_expired();
+            }
+        }
+
         let before = records.len();
-        records.retain(|_, record| !record.is_expired(now));
+        records.retain(|_, record| !record.should_delete(now));
         before - records.len()
     }
 
@@ -584,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_expired_removes_old_committed() {
+    fn cleanup_marks_expired_after_ttl() {
         let store = IdempotencyStore::new(node(1));
 
         let _ = store.check_or_insert_processing(
@@ -619,11 +648,69 @@ mod tests {
         assert_eq!(store.count(), 3);
 
         let removed = store.cleanup_expired(TTL_MS + 2000);
+        assert_eq!(removed, 0);
+        assert_eq!(store.count(), 3);
+
+        let old_record = store.get(partition(10), "req-old").unwrap();
+        assert!(old_record.is_expired_status());
+
+        let new_record = store.get(partition(10), "req-new").unwrap();
+        assert!(new_record.is_committed());
+
+        let processing_record = store.get(partition(10), "req-processing").unwrap();
+        assert!(processing_record.is_processing());
+    }
+
+    #[test]
+    fn cleanup_deletes_after_grace_period() {
+        let store = IdempotencyStore::new(node(1));
+
+        let _ = store.check_or_insert_processing(
+            "req-old",
+            partition(10),
+            epoch(5),
+            "users",
+            "1",
+            1000,
+        );
+        store.mark_committed(partition(10), "req-old", b"old".to_vec());
+
+        store.cleanup_expired(TTL_MS + 2000);
+        assert_eq!(store.count(), 1);
+
+        let removed = store.cleanup_expired(TTL_MS + GRACE_PERIOD_MS + 2000);
         assert_eq!(removed, 1);
-        assert_eq!(store.count(), 2);
+        assert_eq!(store.count(), 0);
         assert!(store.get(partition(10), "req-old").is_none());
-        assert!(store.get(partition(10), "req-new").is_some());
-        assert!(store.get(partition(10), "req-processing").is_some());
+    }
+
+    #[test]
+    fn retry_after_expiry_returns_error() {
+        let store = IdempotencyStore::new(node(1));
+
+        let result = store.check_or_insert_processing(
+            "req-123",
+            partition(10),
+            epoch(5),
+            "users",
+            "456",
+            1000,
+        );
+        assert!(matches!(result, Ok(IdempotencyCheck::Proceed)));
+
+        store.mark_committed(partition(10), "req-123", b"response-data".to_vec());
+
+        store.cleanup_expired(TTL_MS + 2000);
+
+        let result = store.check_or_insert_processing(
+            "req-123",
+            partition(10),
+            epoch(5),
+            "users",
+            "456",
+            TTL_MS + 3000,
+        );
+        assert!(matches!(result, Err(IdempotencyError::Expired)));
     }
 
     #[test]
