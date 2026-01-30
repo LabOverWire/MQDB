@@ -3,7 +3,7 @@ use crate::cluster::protocol::Operation;
 use crate::cluster::{NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct DbEntity {
@@ -98,11 +98,19 @@ impl DbDataStore {
         }
     }
 
+    fn read_entities(&self) -> RwLockReadGuard<'_, HashMap<String, DbEntity>> {
+        self.entities.read().expect("db entity lock poisoned")
+    }
+
+    fn write_entities(&self) -> RwLockWriteGuard<'_, HashMap<String, DbEntity>> {
+        self.entities.write().expect("db entity lock poisoned")
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entities.read().unwrap().len()
+        self.read_entities().len()
     }
 
     #[must_use]
@@ -124,7 +132,7 @@ impl DbDataStore {
     ) -> Result<DbEntity, DbDataStoreError> {
         let start = std::time::Instant::now();
         let key = format!("{entity}/{id}");
-        let mut entities = self.entities.write().unwrap();
+        let mut entities = self.write_entities();
         let lock_time = start.elapsed();
 
         if entities.contains_key(&key) {
@@ -150,7 +158,7 @@ impl DbDataStore {
     #[must_use]
     pub fn get(&self, entity: &str, id: &str) -> Option<DbEntity> {
         let key = format!("{entity}/{id}");
-        self.entities.read().unwrap().get(&key).cloned()
+        self.read_entities().get(&key).cloned()
     }
 
     /// # Panics
@@ -166,7 +174,7 @@ impl DbDataStore {
         timestamp_ms: u64,
     ) -> Result<DbEntity, DbDataStoreError> {
         let key = format!("{entity}/{id}");
-        let mut entities = self.entities.write().unwrap();
+        let mut entities = self.write_entities();
         if !entities.contains_key(&key) {
             return Err(DbDataStoreError::NotFound);
         }
@@ -182,7 +190,7 @@ impl DbDataStore {
     /// Returns `NotFound` if the entity does not exist.
     pub fn delete(&self, entity: &str, id: &str) -> Result<DbEntity, DbDataStoreError> {
         let key = format!("{entity}/{id}");
-        let mut entities = self.entities.write().unwrap();
+        let mut entities = self.write_entities();
         entities.remove(&key).ok_or(DbDataStoreError::NotFound)
     }
 
@@ -190,7 +198,7 @@ impl DbDataStore {
     /// Panics if the internal lock is poisoned.
     pub fn upsert(&self, entity: &str, id: &str, data: &[u8], timestamp_ms: u64) -> DbEntity {
         let key = format!("{entity}/{id}");
-        let mut entities = self.entities.write().unwrap();
+        let mut entities = self.write_entities();
         let db_entity = DbEntity::create(entity, id, data, timestamp_ms);
         entities.insert(key, db_entity.clone());
         db_entity
@@ -201,9 +209,8 @@ impl DbDataStore {
     #[must_use]
     pub fn list(&self, entity_type: &str) -> Vec<DbEntity> {
         let prefix = format!("{entity_type}/");
-        self.entities
-            .read()
-            .unwrap()
+        let entities = self.read_entities();
+        entities
             .iter()
             .filter(|(k, _)| k.starts_with(&prefix))
             .map(|(_, v)| v.clone())
@@ -215,9 +222,8 @@ impl DbDataStore {
     #[must_use]
     pub fn list_for_partition(&self, entity_type: &str, partition: PartitionId) -> Vec<DbEntity> {
         let prefix = format!("{entity_type}/");
-        self.entities
-            .read()
-            .unwrap()
+        let entities = self.read_entities();
+        entities
             .iter()
             .filter(|(k, v)| k.starts_with(&prefix) && v.partition() == partition)
             .map(|(_, v)| v.clone())
@@ -228,13 +234,13 @@ impl DbDataStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.entities.read().unwrap().len()
+        self.read_entities().len()
     }
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        let mut entities = self.entities.write().unwrap();
+        let mut entities = self.write_entities();
         let before = entities.len();
         entities.retain(|_, v| v.partition() != partition);
         before - entities.len()
@@ -251,7 +257,7 @@ impl DbDataStore {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<DbEntity>, bool, Option<Vec<u8>>) {
-        let entities = self.entities.read().unwrap();
+        let entities = self.read_entities();
 
         let cursor_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
 
@@ -337,11 +343,11 @@ impl DbDataStore {
             Operation::Insert | Operation::Update => {
                 let entity = Self::deserialize(data).ok_or(DbDataStoreError::SerializationError)?;
                 let key = entity.key();
-                self.entities.write().unwrap().insert(key, entity);
+                self.write_entities().insert(key, entity);
                 Ok(())
             }
             Operation::Delete => {
-                self.entities.write().unwrap().remove(id);
+                self.write_entities().remove(id);
                 Ok(())
             }
         }
@@ -352,7 +358,7 @@ impl DbDataStore {
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
-        let entities = self.entities.read().unwrap();
+        let entities = self.read_entities();
         let partition_entities: Vec<_> = entities
             .iter()
             .filter(|(_, v)| v.partition() == partition)
@@ -420,10 +426,7 @@ impl DbDataStore {
             offset += data_len;
 
             if let Some(entity) = Self::deserialize(entity_data) {
-                self.entities
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), entity);
+                self.write_entities().insert(key.to_string(), entity);
                 imported += 1;
             }
         }
@@ -435,33 +438,33 @@ impl DbDataStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn cleanup_expired_ttl(&self, now_secs: u64) -> Vec<(String, String)> {
-        let expired: Vec<(String, String, String)> = self
-            .entities
-            .read()
-            .expect("entities lock poisoned")
-            .iter()
-            .filter_map(|(key, entity)| {
-                let data: serde_json::Value = serde_json::from_slice(&entity.data).ok()?;
-                let expires_at = data
-                    .get("_expires_at")
-                    .and_then(serde_json::Value::as_u64)?;
-                if expires_at <= now_secs {
-                    Some((
-                        key.clone(),
-                        entity.entity_str().to_string(),
-                        entity.id_str().to_string(),
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let expired: Vec<(String, String, String)> = {
+            let entities = self.read_entities();
+            entities
+                .iter()
+                .filter_map(|(key, entity)| {
+                    let data: serde_json::Value = serde_json::from_slice(&entity.data).ok()?;
+                    let expires_at = data
+                        .get("_expires_at")
+                        .and_then(serde_json::Value::as_u64)?;
+                    if expires_at <= now_secs {
+                        Some((
+                            key.clone(),
+                            entity.entity_str().to_string(),
+                            entity.id_str().to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         if expired.is_empty() {
             return Vec::new();
         }
 
-        let mut entities = self.entities.write().expect("entities lock poisoned");
+        let mut entities = self.write_entities();
         let mut deleted = Vec::new();
         for (key, entity_name, entity_id) in expired {
             entities.remove(&key);

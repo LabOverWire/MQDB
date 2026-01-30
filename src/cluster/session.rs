@@ -2,7 +2,7 @@ use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct SessionData {
@@ -223,13 +223,21 @@ impl SessionStore {
         }
     }
 
+    fn read_sessions(&self) -> RwLockReadGuard<'_, HashMap<String, SessionData>> {
+        self.sessions.read().expect("session lock poisoned")
+    }
+
+    fn write_sessions(&self) -> RwLockWriteGuard<'_, HashMap<String, SessionData>> {
+        self.sessions.write().expect("session lock poisoned")
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
     /// Returns `AlreadyExists` if a session with the same client ID exists.
     pub fn create_session(&self, client_id: &str) -> Result<SessionData, SessionError> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.write_sessions();
         if sessions.contains_key(client_id) {
             return Err(SessionError::AlreadyExists);
         }
@@ -243,7 +251,7 @@ impl SessionStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get_or_create(&self, client_id: &str) -> SessionData {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.write_sessions();
         sessions
             .entry(client_id.to_string())
             .or_insert_with(|| SessionData::create(client_id, self.node_id))
@@ -254,7 +262,7 @@ impl SessionStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get(&self, client_id: &str) -> Option<SessionData> {
-        self.sessions.read().unwrap().get(client_id).cloned()
+        self.read_sessions().get(client_id).cloned()
     }
 
     /// # Panics
@@ -266,7 +274,7 @@ impl SessionStore {
     where
         F: FnOnce(&mut SessionData),
     {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.write_sessions();
         let session = sessions.get_mut(client_id).ok_or(SessionError::NotFound)?;
         f(session);
         Ok(session.clone())
@@ -276,7 +284,7 @@ impl SessionStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn remove(&self, client_id: &str) -> Option<SessionData> {
-        self.sessions.write().unwrap().remove(client_id)
+        self.write_sessions().remove(client_id)
     }
 
     /// # Errors
@@ -353,7 +361,7 @@ impl SessionStore {
     /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn session_count(&self) -> usize {
-        self.sessions.read().unwrap().len()
+        self.read_sessions().len()
     }
 
     /// # Panics
@@ -422,14 +430,14 @@ impl SessionStore {
             Operation::Insert | Operation::Update => {
                 let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
                 let client_id = session.client_id_str().to_string();
-                let mut sessions = self.sessions.write().unwrap();
+                let mut sessions = self.write_sessions();
                 sessions.insert(client_id, session);
                 Ok(())
             }
             Operation::Delete => {
                 let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
                 let client_id = session.client_id_str().to_string();
-                let mut sessions = self.sessions.write().unwrap();
+                let mut sessions = self.write_sessions();
                 sessions.remove(&client_id);
                 Ok(())
             }
@@ -450,12 +458,12 @@ impl SessionStore {
         match operation {
             Operation::Insert | Operation::Update => {
                 let session = Self::deserialize(data).ok_or(SessionError::SerializationError)?;
-                let mut sessions = self.sessions.write().unwrap();
+                let mut sessions = self.write_sessions();
                 sessions.insert(id.to_string(), session);
                 Ok(())
             }
             Operation::Delete => {
-                let mut sessions = self.sessions.write().unwrap();
+                let mut sessions = self.write_sessions();
                 sessions.remove(id);
                 Ok(())
             }
@@ -467,7 +475,7 @@ impl SessionStore {
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.read_sessions();
         let partition_sessions: Vec<_> = sessions
             .iter()
             .filter(|(_, s)| s.partition() == partition)
@@ -549,7 +557,7 @@ impl SessionStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.write_sessions();
         let before = sessions.len();
         sessions.retain(|_, s| s.partition() != partition);
         before - sessions.len()
@@ -571,7 +579,7 @@ impl SessionStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn cleanup_expired_sessions(&self, now: u64) -> Vec<SessionData> {
-        let mut sessions = self.sessions.write().unwrap();
+        let mut sessions = self.write_sessions();
         let mut expired = Vec::new();
 
         sessions.retain(|_, session| {
@@ -596,7 +604,7 @@ impl SessionStore {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<SessionData>, bool, Option<Vec<u8>>) {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.read_sessions();
         let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
 
         let mut results: Vec<_> = sessions
