@@ -330,6 +330,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             wildcards,
             retained,
             lwt,
+            ownership,
             all,
             nodes,
         } => commands::dev::cmd_dev_test(
@@ -339,6 +340,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             wildcards,
             retained,
             lwt,
+            ownership,
             all,
             nodes,
         ),
@@ -354,6 +356,8 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             topology,
             bridge_out,
             no_bridge_out,
+            passwd,
+            ownership,
         } => commands::dev::cmd_dev_start_cluster(
             nodes,
             clean,
@@ -366,6 +370,8 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             topology.as_deref(),
             bridge_out,
             no_bridge_out,
+            passwd.as_deref(),
+            ownership.as_deref(),
         )?,
         DevAction::Bench {
             scenario,

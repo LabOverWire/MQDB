@@ -42,6 +42,8 @@ pub(crate) enum DevAction {
         #[arg(long)]
         lwt: bool,
         #[arg(long)]
+        ownership: bool,
+        #[arg(long)]
         all: bool,
         #[arg(long, default_value = "3")]
         nodes: u8,
@@ -83,6 +85,13 @@ pub(crate) enum DevAction {
             help = "Use Both bridge direction even for full topology (may cause amplification)"
         )]
         no_bridge_out: bool,
+        #[arg(long, help = "Path to password file for authentication")]
+        passwd: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
+        )]
+        ownership: Option<String>,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {

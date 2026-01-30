@@ -1261,7 +1261,7 @@ mqdb dev start-cluster --no-quic
 ### Run Built-in Tests
 
 ```bash
-# Run all cross-node tests
+# Run all cross-node tests (excludes ownership - see below)
 mqdb dev test --all
 
 # Run specific test suites
@@ -1270,10 +1270,15 @@ mqdb dev test --db          # Cross-node DB CRUD
 mqdb dev test --wildcards   # Wildcard subscriptions
 mqdb dev test --retained    # Retained messages
 mqdb dev test --lwt         # Last Will & Testament
+mqdb dev test --ownership   # Ownership enforcement (self-contained, see Section 22)
 
 # Specify node count
 mqdb dev test --all --nodes 5
 ```
+
+> **Note:** `--ownership` is excluded from `--all` because it manages its own authenticated cluster.
+> It kills any running cluster, starts a fresh one with password auth and `--ownership` config,
+> runs ownership tests, then kills the cluster.
 
 ---
 
@@ -1897,6 +1902,15 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Unique constraint enforced across nodes
 - [ ] Foreign key validated across nodes
 
+### Ownership Enforcement
+- [ ] List filters by authenticated sender
+- [ ] Non-owner update returns 403 Forbidden
+- [ ] Non-owner delete returns 403 Forbidden
+- [ ] Owner update succeeds
+- [ ] Owner delete succeeds
+- [ ] Internal (no sender) bypasses ownership
+- [ ] Ownership works across cluster nodes
+
 ### Monitoring
 - [ ] Health endpoint returns correct status
 - [ ] Health updates on node failure
@@ -2250,3 +2264,146 @@ Run through this checklist to verify topic protection:
 **Integration:**
 - [ ] Protection runs before ACL evaluation
 - [ ] Permissive ACL cannot override protection
+
+---
+
+## 22. Ownership Enforcement Testing
+
+Ownership enforcement restricts list, update, and delete operations based on the authenticated
+user's identity. When `--ownership entity=field` is configured, the broker:
+
+- **List:** Injects a mandatory filter `field = sender` so users only see their own records
+- **Update/Delete:** Checks that `record.data.field == sender` before allowing the operation
+- **Create/Read:** Not restricted (IDs are UUIDs, not guessable)
+- **No sender (internal):** Bypasses all ownership checks (for replication, outbox, etc.)
+
+### Prerequisites
+
+Ownership requires **real authentication** (password or SCRAM). In anonymous mode, the broker
+has no sender identity to enforce against. The `x-mqtt-sender` user property is only injected
+when authentication succeeds.
+
+### Automated Test
+
+The `mqdb dev test --ownership` command is fully self-contained:
+
+```bash
+mqdb dev test --ownership --nodes 3
+```
+
+This command:
+1. Creates a temporary password file with users `alice`, `bob`, and `admin`
+2. Kills any running cluster
+3. Starts a fresh 3-node cluster with `--passwd`, `--admin-users admin`, and `--ownership test_owned=userId`
+4. Waits for the authenticated cluster to become ready
+5. Runs 7 test cases (see below)
+6. Kills the cluster and cleans up
+
+### Test Cases
+
+| # | Test | Expected |
+|---|------|----------|
+| 1 | Create entity as alice with `userId: "alice"` | Success, returns ID |
+| 2 | List as alice | Sees 1 record (own) |
+| 3 | List as bob | Sees 0 records (filtered out) |
+| 4 | Update alice's record as bob | Forbidden error |
+| 5 | Delete alice's record as bob | Forbidden error |
+| 6 | Update alice's record as alice | Success (owner) |
+| 7 | Delete alice's record as alice | Success (owner) |
+
+### Manual Testing
+
+To test ownership manually:
+
+```bash
+# 1. Create password file
+mqdb passwd alice -b alice -f /tmp/ownership-passwd
+mqdb passwd bob -b bob -f /tmp/ownership-passwd
+mqdb passwd admin -b admin -f /tmp/ownership-passwd
+
+# 2. Start cluster with auth + ownership
+mqdb dev start-cluster --nodes 3 --clean \
+    --passwd /tmp/ownership-passwd \
+    --ownership diagrams=userId
+
+# 3. Wait for cluster
+sleep 10
+
+# 4. Create a diagram as alice
+mqdb create diagrams \
+    -d '{"userId": "alice", "title": "Alice Diagram"}' \
+    --broker 127.0.0.1:1883 --user alice --pass alice --format json
+# Note the returned ID
+
+# 5. List as alice (should see the diagram)
+mqdb list diagrams --broker 127.0.0.1:1883 --user alice --pass alice
+
+# 6. List as bob (should see nothing)
+mqdb list diagrams --broker 127.0.0.1:1883 --user bob --pass bob
+
+# 7. Update as bob (should fail with forbidden)
+mqdb update diagrams <id> -d '{"title": "Stolen"}' \
+    --broker 127.0.0.1:1883 --user bob --pass bob
+
+# 8. Delete as bob (should fail with forbidden)
+mqdb delete diagrams <id> \
+    --broker 127.0.0.1:1883 --user bob --pass bob
+
+# 9. Update as alice (should succeed)
+mqdb update diagrams <id> -d '{"title": "Updated"}' \
+    --broker 127.0.0.1:1883 --user alice --pass alice
+
+# 10. Delete as alice (should succeed)
+mqdb delete diagrams <id> \
+    --broker 127.0.0.1:1883 --user alice --pass alice
+
+# 11. Cleanup
+mqdb dev kill
+```
+
+### Ownership Configuration
+
+The `--ownership` flag accepts `entity=field` pairs:
+
+```bash
+# Single entity
+--ownership diagrams=userId
+
+# Multiple entities (comma-separated)
+--ownership "diagrams=userId,notes=ownerId"
+```
+
+For agent mode:
+```bash
+mqdb agent start --db /tmp/mqdb-own --passwd passwd.txt \
+    --ownership diagrams=userId
+```
+
+For cluster mode (via dev command):
+```bash
+mqdb dev start-cluster --nodes 3 --clean \
+    --passwd passwd.txt --ownership diagrams=userId
+```
+
+### Verification Checklist
+
+**List filtering:**
+- [ ] Authenticated user only sees records where `ownerField == username`
+- [ ] Different user sees empty list for same entity
+- [ ] Unauthenticated (internal) operations see all records
+
+**Write protection:**
+- [ ] Update by non-owner returns 403 Forbidden
+- [ ] Delete by non-owner returns 403 Forbidden
+- [ ] Update by owner succeeds
+- [ ] Delete by owner succeeds
+- [ ] Internal operations (no sender) bypass ownership checks
+
+**Cluster mode:**
+- [ ] Ownership filters applied on local list path
+- [ ] Ownership filters included in scatter-gather queries to remote nodes
+- [ ] Write ownership checks work on partition primary nodes
+
+**Edge cases:**
+- [ ] Entity without ownership config allows all operations
+- [ ] Record missing the owner field allows all operations (no crash)

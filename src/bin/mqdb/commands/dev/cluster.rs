@@ -15,6 +15,8 @@ pub(crate) fn cmd_dev_start_cluster(
     topology: Option<&str>,
     bridge_out: bool,
     no_bridge_out: bool,
+    passwd: Option<&std::path::Path>,
+    ownership: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -43,6 +45,16 @@ pub(crate) fn cmd_dev_start_cluster(
             "--admin-users",
             "admin",
         ]);
+
+        if let Some(passwd_path) = passwd {
+            if let Some(s) = passwd_path.to_str() {
+                cmd.args(["--passwd", s]);
+            }
+        }
+
+        if let Some(ownership_spec) = ownership {
+            cmd.args(["--ownership", ownership_spec]);
+        }
 
         let peers: Vec<String> = match topology_name {
             "full" => (1..=nodes)
