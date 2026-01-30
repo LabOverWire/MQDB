@@ -52,8 +52,8 @@ pub(crate) async fn execute_request(
     let timeout = Duration::from_secs(conn.timeout);
     let response = tokio::time::timeout(timeout, rx.recv_async())
         .await
-        .map_err(|_| "Request timed out")?
-        .map_err(|_| "No response received")?;
+        .map_err(|_| format!("request timed out after {}s", conn.timeout))?
+        .map_err(|_| "no response received (channel closed)")?;
 
     client.disconnect().await?;
 

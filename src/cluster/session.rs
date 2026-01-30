@@ -63,7 +63,7 @@ impl SessionData {
 
     #[must_use]
     pub fn client_id_str(&self) -> &str {
-        std::str::from_utf8(&self.client_id).unwrap_or("")
+        super::store_utils::bytes_to_str(&self.client_id)
     }
 
     #[must_use]
@@ -404,12 +404,12 @@ impl SessionStore {
 
     #[must_use]
     pub fn serialize(session: &SessionData) -> Vec<u8> {
-        session.to_be_bytes()
+        super::store_utils::serialize(session)
     }
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<SessionData> {
-        SessionData::try_from_be_bytes(bytes).ok().map(|(s, _)| s)
+        super::store_utils::deserialize(bytes)
     }
 
     /// # Panics

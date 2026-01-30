@@ -1,7 +1,5 @@
-mod epoch;
-mod node;
-mod partition;
 mod partition_map;
+mod types;
 
 #[cfg(feature = "agent")]
 mod client_location;
@@ -33,7 +31,7 @@ mod lwt;
 mod message_processor;
 #[cfg(feature = "agent")]
 mod migration;
-#[cfg(feature = "agent")]
+#[cfg(feature = "mqtt-bridge")]
 mod mqtt_transport;
 #[cfg(feature = "agent")]
 mod node_controller;
@@ -72,6 +70,8 @@ mod snapshot;
 #[cfg(feature = "agent")]
 mod store_manager;
 #[cfg(feature = "agent")]
+pub(crate) mod store_utils;
+#[cfg(feature = "agent")]
 mod subscription_cache;
 #[cfg(feature = "agent")]
 mod topic_index;
@@ -86,10 +86,8 @@ mod wildcard_store;
 #[cfg(feature = "agent")]
 mod write_log;
 
-pub use epoch::Epoch;
-pub use node::NodeId;
-pub use partition::{NUM_PARTITIONS, PartitionId};
 pub use partition_map::{PartitionAssignment, PartitionMap, PartitionRole};
+pub use types::{Epoch, NUM_PARTITIONS, NodeId, PartitionId};
 
 #[cfg(feature = "agent")]
 pub use client_location::{
@@ -131,7 +129,7 @@ pub use message_processor::{HeartbeatUpdate, MessageProcessor, ProcessingBatch};
 pub use migration::{
     MigrationCheckpoint, MigrationError, MigrationManager, MigrationPhase, MigrationState,
 };
-#[cfg(feature = "agent")]
+#[cfg(feature = "mqtt-bridge")]
 #[allow(deprecated)]
 pub use mqtt_transport::MqttTransport;
 #[cfg(feature = "agent")]

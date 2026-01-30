@@ -352,23 +352,20 @@ impl ClusteredAgent {
             ctrl.transport().clone()
         };
 
-        if self.use_direct_quic {
-            self.connect_quic_transport(
-                &transport,
-                &broker_addr,
-                service_username,
-                service_password,
-            )
-            .await
-        } else {
-            self.connect_mqtt_transport(
-                &transport,
-                &broker_addr,
-                service_username,
-                service_password,
-            )
-            .await
+        #[cfg(feature = "mqtt-bridge")]
+        if !self.use_direct_quic {
+            return self
+                .connect_mqtt_transport(
+                    &transport,
+                    &broker_addr,
+                    service_username,
+                    service_password,
+                )
+                .await;
         }
+
+        self.connect_quic_transport(&transport, &broker_addr, service_username, service_password)
+            .await
     }
 
     async fn connect_quic_transport(
@@ -449,6 +446,7 @@ impl ClusteredAgent {
         Ok(admin_mqtt_client)
     }
 
+    #[cfg(feature = "mqtt-bridge")]
     #[allow(deprecated)]
     async fn connect_mqtt_transport(
         &self,

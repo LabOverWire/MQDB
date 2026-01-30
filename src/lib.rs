@@ -82,7 +82,10 @@ pub use subscription::SubscriptionRegistry;
 pub use subscription::{Subscription, SubscriptionMode, match_pattern, match_wildcard};
 pub use transport::{ErrorCode, ErrorResponse, Request, Response};
 
-pub use protocol::{AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic};
+pub use protocol::{
+    AdminOperation, DbOp, DbOperation, ProtocolError, build_request, parse_admin_topic,
+    parse_db_topic,
+};
 
 pub use cluster::{
     Epoch, NUM_PARTITIONS, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole,

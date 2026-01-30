@@ -8,7 +8,6 @@ mod transport;
 pub use transport::ClusterTransportKind;
 
 use crate::cluster::raft::RaftCoordinator;
-#[allow(deprecated)]
 use crate::cluster::{
     DedicatedExecutor, InboundMessage, NodeController, NodeId, PartitionMap, ProcessingBatch,
     RaftAdminCommand, RaftEvent, RaftStatus,

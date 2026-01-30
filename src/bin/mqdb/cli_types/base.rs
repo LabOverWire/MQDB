@@ -18,23 +18,27 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    #[command(about = "Manage the standalone MQTT broker agent")]
     Agent {
         #[command(subcommand)]
         action: AgentAction,
     },
+    #[command(about = "Manage distributed cluster nodes")]
     Cluster {
         #[command(subcommand)]
         action: ClusterAction,
     },
+    #[command(about = "Manage password-file credentials")]
     Passwd {
+        #[arg(help = "Username to add, update, or delete")]
         username: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Batch mode - password on command line")]
         batch: Option<String>,
-        #[arg(short = 'D', long)]
+        #[arg(short = 'D', long, help = "Delete the specified user")]
         delete: bool,
-        #[arg(short = 'n', long)]
+        #[arg(short = 'n', long, help = "Output credentials to stdout")]
         stdout: bool,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Password file path")]
         file: Option<PathBuf>,
     },
     #[command(about = "Manage SCRAM-SHA-256 credentials")]
@@ -62,112 +66,145 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: AclAction,
     },
+    #[command(about = "Create a new record in an entity")]
     Create {
+        #[arg(help = "Entity name (e.g. users, orders)")]
         entity: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "JSON data for the new record")]
         data: String,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Read a record by ID")]
     Read {
+        #[arg(help = "Entity name")]
         entity: String,
+        #[arg(help = "Record ID")]
         id: String,
-        #[arg(long)]
+        #[arg(long, help = "Comma-separated list of fields to return")]
         projection: Option<String>,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Update a record by ID")]
     Update {
+        #[arg(help = "Entity name")]
         entity: String,
+        #[arg(help = "Record ID")]
         id: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "JSON data with fields to update")]
         data: String,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Delete a record by ID")]
     Delete {
+        #[arg(help = "Entity name")]
         entity: String,
+        #[arg(help = "Record ID")]
         id: String,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "List records with optional filtering and sorting")]
     List {
+        #[arg(help = "Entity name")]
         entity: String,
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Filter expressions: field=value, field>value, field~pattern*"
+        )]
         filter: Vec<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Sort: field:asc or field:desc (comma-separated)")]
         sort: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Maximum number of records to return")]
         limit: Option<usize>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Number of records to skip")]
         offset: Option<usize>,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Watch an entity for real-time change events")]
     Watch {
+        #[arg(help = "Entity name")]
         entity: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "Filter expressions for events")]
         filter: Vec<String>,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Manage entity schemas")]
     Schema {
         #[command(subcommand)]
         action: SchemaAction,
     },
+    #[command(about = "Manage entity constraints (unique, foreign key, not-null)")]
     Constraint {
         #[command(subcommand)]
         action: ConstraintAction,
     },
+    #[command(about = "Create and manage database backups")]
     Backup {
         #[command(subcommand)]
         action: BackupAction,
     },
+    #[command(about = "Restore a database from a named backup")]
     Restore {
-        #[arg(short, long)]
+        #[arg(short, long, help = "Name of the backup to restore")]
         name: String,
         #[command(flatten)]
         conn: ConnectionArgs,
     },
+    #[command(about = "Subscribe to entity change events")]
     Subscribe {
+        #[arg(help = "Topic pattern to subscribe to")]
         pattern: String,
-        #[arg(long)]
+        #[arg(long, help = "Filter events to a specific entity")]
         entity: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Consumer group name for load-balanced delivery")]
         group: Option<String>,
-        #[arg(long, default_value = "broadcast")]
+        #[arg(
+            long,
+            default_value = "broadcast",
+            help = "Delivery mode: broadcast, load-balanced, ordered"
+        )]
         mode: SubscriptionModeArg,
-        #[arg(long, default_value = "10")]
+        #[arg(long, default_value = "10", help = "Heartbeat interval in seconds")]
         heartbeat_interval: u64,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
+    #[command(about = "Manage consumer groups")]
     ConsumerGroup {
         #[command(subcommand)]
         action: ConsumerGroupAction,
     },
+    #[command(about = "Low-level database management commands")]
     Db {
         #[command(subcommand)]
         action: DbAction,
     },
+    #[command(about = "Development and testing utilities")]
     Dev {
         #[command(subcommand)]
         action: DevAction,
     },
+    #[command(about = "Run performance benchmarks")]
     Bench {
         #[command(subcommand)]
         action: BenchAction,

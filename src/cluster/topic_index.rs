@@ -28,7 +28,7 @@ impl SubscriberLocation {
 
     #[must_use]
     pub fn client_id_str(&self) -> &str {
-        std::str::from_utf8(&self.client_id).unwrap_or("")
+        super::store_utils::bytes_to_str(&self.client_id)
     }
 
     #[must_use]
@@ -66,7 +66,7 @@ impl TopicIndexEntry {
 
     #[must_use]
     pub fn topic_str(&self) -> &str {
-        std::str::from_utf8(&self.topic).unwrap_or("")
+        super::store_utils::bytes_to_str(&self.topic)
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -321,14 +321,12 @@ impl TopicIndex {
 
     #[must_use]
     pub fn serialize(entry: &TopicIndexEntry) -> Vec<u8> {
-        entry.to_be_bytes()
+        super::store_utils::serialize(entry)
     }
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<TopicIndexEntry> {
-        TopicIndexEntry::try_from_be_bytes(bytes)
-            .ok()
-            .map(|(e, _)| e)
+        super::store_utils::deserialize(bytes)
     }
 
     /// # Panics

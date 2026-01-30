@@ -2,11 +2,13 @@ use super::{
     BATCH_QUEUE_CAPACITY, ClusterConfig, ClusterInitError, ClusterTransportKind, ClusteredAgent,
     MAIN_QUEUE_CAPACITY, MessageProcessorChannels, RAFT_CHANNEL_CAPACITY,
 };
-use crate::cluster::raft::{RaftConfig, RaftCoordinator};
+#[cfg(feature = "mqtt-bridge")]
 #[allow(deprecated)]
+use crate::cluster::MqttTransport;
+use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
-    DedicatedExecutor, InboundMessage, MessageProcessor, MqttTransport, NodeController, NodeId,
-    PartitionMap, QuicDirectTransport, RaftStatus, TransportConfig,
+    DedicatedExecutor, InboundMessage, MessageProcessor, NodeController, NodeId, PartitionMap,
+    QuicDirectTransport, RaftStatus, TransportConfig,
 };
 use crate::config::DurabilityMode;
 use crate::storage::FjallBackend;
@@ -35,25 +37,31 @@ impl ClusteredAgent {
         }
     }
 
-    #[allow(deprecated)]
     fn build_transport(
         node_id: NodeId,
         config: &ClusterConfig,
     ) -> (ClusterTransportKind, flume::Receiver<InboundMessage>) {
-        if config.use_direct_quic {
-            let quic_transport = QuicDirectTransport::new(node_id);
-            #[cfg(feature = "dev-insecure")]
-            quic_transport.set_insecure(config.quic_insecure);
-            if let Some(ca_path) = &config.quic_ca_file {
-                quic_transport.set_ca_file(ca_path.clone());
+        #[cfg(feature = "mqtt-bridge")]
+        if !config.use_direct_quic {
+            #[allow(deprecated)]
+            {
+                let mqtt_transport = MqttTransport::new(node_id);
+                let inbox_rx = mqtt_transport.inbox_rx();
+                return (ClusterTransportKind::Mqtt(mqtt_transport), inbox_rx);
             }
-            let inbox_rx = quic_transport.inbox_rx();
-            (ClusterTransportKind::Quic(quic_transport), inbox_rx)
-        } else {
-            let mqtt_transport = MqttTransport::new(node_id);
-            let inbox_rx = mqtt_transport.inbox_rx();
-            (ClusterTransportKind::Mqtt(mqtt_transport), inbox_rx)
         }
+
+        #[cfg(not(feature = "mqtt-bridge"))]
+        let _ = config.use_direct_quic;
+
+        let quic_transport = QuicDirectTransport::new(node_id);
+        #[cfg(feature = "dev-insecure")]
+        quic_transport.set_insecure(config.quic_insecure);
+        if let Some(ca_path) = &config.quic_ca_file {
+            quic_transport.set_ca_file(ca_path.clone());
+        }
+        let inbox_rx = quic_transport.inbox_rx();
+        (ClusterTransportKind::Quic(quic_transport), inbox_rx)
     }
 
     fn open_raft(

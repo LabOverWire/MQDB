@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::cursor::{PartitionCursor, ScatterCursor};
-use super::partition::NUM_PARTITIONS;
+use super::types::NUM_PARTITIONS;
 use super::{NodeId, PartitionId, QueryRequest, QueryResponse};
 
 const DEFAULT_QUERY_TIMEOUT_MS: u32 = 10_000;

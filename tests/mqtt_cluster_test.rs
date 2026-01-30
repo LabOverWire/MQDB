@@ -1,3 +1,4 @@
+#![cfg(feature = "mqtt-bridge")]
 #![allow(deprecated)]
 
 use mqdb::cluster::{

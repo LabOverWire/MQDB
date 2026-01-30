@@ -64,7 +64,7 @@ impl RetainedMessage {
 
     #[must_use]
     pub fn topic_str(&self) -> &str {
-        std::str::from_utf8(&self.topic).unwrap_or("")
+        super::store_utils::bytes_to_str(&self.topic)
     }
 
     #[must_use]
@@ -201,14 +201,12 @@ impl RetainedStore {
 
     #[must_use]
     pub fn serialize(msg: &RetainedMessage) -> Vec<u8> {
-        msg.to_be_bytes()
+        super::store_utils::serialize(msg)
     }
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<RetainedMessage> {
-        RetainedMessage::try_from_be_bytes(bytes)
-            .ok()
-            .map(|(m, _)| m)
+        super::store_utils::deserialize(bytes)
     }
 
     /// # Panics

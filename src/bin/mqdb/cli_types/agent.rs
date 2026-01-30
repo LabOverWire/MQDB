@@ -7,10 +7,15 @@ use super::base::{ConnectionArgs, DurabilityArg};
 
 #[derive(Subcommand)]
 pub(crate) enum AgentAction {
+    #[command(about = "Start a standalone MQTT broker agent")]
     Start {
-        #[arg(long, default_value = "127.0.0.1:1883")]
+        #[arg(
+            long,
+            default_value = "127.0.0.1:1883",
+            help = "Address to bind MQTT listener"
+        )]
         bind: SocketAddr,
-        #[arg(long)]
+        #[arg(long, help = "Path to database directory")]
         db: PathBuf,
         #[command(flatten)]
         auth: Box<AuthArgs>,
@@ -35,6 +40,7 @@ pub(crate) enum AgentAction {
         #[command(flatten)]
         oauth: Box<OAuthArgs>,
     },
+    #[command(about = "Check broker connectivity status")]
     Status {
         #[command(flatten)]
         conn: ConnectionArgs,

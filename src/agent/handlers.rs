@@ -38,7 +38,7 @@ pub(super) async fn handle_message(
         Err(e) => {
             warn!("Failed to build request from {}: {}", topic, e);
             if let Some(response_topic) = &message.properties.response_topic {
-                let response = Response::error(crate::ErrorCode::BadRequest, e);
+                let response = Response::error(crate::ErrorCode::BadRequest, e.to_string());
                 if let Ok(payload) = serde_json::to_vec(&response) {
                     let _ = client.publish_qos1(response_topic, payload).await;
                 }

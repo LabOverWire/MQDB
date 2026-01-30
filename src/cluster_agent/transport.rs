@@ -1,17 +1,20 @@
+#[cfg(feature = "mqtt-bridge")]
 #[allow(deprecated)]
+use crate::cluster::MqttTransport;
 use crate::cluster::{
-    ClusterMessage, ClusterTransport, InboundMessage, MqttTransport, NodeId, PartitionId,
-    QuicDirectTransport,
+    ClusterMessage, ClusterTransport, InboundMessage, NodeId, PartitionId, QuicDirectTransport,
 };
 
 #[derive(Debug, Clone)]
 pub enum ClusterTransportKind {
+    #[cfg(feature = "mqtt-bridge")]
     #[deprecated(since = "0.2.0", note = "use Quic variant instead")]
     Mqtt(#[allow(deprecated)] MqttTransport),
     Quic(QuicDirectTransport),
 }
 
 impl ClusterTransportKind {
+    #[cfg(feature = "mqtt-bridge")]
     #[deprecated(since = "0.2.0", note = "MQTT transport is deprecated, use QUIC")]
     #[must_use]
     #[allow(deprecated)]
@@ -24,25 +27,30 @@ impl ClusterTransportKind {
     }
 
     #[must_use]
-    #[allow(deprecated)]
     pub fn as_quic(&self) -> Option<&QuicDirectTransport> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(_) => None,
             Self::Quic(t) => Some(t),
         }
     }
 
     pub fn log_queue_stats(&self) {
-        if let Self::Quic(t) = self {
-            t.log_queue_stats();
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(_) => {}
+            Self::Quic(t) => t.log_queue_stats(),
         }
     }
 }
 
-#[allow(deprecated)]
 impl ClusterTransport for ClusterTransportKind {
     fn local_node(&self) -> NodeId {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.local_node(),
             Self::Quic(t) => t.local_node(),
         }
@@ -54,6 +62,8 @@ impl ClusterTransport for ClusterTransportKind {
         message: ClusterMessage,
     ) -> Result<(), crate::cluster::TransportError> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.send(to, message).await,
             Self::Quic(t) => t.send(to, message).await,
         }
@@ -64,6 +74,8 @@ impl ClusterTransport for ClusterTransportKind {
         message: ClusterMessage,
     ) -> Result<(), crate::cluster::TransportError> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.broadcast(message).await,
             Self::Quic(t) => t.broadcast(message).await,
         }
@@ -75,6 +87,8 @@ impl ClusterTransport for ClusterTransportKind {
         message: ClusterMessage,
     ) -> Result<(), crate::cluster::TransportError> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.send_to_partition_primary(partition, message).await,
             Self::Quic(t) => t.send_to_partition_primary(partition, message).await,
         }
@@ -82,6 +96,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     fn recv(&self) -> Option<InboundMessage> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.recv(),
             Self::Quic(t) => t.recv(),
         }
@@ -89,6 +105,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     fn try_recv_timeout(&self, timeout_ms: u64) -> Option<InboundMessage> {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.try_recv_timeout(timeout_ms),
             Self::Quic(t) => t.try_recv_timeout(timeout_ms),
         }
@@ -96,6 +114,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     fn pending_count(&self) -> usize {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.pending_count(),
             Self::Quic(t) => t.pending_count(),
         }
@@ -103,6 +123,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     fn requeue(&self, msg: InboundMessage) {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.requeue(msg),
             Self::Quic(t) => t.requeue(msg),
         }
@@ -110,6 +132,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.queue_local_publish(topic, payload, qos).await,
             Self::Quic(t) => t.queue_local_publish(topic, payload, qos).await,
         }
@@ -117,6 +141,8 @@ impl ClusterTransport for ClusterTransportKind {
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
             Self::Mqtt(t) => t.queue_local_publish_retained(topic, payload, qos).await,
             Self::Quic(t) => t.queue_local_publish_retained(topic, payload, qos).await,
         }

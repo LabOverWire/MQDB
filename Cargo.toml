@@ -72,6 +72,7 @@ http-api = [
     "dep:jsonwebtoken",
 ]
 
+mqtt-bridge = ["cluster"]
 dev-insecure = []
 wasm = [
     "dep:web-time",
