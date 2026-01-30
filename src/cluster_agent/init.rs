@@ -208,6 +208,7 @@ impl ClusteredAgent {
             rx_batch: Some(rx_batch),
             ws_bind_address: config.ws_bind_address,
             http_config: config.http_config,
+            ownership: Arc::new(config.ownership),
         })
     }
 

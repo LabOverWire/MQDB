@@ -110,6 +110,7 @@ pub struct ClusterConfig {
     pub bridge_out_only: bool,
     pub ws_bind_address: Option<SocketAddr>,
     pub http_config: Option<crate::http::HttpServerConfig>,
+    pub ownership: crate::types::OwnershipConfig,
 }
 
 pub struct ClusteredAgent {
@@ -145,6 +146,7 @@ pub struct ClusteredAgent {
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
     ws_bind_address: Option<SocketAddr>,
     http_config: Option<crate::http::HttpServerConfig>,
+    ownership: Arc<crate::types::OwnershipConfig>,
 }
 
 impl ClusteredAgent {

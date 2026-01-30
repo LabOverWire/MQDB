@@ -1,4 +1,5 @@
 use crate::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
+use crate::types::OwnershipConfig;
 use crate::{Database, Response};
 use mqtt5::client::MqttClient;
 use mqtt5::types::Message;
@@ -16,6 +17,7 @@ pub(super) async fn handle_message(
     client: &MqttClient,
     message: Message,
     backup_dir: &Path,
+    ownership: &OwnershipConfig,
 ) {
     let topic = &message.topic;
 
@@ -47,6 +49,13 @@ pub(super) async fn handle_message(
         }
     };
 
+    let sender_uid = message
+        .properties
+        .user_properties
+        .iter()
+        .find(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str());
+
     let span = info_span!(
         "database_operation",
         entity = %op.entity,
@@ -75,7 +84,10 @@ pub(super) async fn handle_message(
         span
     };
 
-    let response = db.execute(request).instrument(span).await;
+    let response = db
+        .execute_with_sender(request, sender_uid, ownership)
+        .instrument(span)
+        .await;
 
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {

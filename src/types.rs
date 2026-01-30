@@ -1,5 +1,52 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnershipConfig {
+    pub entity_owner_fields: HashMap<String, String>,
+}
+
+impl OwnershipConfig {
+    #[must_use]
+    pub fn new(entity_owner_fields: HashMap<String, String>) -> Self {
+        Self {
+            entity_owner_fields,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if any pair in the spec string is not in `entity=field` format.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut fields = HashMap::new();
+        for pair in spec.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = pair.splitn(2, '=').collect();
+            if parts.len() != 2 {
+                return Err(format!(
+                    "invalid ownership spec '{pair}': expected entity=field"
+                ));
+            }
+            fields.insert(parts[0].to_string(), parts[1].to_string());
+        }
+        Ok(Self {
+            entity_owner_fields: fields,
+        })
+    }
+
+    #[must_use]
+    pub fn owner_field(&self, entity: &str) -> Option<&str> {
+        self.entity_owner_fields.get(entity).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entity_owner_fields.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

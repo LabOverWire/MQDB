@@ -125,6 +125,7 @@ impl From<Error> for Response {
             Error::Validation(_) | Error::SchemaViolation { .. } => {
                 (ErrorCode::BadRequest, e.to_string())
             }
+            Error::Forbidden(_) => (ErrorCode::Forbidden, e.to_string()),
             Error::ConstraintViolation(_)
             | Error::UniqueViolation { .. }
             | Error::ForeignKeyViolation { .. }
@@ -140,6 +141,7 @@ impl From<Error> for Response {
 mod execute {
     use super::{Request, Response};
     use crate::Database;
+    use crate::types::OwnershipConfig;
     use serde_json::Value;
 
     fn value_from_unit(_: ()) -> Value {
@@ -156,6 +158,16 @@ mod execute {
 
     impl Database {
         pub async fn execute(&self, request: Request) -> Response {
+            self.execute_with_sender(request, None, &OwnershipConfig::default())
+                .await
+        }
+
+        pub async fn execute_with_sender(
+            &self,
+            request: Request,
+            sender: Option<&str>,
+            ownership: &OwnershipConfig,
+        ) -> Response {
             match request {
                 Request::Create { entity, data } => match self.create(entity, data).await {
                     Ok(v) => Response::ok(v),
@@ -171,23 +183,46 @@ mod execute {
                     Err(e) => e.into(),
                 },
                 Request::Update { entity, id, fields } => {
+                    if let Some(uid) = sender
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                        && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    {
+                        return e.into();
+                    }
                     match self.update(entity, id, fields).await {
                         Ok(v) => Response::ok(v),
                         Err(e) => e.into(),
                     }
                 }
-                Request::Delete { entity, id } => match self.delete(entity, id).await {
-                    Ok(()) => Response::ok(value_from_unit(())),
-                    Err(e) => e.into(),
-                },
+                Request::Delete { entity, id } => {
+                    if let Some(uid) = sender
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                        && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    {
+                        return e.into();
+                    }
+                    match self.delete(entity, id).await {
+                        Ok(()) => Response::ok(value_from_unit(())),
+                        Err(e) => e.into(),
+                    }
+                }
                 Request::List {
                     entity,
-                    filters,
+                    mut filters,
                     sort,
                     pagination,
                     includes,
                     projection,
                 } => {
+                    if let Some(uid) = sender
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                    {
+                        filters.push(crate::Filter::new(
+                            owner_field.to_string(),
+                            crate::FilterOp::Eq,
+                            Value::String(uid.to_string()),
+                        ));
+                    }
                     match self
                         .list(entity, filters, sort, pagination, includes, projection)
                         .await

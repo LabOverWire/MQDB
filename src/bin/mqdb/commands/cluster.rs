@@ -30,6 +30,7 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) quic_insecure: bool,
     pub(crate) ws_bind: Option<SocketAddr>,
     pub(crate) oauth: OAuthArgs,
+    pub(crate) ownership: Option<String>,
 }
 
 pub(crate) async fn cmd_cluster_start(
@@ -89,6 +90,11 @@ pub(crate) async fn cmd_cluster_start(
     if let Some(http_bind) = args.oauth.http_bind {
         let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
         config = config.with_http_config(http_config);
+    }
+    if let Some(ownership_spec) = args.ownership {
+        let ownership = mqdb::OwnershipConfig::parse(&ownership_spec)
+            .map_err(|e| format!("invalid --ownership: {e}"))?;
+        config = config.with_ownership(ownership);
     }
 
     let mut agent = ClusteredAgent::new(config)?;

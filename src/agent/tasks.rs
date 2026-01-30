@@ -18,6 +18,7 @@ impl MqdbAgent {
         let db = Arc::clone(&self.db);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let backup_dir = self.backup_dir.clone();
+        let ownership_config = Arc::clone(&self.ownership_config);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -74,7 +75,7 @@ impl MqdbAgent {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         if let Some(message) = msg {
-                            handle_message(&db, &response_client, message, &backup_dir).await;
+                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config).await;
                         } else {
                             debug!("Message channel closed");
                             break;

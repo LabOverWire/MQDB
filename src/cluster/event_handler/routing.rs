@@ -153,6 +153,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 &event.payload,
                 event.response_topic.as_deref(),
                 event.correlation_data.as_deref(),
+                event.user_id.as_deref(),
             )
             .await
         {

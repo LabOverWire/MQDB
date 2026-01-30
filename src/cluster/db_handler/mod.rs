@@ -8,6 +8,8 @@ use super::NodeId;
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};
 use super::node_controller::NodeController;
 use super::transport::ClusterTransport;
+use crate::types::OwnershipConfig;
+use std::sync::Arc;
 
 pub struct DbPublishResponse {
     pub topic: String,
@@ -17,13 +19,23 @@ pub struct DbPublishResponse {
 
 pub struct DbRequestHandler {
     node_id: NodeId,
+    ownership: Arc<OwnershipConfig>,
 }
 
 #[allow(clippy::unused_self)]
 impl DbRequestHandler {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
-        Self { node_id }
+        Self {
+            node_id,
+            ownership: Arc::new(OwnershipConfig::default()),
+        }
+    }
+
+    #[must_use]
+    pub fn with_ownership(mut self, ownership: Arc<OwnershipConfig>) -> Self {
+        self.ownership = ownership;
+        self
     }
 
     pub async fn handle_publish<T: ClusterTransport>(
@@ -33,6 +45,7 @@ impl DbRequestHandler {
         payload: &[u8],
         response_topic: Option<&str>,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<DbPublishResponse> {
         let parsed = ParsedDbTopic::parse(topic)?;
 
@@ -51,6 +64,7 @@ impl DbRequestHandler {
                     payload,
                     response_topic?,
                     correlation_data,
+                    sender,
                 )
                 .await?
             }
@@ -69,6 +83,7 @@ impl std::fmt::Debug for DbRequestHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbRequestHandler")
             .field("node_id", &self.node_id)
+            .field("ownership", &self.ownership)
             .finish()
     }
 }

@@ -108,10 +108,10 @@ impl ClusteredAgent {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let event_handler = Arc::new(ClusterEventHandler::new(
-            self.node_id,
-            self.controller.clone(),
-        ));
+        let event_handler = Arc::new(
+            ClusterEventHandler::new(self.node_id, self.controller.clone())
+                .with_ownership(Arc::clone(&self.ownership)),
+        );
         self.configure_broker(event_handler, bridge_configs, use_external_bridge_manager)
             .await
     }
@@ -473,10 +473,10 @@ impl ClusteredAgent {
     pub(super) async fn initialize_event_handler(
         &self,
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>> {
-        let event_handler = Arc::new(ClusterEventHandler::new(
-            self.node_id,
-            self.controller.clone(),
-        ));
+        let event_handler = Arc::new(
+            ClusterEventHandler::new(self.node_id, self.controller.clone())
+                .with_ownership(Arc::clone(&self.ownership)),
+        );
         let synced_retained_topics = event_handler.synced_retained_topics();
 
         {

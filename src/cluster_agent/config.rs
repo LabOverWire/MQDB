@@ -31,6 +31,7 @@ impl ClusterConfig {
             bridge_out_only: false,
             ws_bind_address: None,
             http_config: None,
+            ownership: crate::types::OwnershipConfig::default(),
         }
     }
 
@@ -176,6 +177,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
         self.http_config = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_ownership(mut self, ownership: crate::types::OwnershipConfig) -> Self {
+        self.ownership = ownership;
         self
     }
 }

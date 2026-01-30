@@ -39,6 +39,11 @@ pub(crate) enum AgentAction {
         ws_bind: Option<SocketAddr>,
         #[command(flatten)]
         oauth: Box<OAuthArgs>,
+        #[arg(
+            long,
+            help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
+        )]
+        ownership: Option<String>,
     },
     #[command(about = "Check broker connectivity status")]
     Status {
@@ -113,6 +118,11 @@ pub(crate) enum ClusterAction {
         ws_bind: Option<SocketAddr>,
         #[command(flatten)]
         oauth: Box<OAuthArgs>,
+        #[arg(
+            long,
+            help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
+        )]
+        ownership: Option<String>,
     },
     #[command(about = "Trigger partition rebalancing across cluster nodes")]
     Rebalance {

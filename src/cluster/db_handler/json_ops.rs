@@ -16,6 +16,7 @@ impl DbRequestHandler {
         payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
@@ -33,6 +34,13 @@ impl DbRequestHandler {
                     .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
+                if let Some(uid) = sender
+                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                    && let Some(err) =
+                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                {
+                    return Some(err);
+                }
                 self.handle_json_update(
                     controller,
                     entity,
@@ -44,15 +52,43 @@ impl DbRequestHandler {
                 .await
             }
             DbTopicOperation::JsonDelete { entity, id } => {
+                if let Some(uid) = sender
+                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                    && let Some(err) =
+                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                {
+                    return Some(err);
+                }
                 self.handle_json_delete(controller, entity, id, response_topic, correlation_data)
                     .await
             }
             DbTopicOperation::JsonList { entity } => {
-                self.handle_json_list(controller, entity, payload, response_topic)
+                self.handle_json_list(controller, entity, payload, response_topic, sender)
                     .await
             }
             _ => None,
         }
+    }
+
+    fn check_cluster_ownership<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        owner_field: &str,
+        sender: &str,
+    ) -> Option<Vec<u8>> {
+        let existing = controller.db_get(entity, id)?;
+        let data: Value = serde_json::from_slice(&existing.data).ok()?;
+        if let Some(owner_value) = data.get(owner_field)
+            && owner_value.as_str() != Some(sender)
+        {
+            return Some(Self::json_error(
+                403,
+                &format!("user '{sender}' does not own {entity}/{id}"),
+            ));
+        }
+        None
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -412,8 +448,9 @@ impl DbRequestHandler {
         entity: &str,
         payload: &[u8],
         response_topic: &str,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
-        let filters: Vec<crate::Filter> = if payload.is_empty() {
+        let mut filters: Vec<crate::Filter> = if payload.is_empty() {
             Vec::new()
         } else if let Ok(data) = serde_json::from_slice::<Value>(payload) {
             data.get("filters")
@@ -423,11 +460,38 @@ impl DbRequestHandler {
             Vec::new()
         };
 
+        if let Some(uid) = sender
+            && let Some(owner_field) = self.ownership.owner_field(entity)
+        {
+            filters.push(crate::Filter::new(
+                owner_field.to_string(),
+                crate::FilterOp::Eq,
+                Value::String(uid.to_string()),
+            ));
+        }
+
+        let scatter_payload = if sender.is_some() && self.ownership.owner_field(entity).is_some() {
+            let mut data: Value = if payload.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_slice(payload).unwrap_or(json!({}))
+            };
+            data["filters"] = serde_json::to_value(&filters).unwrap_or(json!([]));
+            serde_json::to_vec(&data).unwrap_or_default()
+        } else {
+            payload.to_vec()
+        };
+
         let has_remote_nodes = !controller.alive_nodes().is_empty();
 
         if has_remote_nodes {
             let started = controller
-                .start_scatter_list_query(entity, payload, response_topic.to_string(), filters)
+                .start_scatter_list_query(
+                    entity,
+                    &scatter_payload,
+                    response_topic.to_string(),
+                    filters,
+                )
                 .await;
 
             if started {

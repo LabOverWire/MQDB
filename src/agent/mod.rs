@@ -28,6 +28,7 @@ pub struct MqdbAgent {
     pub(super) quic_key_file: Option<PathBuf>,
     pub(super) ws_bind_address: Option<SocketAddr>,
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
+    pub(super) ownership_config: Arc<crate::types::OwnershipConfig>,
 }
 
 impl MqdbAgent {
@@ -49,6 +50,7 @@ impl MqdbAgent {
             quic_key_file: None,
             ws_bind_address: None,
             http_config: std::sync::Mutex::new(None),
+            ownership_config: Arc::new(crate::types::OwnershipConfig::default()),
         }
     }
 
@@ -147,6 +149,12 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_admin_users(mut self, users: HashSet<String>) -> Self {
         self.auth_setup.admin_users = users;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ownership_config(mut self, config: crate::types::OwnershipConfig) -> Self {
+        self.ownership_config = Arc::new(config);
         self
     }
 

@@ -17,6 +17,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) quic_key: Option<PathBuf>,
     pub(crate) ws_bind: Option<SocketAddr>,
     pub(crate) oauth: OAuthArgs,
+    pub(crate) ownership: Option<String>,
 }
 
 pub(crate) async fn cmd_agent_start(
@@ -43,6 +44,11 @@ pub(crate) async fn cmd_agent_start(
     }
     if let Some(ws_addr) = args.ws_bind {
         agent = agent.with_ws_bind_address(ws_addr);
+    }
+    if let Some(ownership_spec) = args.ownership {
+        let ownership = mqdb::OwnershipConfig::parse(&ownership_spec)
+            .map_err(|e| format!("invalid --ownership: {e}"))?;
+        agent = agent.with_ownership_config(ownership);
     }
 
     if let Some(http_bind) = args.oauth.http_bind {

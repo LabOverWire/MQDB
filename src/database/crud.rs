@@ -241,6 +241,31 @@ impl Database {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns `Forbidden` if the sender doesn't own the entity, or `NotFound` if it doesn't exist.
+    pub fn check_ownership(
+        &self,
+        entity_name: &str,
+        id: &str,
+        owner_field: &str,
+        sender: &str,
+    ) -> Result<()> {
+        let key = keys::encode_data_key(entity_name, id);
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.to_string(),
+            id: id.to_string(),
+        })?;
+        let entity = Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
+        if let Some(owner_value) = entity.data.get(owner_field)
+            && owner_value.as_str() != Some(sender)
+        {
+            return Err(Error::Forbidden(format!(
+                "user '{sender}' does not own {entity_name}/{id}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(super) async fn generate_id(&self, entity_name: &str) -> Result<String> {
         let _lock = self.id_gen_lock.lock().await;
 

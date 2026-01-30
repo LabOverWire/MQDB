@@ -137,6 +137,7 @@ async fn handle_create_success() {
             &payload,
             Some("$DB/_resp/client1"),
             Some(b"corr-123"),
+            None,
         )
         .await;
 
@@ -166,7 +167,14 @@ async fn handle_read_not_found() {
     let topic = format!("$DB/p{}/{}/{}", partition.get(), entity, id);
 
     let response = handler
-        .handle_publish(&mut ctrl, &topic, &payload, Some("$DB/_resp/client1"), None)
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &payload,
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+        )
         .await;
 
     assert!(response.is_some());
@@ -190,7 +198,14 @@ async fn handle_invalid_partition_returns_error() {
     let topic = "$DB/p63/users/create";
 
     let response = handler
-        .handle_publish(&mut ctrl, topic, &payload, Some("$DB/_resp/client1"), None)
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &payload,
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+        )
         .await;
 
     assert!(response.is_some());
@@ -214,7 +229,7 @@ async fn no_response_without_response_topic() {
     let topic = "$DB/p0/users/create";
 
     let response = handler
-        .handle_publish(&mut ctrl, topic, &payload, None, None)
+        .handle_publish(&mut ctrl, topic, &payload, None, None, None)
         .await;
 
     assert!(response.is_none());
@@ -234,6 +249,7 @@ async fn parse_invalid_topic_returns_none() {
             "not/a/db/topic",
             &[],
             Some("$DB/_resp/client1"),
+            None,
             None,
         )
         .await;

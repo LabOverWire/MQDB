@@ -139,6 +139,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
             quic_key,
             ws_bind,
             oauth,
+            ownership,
         } => {
             cmd_agent_start(AgentStartArgs {
                 bind,
@@ -150,6 +151,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 quic_key,
                 ws_bind,
                 oauth: *oauth,
+                ownership,
             })
             .await
         }
@@ -179,6 +181,7 @@ async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::erro
             quic_insecure,
             ws_bind,
             oauth,
+            ownership,
         } => {
             Box::pin(cmd_cluster_start(ClusterStartArgs {
                 node_id,
@@ -200,6 +203,7 @@ async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::erro
                 quic_insecure,
                 ws_bind,
                 oauth: *oauth,
+                ownership,
             }))
             .await
         }

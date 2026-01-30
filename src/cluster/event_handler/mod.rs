@@ -37,6 +37,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     #[must_use]
+    pub fn with_ownership(
+        mut self,
+        ownership: std::sync::Arc<crate::types::OwnershipConfig>,
+    ) -> Self {
+        self.db_handler = self.db_handler.with_ownership(ownership);
+        self
+    }
+
+    #[must_use]
     pub fn synced_retained_topics(&self) -> Arc<RwLock<HashMap<String, Instant>>> {
         Arc::clone(&self.synced_retained_topics)
     }
