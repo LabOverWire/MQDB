@@ -490,7 +490,7 @@ impl DbRequestHandler {
                     entity,
                     &scatter_payload,
                     response_topic.to_string(),
-                    filters,
+                    filters.clone(),
                 )
                 .await;
 
@@ -504,6 +504,9 @@ impl DbRequestHandler {
             .iter()
             .filter_map(|e| {
                 let data: Value = serde_json::from_slice(&e.data).ok()?;
+                if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
+                    return None;
+                }
                 Some(json!({
                     "id": e.id_str(),
                     "data": data

@@ -263,6 +263,7 @@ mod execute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::OwnershipConfig;
 
     #[test]
     fn test_request_serialization() {
@@ -330,5 +331,175 @@ mod tests {
             }
             Response::Ok { .. } => panic!("expected error response"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_with_sender_update_forbidden_for_non_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_req = Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "My Diagram"}),
+        };
+        let create_resp = db.execute(create_req).await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok response from create"),
+        };
+
+        let update_req = Request::Update {
+            entity: "diagrams".to_string(),
+            id: id.clone(),
+            fields: serde_json::json!({"title": "Stolen"}),
+        };
+        let resp = db
+            .execute_with_sender(update_req, Some("bob"), &ownership)
+            .await;
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 403);
+                assert!(message.contains("bob"));
+            }
+            Response::Ok { .. } => panic!("expected forbidden"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_with_sender_update_allowed_for_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Orig"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Update {
+                    entity: "diagrams".to_string(),
+                    id,
+                    fields: serde_json::json!({"title": "Updated"}),
+                },
+                Some("alice"),
+                &ownership,
+            )
+            .await;
+        assert!(resp.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_with_sender_delete_forbidden_for_non_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Private"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".to_string(),
+                    id,
+                },
+                Some("bob"),
+                &ownership,
+            )
+            .await;
+        match resp {
+            Response::Error { code, .. } => assert_eq!(code, 403),
+            Response::Ok { .. } => panic!("expected forbidden"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_with_sender_list_filters_by_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice's"}),
+        })
+        .await;
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "bob", "title": "Bob's"}),
+        })
+        .await;
+
+        let resp = db
+            .execute_with_sender(
+                Request::List {
+                    entity: "diagrams".to_string(),
+                    filters: vec![],
+                    sort: vec![],
+                    pagination: None,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("alice"),
+                &ownership,
+            )
+            .await;
+
+        match resp {
+            Response::Ok { data } => {
+                let items = data.as_array().unwrap();
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0]["userId"], "alice");
+            }
+            Response::Error { .. } => panic!("expected ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_with_sender_none_bypasses_ownership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Internal"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Update {
+                    entity: "diagrams".to_string(),
+                    id,
+                    fields: serde_json::json!({"title": "System Override"}),
+                },
+                None,
+                &ownership,
+            )
+            .await;
+        assert!(resp.is_ok());
     }
 }

@@ -4,8 +4,9 @@ use super::super::node_controller::NodeController;
 use super::super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::super::{Epoch, NodeId, PartitionId, PartitionMap};
 use super::DbRequestHandler;
+use crate::types::OwnershipConfig;
 use bebytes::BeBytes;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 fn create_test_controller(
@@ -112,6 +113,38 @@ fn setup_controller_with_partition(partition: PartitionId) -> NodeController<Moc
     ctrl.update_partition_map(map);
 
     ctrl
+}
+
+fn setup_controller_all_partitions() -> NodeController<MockTransport> {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let mut map = PartitionMap::default();
+    for i in 0..64_u16 {
+        let partition = PartitionId::new(i).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl
+}
+
+fn ownership_config(entity: &str, field: &str) -> Arc<OwnershipConfig> {
+    let mut fields = HashMap::new();
+    fields.insert(entity.to_string(), field.to_string());
+    Arc::new(OwnershipConfig::new(fields))
+}
+
+fn parse_json_response(payload: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null)
 }
 
 #[tokio::test]
@@ -255,4 +288,305 @@ async fn parse_invalid_topic_returns_none() {
         .await;
 
     assert!(response.is_none());
+}
+
+#[tokio::test]
+async fn json_update_forbidden_for_non_owner() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let id = "diag-1";
+    let data = serde_json::json!({"userId": "alice", "title": "My Diagram"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    let now_ms = 1000_u64;
+    ctrl.db_create(entity, id, &data_bytes, now_ms)
+        .await
+        .unwrap();
+
+    let update_payload = serde_json::to_vec(&serde_json::json!({"title": "Stolen"})).unwrap();
+    let topic = format!("$DB/{entity}/{id}/update");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &update_payload,
+            Some("$DB/_resp/client1"),
+            None,
+            Some("bob"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 403);
+    assert!(json["message"].as_str().unwrap().contains("bob"));
+}
+
+#[tokio::test]
+async fn json_update_allowed_for_owner() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let id = "diag-2";
+    let data = serde_json::json!({"userId": "alice", "title": "My Diagram"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    ctrl.db_create(entity, id, &data_bytes, 1000).await.unwrap();
+
+    let update_payload = serde_json::to_vec(&serde_json::json!({"title": "Updated"})).unwrap();
+    let topic = format!("$DB/{entity}/{id}/update");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &update_payload,
+            Some("$DB/_resp/client1"),
+            None,
+            Some("alice"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn json_delete_forbidden_for_non_owner() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let id = "diag-3";
+    let data = serde_json::json!({"userId": "alice", "title": "Private"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    ctrl.db_create(entity, id, &data_bytes, 1000).await.unwrap();
+
+    let topic = format!("$DB/{entity}/{id}/delete");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &[],
+            Some("$DB/_resp/client1"),
+            None,
+            Some("bob"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 403);
+}
+
+#[tokio::test]
+async fn json_delete_allowed_for_owner() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let id = "diag-4";
+    let data = serde_json::json!({"userId": "alice", "title": "Deletable"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    ctrl.db_create(entity, id, &data_bytes, 1000).await.unwrap();
+
+    let topic = format!("$DB/{entity}/{id}/delete");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &[],
+            Some("$DB/_resp/client1"),
+            None,
+            Some("alice"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["deleted"], true);
+}
+
+#[tokio::test]
+async fn json_update_bypasses_ownership_when_no_sender() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let id = "diag-5";
+    let data = serde_json::json!({"userId": "alice", "title": "Internal"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    ctrl.db_create(entity, id, &data_bytes, 1000).await.unwrap();
+
+    let update_payload =
+        serde_json::to_vec(&serde_json::json!({"title": "System Update"})).unwrap();
+    let topic = format!("$DB/{entity}/{id}/update");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &update_payload,
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn json_list_filters_by_sender_ownership() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let alice_data = serde_json::json!({"userId": "alice", "title": "Alice's"});
+    let bob_data = serde_json::json!({"userId": "bob", "title": "Bob's"});
+    ctrl.db_create(
+        entity,
+        "d-alice",
+        &serde_json::to_vec(&alice_data).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+    ctrl.db_create(
+        entity,
+        "d-bob",
+        &serde_json::to_vec(&bob_data).unwrap(),
+        1001,
+    )
+    .await
+    .unwrap();
+
+    let topic = format!("$DB/{entity}/list");
+    let payload = b"{}";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            payload,
+            Some("$DB/_resp/client1"),
+            None,
+            Some("alice"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    let items = json["data"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["data"]["userId"], "alice");
+}
+
+#[tokio::test]
+async fn json_list_returns_all_when_no_sender() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "diagrams";
+    let alice_data = serde_json::json!({"userId": "alice", "title": "Alice's"});
+    let bob_data = serde_json::json!({"userId": "bob", "title": "Bob's"});
+    ctrl.db_create(
+        entity,
+        "d-a2",
+        &serde_json::to_vec(&alice_data).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+    ctrl.db_create(
+        entity,
+        "d-b2",
+        &serde_json::to_vec(&bob_data).unwrap(),
+        1001,
+    )
+    .await
+    .unwrap();
+
+    let topic = format!("$DB/{entity}/list");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            b"{}",
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    let items = json["data"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+}
+
+#[tokio::test]
+async fn json_update_no_ownership_config_allows_any_sender() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let entity = "notes";
+    let id = "n-1";
+    let data = serde_json::json!({"userId": "alice", "text": "Secret"});
+    let data_bytes = serde_json::to_vec(&data).unwrap();
+    ctrl.db_create(entity, id, &data_bytes, 1000).await.unwrap();
+
+    let update_payload = serde_json::to_vec(&serde_json::json!({"text": "Modified"})).unwrap();
+    let topic = format!("$DB/{entity}/{id}/update");
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &update_payload,
+            Some("$DB/_resp/client1"),
+            None,
+            Some("eve"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
 }
