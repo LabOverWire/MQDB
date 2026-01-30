@@ -86,7 +86,7 @@ optional = true
 
 [[bin]]
 name = "mqdb"
-path = "src/bin/mqdb.rs"
+path = "src/bin/mqdb/main.rs"
 required-features = ["native"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
