@@ -4,6 +4,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `DbDataStoreError` if the record already exists or serialization fails.
     pub fn db_create_replicated(
         &self,
         entity_type: &str,
@@ -26,6 +28,8 @@ impl StoreManager {
         Ok((db_entity, write))
     }
 
+    /// # Errors
+    /// Returns `DbDataStoreError` if the record does not exist.
     pub fn db_update_replicated(
         &self,
         entity_type: &str,
@@ -71,6 +75,8 @@ impl StoreManager {
         (db_entity, write)
     }
 
+    /// # Errors
+    /// Returns `DbDataStoreError` if the record does not exist.
     pub fn db_delete_replicated(
         &self,
         entity_type: &str,

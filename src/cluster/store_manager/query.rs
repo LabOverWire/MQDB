@@ -5,6 +5,8 @@ use crate::cluster::db::DbDataStore;
 use crate::cluster::entity;
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `StoreApplyError::UnknownEntity` if the entity type is not recognized.
     #[allow(clippy::type_complexity)]
     pub fn query_entity(
         &self,

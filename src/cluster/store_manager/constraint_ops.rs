@@ -4,6 +4,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `ConstraintStoreError::AlreadyExists` if the constraint is already registered.
     pub fn constraint_add_replicated(
         &self,
         constraint: &ClusterConstraint,
@@ -30,6 +32,8 @@ impl StoreManager {
         Ok(write)
     }
 
+    /// # Errors
+    /// Returns `ConstraintStoreError::NotFound` if the constraint does not exist.
     pub fn constraint_remove_replicated(
         &self,
         entity_type: &str,

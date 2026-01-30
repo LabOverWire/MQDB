@@ -3,6 +3,8 @@ use crate::cluster::entity;
 use crate::cluster::protocol::ReplicationWrite;
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `StoreApplyError::PersistenceError` if the batch write to storage fails.
     pub fn persist_writes_batch(&self, writes: &[ReplicationWrite]) -> Result<(), StoreApplyError> {
         if let Some(storage) = &self.storage {
             storage
@@ -20,6 +22,8 @@ impl StoreManager {
         }
     }
 
+    /// # Errors
+    /// Returns `StoreApplyError` if persistence fails or the entity type is unknown.
     pub fn apply_write(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         if let Some(storage) = &self.storage {
             storage

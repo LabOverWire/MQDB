@@ -4,6 +4,8 @@ use crate::cluster::session::{SessionData, SessionError, session_partition};
 use crate::cluster::{Epoch, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `SessionError` if the session already exists for this client ID.
     pub fn create_session_replicated(
         &self,
         client_id: &str,
@@ -22,6 +24,8 @@ impl StoreManager {
         Ok((session, write))
     }
 
+    /// # Errors
+    /// Returns `SessionError` if no session exists for this client ID.
     pub fn update_session_replicated<F>(
         &self,
         client_id: &str,
@@ -44,6 +48,8 @@ impl StoreManager {
         Ok((session, write))
     }
 
+    /// # Errors
+    /// Returns `SessionError` if no session exists for this client ID.
     pub fn remove_session_replicated(
         &self,
         client_id: &str,

@@ -11,6 +11,8 @@ use crate::cluster::wildcard_store::{WildcardEntry, WildcardStoreError};
 use crate::cluster::{Epoch, PartitionId, SubscriptionType, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns [`Qos2StoreError`] if the `QoS` 2 flow already exists for this client and packet ID.
     pub fn start_qos2_inbound_replicated(
         &self,
         client_id: &str,
@@ -35,6 +37,8 @@ impl StoreManager {
         Ok((state, write))
     }
 
+    /// # Errors
+    /// Returns [`Qos2StoreError`] if the outbound `QoS` 2 flow already exists for this client and packet ID.
     pub fn start_qos2_outbound_replicated(
         &self,
         client_id: &str,
@@ -59,6 +63,8 @@ impl StoreManager {
         Ok((state, write))
     }
 
+    /// # Errors
+    /// Returns [`Qos2StoreError`] if no `QoS` 2 state exists for this client and packet ID.
     pub fn advance_qos2_replicated(
         &self,
         client_id: &str,
@@ -78,6 +84,8 @@ impl StoreManager {
         Ok((phase, write))
     }
 
+    /// # Errors
+    /// Returns [`Qos2StoreError`] if no `QoS` 2 state exists to complete for this client and packet ID.
     pub fn complete_qos2_replicated(
         &self,
         client_id: &str,
@@ -140,6 +148,8 @@ impl StoreManager {
         (snapshot, write)
     }
 
+    /// # Errors
+    /// Returns `SubscriptionCacheError` if the client has no subscription for the given topic.
     pub fn remove_subscription_replicated(
         &self,
         client_id: &str,
@@ -220,6 +230,8 @@ impl StoreManager {
         (entry, writes)
     }
 
+    /// # Errors
+    /// Returns `TopicIndexError` if the client is not subscribed to the given topic.
     pub fn unsubscribe_topic_replicated(
         &self,
         topic: &str,
@@ -245,6 +257,8 @@ impl StoreManager {
         Ok((entry, writes))
     }
 
+    /// # Errors
+    /// Returns `WildcardStoreError` if the wildcard pattern is invalid or the subscription fails.
     pub fn subscribe_wildcard_replicated(
         &self,
         pattern: &str,
@@ -279,6 +293,8 @@ impl StoreManager {
         Ok((entry, writes))
     }
 
+    /// # Errors
+    /// Returns `WildcardStoreError` if the client has no wildcard subscription for the given pattern.
     pub fn unsubscribe_wildcard_replicated(
         &self,
         pattern: &str,
@@ -304,6 +320,8 @@ impl StoreManager {
         Ok(writes)
     }
 
+    /// # Errors
+    /// Returns `InflightStoreError` if the inflight message already exists for this client and packet ID.
     pub fn add_inflight_replicated(
         &self,
         client_id: &str,
@@ -329,6 +347,8 @@ impl StoreManager {
         Ok((msg, write))
     }
 
+    /// # Errors
+    /// Returns `InflightStoreError` if no inflight message exists for this client and packet ID.
     pub fn acknowledge_inflight_replicated(
         &self,
         client_id: &str,

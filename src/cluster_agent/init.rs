@@ -102,6 +102,8 @@ impl ClusteredAgent {
         executor
     }
 
+    /// # Errors
+    /// If node initialization fails: invalid node ID, storage backend, or Raft setup.
     pub fn new(config: ClusterConfig) -> Result<Self, ClusterInitError> {
         let node_id = NodeId::validated(config.node_id)
             .ok_or(ClusterInitError::InvalidNodeId(config.node_id))?;

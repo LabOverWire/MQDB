@@ -5,6 +5,8 @@ use crate::cluster::session::SessionData;
 use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `IdempotencyError` if the key is already committed or a conflict is detected.
     pub fn check_idempotency(
         &self,
         idempotency_key: &str,

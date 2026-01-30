@@ -56,6 +56,8 @@ impl StoreManager {
         buf
     }
 
+    /// # Errors
+    /// Returns `StoreApplyError` if the snapshot data is malformed or a store import fails.
     pub fn import_partition(&self, data: &[u8]) -> Result<usize, StoreApplyError> {
         if data.is_empty() {
             return Ok(0);

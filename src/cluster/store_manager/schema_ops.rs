@@ -4,6 +4,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `SchemaStoreError` if a schema for the entity already exists.
     pub fn schema_register_replicated(
         &self,
         entity: &str,
@@ -30,6 +32,8 @@ impl StoreManager {
         Ok((schema, writes))
     }
 
+    /// # Errors
+    /// Returns `SchemaStoreError` if no schema exists for the entity.
     pub fn schema_update_replicated(
         &self,
         entity: &str,

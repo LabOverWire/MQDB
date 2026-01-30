@@ -10,6 +10,7 @@ mod query;
 mod recovery;
 mod schema_ops;
 mod session_ops;
+#[cfg(test)]
 mod tests;
 mod unique_ops;
 

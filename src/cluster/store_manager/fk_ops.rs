@@ -4,6 +4,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `FkStoreError` if the foreign key request already exists or is invalid.
     pub fn fk_add_request_replicated(
         &self,
         request: FkValidationRequest,
@@ -23,6 +25,8 @@ impl StoreManager {
         ))
     }
 
+    /// # Errors
+    /// Returns `FkStoreError` if the request ID is not found or already completed.
     pub fn fk_complete_request_replicated(
         &self,
         request_id: &str,

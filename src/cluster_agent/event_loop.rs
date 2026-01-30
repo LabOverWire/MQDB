@@ -15,6 +15,8 @@ use super::{
 };
 
 impl ClusteredAgent {
+    /// # Errors
+    /// If broker setup, transport connection, or event loop execution fails.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let synced_retained_topics = self.initialize_event_handler().await;
 

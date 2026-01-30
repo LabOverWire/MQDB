@@ -4,6 +4,8 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
+    /// # Errors
+    /// Returns `IndexStoreError` if the index entry already exists.
     pub fn index_add_replicated(
         &self,
         entity: &str,
@@ -31,6 +33,8 @@ impl StoreManager {
         Ok((entry, write))
     }
 
+    /// # Errors
+    /// Returns `IndexStoreError` if the index entry is not found.
     pub fn index_remove_replicated(
         &self,
         entity: &str,

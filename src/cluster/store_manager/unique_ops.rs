@@ -53,6 +53,8 @@ impl StoreManager {
         }
     }
 
+    /// # Errors
+    /// Returns `UniqueStoreError` if no matching reservation exists or the request ID mismatches.
     pub fn unique_commit_replicated(
         &self,
         entity: &str,
