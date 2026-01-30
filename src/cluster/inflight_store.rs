@@ -1,4 +1,5 @@
 use super::protocol::Operation;
+use super::store_utils;
 use super::{NodeId, PartitionId, session_partition};
 use bebytes::BeBytes;
 use std::collections::HashMap;
@@ -52,12 +53,12 @@ impl InflightMessage {
 
     #[must_use]
     pub fn client_id_str(&self) -> &str {
-        std::str::from_utf8(&self.client_id).unwrap_or("")
+        store_utils::bytes_to_str(&self.client_id)
     }
 
     #[must_use]
     pub fn topic_str(&self) -> &str {
-        std::str::from_utf8(&self.topic).unwrap_or("")
+        store_utils::bytes_to_str(&self.topic)
     }
 
     pub fn increment_attempts(&mut self, timestamp: u64) {
@@ -376,14 +377,12 @@ impl InflightStore {
 
     #[must_use]
     pub fn serialize(msg: &InflightMessage) -> Vec<u8> {
-        msg.to_be_bytes()
+        store_utils::serialize(msg)
     }
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<InflightMessage> {
-        InflightMessage::try_from_be_bytes(bytes)
-            .ok()
-            .map(|(m, _)| m)
+        store_utils::deserialize(bytes)
     }
 
     /// # Panics

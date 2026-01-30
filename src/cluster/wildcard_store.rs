@@ -1,4 +1,5 @@
 use super::protocol::Operation;
+use super::store_utils;
 use super::{
     NodeId, PartitionId, SubscriberLocation, SubscriptionType, TopicTrie, WildcardSubscriber,
     is_wildcard_pattern, validate_pattern,
@@ -69,12 +70,12 @@ impl WildcardEntry {
 
     #[must_use]
     pub fn pattern_str(&self) -> &str {
-        std::str::from_utf8(&self.pattern).unwrap_or("")
+        store_utils::bytes_to_str(&self.pattern)
     }
 
     #[must_use]
     pub fn client_id_str(&self) -> &str {
-        std::str::from_utf8(&self.client_id).unwrap_or("")
+        store_utils::bytes_to_str(&self.client_id)
     }
 
     #[must_use]
@@ -241,12 +242,12 @@ impl WildcardStore {
 
     #[must_use]
     pub fn serialize_entry(entry: &WildcardEntry) -> Vec<u8> {
-        entry.to_be_bytes()
+        store_utils::serialize(entry)
     }
 
     #[must_use]
     pub fn deserialize_entry(bytes: &[u8]) -> Option<WildcardEntry> {
-        WildcardEntry::try_from_be_bytes(bytes).ok().map(|(e, _)| e)
+        store_utils::deserialize(bytes)
     }
 
     #[must_use]
