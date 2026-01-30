@@ -84,7 +84,16 @@ struct AdminRequest {
     payload: Vec<u8>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
+pub struct QuicConfig {
+    pub enabled: bool,
+    #[cfg(feature = "dev-insecure")]
+    pub insecure: bool,
+    pub cert_file: Option<PathBuf>,
+    pub key_file: Option<PathBuf>,
+    pub ca_file: Option<PathBuf>,
+    pub direct: bool,
+}
+
 pub struct ClusterConfig {
     pub node_id: u16,
     pub node_name: String,
@@ -97,19 +106,12 @@ pub struct ClusterConfig {
     pub password_file: Option<PathBuf>,
     pub acl_file: Option<PathBuf>,
     pub auth_setup: crate::auth_config::AuthSetupConfig,
-    pub use_quic: bool,
-    #[cfg(feature = "dev-insecure")]
-    pub quic_insecure: bool,
-    pub quic_cert_file: Option<PathBuf>,
-    pub quic_key_file: Option<PathBuf>,
-    pub quic_ca_file: Option<PathBuf>,
+    pub quic: QuicConfig,
     pub bridge_out_only: bool,
-    pub use_direct_quic: bool,
     pub ws_bind_address: Option<SocketAddr>,
     pub http_config: Option<crate::http::HttpServerConfig>,
 }
 
-#[allow(clippy::struct_excessive_bools)]
 pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
@@ -132,11 +134,7 @@ pub struct ClusteredAgent {
     password_file: Option<PathBuf>,
     acl_file: Option<PathBuf>,
     auth_setup: crate::auth_config::AuthSetupConfig,
-    use_quic: bool,
-    #[cfg(feature = "dev-insecure")]
-    quic_insecure: bool,
-    quic_cert_file: Option<PathBuf>,
-    quic_key_file: Option<PathBuf>,
+    quic: QuicConfig,
     bridge_out_only: bool,
     cluster_port_offset: u16,
     bridge_executor: Option<DedicatedExecutor>,
@@ -145,7 +143,6 @@ pub struct ClusteredAgent {
     tx_tick: Option<flume::Sender<u64>>,
     rx_main_queue: Option<flume::Receiver<InboundMessage>>,
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
-    use_direct_quic: bool,
     ws_bind_address: Option<SocketAddr>,
     http_config: Option<crate::http::HttpServerConfig>,
 }

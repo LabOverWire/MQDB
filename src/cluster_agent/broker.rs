@@ -5,8 +5,8 @@ use mqtt5::QoS;
 use mqtt5::broker::auth::CompositeAuthProvider;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
-    ChangeOnlyDeliveryConfig, ClusterListenerConfig, QuicConfig, StorageBackend, StorageConfig,
-    WebSocketConfig,
+    ChangeOnlyDeliveryConfig, ClusterListenerConfig, QuicConfig as BrokerQuicConfig,
+    StorageBackend, StorageConfig, WebSocketConfig,
 };
 use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
@@ -57,14 +57,14 @@ impl ClusteredAgent {
                 config.clean_start = false;
                 config.try_private = true;
 
-                if self.use_quic {
+                if self.quic.enabled {
                     config.protocol = BridgeProtocol::Quic;
                     config.quic_stream_strategy = Some(StreamStrategy::DataPerTopic);
                     config.quic_flow_headers = Some(true);
                     config.quic_datagrams = Some(true);
                     config.fallback_tcp = true;
                     #[cfg(feature = "dev-insecure")]
-                    if self.quic_insecure {
+                    if self.quic.insecure {
                         config.insecure = Some(true);
                     }
                 }
@@ -77,7 +77,7 @@ impl ClusteredAgent {
     pub(super) fn prepare_bridges(
         &mut self,
     ) -> Result<(Vec<BridgeConfig>, bool), Box<dyn std::error::Error + Send + Sync>> {
-        if self.use_direct_quic {
+        if self.quic.direct {
             return Ok((vec![], false));
         }
         if !self.peers.is_empty() && self.bridge_executor.is_none() {
@@ -235,9 +235,9 @@ impl ClusteredAgent {
     }
 
     fn apply_quic_config(&self, broker_config: BrokerConfig) -> BrokerConfig {
-        if self.use_quic {
-            if let (Some(cert_file), Some(key_file)) = (&self.quic_cert_file, &self.quic_key_file) {
-                let quic_config = QuicConfig::new(cert_file.clone(), key_file.clone())
+        if self.quic.enabled {
+            if let (Some(cert_file), Some(key_file)) = (&self.quic.cert_file, &self.quic.key_file) {
+                let quic_config = BrokerQuicConfig::new(cert_file.clone(), key_file.clone())
                     .with_bind_address(self.bind_address);
                 info!(quic_bind = %self.bind_address, "QUIC listener configured (same port as TCP)");
                 return broker_config.with_quic(quic_config);
@@ -262,7 +262,7 @@ impl ClusteredAgent {
         &self,
         broker_config: BrokerConfig,
     ) -> Result<BrokerConfig, Box<dyn std::error::Error + Send + Sync>> {
-        if self.use_direct_quic {
+        if self.quic.direct {
             return Ok(broker_config);
         }
         let cluster_addr: SocketAddr =
@@ -271,7 +271,7 @@ impl ClusteredAgent {
                 .map_err(|e| format!("invalid cluster address: {e}"))?;
 
         let cluster_listener = if let (Some(cert_file), Some(key_file)) =
-            (&self.quic_cert_file, &self.quic_key_file)
+            (&self.quic.cert_file, &self.quic.key_file)
         {
             ClusterListenerConfig::quic(vec![cluster_addr], cert_file.clone(), key_file.clone())
         } else {
@@ -353,7 +353,7 @@ impl ClusteredAgent {
         };
 
         #[cfg(feature = "mqtt-bridge")]
-        if !self.use_direct_quic {
+        if !self.quic.direct {
             return self
                 .connect_mqtt_transport(
                     &transport,
@@ -383,7 +383,7 @@ impl ClusteredAgent {
                 .parse()
                 .map_err(|e| format!("invalid cluster address: {e}"))?;
 
-        let (cert_file, key_file) = match (&self.quic_cert_file, &self.quic_key_file) {
+        let (cert_file, key_file) = match (&self.quic.cert_file, &self.quic.key_file) {
             (Some(c), Some(k)) => (c.clone(), k.clone()),
             _ => return Err("QUIC cert and key files required for direct QUIC mode".into()),
         };
@@ -489,7 +489,7 @@ impl ClusteredAgent {
     pub(super) async fn take_local_publish_receiver(
         &self,
     ) -> Option<flume::Receiver<crate::cluster::LocalPublishRequest>> {
-        if self.use_direct_quic {
+        if self.quic.direct {
             let ctrl = self.controller.read().await;
             ctrl.transport()
                 .as_quic()

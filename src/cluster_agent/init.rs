@@ -42,7 +42,7 @@ impl ClusteredAgent {
         config: &ClusterConfig,
     ) -> (ClusterTransportKind, flume::Receiver<InboundMessage>) {
         #[cfg(feature = "mqtt-bridge")]
-        if !config.use_direct_quic {
+        if !config.quic.direct {
             #[allow(deprecated)]
             {
                 let mqtt_transport = MqttTransport::new(node_id);
@@ -52,12 +52,12 @@ impl ClusteredAgent {
         }
 
         #[cfg(not(feature = "mqtt-bridge"))]
-        let _ = config.use_direct_quic;
+        let _ = config.quic.direct;
 
         let quic_transport = QuicDirectTransport::new(node_id);
         #[cfg(feature = "dev-insecure")]
-        quic_transport.set_insecure(config.quic_insecure);
-        if let Some(ca_path) = &config.quic_ca_file {
+        quic_transport.set_insecure(config.quic.insecure);
+        if let Some(ca_path) = &config.quic.ca_file {
             quic_transport.set_ca_file(ca_path.clone());
         }
         let inbox_rx = quic_transport.inbox_rx();
@@ -198,11 +198,7 @@ impl ClusteredAgent {
             password_file: config.password_file,
             acl_file: config.acl_file,
             auth_setup: config.auth_setup,
-            use_quic: config.use_quic,
-            #[cfg(feature = "dev-insecure")]
-            quic_insecure: config.quic_insecure,
-            quic_cert_file: config.quic_cert_file.clone(),
-            quic_key_file: config.quic_key_file.clone(),
+            quic: config.quic,
             bridge_out_only: config.bridge_out_only,
             cluster_port_offset: config.cluster_port_offset,
             bridge_executor: None,
@@ -210,7 +206,6 @@ impl ClusteredAgent {
             tx_tick: Some(tx_tick),
             rx_main_queue: Some(rx_main_queue),
             rx_batch: Some(rx_batch),
-            use_direct_quic: config.use_direct_quic,
             ws_bind_address: config.ws_bind_address,
             http_config: config.http_config,
         })

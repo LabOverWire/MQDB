@@ -1,4 +1,4 @@
-use super::ClusterConfig;
+use super::{ClusterConfig, QuicConfig};
 use crate::config::DurabilityMode;
 use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, RateLimitConfig};
 use std::net::SocketAddr;
@@ -19,14 +19,16 @@ impl ClusterConfig {
             password_file: None,
             acl_file: None,
             auth_setup: crate::auth_config::AuthSetupConfig::default(),
-            use_quic: true,
-            #[cfg(feature = "dev-insecure")]
-            quic_insecure: false,
-            quic_cert_file: None,
-            quic_key_file: None,
-            quic_ca_file: None,
+            quic: QuicConfig {
+                enabled: true,
+                #[cfg(feature = "dev-insecure")]
+                insecure: false,
+                cert_file: None,
+                key_file: None,
+                ca_file: None,
+                direct: true,
+            },
             bridge_out_only: false,
-            use_direct_quic: true,
             ws_bind_address: None,
             http_config: None,
         }
@@ -123,27 +125,27 @@ impl ClusterConfig {
 
     #[must_use]
     pub fn with_quic(mut self, enabled: bool) -> Self {
-        self.use_quic = enabled;
+        self.quic.enabled = enabled;
         self
     }
 
     #[cfg(feature = "dev-insecure")]
     #[must_use]
     pub fn with_quic_insecure(mut self, insecure: bool) -> Self {
-        self.quic_insecure = insecure;
+        self.quic.insecure = insecure;
         self
     }
 
     #[must_use]
     pub fn with_quic_certs(mut self, cert_file: PathBuf, key_file: PathBuf) -> Self {
-        self.quic_cert_file = Some(cert_file);
-        self.quic_key_file = Some(key_file);
+        self.quic.cert_file = Some(cert_file);
+        self.quic.key_file = Some(key_file);
         self
     }
 
     #[must_use]
     pub fn with_quic_ca(mut self, ca_file: PathBuf) -> Self {
-        self.quic_ca_file = Some(ca_file);
+        self.quic.ca_file = Some(ca_file);
         self
     }
 
@@ -161,7 +163,7 @@ impl ClusterConfig {
 
     #[must_use]
     pub fn with_direct_quic(mut self, use_direct_quic: bool) -> Self {
-        self.use_direct_quic = use_direct_quic;
+        self.quic.direct = use_direct_quic;
         self
     }
 
