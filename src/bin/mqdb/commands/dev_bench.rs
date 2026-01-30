@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use mqtt5::client::MqttClient;
@@ -983,7 +983,9 @@ pub(crate) fn cmd_dev_profile(
     Ok(())
 }
 
-pub(crate) fn cmd_dev_baseline(action: DevBaselineAction) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cmd_dev_baseline(
+    action: DevBaselineAction,
+) -> Result<(), Box<dyn std::error::Error>> {
     let baselines_dir = PathBuf::from(".claude/benchmarks/baselines");
 
     match action {

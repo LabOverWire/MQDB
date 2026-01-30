@@ -4,7 +4,9 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub(crate) async fn connect_client(conn: &ConnectionArgs) -> Result<MqttClient, Box<dyn std::error::Error>> {
+pub(crate) async fn connect_client(
+    conn: &ConnectionArgs,
+) -> Result<MqttClient, Box<dyn std::error::Error>> {
     let client = MqttClient::new("mqdb-cli");
 
     if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {

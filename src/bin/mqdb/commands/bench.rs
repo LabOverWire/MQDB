@@ -58,7 +58,9 @@ impl BenchMetrics {
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss
 )]
-pub(crate) async fn cmd_bench_pubsub(args: BenchPubsubArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_bench_pubsub(
+    args: BenchPubsubArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
 

@@ -1,6 +1,6 @@
 use super::*;
-use bebytes::BeBytes;
 use crate::cluster::{Epoch, NodeId, PartitionId};
+use bebytes::BeBytes;
 
 #[test]
 fn heartbeat_bitmap_operations() {
@@ -383,8 +383,7 @@ fn unique_reserve_response_roundtrip() {
 
 #[test]
 fn unique_commit_request_roundtrip() {
-    let req =
-        UniqueCommitRequest::create(999, "users", "email", b"test@example.com", "req-abc");
+    let req = UniqueCommitRequest::create(999, "users", "email", b"test@example.com", "req-abc");
 
     let bytes = req.to_be_bytes();
     let (decoded, _) = UniqueCommitRequest::try_from_be_bytes(&bytes).unwrap();

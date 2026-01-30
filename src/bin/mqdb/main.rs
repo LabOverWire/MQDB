@@ -4,11 +4,13 @@ mod common;
 
 use cli_types::{
     AclAction, AgentAction, BackupAction, BenchAction, Cli, ClusterAction, Commands,
-    ConsumerGroupAction, ConstraintAction, DbAction, DevAction, SchemaAction,
+    ConstraintAction, ConsumerGroupAction, DbAction, DevAction, SchemaAction,
 };
 use commands::agent::{AgentStartArgs, cmd_agent_start, cmd_agent_status};
 use commands::bench::{BenchDbArgs, BenchPubsubArgs, cmd_bench_db, cmd_bench_pubsub};
-use commands::cluster::{ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status};
+use commands::cluster::{
+    ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status,
+};
 use commands::crud::{
     cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list, cmd_create,
     cmd_delete, cmd_list, cmd_read, cmd_restore, cmd_schema_get, cmd_schema_set, cmd_subscribe,
@@ -252,7 +254,10 @@ async fn dispatch_consumer_group(
             Box::pin(commands::consumer::cmd_consumer_group_list(conn, format)).await
         }
         ConsumerGroupAction::Show { name, conn, format } => {
-            Box::pin(commands::consumer::cmd_consumer_group_show(name, conn, format)).await
+            Box::pin(commands::consumer::cmd_consumer_group_show(
+                name, conn, format,
+            ))
+            .await
         }
     }
 }
@@ -264,7 +269,12 @@ async fn dispatch_db(action: DbAction) -> Result<(), Box<dyn std::error::Error>>
             entity,
             data,
             conn,
-        } => Box::pin(commands::consumer::cmd_db_create(partition, entity, data, conn)).await,
+        } => {
+            Box::pin(commands::consumer::cmd_db_create(
+                partition, entity, data, conn,
+            ))
+            .await
+        }
         DbAction::Read {
             partition,
             entity,
@@ -277,13 +287,23 @@ async fn dispatch_db(action: DbAction) -> Result<(), Box<dyn std::error::Error>>
             id,
             data,
             conn,
-        } => Box::pin(commands::consumer::cmd_db_update(partition, entity, id, data, conn)).await,
+        } => {
+            Box::pin(commands::consumer::cmd_db_update(
+                partition, entity, id, data, conn,
+            ))
+            .await
+        }
         DbAction::Delete {
             partition,
             entity,
             id,
             conn,
-        } => Box::pin(commands::consumer::cmd_db_delete(partition, entity, id, conn)).await,
+        } => {
+            Box::pin(commands::consumer::cmd_db_delete(
+                partition, entity, id, conn,
+            ))
+            .await
+        }
     }
 }
 
@@ -348,7 +368,12 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             output,
             baseline,
             db,
-        } => Box::pin(commands::dev_bench::cmd_dev_bench(scenario, output, baseline, &db)).await?,
+        } => {
+            Box::pin(commands::dev_bench::cmd_dev_bench(
+                scenario, output, baseline, &db,
+            ))
+            .await?;
+        }
         DevAction::Profile {
             scenario,
             tool,

@@ -1,5 +1,7 @@
 use crate::cli_types::{ConnectionArgs, OutputFormat, SubscriptionModeArg};
-use crate::common::{connect_client, execute_request, matches_filters, output_response, parse_filters};
+use crate::common::{
+    connect_client, execute_request, matches_filters, output_response, parse_filters,
+};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -243,7 +245,9 @@ pub(crate) async fn cmd_backup_create(
     Ok(())
 }
 
-pub(crate) async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_backup_list(
+    conn: &ConnectionArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/backup/list";
     let payload = json!({});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
@@ -273,7 +277,10 @@ pub(crate) async fn cmd_backup_list(conn: &ConnectionArgs) -> Result<(), Box<dyn
     Ok(())
 }
 
-pub(crate) async fn cmd_restore(name: &str, conn: &ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_restore(
+    name: &str,
+    conn: &ConnectionArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$DB/_admin/restore";
     let payload = json!({"name": name});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;

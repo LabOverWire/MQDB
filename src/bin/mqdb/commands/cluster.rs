@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use mqdb::{ClusterConfig, ClusteredAgent, PeerConfig};
 use serde_json::json;
 
+use super::agent::{build_auth_setup_config, build_http_config};
 use crate::cli_types::{AuthArgs, ConnectionArgs, DurabilityArg, OAuthArgs, OutputFormat};
 use crate::common::{execute_request, output_response};
-use super::agent::{build_auth_setup_config, build_http_config};
 
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ClusterStartArgs {
@@ -32,7 +32,9 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) oauth: OAuthArgs,
 }
 
-pub(crate) async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_cluster_start(
+    args: ClusterStartArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb::config::DurabilityMode;
 
     let peer_configs = parse_peer_configs(&args.peers)?;
@@ -95,7 +97,9 @@ pub(crate) async fn cmd_cluster_start(args: ClusterStartArgs) -> Result<(), Box<
     Ok(())
 }
 
-pub(crate) async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_cluster_rebalance(
+    conn: ConnectionArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$SYS/mqdb/cluster/rebalance";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
 
@@ -123,7 +127,9 @@ pub(crate) async fn cmd_cluster_rebalance(conn: ConnectionArgs) -> Result<(), Bo
     Ok(())
 }
 
-pub(crate) async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn cmd_cluster_status(
+    conn: ConnectionArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
     let topic = "$SYS/mqdb/cluster/status";
     let response = Box::pin(execute_request(&conn, topic, json!({}))).await?;
 
@@ -195,8 +201,7 @@ pub(crate) async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<d
     }
 
     if let Some(partitions) = data.get("partitions").and_then(serde_json::Value::as_array) {
-        let mut primary_counts: HashMap<u64, usize> =
-            HashMap::new();
+        let mut primary_counts: HashMap<u64, usize> = HashMap::new();
         let mut with_replicas = 0;
 
         for p in partitions {
@@ -232,7 +237,9 @@ pub(crate) async fn cmd_cluster_status(conn: ConnectionArgs) -> Result<(), Box<d
     Ok(())
 }
 
-pub(crate) fn parse_peer_configs(peers: &[String]) -> Result<Vec<PeerConfig>, Box<dyn std::error::Error>> {
+pub(crate) fn parse_peer_configs(
+    peers: &[String],
+) -> Result<Vec<PeerConfig>, Box<dyn std::error::Error>> {
     peers
         .iter()
         .map(|peer| {
