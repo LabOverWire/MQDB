@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     #[error("storage error: {0}")]
     Storage(#[from] fjall::Error),
 

@@ -1,10 +1,10 @@
 mod backend;
-#[cfg(feature = "native")]
+#[cfg(feature = "agent")]
 mod fjall_backend;
 mod memory_backend;
 
 pub use backend::{AsyncBatchOperations, AsyncStorageBackend, BatchOperations, StorageBackend};
-#[cfg(feature = "native")]
+#[cfg(feature = "agent")]
 pub use fjall_backend::FjallBackend;
 pub use memory_backend::MemoryBackend;
 
@@ -18,7 +18,7 @@ pub struct Storage {
 impl Storage {
     /// # Errors
     /// Returns an error if the storage backend fails to open.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     pub fn open<P: AsRef<std::path::Path>>(
         path: P,
         durability: crate::config::DurabilityMode,

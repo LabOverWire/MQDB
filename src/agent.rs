@@ -21,9 +21,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 #[cfg(feature = "opentelemetry")]
 use mqtt5::telemetry::propagation;
 
-const BROKER_MAX_CLIENTS: usize = 10_000;
-const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
-const SESSION_EXPIRY_SECS: u64 = 3600;
+use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
 
 pub use crate::protocol::{
     AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic,

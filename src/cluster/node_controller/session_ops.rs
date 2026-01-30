@@ -44,7 +44,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns an error if this node is not the primary for the session partition or if there are too many pending writes.
-    #[cfg(feature = "native")]
+    #[cfg(feature = "cluster")]
     pub async fn create_session_quorum(
         &mut self,
         client_id: &str,

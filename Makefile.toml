@@ -25,6 +25,13 @@ echo "Testing:"
 echo "  cargo make test          Run all tests"
 echo "  cargo make test-verbose  Run tests with output"
 echo "  cargo make ci            CI pipeline (format-check + clippy + test)"
+echo "  cargo make test-e2e      Run E2E cluster tests"
+echo "  cargo make ci-full       CI + E2E tests"
+echo ""
+echo "WASM:"
+echo "  cargo make wasm-build    Build WASM package (pkg/)"
+echo "  cargo make wasm-test     Run WASM tests (Node.js)"
+echo "  cargo make ci-wasm       WASM CI (build + test)"
 echo ""
 echo "Benchmarking:"
 echo "  cargo make bench-pubsub  Run pub/sub benchmark"
@@ -173,3 +180,30 @@ args = ["build", "--target", "wasm32-unknown-unknown", "--release", "--manifest-
 description = "Generate JS bindings"
 command = "wasm-bindgen"
 args = ["--target", "web", "--out-dir", "crates/mqdb-wasm/pkg", "crates/mqdb-wasm/target/wasm32-unknown-unknown/release/mqdb_wasm.wasm"]
+
+[tasks.test-e2e]
+description = "Run E2E cluster tests (requires release build)"
+dependencies = ["build-release"]
+script = '''
+./target/release/mqdb dev start-cluster --nodes 3 --clean
+sleep 3
+./target/release/mqdb dev test --all
+RESULT=$?
+./target/release/mqdb dev kill
+exit $RESULT
+'''
+
+[tasks.ci-full]
+description = "Full CI: format-check + clippy + test + E2E"
+dependencies = ["ci", "test-e2e"]
+
+[tasks.wasm-test]
+description = "Run WASM tests in Node.js"
+script = '''
+cd crates/mqdb-wasm
+wasm-pack test --node
+'''
+
+[tasks.ci-wasm]
+description = "WASM CI: build + test"
+dependencies = ["wasm-build", "wasm-test"]

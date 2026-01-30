@@ -32,9 +32,36 @@ use tokio::sync::{RwLock, broadcast, oneshot, watch};
 use tokio::time::interval;
 use tracing::{debug, info, warn};
 
-const BROKER_MAX_CLIENTS: usize = 10_000;
-const BROKER_MAX_PACKET_SIZE: usize = 10 * 1024 * 1024;
-const SESSION_EXPIRY_SECS: u64 = 3600;
+use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
+
+#[derive(Debug)]
+pub enum ClusterInitError {
+    InvalidNodeId(u16),
+    StorageOpen { path: PathBuf, source: crate::Error },
+    RaftInit(crate::Error),
+}
+
+impl std::fmt::Display for ClusterInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidNodeId(id) => write!(f, "invalid node_id {id}: must be 1-65535"),
+            Self::StorageOpen { path, source } => {
+                write!(f, "failed to open storage at {}: {source}", path.display())
+            }
+            Self::RaftInit(e) => write!(f, "failed to initialize raft: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ClusterInitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::StorageOpen { source, .. } | Self::RaftInit(source) => Some(source),
+            Self::InvalidNodeId(_) => None,
+        }
+    }
+}
+
 const CLEANUP_INTERVAL_SECS: u64 = 3600;
 const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
 const RETAINED_SYNC_CLEANUP_INTERVAL_SECS: u64 = 30;
@@ -437,15 +464,15 @@ pub struct ClusteredAgent {
 impl ClusteredAgent {
     fn open_stores_backend(
         config: &ClusterConfig,
-    ) -> Result<Option<Arc<dyn crate::storage::StorageBackend>>, String> {
+    ) -> Result<Option<Arc<dyn crate::storage::StorageBackend>>, ClusterInitError> {
         if config.persist_stores {
             let stores_path = config.db_path.join("stores");
             Ok(Some(Arc::new(
                 FjallBackend::open(&stores_path, config.stores_durability).map_err(|e| {
-                    format!(
-                        "failed to open stores storage at {}: {e}",
-                        stores_path.display()
-                    )
+                    ClusterInitError::StorageOpen {
+                        path: stores_path.clone(),
+                        source: e,
+                    }
                 })?,
             )))
         } else {
@@ -478,18 +505,18 @@ impl ClusteredAgent {
         node_id: NodeId,
         db_path: &std::path::Path,
         transport: ClusterTransportKind,
-    ) -> Result<RaftCoordinator<ClusterTransportKind>, String> {
+    ) -> Result<RaftCoordinator<ClusterTransportKind>, ClusterInitError> {
         let raft_path = db_path.join("raft");
         let raft_backend = Arc::new(
             FjallBackend::open(&raft_path, DurabilityMode::Immediate).map_err(|e| {
-                format!(
-                    "failed to open raft storage at {}: {e}",
-                    raft_path.display()
-                )
+                ClusterInitError::StorageOpen {
+                    path: raft_path.clone(),
+                    source: e,
+                }
             })?,
         );
         RaftCoordinator::new_with_storage(node_id, transport, RaftConfig::default(), raft_backend)
-            .map_err(|e| format!("failed to initialize raft coordinator: {e}"))
+            .map_err(ClusterInitError::RaftInit)
     }
 
     fn spawn_message_processor(
@@ -522,9 +549,9 @@ impl ClusteredAgent {
 
     /// # Errors
     /// Returns an error if the node ID is invalid (must be 1-65535) or storage fails to open.
-    pub fn new(config: ClusterConfig) -> Result<Self, String> {
-        let node_id =
-            NodeId::validated(config.node_id).ok_or("invalid node_id: must be 1-65535")?;
+    pub fn new(config: ClusterConfig) -> Result<Self, ClusterInitError> {
+        let node_id = NodeId::validated(config.node_id)
+            .ok_or(ClusterInitError::InvalidNodeId(config.node_id))?;
         let stores_backend = Self::open_stores_backend(&config)?;
 
         let (tx_raft_messages, rx_raft_messages) = flume::bounded(RAFT_CHANNEL_CAPACITY);

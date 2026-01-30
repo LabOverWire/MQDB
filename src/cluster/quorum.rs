@@ -1,7 +1,7 @@
 use super::protocol::{AckStatus, ReplicationAck};
 use super::{Epoch, NodeId};
 use std::collections::HashSet;
-#[cfg(feature = "native")]
+#[cfg(feature = "agent")]
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub struct QuorumTracker {
     failed_nodes: HashSet<u16>,
     stale_epoch_seen: bool,
     highest_epoch_seen: Epoch,
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     completion_tx: Option<oneshot::Sender<QuorumResult>>,
 }
 
@@ -57,12 +57,12 @@ impl QuorumTracker {
             failed_nodes: HashSet::new(),
             stale_epoch_seen: false,
             highest_epoch_seen: epoch,
-            #[cfg(feature = "native")]
+            #[cfg(feature = "agent")]
             completion_tx: None,
         }
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     #[must_use]
     pub fn with_completion(
         sequence: u64,
@@ -86,7 +86,7 @@ impl QuorumTracker {
         (tracker, rx)
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     pub fn signal_completion(&mut self) {
         if let Some(tx) = self.completion_tx.take() {
             let _ = tx.send(self.current_result());
@@ -235,7 +235,7 @@ impl PendingWrites {
             if self.trackers[i].is_complete() {
                 let mut tracker = self.trackers.swap_remove(i);
                 let result = tracker.current_result();
-                #[cfg(feature = "native")]
+                #[cfg(feature = "agent")]
                 tracker.signal_completion();
                 completed.push((tracker.sequence(), result));
             } else {

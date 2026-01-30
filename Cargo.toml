@@ -40,17 +40,28 @@ jsonwebtoken = { version = "9.3", optional = true }
 
 [features]
 default = ["native"]
-native = [
+native = ["agent", "cluster", "http-api"]
+
+agent = [
     "dep:clap",
     "dep:comfy-table",
     "dep:fjall",
     "dep:mqtt5",
     "dep:tokio",
     "dep:tracing-subscriber",
+    "dep:lru",
+]
+
+cluster = [
+    "agent",
     "dep:quinn",
     "dep:rustls",
     "dep:rustls-pemfile",
     "dep:rustls-native-certs",
+]
+
+http-api = [
+    "agent",
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
@@ -58,9 +69,9 @@ native = [
     "dep:reqwest",
     "dep:ring",
     "dep:base64",
-    "dep:lru",
     "dep:jsonwebtoken",
 ]
+
 dev-insecure = []
 wasm = [
     "dep:web-time",

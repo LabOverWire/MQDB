@@ -91,7 +91,7 @@ pub(crate) async fn cmd_cluster_start(
         config = config.with_http_config(http_config);
     }
 
-    let mut agent = ClusteredAgent::new(config).map_err(|e| e.clone())?;
+    let mut agent = ClusteredAgent::new(config)?;
     Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
 
     Ok(())

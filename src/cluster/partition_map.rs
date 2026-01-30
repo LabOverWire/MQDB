@@ -144,7 +144,7 @@ impl PartitionMap {
         PartitionId::all().any(|p| self.role_for(p, node) != PartitionRole::None)
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     pub fn apply_update(&mut self, update: &super::raft::PartitionUpdate) -> bool {
         let Some(partition) = PartitionId::new(u16::from(update.partition)) else {
             return false;
