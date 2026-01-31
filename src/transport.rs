@@ -184,6 +184,7 @@ mod execute {
                 },
                 Request::Update { entity, id, fields } => {
                     if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
                         && let Some(owner_field) = ownership.owner_field(&entity)
                         && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
                     {
@@ -196,6 +197,7 @@ mod execute {
                 }
                 Request::Delete { entity, id } => {
                     if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
                         && let Some(owner_field) = ownership.owner_field(&entity)
                         && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
                     {
@@ -215,6 +217,7 @@ mod execute {
                     projection,
                 } => {
                     if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
                         && let Some(owner_field) = ownership.owner_field(&entity)
                     {
                         filters.push(crate::Filter::new(

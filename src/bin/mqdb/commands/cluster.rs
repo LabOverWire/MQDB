@@ -92,8 +92,10 @@ pub(crate) async fn cmd_cluster_start(
         config = config.with_http_config(http_config);
     }
     if let Some(ownership_spec) = args.ownership {
+        let admin_set = args.auth.admin_users.iter().cloned().collect();
         let ownership = mqdb::OwnershipConfig::parse(&ownership_spec)
-            .map_err(|e| format!("invalid --ownership: {e}"))?;
+            .map_err(|e| format!("invalid --ownership: {e}"))?
+            .with_admin_users(admin_set);
         config = config.with_ownership(ownership);
     }
 

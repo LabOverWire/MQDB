@@ -143,6 +143,17 @@ fn ownership_config(entity: &str, field: &str) -> Arc<OwnershipConfig> {
     Arc::new(OwnershipConfig::new(fields))
 }
 
+fn ownership_config_with_admins(
+    entity: &str,
+    field: &str,
+    admins: &[&str],
+) -> Arc<OwnershipConfig> {
+    let mut fields = HashMap::new();
+    fields.insert(entity.to_string(), field.to_string());
+    let admin_set = admins.iter().map(|s| (*s).to_string()).collect();
+    Arc::new(OwnershipConfig::new(fields).with_admin_users(admin_set))
+}
+
 fn parse_json_response(payload: &[u8]) -> serde_json::Value {
     serde_json::from_slice(payload).unwrap_or(serde_json::Value::Null)
 }
@@ -589,4 +600,127 @@ async fn json_update_no_ownership_config_allows_any_sender() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn admin_bypasses_ownership_on_update() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config_with_admins("diagrams", "userId", &["admin"]);
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data = serde_json::json!({"userId": "alice", "title": "Alice's"});
+    ctrl.db_create(
+        "diagrams",
+        "d-adm1",
+        &serde_json::to_vec(&data).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+
+    let update_payload =
+        serde_json::to_vec(&serde_json::json!({"title": "Admin Override"})).unwrap();
+    let topic = "$DB/diagrams/d-adm1/update";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &update_payload,
+            Some("$DB/_resp/c1"),
+            None,
+            Some("admin"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["title"], "Admin Override");
+}
+
+#[tokio::test]
+async fn admin_bypasses_ownership_on_delete() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config_with_admins("diagrams", "userId", &["admin"]);
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data = serde_json::json!({"userId": "alice", "title": "Deletable"});
+    ctrl.db_create(
+        "diagrams",
+        "d-adm2",
+        &serde_json::to_vec(&data).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+
+    let topic = "$DB/diagrams/d-adm2/delete";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &[],
+            Some("$DB/_resp/c1"),
+            None,
+            Some("admin"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["deleted"], true);
+}
+
+#[tokio::test]
+async fn admin_sees_all_records_on_list() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config_with_admins("diagrams", "userId", &["admin"]);
+    let handler = DbRequestHandler::new(node1).with_ownership(ownership);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let alice = serde_json::json!({"userId": "alice", "title": "Alice's"});
+    let bob = serde_json::json!({"userId": "bob", "title": "Bob's"});
+    ctrl.db_create(
+        "diagrams",
+        "d-adm3",
+        &serde_json::to_vec(&alice).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+    ctrl.db_create(
+        "diagrams",
+        "d-adm4",
+        &serde_json::to_vec(&bob).unwrap(),
+        1001,
+    )
+    .await
+    .unwrap();
+
+    let topic = "$DB/diagrams/list";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            b"{}",
+            Some("$DB/_resp/c1"),
+            None,
+            Some("admin"),
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    let items = json["data"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
 }

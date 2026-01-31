@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
 pub struct OwnershipConfig {
     pub entity_owner_fields: HashMap<String, String>,
+    admin_users: HashSet<String>,
 }
 
 impl OwnershipConfig {
@@ -12,6 +13,7 @@ impl OwnershipConfig {
     pub fn new(entity_owner_fields: HashMap<String, String>) -> Self {
         Self {
             entity_owner_fields,
+            admin_users: HashSet::new(),
         }
     }
 
@@ -34,12 +36,24 @@ impl OwnershipConfig {
         }
         Ok(Self {
             entity_owner_fields: fields,
+            admin_users: HashSet::new(),
         })
+    }
+
+    #[must_use]
+    pub fn with_admin_users(mut self, users: HashSet<String>) -> Self {
+        self.admin_users = users;
+        self
     }
 
     #[must_use]
     pub fn owner_field(&self, entity: &str) -> Option<&str> {
         self.entity_owner_fields.get(entity).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn is_admin(&self, user: &str) -> bool {
+        self.admin_users.contains(user)
     }
 
     #[must_use]

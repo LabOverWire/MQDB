@@ -831,6 +831,64 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
         failed += 1;
     }
 
+    let list_admin = Command::new(&exe)
+        .args([
+            "list", &entity, "--broker", broker, "--user", "admin", "--pass", "admin", "--format",
+            "json",
+        ])
+        .output();
+
+    let admin_count = list_admin
+        .as_ref()
+        .ok()
+        .and_then(|o| {
+            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&o.stdout)).ok()
+        })
+        .and_then(|v| v["data"].as_array().map(Vec::len))
+        .unwrap_or(0);
+
+    if admin_count == 1 {
+        println!("  List as admin (sees all): ✓");
+        passed += 1;
+    } else {
+        println!("  List as admin (sees all): ✗ (got {admin_count})");
+        failed += 1;
+    }
+
+    let update_admin = Command::new(&exe)
+        .args([
+            "update",
+            &entity,
+            &id,
+            "-d",
+            r#"{"title": "Admin Override"}"#,
+            "--broker",
+            broker,
+            "--user",
+            "admin",
+            "--pass",
+            "admin",
+            "--format",
+            "json",
+        ])
+        .output();
+
+    let admin_update_ok = update_admin
+        .as_ref()
+        .ok()
+        .is_some_and(|o| o.status.success());
+
+    if admin_update_ok {
+        println!("  Update as admin (bypass): ✓");
+        passed += 1;
+    } else {
+        println!("  Update as admin (bypass): ✗");
+        if let Ok(o) = &update_admin {
+            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
+        }
+        failed += 1;
+    }
+
     let update_alice = Command::new(&exe)
         .args([
             "update",

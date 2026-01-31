@@ -46,10 +46,8 @@ pub(crate) fn cmd_dev_start_cluster(
             "admin",
         ]);
 
-        if let Some(passwd_path) = passwd {
-            if let Some(s) = passwd_path.to_str() {
-                cmd.args(["--passwd", s]);
-            }
+        if let Some(s) = passwd.and_then(|p| p.to_str()) {
+            cmd.args(["--passwd", s]);
         }
 
         if let Some(ownership_spec) = ownership {

@@ -46,8 +46,10 @@ pub(crate) async fn cmd_agent_start(
         agent = agent.with_ws_bind_address(ws_addr);
     }
     if let Some(ownership_spec) = args.ownership {
+        let admin_set = args.auth.admin_users.iter().cloned().collect();
         let ownership = mqdb::OwnershipConfig::parse(&ownership_spec)
-            .map_err(|e| format!("invalid --ownership: {e}"))?;
+            .map_err(|e| format!("invalid --ownership: {e}"))?
+            .with_admin_users(admin_set);
         agent = agent.with_ownership_config(ownership);
     }
 

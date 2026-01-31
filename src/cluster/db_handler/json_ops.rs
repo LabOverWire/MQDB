@@ -35,6 +35,7 @@ impl DbRequestHandler {
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
                 if let Some(uid) = sender
+                    && !self.ownership.is_admin(uid)
                     && let Some(owner_field) = self.ownership.owner_field(entity)
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
@@ -53,6 +54,7 @@ impl DbRequestHandler {
             }
             DbTopicOperation::JsonDelete { entity, id } => {
                 if let Some(uid) = sender
+                    && !self.ownership.is_admin(uid)
                     && let Some(owner_field) = self.ownership.owner_field(entity)
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
@@ -461,6 +463,7 @@ impl DbRequestHandler {
         };
 
         if let Some(uid) = sender
+            && !self.ownership.is_admin(uid)
             && let Some(owner_field) = self.ownership.owner_field(entity)
         {
             filters.push(crate::Filter::new(
@@ -470,7 +473,9 @@ impl DbRequestHandler {
             ));
         }
 
-        let scatter_payload = if sender.is_some() && self.ownership.owner_field(entity).is_some() {
+        let sender_needs_filter = sender.is_some_and(|uid| !self.ownership.is_admin(uid))
+            && self.ownership.owner_field(entity).is_some();
+        let scatter_payload = if sender_needs_filter {
             let mut data: Value = if payload.is_empty() {
                 json!({})
             } else {
