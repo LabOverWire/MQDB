@@ -599,6 +599,13 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
             .output();
     }
 
+    let ts = std::time::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let entity = format!("test_owned_{ts}");
+    let ownership_spec = format!("{entity}=userId");
+
     let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
     std::thread::sleep(Duration::from_secs(1));
 
@@ -629,7 +636,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
             "--passwd",
             passwd_path,
             "--ownership",
-            "test_owned=userId",
+            &ownership_spec,
         ]);
 
         let peers: Vec<String> = (1..node_id)
@@ -677,11 +684,6 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
     println!("  Authenticated cluster ready!\n");
 
     let broker = "127.0.0.1:1883";
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let entity = format!("test_owned_{ts}");
 
     let create_output = Command::new(&exe)
         .args([
@@ -707,7 +709,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
             let stdout = String::from_utf8_lossy(&o.stdout);
             serde_json::from_str::<serde_json::Value>(&stdout).ok()
         })
-        .and_then(|v| v["data"]["id"].as_str().map(String::from));
+        .and_then(|v| v["id"].as_str().map(String::from));
 
     if id.is_some() {
         println!("  Create as alice: ✓");
