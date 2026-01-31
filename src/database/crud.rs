@@ -13,20 +13,26 @@ impl Database {
         schema_registry.apply_defaults(&entity_name, &mut data)?;
         drop(schema_registry);
 
-        let id = self.generate_id(&entity_name).await?;
-
-        if let Value::Object(ref mut obj) = data {
-            obj.insert("id".to_string(), Value::String(id.clone()));
-
-            if let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
-                    .as_secs();
-                let expires_at = now + ttl_secs;
-                obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
-                obj.remove("ttl_secs");
+        let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
+            client_id.to_string()
+        } else {
+            let generated = self.generate_id(&entity_name).await?;
+            if let Value::Object(ref mut obj) = data {
+                obj.insert("id".to_string(), Value::String(generated.clone()));
             }
+            generated
+        };
+
+        if let Value::Object(ref mut obj) = data
+            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
+                .as_secs();
+            let expires_at = now + ttl_secs;
+            obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
+            obj.remove("ttl_secs");
         }
 
         let schema_registry = self.schema_registry.read().await;

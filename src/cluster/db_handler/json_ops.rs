@@ -107,8 +107,12 @@ impl DbRequestHandler {
             Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
 
-        let partition = controller.pick_partition_for_create();
-        let id = self.generate_id_for_partition(entity, partition, payload);
+        let (partition, id) = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
+            (data_partition(entity, client_id), client_id.to_string())
+        } else {
+            let p = controller.pick_partition_for_create();
+            (p, self.generate_id_for_partition(entity, p, payload))
+        };
 
         if !controller.is_local_partition(partition) {
             return self

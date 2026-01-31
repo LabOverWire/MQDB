@@ -348,7 +348,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
         Self::apply_ttl_expiry(&mut data);
 
-        let id = self.generate_id_for_partition(entity, partition, payload);
+        let id = if let Some(client_id) = data.get("id").and_then(serde_json::Value::as_str) {
+            client_id.to_string()
+        } else {
+            self.generate_id_for_partition(entity, partition, payload)
+        };
         let request_id = uuid::Uuid::new_v4().to_string();
         let now_ms = Self::current_time_ms();
 
