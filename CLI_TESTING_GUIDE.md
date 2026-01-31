@@ -184,7 +184,9 @@ mqdb create products --data '{"name": "Chair", "price": 199, "category": "furnit
 mqdb create products --data '{"name": "Keyboard", "price": 79, "category": "electronics", "stock": 150}'
 ```
 
-> **Note:** IDs are auto-generated (1, 2, 3...). Use the returned IDs in subsequent commands.
+> **Note:** IDs are auto-generated if not provided. To use a client-provided ID, include `"id"` in the payload:
+> `mqdb create products --data '{"id": "my-uuid", "name": "Monitor", "price": 499}'`
+> If no `"id"` field is present, the server generates one (sequential in agent mode, hash-based in cluster mode).
 
 ### Basic List
 

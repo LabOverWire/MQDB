@@ -18,6 +18,7 @@ echo ""
 echo "Building:"
 echo "  cargo make build         Build all targets (debug)"
 echo "  cargo make build-release Build release binary"
+echo "  cargo make install       Install mqdb binary from local codebase"
 echo "  cargo make build-profiling Build with profiling profile"
 echo "  cargo make wasm-build    Build WASM package (pkg/)"
 echo ""
@@ -87,6 +88,11 @@ args = ["build", "--all-targets"]
 description = "Build release binary"
 command = "cargo"
 args = ["build", "--release"]
+
+[tasks.install]
+description = "Install mqdb binary from local codebase"
+command = "cargo"
+args = ["install", "--path", "."]
 
 [tasks.clippy]
 description = "Lint all crates with pedantic warnings"

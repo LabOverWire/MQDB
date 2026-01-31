@@ -336,7 +336,7 @@ agent.run().await?;
 ### MQTT Topic Structure
 
 **CRUD Operations:**
-- `$DB/{entity}/create` - Create entity
+- `$DB/{entity}/create` - Create entity (include `"id"` in payload to use a client-provided ID)
 - `$DB/{entity}/{id}` - Read entity
 - `$DB/{entity}/{id}/update` - Update entity
 - `$DB/{entity}/{id}/delete` - Delete entity
@@ -614,6 +614,7 @@ mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl 
 
 # CRUD operations
 mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
+mqdb create users '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
 mqdb read users 1
 mqdb update users 1 '{"name": "Alice Smith"}'
 mqdb delete users 1

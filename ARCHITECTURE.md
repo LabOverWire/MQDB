@@ -513,7 +513,7 @@ OutboxConfig {
 ```
 db.create("users", json!({...}))
     ↓
-Generate ID (atomic sequence counter)
+Extract client-provided ID from payload, or generate one (atomic sequence counter)
     ↓
 Apply schema defaults (if schema exists)
     ↓
