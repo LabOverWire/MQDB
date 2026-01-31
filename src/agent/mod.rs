@@ -179,8 +179,10 @@ impl MqdbAgent {
             needs_composite,
             service_username.as_ref(),
             service_password.as_ref(),
+            self.auth_setup.password_file.as_deref(),
             &admin_users,
-        )?;
+        )
+        .await?;
 
         info!("MQDB Agent listening on {}", self.bind_address);
 

@@ -208,13 +208,19 @@ impl ClusteredAgent {
             && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
         {
             let primary = broker.auth_provider();
-            let fallback = PasswordAuthProvider::new();
+            let fallback = if let Some(path) = &self.password_file {
+                PasswordAuthProvider::from_file(path)
+                    .await
+                    .map_err(|e| format!("failed to load password file: {e}"))?
+            } else {
+                PasswordAuthProvider::new()
+            };
             fallback
                 .add_user(svc_user.clone(), svc_pass)
                 .map_err(|e| format!("failed to create service account: {e}"))?;
             let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
             broker = broker.with_auth_provider(Arc::new(composite));
-            info!("composite auth provider configured for internal service clients");
+            info!("composite auth provider configured (password file + service account)");
         }
 
         let current_provider = broker.auth_provider();
