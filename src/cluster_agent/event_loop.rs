@@ -26,7 +26,7 @@ impl ClusteredAgent {
             self.configure_broker_with_event_handler(&bridge_configs, use_external_bridge_manager)
                 .await?;
 
-        let broker = self
+        let (broker, auth_providers) = self
             .build_broker(
                 broker_config,
                 needs_composite,
@@ -35,6 +35,7 @@ impl ClusteredAgent {
                 &admin_users,
             )
             .await?;
+        self.auth_providers = auth_providers;
 
         let (broker_handle, _bridge_manager) = self
             .start_broker(broker, &bridge_configs, use_external_bridge_manager)

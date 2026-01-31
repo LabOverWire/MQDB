@@ -1,6 +1,8 @@
 use crate::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::OwnershipConfig;
 use crate::{Database, Response};
+use mqtt5::broker::auth::ComprehensiveAuthProvider;
+use mqtt5::broker::{AclRule, Permission};
 use mqtt5::client::MqttClient;
 use mqtt5::types::Message;
 use serde_json::Value;
@@ -18,6 +20,7 @@ pub(super) async fn handle_message(
     message: Message,
     backup_dir: &Path,
     ownership: &OwnershipConfig,
+    auth_providers: Option<&ComprehensiveAuthProvider>,
 ) {
     let topic = &message.topic;
 
@@ -26,7 +29,7 @@ pub(super) async fn handle_message(
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        handle_admin_operation(db, client, &message, admin_op, backup_dir).await;
+        handle_admin_operation(db, client, &message, admin_op, backup_dir, auth_providers).await;
         return;
     }
 
@@ -109,6 +112,7 @@ async fn handle_admin_operation(
     message: &Message,
     op: AdminOperation,
     backup_dir: &Path,
+    auth_providers: Option<&ComprehensiveAuthProvider>,
 ) {
     let payload: Value = if message.payload.is_empty() {
         Value::Null
@@ -146,6 +150,24 @@ async fn handle_admin_operation(
         AdminOperation::ConsumerGroupList => handle_consumer_group_list(db).await,
         AdminOperation::ConsumerGroupShow { name } => handle_consumer_group_show(db, &name).await,
         AdminOperation::Health => handle_health(db),
+        AdminOperation::UserAdd => handle_user_add(auth_providers, &payload),
+        AdminOperation::UserDelete => handle_user_delete(auth_providers, &payload),
+        AdminOperation::UserList => handle_user_list(auth_providers),
+        AdminOperation::AclRuleAdd => handle_acl_rule_add(auth_providers, &payload).await,
+        AdminOperation::AclRuleRemove => handle_acl_rule_remove(auth_providers, &payload).await,
+        AdminOperation::AclRuleList => handle_acl_rule_list(auth_providers, &payload).await,
+        AdminOperation::AclRoleAdd => handle_acl_role_add(auth_providers, &payload).await,
+        AdminOperation::AclRoleDelete => handle_acl_role_delete(auth_providers, &payload).await,
+        AdminOperation::AclRoleList => handle_acl_role_list(auth_providers).await,
+        AdminOperation::AclAssignmentAssign => {
+            handle_acl_assignment_assign(auth_providers, &payload).await
+        }
+        AdminOperation::AclAssignmentUnassign => {
+            handle_acl_assignment_unassign(auth_providers, &payload).await
+        }
+        AdminOperation::AclAssignmentList => {
+            handle_acl_assignment_list(auth_providers, &payload).await
+        }
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -426,4 +448,276 @@ fn is_valid_backup_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn no_auth_response() -> Response {
+    Response::error(crate::ErrorCode::Forbidden, "authentication not configured")
+}
+
+fn parse_permission(s: &str) -> Option<Permission> {
+    match s {
+        "read" | "subscribe" => Some(Permission::Read),
+        "write" | "publish" => Some(Permission::Write),
+        "readwrite" | "rw" | "all" => Some(Permission::ReadWrite),
+        "deny" | "none" => Some(Permission::Deny),
+        _ => None,
+    }
+}
+
+fn permission_str(p: Permission) -> &'static str {
+    match p {
+        Permission::Read => "read",
+        Permission::Write => "write",
+        Permission::ReadWrite => "readwrite",
+        Permission::Deny => "deny",
+    }
+}
+
+fn handle_user_add(auth: Option<&ComprehensiveAuthProvider>, payload: &Value) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(username) = payload.get("username").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: username");
+    };
+    let Some(password) = payload.get("password").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: password");
+    };
+    if auth.password_provider().has_user(username) {
+        return Response::error(crate::ErrorCode::Conflict, "user already exists");
+    }
+    match auth
+        .password_provider()
+        .add_user(username.to_string(), password)
+    {
+        Ok(()) => Response::ok(json!({"message": "user added"})),
+        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
+    }
+}
+
+fn handle_user_delete(auth: Option<&ComprehensiveAuthProvider>, payload: &Value) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(username) = payload.get("username").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: username");
+    };
+    if !auth.password_provider().has_user(username) {
+        return Response::error(crate::ErrorCode::NotFound, "user not found");
+    }
+    let _ = auth.password_provider().remove_user(username);
+    Response::ok(json!({"message": "user deleted"}))
+}
+
+fn handle_user_list(auth: Option<&ComprehensiveAuthProvider>) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let users = auth.password_provider().list_users();
+    Response::ok(json!(users))
+}
+
+async fn handle_acl_rule_add(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(user) = payload.get("user").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: user");
+    };
+    let Some(topic) = payload.get("topic").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: topic");
+    };
+    let Some(access_str) = payload.get("access").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: access");
+    };
+    let Some(permission) = parse_permission(access_str) else {
+        return Response::error(
+            crate::ErrorCode::BadRequest,
+            format!("invalid access value: {access_str}"),
+        );
+    };
+    let rule = AclRule::new(user.to_string(), topic.to_string(), permission);
+    auth.acl_manager().add_rule(rule).await;
+    Response::ok(json!({"message": "rule added"}))
+}
+
+async fn handle_acl_rule_remove(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(user) = payload.get("user").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: user");
+    };
+    let Some(topic) = payload.get("topic").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: topic");
+    };
+    auth.acl_manager().remove_rule(user, topic).await;
+    Response::ok(json!({"message": "rule removed"}))
+}
+
+async fn handle_acl_rule_list(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let user_filter = payload.get("user").and_then(|v| v.as_str());
+    let rules = if let Some(user) = user_filter {
+        auth.acl_manager().list_user_rules(user).await
+    } else {
+        auth.acl_manager().list_rules().await
+    };
+    let data: Vec<Value> = rules
+        .iter()
+        .map(|r| {
+            json!({
+                "user": r.username,
+                "topic": r.topic_pattern,
+                "access": permission_str(r.permission)
+            })
+        })
+        .collect();
+    Response::ok(json!(data))
+}
+
+async fn handle_acl_role_add(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: role");
+    };
+    auth.acl_manager().add_role(role_name.to_string()).await;
+    if let Some(rules) = payload.get("rules").and_then(|v| v.as_array()) {
+        for rule_val in rules {
+            let Some(topic) = rule_val.get("topic").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(access_str) = rule_val.get("access").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(permission) = parse_permission(access_str) else {
+                continue;
+            };
+            let _ = auth
+                .acl_manager()
+                .add_role_rule(role_name, topic.to_string(), permission)
+                .await;
+        }
+    }
+    Response::ok(json!({"message": "role added"}))
+}
+
+async fn handle_acl_role_delete(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: role");
+    };
+    if !auth.acl_manager().remove_role(role_name).await {
+        return Response::error(crate::ErrorCode::NotFound, "role not found");
+    }
+    Response::ok(json!({"message": "role deleted"}))
+}
+
+async fn handle_acl_role_list(auth: Option<&ComprehensiveAuthProvider>) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let role_names = auth.acl_manager().list_roles().await;
+    let mut roles = serde_json::Map::new();
+    for name in &role_names {
+        if let Some(role) = auth.acl_manager().get_role(name).await {
+            let role_entries: Vec<Value> = role
+                .rules
+                .iter()
+                .map(|r| {
+                    json!({
+                        "topic": r.topic_pattern,
+                        "access": permission_str(r.permission)
+                    })
+                })
+                .collect();
+            roles.insert(name.clone(), json!(role_entries));
+        }
+    }
+    Response::ok(json!(roles))
+}
+
+async fn handle_acl_assignment_assign(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(user) = payload.get("user").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: user");
+    };
+    let Some(role) = payload.get("role").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: role");
+    };
+    match auth.acl_manager().assign_role(user, role).await {
+        Ok(()) => Response::ok(json!({"message": "role assigned"})),
+        Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+    }
+}
+
+async fn handle_acl_assignment_unassign(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(user) = payload.get("user").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: user");
+    };
+    let Some(role) = payload.get("role").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: role");
+    };
+    if !auth.acl_manager().unassign_role(user, role).await {
+        return Response::error(crate::ErrorCode::NotFound, "assignment not found");
+    }
+    Response::ok(json!({"message": "role unassigned"}))
+}
+
+async fn handle_acl_assignment_list(
+    auth: Option<&ComprehensiveAuthProvider>,
+    payload: &Value,
+) -> Response {
+    use serde_json::json;
+    let Some(auth) = auth else {
+        return no_auth_response();
+    };
+    let Some(user) = payload.get("user").and_then(|v| v.as_str()) else {
+        return Response::error(crate::ErrorCode::BadRequest, "missing field: user");
+    };
+    let roles = auth.acl_manager().get_user_roles(user).await;
+    Response::ok(json!(roles))
 }

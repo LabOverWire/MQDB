@@ -209,6 +209,7 @@ impl ClusteredAgent {
             ws_bind_address: config.ws_bind_address,
             http_config: config.http_config,
             ownership: Arc::new(config.ownership),
+            auth_providers: None,
         })
     }
 

@@ -2,13 +2,13 @@ use super::{AdminRequest, ClusterTransportKind, ClusteredAgent};
 use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::QoS;
-use mqtt5::broker::auth::CompositeAuthProvider;
+use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
     ChangeOnlyDeliveryConfig, ClusterListenerConfig, QuicConfig as BrokerQuicConfig,
     StorageBackend, StorageConfig, WebSocketConfig,
 };
-use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
+use mqtt5::broker::{AclManager, BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
@@ -190,6 +190,7 @@ impl ClusteredAgent {
         ))
     }
 
+    #[allow(clippy::type_complexity)]
     pub(super) async fn build_broker(
         &self,
         broker_config: BrokerConfig,
@@ -197,30 +198,61 @@ impl ClusteredAgent {
         service_username: Option<&String>,
         service_password: Option<&String>,
         admin_users: &std::collections::HashSet<String>,
-    ) -> Result<MqttBroker, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<
+        (MqttBroker, Option<Arc<ComprehensiveAuthProvider>>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let broker_config = self.apply_quic_config(broker_config);
         let broker_config = self.apply_ws_config(broker_config);
         let broker_config = self.apply_cluster_listener(broker_config)?;
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
 
-        if needs_composite
-            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
-        {
-            let primary = broker.auth_provider();
-            let fallback = if let Some(path) = &self.password_file {
+        let auth_providers = if self.password_file.is_some() || self.acl_file.is_some() {
+            let pwd = if let Some(path) = &self.password_file {
                 PasswordAuthProvider::from_file(path)
                     .await
                     .map_err(|e| format!("failed to load password file: {e}"))?
             } else {
                 PasswordAuthProvider::new()
             };
-            fallback
-                .add_user(svc_user.clone(), svc_pass)
-                .map_err(|e| format!("failed to create service account: {e}"))?;
-            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
+            let acl = if let Some(path) = &self.acl_file {
+                AclManager::from_file(path)
+                    .await
+                    .map_err(|e| format!("failed to load ACL file: {e}"))?
+            } else {
+                AclManager::allow_all()
+            };
+            Some(Arc::new(ComprehensiveAuthProvider::with_providers(
+                pwd, acl,
+            )))
+        } else {
+            None
+        };
+
+        if needs_composite
+            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
+        {
+            let primary = broker.auth_provider();
+            let fallback: Arc<dyn mqtt5::broker::auth::AuthProvider> =
+                if let Some(ref comprehensive) = auth_providers {
+                    comprehensive
+                        .password_provider()
+                        .add_user(svc_user.clone(), svc_pass)
+                        .map_err(|e| format!("failed to create service account: {e}"))?;
+                    comprehensive.clone()
+                } else {
+                    let fallback = PasswordAuthProvider::new();
+                    fallback
+                        .add_user(svc_user.clone(), svc_pass)
+                        .map_err(|e| format!("failed to create service account: {e}"))?;
+                    Arc::new(fallback)
+                };
+            let composite = CompositeAuthProvider::new(primary, fallback);
             broker = broker.with_auth_provider(Arc::new(composite));
             info!("composite auth provider configured (password file + service account)");
+        } else if let Some(ref comprehensive) = auth_providers {
+            broker = broker.with_auth_provider(comprehensive.clone());
         }
 
         let current_provider = broker.auth_provider();
@@ -237,7 +269,7 @@ impl ClusteredAgent {
             );
         }
 
-        Ok(broker)
+        Ok((broker, auth_providers))
     }
 
     fn apply_quic_config(&self, broker_config: BrokerConfig) -> BrokerConfig {

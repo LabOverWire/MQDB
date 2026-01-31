@@ -1,5 +1,6 @@
 use super::handlers::handle_message;
 use super::{MqdbAgent, connect_mqtt_client, resolve_connect_address};
+use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -14,6 +15,7 @@ impl MqdbAgent {
         bind_addr: SocketAddr,
         handler_username: Option<String>,
         handler_password: Option<String>,
+        auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
     ) -> tokio::task::JoinHandle<()> {
         let db = Arc::clone(&self.db);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -75,7 +77,7 @@ impl MqdbAgent {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         if let Some(message) = msg {
-                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config).await;
+                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, auth_providers.as_deref()).await;
                         } else {
                             debug!("Message channel closed");
                             break;

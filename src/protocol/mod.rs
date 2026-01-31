@@ -55,6 +55,18 @@ pub enum AdminOperation {
     ConsumerGroupList,
     ConsumerGroupShow { name: String },
     Health,
+    UserAdd,
+    UserDelete,
+    UserList,
+    AclRuleAdd,
+    AclRuleRemove,
+    AclRuleList,
+    AclRoleAdd,
+    AclRoleDelete,
+    AclRoleList,
+    AclAssignmentAssign,
+    AclAssignmentUnassign,
+    AclAssignmentList,
 }
 
 type ListOptions = (
@@ -107,6 +119,18 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
         ["consumer-groups", name] => Some(AdminOperation::ConsumerGroupShow {
             name: (*name).to_string(),
         }),
+        ["users", "add"] => Some(AdminOperation::UserAdd),
+        ["users", "delete"] => Some(AdminOperation::UserDelete),
+        ["users", "list"] => Some(AdminOperation::UserList),
+        ["acl", "rules", "add"] => Some(AdminOperation::AclRuleAdd),
+        ["acl", "rules", "remove"] => Some(AdminOperation::AclRuleRemove),
+        ["acl", "rules", "list"] => Some(AdminOperation::AclRuleList),
+        ["acl", "roles", "add"] => Some(AdminOperation::AclRoleAdd),
+        ["acl", "roles", "delete"] => Some(AdminOperation::AclRoleDelete),
+        ["acl", "roles", "list"] => Some(AdminOperation::AclRoleList),
+        ["acl", "assignments", "assign"] => Some(AdminOperation::AclAssignmentAssign),
+        ["acl", "assignments", "unassign"] => Some(AdminOperation::AclAssignmentUnassign),
+        ["acl", "assignments", "list"] => Some(AdminOperation::AclAssignmentList),
         _ => None,
     }
 }

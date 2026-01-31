@@ -174,12 +174,13 @@ impl MqdbAgent {
         self.apply_transport_config(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
-        let mut broker = Self::apply_auth_providers(
+        let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
             needs_composite,
             service_username.as_ref(),
             service_password.as_ref(),
             self.auth_setup.password_file.as_deref(),
+            self.auth_setup.acl_file.as_deref(),
             &admin_users,
         )
         .await?;
@@ -191,6 +192,7 @@ impl MqdbAgent {
             bind_addr,
             service_username.clone(),
             service_password.clone(),
+            auth_providers,
         );
         let event_task = self.spawn_event_task(
             bind_addr,

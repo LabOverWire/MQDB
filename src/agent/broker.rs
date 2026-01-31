@@ -1,9 +1,9 @@
 use super::MqdbAgent;
 use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
 use crate::topic_protection::TopicProtectionAuthProvider;
-use mqtt5::broker::auth::CompositeAuthProvider;
+use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::config::{ChangeOnlyDeliveryConfig, QuicConfig, WebSocketConfig};
-use mqtt5::broker::{BrokerConfig, MqttBroker, PasswordAuthProvider};
+use mqtt5::broker::{AclManager, BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -86,27 +86,57 @@ impl MqdbAgent {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub(super) async fn apply_auth_providers(
         mut broker: MqttBroker,
         needs_composite: bool,
         service_username: Option<&String>,
         service_password: Option<&String>,
         password_file: Option<&std::path::Path>,
+        acl_file: Option<&std::path::Path>,
         admin_users: &HashSet<String>,
-    ) -> Result<MqttBroker, Box<dyn std::error::Error + Send + Sync>> {
-        if needs_composite
-            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
-        {
-            let primary = broker.auth_provider();
-            let fallback = if let Some(path) = password_file {
+    ) -> Result<
+        (MqttBroker, Option<Arc<ComprehensiveAuthProvider>>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let auth_providers = if password_file.is_some() || acl_file.is_some() {
+            let pwd = if let Some(path) = password_file {
                 PasswordAuthProvider::from_file(path).await?
             } else {
                 PasswordAuthProvider::new()
             };
-            fallback.add_user(svc_user.clone(), svc_pass)?;
-            let composite = CompositeAuthProvider::new(primary, Arc::new(fallback));
+            let acl = if let Some(path) = acl_file {
+                AclManager::from_file(path).await?
+            } else {
+                AclManager::allow_all()
+            };
+            Some(Arc::new(ComprehensiveAuthProvider::with_providers(
+                pwd, acl,
+            )))
+        } else {
+            None
+        };
+
+        if needs_composite
+            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
+        {
+            let primary = broker.auth_provider();
+            let fallback: Arc<dyn mqtt5::broker::auth::AuthProvider> =
+                if let Some(ref comprehensive) = auth_providers {
+                    comprehensive
+                        .password_provider()
+                        .add_user(svc_user.clone(), svc_pass)?;
+                    comprehensive.clone()
+                } else {
+                    let fallback = PasswordAuthProvider::new();
+                    fallback.add_user(svc_user.clone(), svc_pass)?;
+                    Arc::new(fallback)
+                };
+            let composite = CompositeAuthProvider::new(primary, fallback);
             broker = broker.with_auth_provider(Arc::new(composite));
             info!("composite auth provider configured (password file + service account)");
+        } else if let Some(ref comprehensive) = auth_providers {
+            broker = broker.with_auth_provider(comprehensive.clone());
         }
 
         let current_provider = broker.auth_provider();
@@ -123,6 +153,6 @@ impl MqdbAgent {
             );
         }
 
-        Ok(broker)
+        Ok((broker, auth_providers))
     }
 }

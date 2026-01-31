@@ -13,6 +13,7 @@ use crate::cluster::{
     RaftAdminCommand, RaftEvent, RaftStatus,
 };
 use crate::config::DurabilityMode;
+use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -147,6 +148,7 @@ pub struct ClusteredAgent {
     ws_bind_address: Option<SocketAddr>,
     http_config: Option<crate::http::HttpServerConfig>,
     ownership: Arc<crate::types::OwnershipConfig>,
+    auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
 }
 
 impl ClusteredAgent {
