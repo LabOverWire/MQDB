@@ -1,21 +1,38 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::helpers::cmd_dev_clean;
+
+fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let path = format!("{db_prefix}-passwd");
+    let _ = std::fs::remove_file(&path);
+    let output = Command::new(exe)
+        .args(["passwd", "admin", "-b", "admin", "-f", &path])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to create dev passwd file: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(PathBuf::from(path))
+}
 
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub(crate) fn cmd_dev_start_cluster(
     nodes: u8,
     clean: bool,
-    quic_cert: &std::path::Path,
-    quic_key: &std::path::Path,
-    quic_ca: &std::path::Path,
+    quic_cert: &Path,
+    quic_key: &Path,
+    quic_ca: &Path,
     no_quic: bool,
     db_prefix: &str,
     bind_host: &str,
     topology: Option<&str>,
     bridge_out: bool,
     no_bridge_out: bool,
-    passwd: Option<&std::path::Path>,
+    passwd: Option<&Path>,
     ownership: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
@@ -25,12 +42,21 @@ pub(crate) fn cmd_dev_start_cluster(
 
     let exe = std::env::current_exe()?;
 
+    let generated_passwd = if passwd.is_none() {
+        Some(ensure_dev_passwd(&exe, db_prefix)?)
+    } else {
+        None
+    };
+    let passwd_path = passwd.unwrap_or_else(|| generated_passwd.as_deref().expect("just created"));
+
     let topology_name = topology.unwrap_or("partial");
     println!("Using {topology_name} mesh topology (bind: {bind_host})");
 
     for node_id in 1..=nodes {
         let port = 1882 + u16::from(node_id);
         let db_path = format!("{db_prefix}-{node_id}");
+
+        let passwd_str = passwd_path.to_str().expect("db_prefix is valid UTF-8");
 
         let mut cmd = Command::new(&exe);
         cmd.args([
@@ -44,11 +70,9 @@ pub(crate) fn cmd_dev_start_cluster(
             &db_path,
             "--admin-users",
             "admin",
+            "--passwd",
+            passwd_str,
         ]);
-
-        if let Some(s) = passwd.and_then(|p| p.to_str()) {
-            cmd.args(["--passwd", s]);
-        }
 
         if let Some(ownership_spec) = ownership {
             cmd.args(["--ownership", ownership_spec]);

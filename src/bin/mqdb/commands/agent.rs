@@ -131,6 +131,18 @@ pub(crate) fn build_auth_setup_config(
     #[cfg(not(feature = "dev-insecure"))]
     let allow_anonymous = false;
 
+    if !auth.admin_users.is_empty()
+        && auth.passwd.is_none()
+        && auth.scram_file.is_none()
+        && jwt_config.is_none()
+        && federated_jwt_config.is_none()
+        && auth.cert_auth_file.is_none()
+    {
+        return Err(
+            "--admin-users requires an authentication method (--passwd, --scram-file, --jwt-algorithm, --federated-jwt-config, or --cert-auth-file)".into()
+        );
+    }
+
     Ok(mqdb::auth_config::AuthSetupConfig {
         password_file: auth.passwd.clone(),
         acl_file: auth.acl.clone(),

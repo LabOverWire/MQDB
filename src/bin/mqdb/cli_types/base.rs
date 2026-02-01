@@ -215,9 +215,9 @@ pub(crate) enum Commands {
 pub(crate) struct ConnectionArgs {
     #[arg(long, env = "MQDB_BROKER", default_value = "127.0.0.1:1883")]
     pub(crate) broker: String,
-    #[arg(long, env = "MQDB_USER")]
+    #[arg(long, env = "MQDB_USER", requires = "pass")]
     pub(crate) user: Option<String>,
-    #[arg(long, env = "MQDB_PASS")]
+    #[arg(long, env = "MQDB_PASS", requires = "user")]
     pub(crate) pass: Option<String>,
     #[arg(long, default_value = "30")]
     pub(crate) timeout: u64,

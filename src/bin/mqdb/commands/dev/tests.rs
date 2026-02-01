@@ -21,6 +21,10 @@ fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
                     "127.0.0.1",
                     "-p",
                     &port.to_string(),
+                    "-u",
+                    "admin",
+                    "-P",
+                    "admin",
                     "-t",
                     "ping",
                     "-m",
@@ -138,16 +142,8 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
     for (idx, &port) in ports.iter().enumerate() {
         let node = idx + 1;
 
-        let create_output = Command::new(&exe)
-            .args([
-                "create",
-                "test_users",
-                "-d",
-                &format!(r#"{{"name": "User{node}", "node": {node}}}"#),
-                "--broker",
-                &format!("127.0.0.1:{port}"),
-            ])
-            .output();
+        let data = format!(r#"{{"name": "User{node}", "node": {node}}}"#);
+        let create_output = mqdb_cmd(&exe, &["create", "test_users", "-d", &data], port);
 
         let created = create_output.map(|o| o.status.success()).unwrap_or(false);
 
@@ -162,16 +158,8 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
         let read_port = ports[(idx + 1) % ports.len()];
         let read_node = ((idx + 1) % ports.len()) + 1;
 
-        let list_output = Command::new(&exe)
-            .args([
-                "list",
-                "test_users",
-                "-f",
-                &format!("node={node}"),
-                "--broker",
-                &format!("127.0.0.1:{read_port}"),
-            ])
-            .output();
+        let filter = format!("node={node}");
+        let list_output = mqdb_cmd(&exe, &["list", "test_users", "-f", &filter], read_port);
 
         let can_read = list_output
             .map(|o| {
@@ -194,6 +182,13 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
     println!("\nResults: {passed} passed, {failed} failed\n");
 }
 
+fn mqdb_cmd(exe: &std::path::Path, args: &[&str], port: u16) -> std::io::Result<std::process::Output> {
+    let broker = format!("127.0.0.1:{port}");
+    let mut full_args: Vec<&str> = args.to_vec();
+    full_args.extend_from_slice(&["--broker", &broker, "--user", "admin", "--pass", "admin"]);
+    Command::new(exe).args(&full_args).output()
+}
+
 fn run_test_constraints(nodes: u8, ports: &[u16]) {
     println!("=== Unique Constraint Test ({nodes} nodes) ===\n");
 
@@ -208,21 +203,11 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
     let entity = format!("test_products_{ts}");
     let constraint_name = format!("unique_{entity}_sku");
 
-    let add_output = Command::new(&exe)
-        .args([
-            "constraint",
-            "add",
-            &entity,
-            "--unique",
-            "sku",
-            "--name",
-            &constraint_name,
-            "--broker",
-            &format!("127.0.0.1:{}", ports[0]),
-            "--user",
-            "admin",
-        ])
-        .output();
+    let add_output = mqdb_cmd(
+        &exe,
+        &["constraint", "add", &entity, "--unique", "sku", "--name", &constraint_name],
+        ports[0],
+    );
 
     let constraint_added = add_output
         .as_ref()
@@ -248,18 +233,11 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let create1 = Command::new(&exe)
-        .args([
-            "create",
-            &entity,
-            "-d",
-            r#"{"name": "Widget A", "sku": "SKU-001"}"#,
-            "--broker",
-            &format!("127.0.0.1:{}", ports[0]),
-            "--user",
-            "admin",
-        ])
-        .output();
+    let create1 = mqdb_cmd(
+        &exe,
+        &["create", &entity, "-d", r#"{"name": "Widget A", "sku": "SKU-001"}"#],
+        ports[0],
+    );
 
     let first_created = create1.map(|o| o.status.success()).unwrap_or(false);
 
@@ -273,18 +251,11 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
 
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let create_dup = Command::new(&exe)
-        .args([
-            "create",
-            &entity,
-            "-d",
-            r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#,
-            "--broker",
-            &format!("127.0.0.1:{}", ports[0]),
-            "--user",
-            "admin",
-        ])
-        .output();
+    let create_dup = mqdb_cmd(
+        &exe,
+        &["create", &entity, "-d", r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#],
+        ports[0],
+    );
 
     let dup_rejected = create_dup
         .map(|o| {
@@ -334,7 +305,7 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
             "sh",
             "-c",
             &format!(
-                "mosquitto_sub -i '{sub_id}_single' -h 127.0.0.1 -p {sub_port} -t 'sensors/+/temp' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_id}_single' -h 127.0.0.1 -p {pub_port} -t 'sensors/room1/temp' -m 'single_level_ok'; wait"
+                "mosquitto_sub -i '{sub_id}_single' -h 127.0.0.1 -p {sub_port} -u admin -P admin -t 'sensors/+/temp' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_id}_single' -h 127.0.0.1 -p {pub_port} -u admin -P admin -t 'sensors/room1/temp' -m 'single_level_ok'; wait"
             ),
         ])
         .output();
@@ -358,7 +329,7 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
             "sh",
             "-c",
             &format!(
-                "mosquitto_sub -i '{sub_id}_multi' -h 127.0.0.1 -p {sub_port} -t 'home/#' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_id}_multi' -h 127.0.0.1 -p {pub_port} -t 'home/kitchen/oven' -m 'multi_level_ok'; wait"
+                "mosquitto_sub -i '{sub_id}_multi' -h 127.0.0.1 -p {sub_port} -u admin -P admin -t 'home/#' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_id}_multi' -h 127.0.0.1 -p {pub_port} -u admin -P admin -t 'home/kitchen/oven' -m 'multi_level_ok'; wait"
             ),
         ])
         .output();
@@ -399,6 +370,10 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
             "127.0.0.1",
             "-p",
             &pub_port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
             "-t",
             &topic,
             "-m",
@@ -419,6 +394,10 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
             "127.0.0.1",
             "-p",
             &sub_port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
             "-t",
             &topic,
             "-C",
@@ -450,6 +429,10 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
             "127.0.0.1",
             "-p",
             &pub_port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
             "-t",
             &topic,
             "-m",
@@ -486,7 +469,7 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
             "sh",
             "-c",
             &format!(
-                "mosquitto_sub -i '{sub_id}' -h 127.0.0.1 -p {sub_port} -t '{will_topic}' -C 1 & SUB_PID=$!; sleep 2; mosquitto_sub -i '{client_id}' -h 127.0.0.1 -p {connect_port} -t 'dummy/topic' --will-topic '{will_topic}' --will-payload '{will_msg}' --will-qos 1 & sleep 2; kill -9 $!; wait $SUB_PID"
+                "mosquitto_sub -i '{sub_id}' -h 127.0.0.1 -p {sub_port} -u admin -P admin -t '{will_topic}' -C 1 & SUB_PID=$!; sleep 2; mosquitto_sub -i '{client_id}' -h 127.0.0.1 -p {connect_port} -u admin -P admin -t 'dummy/topic' --will-topic '{will_topic}' --will-payload '{will_msg}' --will-qos 1 & sleep 2; kill -9 $!; wait $SUB_PID"
             ),
         ])
         .output();
@@ -520,7 +503,7 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
             "sh",
             "-c",
             &format!(
-                "mosquitto_sub -i '{sub_client_id}' -h 127.0.0.1 -p {sub_port} -t '{topic}' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_client_id}' -h 127.0.0.1 -p {pub_port} -t '{topic}' -m '{msg}'; wait"
+                "mosquitto_sub -i '{sub_client_id}' -h 127.0.0.1 -p {sub_port} -u admin -P admin -t '{topic}' -C 1 & sleep 1.5; mosquitto_pub -i '{pub_client_id}' -h 127.0.0.1 -p {pub_port} -u admin -P admin -t '{topic}' -m '{msg}'; wait"
             ),
         ])
         .output();
