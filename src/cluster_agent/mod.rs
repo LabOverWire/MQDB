@@ -149,6 +149,7 @@ pub struct ClusteredAgent {
     ws_bind_address: Option<SocketAddr>,
     http_config: Option<crate::http::HttpServerConfig>,
     ownership: Arc<crate::types::OwnershipConfig>,
+    scope_config: Arc<crate::types::ScopeConfig>,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
 }
 

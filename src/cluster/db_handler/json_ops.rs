@@ -5,6 +5,7 @@ use super::super::node_controller::NodeController;
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
+use crate::events::ChangeEvent;
 use serde_json::{Value, json};
 
 #[allow(clippy::unused_self)]
@@ -26,6 +27,7 @@ impl DbRequestHandler {
                     payload,
                     response_topic,
                     correlation_data,
+                    sender,
                 )
                 .await
             }
@@ -42,15 +44,30 @@ impl DbRequestHandler {
                 {
                     return Some(err);
                 }
-                self.handle_json_update(
-                    controller,
-                    entity,
-                    id,
-                    payload,
-                    response_topic,
-                    correlation_data,
-                )
-                .await
+                let partition = data_partition(entity, id);
+                if !controller.is_local_partition(partition) {
+                    let forwarded = controller
+                        .forward_json_db_request(
+                            partition,
+                            JsonDbOp::Update,
+                            entity,
+                            Some(id),
+                            payload,
+                            response_topic,
+                            correlation_data,
+                        )
+                        .await;
+                    return if forwarded {
+                        None
+                    } else {
+                        Some(Self::json_error(
+                            503,
+                            "partition not local and forwarding failed",
+                        ))
+                    };
+                }
+                self.handle_json_update(controller, entity, id, payload, sender)
+                    .await
             }
             DbTopicOperation::JsonDelete { entity, id } => {
                 if let Some(uid) = sender
@@ -61,7 +78,29 @@ impl DbRequestHandler {
                 {
                     return Some(err);
                 }
-                self.handle_json_delete(controller, entity, id, response_topic, correlation_data)
+                let partition = data_partition(entity, id);
+                if !controller.is_local_partition(partition) {
+                    let forwarded = controller
+                        .forward_json_db_request(
+                            partition,
+                            JsonDbOp::Delete,
+                            entity,
+                            Some(id),
+                            &[],
+                            response_topic,
+                            correlation_data,
+                        )
+                        .await;
+                    return if forwarded {
+                        None
+                    } else {
+                        Some(Self::json_error(
+                            503,
+                            "partition not local and forwarding failed",
+                        ))
+                    };
+                }
+                self.handle_json_delete(controller, entity, id, sender)
                     .await
             }
             DbTopicOperation::JsonList { entity } => {
@@ -101,6 +140,7 @@ impl DbRequestHandler {
         payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
@@ -127,7 +167,7 @@ impl DbRequestHandler {
                 .await;
         }
 
-        self.execute_local_create(controller, entity, &id, &data, partition)
+        self.execute_local_create(controller, entity, &id, &data, partition, sender)
             .await
     }
 
@@ -169,6 +209,7 @@ impl DbRequestHandler {
         id: &str,
         data: &Value,
         partition: PartitionId,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
         let now_ms = Self::current_time_ms();
@@ -190,6 +231,15 @@ impl DbRequestHandler {
                     controller
                         .commit_unique_constraints(entity, id, data, partition, &request_id, now_ms)
                         .await;
+                    let scope = self.scope_config.resolve_scope(entity, data);
+                    let event = ChangeEvent::create(
+                        entity.to_string(),
+                        db_entity.id_str().to_string(),
+                        data.clone(),
+                    )
+                    .with_sender(sender.map(str::to_string))
+                    .with_scope(scope);
+                    self.publish_change_event(controller, event).await;
                     Self::json_success(entity, db_entity.id_str(), data)
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
@@ -309,39 +359,14 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let updates: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
         };
 
-        let partition = data_partition(entity, id);
-
-        if !controller.is_local_partition(partition) {
-            let forwarded = controller
-                .forward_json_db_request(
-                    partition,
-                    JsonDbOp::Update,
-                    entity,
-                    Some(id),
-                    payload,
-                    response_topic,
-                    correlation_data,
-                )
-                .await;
-            return if forwarded {
-                None
-            } else {
-                Some(Self::json_error(
-                    503,
-                    "partition not local and forwarding failed",
-                ))
-            };
-        }
-
-        self.execute_local_update(controller, entity, id, updates)
+        self.execute_local_update(controller, entity, id, updates, sender)
             .await
     }
 
@@ -351,6 +376,7 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         updates: Value,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let merged_data = match self.merge_with_existing(controller, entity, id, updates) {
             Ok(data) => data,
@@ -362,7 +388,18 @@ impl DbRequestHandler {
 
         Some(
             match controller.db_update(entity, id, &data_bytes, now_ms).await {
-                Ok(db_entity) => Self::json_success(entity, db_entity.id_str(), &merged_data),
+                Ok(db_entity) => {
+                    let scope = self.scope_config.resolve_scope(entity, &merged_data);
+                    let event = ChangeEvent::update(
+                        entity.to_string(),
+                        db_entity.id_str().to_string(),
+                        merged_data.clone(),
+                    )
+                    .with_sender(sender.map(str::to_string))
+                    .with_scope(scope);
+                    self.publish_change_event(controller, event).await;
+                    Self::json_success(entity, db_entity.id_str(), &merged_data)
+                }
                 Err(db::DbDataStoreError::NotFound) => {
                     Self::json_error(404, &format!("entity not found: {entity} id={id}"))
                 }
@@ -404,34 +441,23 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
-        let partition = data_partition(entity, id);
-
-        if !controller.is_local_partition(partition) {
-            let forwarded = controller
-                .forward_json_db_request(
-                    partition,
-                    JsonDbOp::Delete,
-                    entity,
-                    Some(id),
-                    &[],
-                    response_topic,
-                    correlation_data,
-                )
-                .await;
-            if forwarded {
-                return None;
-            }
-            return Some(Self::json_error(
-                503,
-                "partition not local and forwarding failed",
-            ));
-        }
+        let pre_delete_scope = if self.scope_config.is_empty() {
+            None
+        } else {
+            controller
+                .db_get(entity, id)
+                .and_then(|e| serde_json::from_slice::<Value>(&e.data).ok())
+                .and_then(|data| self.scope_config.resolve_scope(entity, &data))
+        };
 
         match controller.db_delete(entity, id).await {
             Ok(_) => {
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string())
+                    .with_sender(sender.map(str::to_string))
+                    .with_scope(pre_delete_scope);
+                self.publish_change_event(controller, event).await;
                 let result = json!({
                     "status": "ok",
                     "id": id,
@@ -529,5 +555,25 @@ impl DbRequestHandler {
         });
 
         Some(serde_json::to_vec(&result).unwrap_or_default())
+    }
+
+    async fn publish_change_event<T: ClusterTransport>(
+        &self,
+        controller: &NodeController<T>,
+        event: ChangeEvent,
+    ) {
+        let topic = event.event_topic(0);
+        match serde_json::to_vec(&event) {
+            Ok(payload) => {
+                tracing::debug!(topic, "publishing change event");
+                controller
+                    .transport()
+                    .queue_local_publish(topic, payload, 1)
+                    .await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to serialize change event");
+            }
+        }
     }
 }

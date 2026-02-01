@@ -110,7 +110,8 @@ impl ClusteredAgent {
     > {
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
-                .with_ownership(Arc::clone(&self.ownership)),
+                .with_ownership(Arc::clone(&self.ownership))
+                .with_scope_config(Arc::clone(&self.scope_config)),
         );
         self.configure_broker(event_handler, bridge_configs, use_external_bridge_manager)
             .await
@@ -513,7 +514,8 @@ impl ClusteredAgent {
     ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>> {
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
-                .with_ownership(Arc::clone(&self.ownership)),
+                .with_ownership(Arc::clone(&self.ownership))
+                .with_scope_config(Arc::clone(&self.scope_config)),
         );
         let synced_retained_topics = event_handler.synced_retained_topics();
 

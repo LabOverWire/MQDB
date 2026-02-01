@@ -129,24 +129,7 @@ impl MqdbAgent {
                     event = event_rx.recv() => {
                         match event {
                             Ok(change_event) => {
-                                let event_type = match change_event.operation {
-                                    crate::Operation::Create => "created",
-                                    crate::Operation::Update => "updated",
-                                    crate::Operation::Delete => "deleted",
-                                };
-
-                                let topic = if let Some((ref scope_entity, ref scope_value)) = change_event.scope {
-                                    if *scope_entity == change_event.entity {
-                                        format!("$DB/{scope_entity}/{scope_value}/events/{event_type}")
-                                    } else {
-                                        format!("$DB/{scope_entity}/{scope_value}/{}/events/{event_type}", change_event.entity)
-                                    }
-                                } else if num_partitions > 0 {
-                                    let partition = change_event.partition(num_partitions);
-                                    format!("$DB/{}/events/p{partition}/{}", change_event.entity, change_event.id)
-                                } else {
-                                    format!("$DB/{}/events/{}", change_event.entity, change_event.id)
-                                };
+                                let topic = change_event.event_topic(num_partitions);
 
                                 let payload = match serde_json::to_vec(&change_event) {
                                     Ok(p) => p,

@@ -8,7 +8,7 @@ use super::NodeId;
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};
 use super::node_controller::NodeController;
 use super::transport::ClusterTransport;
-use crate::types::OwnershipConfig;
+use crate::types::{OwnershipConfig, ScopeConfig};
 use std::sync::Arc;
 
 pub struct DbPublishResponse {
@@ -20,6 +20,7 @@ pub struct DbPublishResponse {
 pub struct DbRequestHandler {
     node_id: NodeId,
     ownership: Arc<OwnershipConfig>,
+    scope_config: Arc<ScopeConfig>,
 }
 
 #[allow(clippy::unused_self)]
@@ -29,12 +30,19 @@ impl DbRequestHandler {
         Self {
             node_id,
             ownership: Arc::new(OwnershipConfig::default()),
+            scope_config: Arc::new(ScopeConfig::default()),
         }
     }
 
     #[must_use]
     pub fn with_ownership(mut self, ownership: Arc<OwnershipConfig>) -> Self {
         self.ownership = ownership;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope_config(mut self, scope_config: Arc<ScopeConfig>) -> Self {
+        self.scope_config = scope_config;
         self
     }
 
@@ -84,6 +92,7 @@ impl std::fmt::Debug for DbRequestHandler {
         f.debug_struct("DbRequestHandler")
             .field("node_id", &self.node_id)
             .field("ownership", &self.ownership)
+            .field("scope_config", &self.scope_config)
             .finish()
     }
 }

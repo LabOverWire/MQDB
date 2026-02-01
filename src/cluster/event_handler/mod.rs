@@ -46,6 +46,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     #[must_use]
+    pub fn with_scope_config(
+        mut self,
+        scope_config: std::sync::Arc<crate::types::ScopeConfig>,
+    ) -> Self {
+        self.db_handler = self.db_handler.with_scope_config(scope_config);
+        self
+    }
+
+    #[must_use]
     pub fn synced_retained_topics(&self) -> Arc<RwLock<HashMap<String, Instant>>> {
         Arc::clone(&self.synced_retained_topics)
     }
