@@ -148,7 +148,13 @@ impl Database {
                 .ok_or_else(|| Error::BackupFailed("entity missing _data field".to_string()))?
                 .clone();
 
-            self.create(entity_name, entity_data).await?;
+            self.create(
+                entity_name,
+                entity_data,
+                None,
+                &crate::types::ScopeConfig::default(),
+            )
+            .await?;
             count += 1;
         }
 

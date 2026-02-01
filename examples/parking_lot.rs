@@ -1,5 +1,6 @@
 use mqdb::{
     Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, OnDeleteAction, Schema,
+    ScopeConfig,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -153,6 +154,8 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
                 "location": format!("Floor 1, Section A, Spot {}", i),
                 "gate_device_id": format!("gate_a{}", i)
             }),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
     }
@@ -166,6 +169,8 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
                 "location": format!("Floor 2, Section B, Spot {}", i),
                 "gate_device_id": format!("gate_b{}", i)
             }),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
     }
@@ -177,6 +182,8 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
             "vehicle_type": "small",
             "owner_name": "Alice Johnson"
         }),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
 
@@ -299,6 +306,8 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
                 "reserved_at": now_timestamp(),
                 "ttl_secs": 900
             }),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
 
@@ -332,6 +341,8 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
         "spots".into(),
         spot_id.clone(),
         json!({"status": "reserved"}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
 
@@ -455,6 +466,8 @@ async fn gate_camera_client(
                 "spot_id": &spot_id,
                 "entry_time": now_timestamp()
             }),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
 
@@ -471,8 +484,14 @@ async fn gate_camera_client(
         }),
     );
 
-    db.update("spots".into(), spot_id, json!({"status": "occupied"}))
-        .await?;
+    db.update(
+        "spots".into(),
+        spot_id,
+        json!({"status": "occupied"}),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
 
     mqtt_publish(
         "gate/a1/status",
@@ -556,6 +575,8 @@ async fn payment_booth_client(
                 "payment_status": "completed",
                 "paid_at": now_timestamp()
             }),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
 
@@ -678,6 +699,8 @@ async fn exit_gate_client(
             "exit_time": now_timestamp(),
             "session_status": "completed"
         }),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
 
@@ -694,6 +717,8 @@ async fn exit_gate_client(
         "spots".into(),
         spot_id.to_string(),
         json!({"status": "available"}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
 

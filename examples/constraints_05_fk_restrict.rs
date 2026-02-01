@@ -1,4 +1,4 @@
-use mqdb::{Database, OnDeleteAction};
+use mqdb::{Database, OnDeleteAction, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -18,17 +18,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating user...");
     let user = json!({"name": "Alice"});
-    let created_user = db.create("users".into(), user).await?;
+    let created_user = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await?;
     let user_id = created_user["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
 
     println!("Creating post by this user...");
     let post = json!({"title": "My Post", "author_id": user_id});
-    db.create("posts".into(), post).await?;
+    db.create("posts".into(), post, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created post\n");
 
     println!("Attempting to delete user (has posts referencing it)...");
-    match db.delete("users".into(), user_id.to_string()).await {
+    match db
+        .delete(
+            "users".into(),
+            user_id.to_string(),
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+    {
         Ok(()) => println!("✗ Should have been prevented!"),
         Err(e) => println!("✓ Deletion prevented: {e}\n"),
     }
@@ -48,11 +59,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .list("posts".into(), vec![], vec![], None, vec![], None)
         .await?;
     let post_id = posts[0]["id"].as_str().unwrap();
-    db.delete("posts".into(), post_id.to_string()).await?;
+    db.delete(
+        "posts".into(),
+        post_id.to_string(),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ Post deleted\n");
 
     println!("Now attempting to delete user (no references)...");
-    db.delete("users".into(), user_id.to_string()).await?;
+    db.delete(
+        "users".into(),
+        user_id.to_string(),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ User deleted successfully\n");
 
     println!("Summary:");

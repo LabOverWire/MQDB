@@ -51,7 +51,9 @@ pub use error::{Error, Result};
 pub use events::{ChangeEvent, Operation};
 pub use schema::{FieldDefinition, FieldType, Schema};
 pub use storage::{BatchWriter, MemoryBackend, Storage, StorageBackend};
-pub use types::{Filter, FilterOp, OwnershipConfig, Pagination, SortDirection, SortOrder};
+pub use types::{
+    Filter, FilterOp, OwnershipConfig, Pagination, ScopeConfig, SortDirection, SortOrder,
+};
 
 #[cfg(feature = "agent")]
 pub use agent::MqdbAgent;

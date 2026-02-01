@@ -1,5 +1,5 @@
 use crate::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
-use crate::types::OwnershipConfig;
+use crate::types::{OwnershipConfig, ScopeConfig};
 use crate::{Database, Response};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
@@ -20,6 +20,7 @@ pub(super) async fn handle_message(
     message: Message,
     backup_dir: &Path,
     ownership: &OwnershipConfig,
+    scope_config: &ScopeConfig,
     auth_providers: Option<&ComprehensiveAuthProvider>,
 ) {
     let topic = &message.topic;
@@ -88,7 +89,7 @@ pub(super) async fn handle_message(
     };
 
     let response = db
-        .execute_with_sender(request, sender_uid, ownership)
+        .execute_with_sender(request, sender_uid, ownership, scope_config)
         .instrument(span)
         .await;
 

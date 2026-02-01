@@ -1,4 +1,4 @@
-use mqdb::{Database, DatabaseConfig, DurabilityMode, Filter, FilterOp};
+use mqdb::{Database, DatabaseConfig, DurabilityMode, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -18,7 +18,9 @@ async fn test_recovery_after_immediate_close_during_writes() {
                 "name": format!("User {}", i),
                 "email": format!("user{}@example.com", i),
             });
-            db.create("users".into(), user).await.unwrap();
+            db.create("users".into(), user, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -50,7 +52,9 @@ async fn test_recovery_with_periodic_durability() {
                 "name": format!("Product {}", i),
                 "price": 10.0 + f64::from(i),
             });
-            db.create("products".into(), product).await.unwrap();
+            db.create("products".into(), product, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -83,7 +87,9 @@ async fn test_recovery_after_many_operations() {
                 "index": i,
                 "status": "active",
             });
-            db.create("users".into(), user).await.unwrap();
+            db.create("users".into(), user, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
 
         let all_users = db
@@ -96,11 +102,24 @@ async fn test_recovery_after_many_operations() {
             let id = user["id"].as_str().unwrap();
 
             if index < 25 {
-                db.update("users".into(), id.to_string(), json!({"status": "updated"}))
-                    .await
-                    .unwrap();
+                db.update(
+                    "users".into(),
+                    id.to_string(),
+                    json!({"status": "updated"}),
+                    None,
+                    &ScopeConfig::default(),
+                )
+                .await
+                .unwrap();
             } else if index < 35 {
-                db.delete("users".into(), id.to_string()).await.unwrap();
+                db.delete(
+                    "users".into(),
+                    id.to_string(),
+                    None,
+                    &ScopeConfig::default(),
+                )
+                .await
+                .unwrap();
             }
         }
     }
@@ -138,7 +157,9 @@ async fn test_recovery_with_indexes() {
                 "name": format!("User {}", i),
                 "email": format!("user{}@example.com", i),
             });
-            db.create("users".into(), user).await.unwrap();
+            db.create("users".into(), user, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -179,7 +200,10 @@ async fn test_recovery_after_concurrent_writes() {
                         "index": i,
                         "value": format!("thread-{}-item-{}", thread_id, i),
                     });
-                    db_clone.create("items".into(), entity).await.unwrap();
+                    db_clone
+                        .create("items".into(), entity, None, &ScopeConfig::default())
+                        .await
+                        .unwrap();
                 }
             });
             handles.push(handle);
@@ -217,7 +241,9 @@ async fn test_recovery_maintains_data_integrity() {
                 "data": format!("important-data-{}", i),
                 "checksum": format!("{:x}", i * 12345),
             });
-            db.create("records".into(), record).await.unwrap();
+            db.create("records".into(), record, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -253,7 +279,9 @@ async fn test_recovery_with_ttl_entries() {
                 "name": format!("Item {}", i),
                 "permanent": i % 2 == 0,
             });
-            db.create("items".into(), item).await.unwrap();
+            db.create("items".into(), item, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -307,7 +335,9 @@ async fn test_recovery_after_delete_operations() {
                 "name": format!("User {}", i),
                 "index": i,
             });
-            db.create("users".into(), user).await.unwrap();
+            db.create("users".into(), user, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
 
         let users = db
@@ -328,7 +358,9 @@ async fn test_recovery_after_delete_operations() {
             .collect();
 
         for id in &ids_to_delete {
-            db.delete("users".into(), id.clone()).await.unwrap();
+            db.delete("users".into(), id.clone(), None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -359,15 +391,30 @@ async fn test_recovery_with_mixed_entity_types() {
             .unwrap();
 
         for i in 0..10 {
-            db.create("users".into(), json!({"name": format!("User {}", i)}))
-                .await
-                .unwrap();
-            db.create("products".into(), json!({"name": format!("Product {}", i)}))
-                .await
-                .unwrap();
-            db.create("orders".into(), json!({"order_id": i}))
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                json!({"name": format!("User {}", i)}),
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+            db.create(
+                "products".into(),
+                json!({"name": format!("Product {}", i)}),
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+            db.create(
+                "orders".into(),
+                json!({"order_id": i}),
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -408,7 +455,9 @@ async fn test_recovery_after_update_operations() {
                 "name": format!("User {}", i),
                 "version": 1,
             });
-            db.create("users".into(), user).await.unwrap();
+            db.create("users".into(), user, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
 
         let users = db
@@ -422,6 +471,8 @@ async fn test_recovery_after_update_operations() {
                     "users".into(),
                     id.to_string(),
                     json!({"version": 2, "updated": true}),
+                    None,
+                    &ScopeConfig::default(),
                 )
                 .await
                 .unwrap();
@@ -460,7 +511,9 @@ async fn test_multiple_reopen_cycles() {
                 "cycle": cycle,
                 "index": i,
             });
-            db.create("items".into(), item).await.unwrap();
+            db.create("items".into(), item, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 
@@ -489,7 +542,9 @@ async fn test_recovery_preserves_checksums() {
             let record = json!({
                 "data": vec![i; 100],
             });
-            db.create("records".into(), record).await.unwrap();
+            db.create("records".into(), record, None, &ScopeConfig::default())
+                .await
+                .unwrap();
         }
     }
 

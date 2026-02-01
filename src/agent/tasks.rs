@@ -21,6 +21,7 @@ impl MqdbAgent {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let backup_dir = self.backup_dir.clone();
         let ownership_config = Arc::clone(&self.ownership_config);
+        let scope_config = Arc::clone(&self.scope_config);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -77,7 +78,7 @@ impl MqdbAgent {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         if let Some(message) = msg {
-                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, auth_providers.as_deref()).await;
+                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, &scope_config, auth_providers.as_deref()).await;
                         } else {
                             debug!("Message channel closed");
                             break;
@@ -128,12 +129,25 @@ impl MqdbAgent {
                     event = event_rx.recv() => {
                         match event {
                             Ok(change_event) => {
-                                let topic = if num_partitions > 0 {
+                                let event_type = match change_event.operation {
+                                    crate::Operation::Create => "created",
+                                    crate::Operation::Update => "updated",
+                                    crate::Operation::Delete => "deleted",
+                                };
+
+                                let topic = if let Some((ref scope_entity, ref scope_value)) = change_event.scope {
+                                    if *scope_entity == change_event.entity {
+                                        format!("$DB/{scope_entity}/{scope_value}/events/{event_type}")
+                                    } else {
+                                        format!("$DB/{scope_entity}/{scope_value}/{}/events/{event_type}", change_event.entity)
+                                    }
+                                } else if num_partitions > 0 {
                                     let partition = change_event.partition(num_partitions);
-                                    format!("$DB/{}/events/p{}/{}", change_event.entity, partition, change_event.id)
+                                    format!("$DB/{}/events/p{partition}/{}", change_event.entity, change_event.id)
                                 } else {
                                     format!("$DB/{}/events/{}", change_event.entity, change_event.id)
                                 };
+
                                 let payload = match serde_json::to_vec(&change_event) {
                                     Ok(p) => p,
                                     Err(e) => {
@@ -142,7 +156,17 @@ impl MqdbAgent {
                                     }
                                 };
 
-                                if let Err(e) = client.publish_qos1(&topic, payload).await {
+                                let mut options = mqtt5::types::PublishOptions {
+                                    qos: mqtt5::QoS::AtLeastOnce,
+                                    ..Default::default()
+                                };
+                                if let Some(ref sender_id) = change_event.sender {
+                                    options.properties.user_properties.push((
+                                        "x-origin-client-id".to_string(),
+                                        sender_id.clone(),
+                                    ));
+                                }
+                                if let Err(e) = client.publish_with_options(&topic, payload, options).await {
                                     warn!("Failed to publish event: {e}");
                                 }
                             }

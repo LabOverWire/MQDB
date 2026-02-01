@@ -35,7 +35,11 @@ impl MqdbAgent {
             topic_alias_maximum: 100,
             change_only_delivery_config: ChangeOnlyDeliveryConfig {
                 enabled: true,
-                topic_patterns: vec!["$DB/+/events/#".to_string()],
+                topic_patterns: vec![
+                    "$DB/+/events/#".to_string(),
+                    "$DB/+/+/events/#".to_string(),
+                    "$DB/+/+/+/events/#".to_string(),
+                ],
             },
             ..Default::default()
         };

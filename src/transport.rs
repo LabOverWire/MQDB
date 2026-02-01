@@ -141,7 +141,7 @@ impl From<Error> for Response {
 mod execute {
     use super::{Request, Response};
     use crate::Database;
-    use crate::types::OwnershipConfig;
+    use crate::types::{OwnershipConfig, ScopeConfig};
     use serde_json::Value;
 
     fn value_from_unit(_: ()) -> Value {
@@ -158,8 +158,13 @@ mod execute {
 
     impl Database {
         pub async fn execute(&self, request: Request) -> Response {
-            self.execute_with_sender(request, None, &OwnershipConfig::default())
-                .await
+            self.execute_with_sender(
+                request,
+                None,
+                &OwnershipConfig::default(),
+                &ScopeConfig::default(),
+            )
+            .await
         }
 
         pub async fn execute_with_sender(
@@ -167,12 +172,15 @@ mod execute {
             request: Request,
             sender: Option<&str>,
             ownership: &OwnershipConfig,
+            scope_config: &ScopeConfig,
         ) -> Response {
             match request {
-                Request::Create { entity, data } => match self.create(entity, data).await {
-                    Ok(v) => Response::ok(v),
-                    Err(e) => e.into(),
-                },
+                Request::Create { entity, data } => {
+                    match self.create(entity, data, sender, scope_config).await {
+                        Ok(v) => Response::ok(v),
+                        Err(e) => e.into(),
+                    }
+                }
                 Request::Read {
                     entity,
                     id,
@@ -190,7 +198,7 @@ mod execute {
                     {
                         return e.into();
                     }
-                    match self.update(entity, id, fields).await {
+                    match self.update(entity, id, fields, sender, scope_config).await {
                         Ok(v) => Response::ok(v),
                         Err(e) => e.into(),
                     }
@@ -203,7 +211,7 @@ mod execute {
                     {
                         return e.into();
                     }
-                    match self.delete(entity, id).await {
+                    match self.delete(entity, id, sender, scope_config).await {
                         Ok(()) => Response::ok(value_from_unit(())),
                         Err(e) => e.into(),
                     }
@@ -266,7 +274,7 @@ mod execute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::OwnershipConfig;
+    use crate::types::{OwnershipConfig, ScopeConfig};
 
     #[test]
     fn test_request_serialization() {
@@ -358,7 +366,7 @@ mod tests {
             fields: serde_json::json!({"title": "Stolen"}),
         };
         let resp = db
-            .execute_with_sender(update_req, Some("bob"), &ownership)
+            .execute_with_sender(update_req, Some("bob"), &ownership, &ScopeConfig::default())
             .await;
         match resp {
             Response::Error { code, message } => {
@@ -395,6 +403,7 @@ mod tests {
                 },
                 Some("alice"),
                 &ownership,
+                &ScopeConfig::default(),
             )
             .await;
         assert!(resp.is_ok());
@@ -425,6 +434,7 @@ mod tests {
                 },
                 Some("bob"),
                 &ownership,
+                &ScopeConfig::default(),
             )
             .await;
         match resp {
@@ -462,6 +472,7 @@ mod tests {
                 },
                 Some("alice"),
                 &ownership,
+                &ScopeConfig::default(),
             )
             .await;
 
@@ -501,6 +512,7 @@ mod tests {
                 },
                 None,
                 &ownership,
+                &ScopeConfig::default(),
             )
             .await;
         assert!(resp.is_ok());

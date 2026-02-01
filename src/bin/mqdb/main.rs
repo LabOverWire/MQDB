@@ -140,6 +140,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
             ws_bind,
             oauth,
             ownership,
+            event_scope,
         } => {
             cmd_agent_start(AgentStartArgs {
                 bind,
@@ -152,6 +153,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 ws_bind,
                 oauth: *oauth,
                 ownership,
+                event_scope,
             })
             .await
         }
@@ -161,49 +163,29 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
 
 async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        ClusterAction::Start {
-            node_id,
-            node_name,
-            bind,
-            db,
-            peers,
-            auth,
-            quic_cert,
-            quic_key,
-            quic_ca,
-            no_quic,
-            no_persist_stores,
-            durability,
-            durability_ms,
-            bridge_out,
-            cluster_port_offset,
-            #[cfg(feature = "dev-insecure")]
-            quic_insecure,
-            ws_bind,
-            oauth,
-            ownership,
-        } => {
+        ClusterAction::Start(fields) => {
             Box::pin(cmd_cluster_start(ClusterStartArgs {
-                node_id,
-                node_name,
-                bind,
-                db_path: db,
-                peers,
-                auth: *auth,
-                quic_cert,
-                quic_key,
-                quic_ca,
-                no_quic,
-                no_persist_stores,
-                durability,
-                durability_ms,
-                bridge_out,
-                cluster_port_offset,
+                node_id: fields.node_id,
+                node_name: fields.node_name,
+                bind: fields.bind,
+                db_path: fields.db,
+                peers: fields.peers,
+                auth: *fields.auth,
+                quic_cert: fields.quic_cert,
+                quic_key: fields.quic_key,
+                quic_ca: fields.quic_ca,
+                no_quic: fields.no_quic,
+                no_persist_stores: fields.no_persist_stores,
+                durability: fields.durability,
+                durability_ms: fields.durability_ms,
+                bridge_out: fields.bridge_out,
+                cluster_port_offset: fields.cluster_port_offset,
                 #[cfg(feature = "dev-insecure")]
-                quic_insecure,
-                ws_bind,
-                oauth: *oauth,
-                ownership,
+                quic_insecure: fields.quic_insecure,
+                ws_bind: fields.ws_bind,
+                oauth: *fields.oauth,
+                ownership: fields.ownership,
+                event_scope: fields.event_scope,
             }))
             .await
         }

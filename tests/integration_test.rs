@@ -1,4 +1,4 @@
-use mqdb::{Database, Filter, FilterOp, SortDirection, SortOrder};
+use mqdb::{Database, Filter, FilterOp, ScopeConfig, SortDirection, SortOrder};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -15,7 +15,10 @@ async fn test_crud_operations() {
         "status": "active"
     });
 
-    let created = db.create("users".into(), user).await.unwrap();
+    let created = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     assert_eq!(created["name"], "Alice");
     assert!(created.get("id").is_some());
 
@@ -33,13 +36,21 @@ async fn test_crud_operations() {
     });
 
     let updated_user = db
-        .update("users".into(), id.clone(), updates)
+        .update(
+            "users".into(),
+            id.clone(),
+            updates,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     assert_eq!(updated_user["name"], "Alice Smith");
     assert_eq!(updated_user["email"], "alice@example.com");
 
-    db.delete("users".into(), id.clone()).await.unwrap();
+    db.delete("users".into(), id.clone(), None, &ScopeConfig::default())
+        .await
+        .unwrap();
 
     let result = db.read("users".into(), id, vec![], None).await;
     assert!(result.is_err());
@@ -61,7 +72,9 @@ async fn test_list_operations() {
     ];
 
     for user in users {
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let all_users = db
@@ -118,7 +131,10 @@ async fn test_reactive_subscriptions() {
         .unwrap();
 
     let user = json!({"name": "Test User", "email": "test@example.com"});
-    let created = db.create("users".into(), user).await.unwrap();
+    let created = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
     let event = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
@@ -152,7 +168,9 @@ async fn test_subscription_persistence() {
         let mut receiver = db.event_receiver();
 
         let user = json!({"name": "Persisted Test", "email": "test@example.com"});
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
 
         let event = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
             .await
@@ -180,10 +198,14 @@ async fn test_wildcard_subscriptions() {
         .unwrap();
 
     let user = json!({"name": "User 1"});
-    db.create("users".into(), user).await.unwrap();
+    db.create("users".into(), user, None, &ScopeConfig::default())
+        .await
+        .unwrap();
 
     let post = json!({"title": "Post 1"});
-    db.create("posts".into(), post).await.unwrap();
+    db.create("posts".into(), post, None, &ScopeConfig::default())
+        .await
+        .unwrap();
 
     let event1 = tokio::time::timeout(tokio::time::Duration::from_millis(100), receiver.recv())
         .await
@@ -216,7 +238,9 @@ async fn test_extended_filter_operators() {
     ];
 
     for user in users {
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let in_filter = Filter::new("status".into(), FilterOp::In, json!(["active", "pending"]));
@@ -304,7 +328,9 @@ async fn test_sorting_and_pagination() {
             "age": 20 + i,
             "score": (i * 3) % 10,
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let all_users = db
@@ -431,7 +457,10 @@ async fn test_relationships_and_includes() {
         "name": "Alice",
         "email": "alice@example.com"
     });
-    let created_author = db.create("users".into(), author).await.unwrap();
+    let created_author = db
+        .create("users".into(), author, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let author_id = created_author["id"].as_str().unwrap().to_string();
 
     let post = json!({
@@ -439,14 +468,20 @@ async fn test_relationships_and_includes() {
         "content": "Hello World!",
         "author_id": author_id.clone()
     });
-    let created_post = db.create("posts".into(), post).await.unwrap();
+    let created_post = db
+        .create("posts".into(), post, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let post_id = created_post["id"].as_str().unwrap().to_string();
 
     let comment = json!({
         "text": "Great post!",
         "post_id": post_id.clone()
     });
-    let created_comment = db.create("comments".into(), comment).await.unwrap();
+    let created_comment = db
+        .create("comments".into(), comment, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let comment_id = created_comment["id"].as_str().unwrap().to_string();
 
     let post_with_author = db
@@ -500,7 +535,10 @@ async fn test_ttl_expiration() {
         "ttl_secs": 2
     });
 
-    let created = db.create("temp".into(), short_lived).await.unwrap();
+    let created = db
+        .create("temp".into(), short_lived, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
     assert!(created.get("_expires_at").is_some());
@@ -546,7 +584,10 @@ async fn test_ttl_disabled() {
         "ttl_secs": 1
     });
 
-    let created = db.create("items".into(), entity).await.unwrap();
+    let created = db
+        .create("items".into(), entity, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
     assert!(created.get("_expires_at").is_some());
@@ -574,7 +615,9 @@ async fn test_ttl_with_indexes() {
         "ttl_secs": 2
     });
 
-    db.create("sessions".into(), session).await.unwrap();
+    db.create("sessions".into(), session, None, &ScopeConfig::default())
+        .await
+        .unwrap();
 
     let filter = Filter::new("user_id".into(), FilterOp::Eq, json!("user123"));
     let results = db
@@ -612,7 +655,9 @@ async fn test_cursor_api() {
             "age": 20 + (i % 30),
             "status": if i % 2 == 0 { "active" } else { "inactive" }
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let mut cursor = db.cursor("users".into(), vec![], vec![]).unwrap();
@@ -657,7 +702,9 @@ async fn test_cursor_with_sorting() {
             "age": 50 - i,
             "score": (i * 3) % 10,
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let sort_by_age_asc = vec![SortOrder::new("age".into(), SortDirection::Asc)];
@@ -726,7 +773,9 @@ async fn test_physical_backup_and_restore() {
             "name": format!("User {}", i),
             "email": format!("user{}@example.com", i),
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     db.backup_physical(&backup_path).unwrap();
@@ -760,7 +809,9 @@ async fn test_logical_backup_and_restore() {
             "price": 10.0 + f64::from(i),
             "stock": 100 - i,
         });
-        db.create("products".into(), product).await.unwrap();
+        db.create("products".into(), product, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     db.backup_logical(&backup_file).unwrap();
@@ -796,9 +847,14 @@ async fn test_backup_fails_if_destination_exists() {
         .await
         .unwrap();
 
-    db.create("users".into(), json!({"name": "Test"}))
-        .await
-        .unwrap();
+    db.create(
+        "users".into(),
+        json!({"name": "Test"}),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     std::fs::create_dir(&backup_path).unwrap();
 

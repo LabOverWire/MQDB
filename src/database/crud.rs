@@ -3,12 +3,19 @@ use crate::entity::Entity;
 use crate::error::{Error, Result};
 use crate::events::ChangeEvent;
 use crate::keys;
+use crate::types::ScopeConfig;
 use serde_json::Value;
 
 impl Database {
     /// # Errors
     /// Returns an error if validation, constraint checks, or storage fails.
-    pub async fn create(&self, entity_name: String, mut data: Value) -> Result<Value> {
+    pub async fn create(
+        &self,
+        entity_name: String,
+        mut data: Value,
+        sender: Option<&str>,
+        scope_config: &ScopeConfig,
+    ) -> Result<Value> {
         let schema_registry = self.schema_registry.read().await;
         schema_registry.apply_defaults(&entity_name, &mut data)?;
         drop(schema_registry);
@@ -52,7 +59,10 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &entity, None);
 
-        let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone());
+        let scope = scope_config.resolve_scope(&entity_name, &data);
+        let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
+            .with_sender(sender.map(String::from))
+            .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
 
@@ -99,7 +109,14 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found, validation fails, or storage fails.
-    pub async fn update(&self, entity_name: String, id: String, fields: Value) -> Result<Value> {
+    pub async fn update(
+        &self,
+        entity_name: String,
+        id: String,
+        fields: Value,
+        sender: Option<&str>,
+        scope_config: &ScopeConfig,
+    ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
         let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
@@ -139,11 +156,14 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &updated_entity, Some(&existing_entity));
 
+        let scope = scope_config.resolve_scope(&entity_name, &updated_entity.data);
         let event = ChangeEvent::update(
             entity_name,
             updated_entity.id.clone(),
             updated_entity.data.clone(),
-        );
+        )
+        .with_sender(sender.map(String::from))
+        .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
 
@@ -157,7 +177,13 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found or constraint validation fails.
-    pub async fn delete(&self, entity_name: String, id: String) -> Result<()> {
+    pub async fn delete(
+        &self,
+        entity_name: String,
+        id: String,
+        sender: Option<&str>,
+        scope_config: &ScopeConfig,
+    ) -> Result<()> {
         use crate::constraint::DeleteOperation;
 
         let key = keys::encode_data_key(&entity_name, &id);
@@ -181,7 +207,7 @@ impl Database {
         index_manager.remove_indexes(&mut batch, &existing_entity);
         drop(index_manager);
 
-        let mut deleted_entities = Vec::new();
+        let mut deleted_entities: Vec<(String, String, Value)> = Vec::new();
 
         for operation in &delete_ops {
             match operation {
@@ -200,7 +226,11 @@ impl Database {
                         index_manager.remove_indexes(&mut batch, &cascade_entity);
                         drop(index_manager);
 
-                        deleted_entities.push((cascade_op.entity.clone(), cascade_op.id.clone()));
+                        deleted_entities.push((
+                            cascade_op.entity.clone(),
+                            cascade_op.id.clone(),
+                            cascade_entity.data,
+                        ));
                     }
                 }
                 DeleteOperation::SetNull(set_null_op) => {
@@ -228,9 +258,19 @@ impl Database {
             }
         }
 
-        let mut events = vec![ChangeEvent::delete(entity_name, id)];
-        for (entity, id) in &deleted_entities {
-            events.push(ChangeEvent::delete(entity.clone(), id.clone()));
+        let primary_scope = scope_config.resolve_scope(&entity_name, &existing_entity.data);
+        let mut events = vec![
+            ChangeEvent::delete(entity_name, id)
+                .with_sender(sender.map(String::from))
+                .with_scope(primary_scope),
+        ];
+        for (cascade_entity, cascade_id, cascade_data) in &deleted_entities {
+            let cascade_scope = scope_config.resolve_scope(cascade_entity, cascade_data);
+            events.push(
+                ChangeEvent::delete(cascade_entity.clone(), cascade_id.clone())
+                    .with_sender(sender.map(String::from))
+                    .with_scope(cascade_scope),
+            );
         }
 
         let operation_id = uuid::Uuid::new_v4().to_string();

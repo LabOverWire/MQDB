@@ -1,4 +1,4 @@
-use mqdb::Database;
+use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,8 @@ async fn benchmark_writes(db: &Database, count: usize) -> Result<(), Box<dyn std
             "value": i
         });
 
-        db.create("users".into(), data).await?;
+        db.create("users".into(), data, None, &ScopeConfig::default())
+            .await?;
 
         let record_elapsed = record_start.elapsed();
         latencies.push(record_elapsed);
@@ -122,7 +123,15 @@ async fn benchmark_updates(db: &Database, count: usize) -> Result<(), Box<dyn st
             "name": format!("Updated User {}", i)
         });
 
-        let _ = db.update("users".into(), i.to_string(), updates).await;
+        let _ = db
+            .update(
+                "users".into(),
+                i.to_string(),
+                updates,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await;
 
         let record_elapsed = record_start.elapsed();
         latencies.push(record_elapsed);

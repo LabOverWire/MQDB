@@ -1,4 +1,4 @@
-use mqdb::{Database, DatabaseConfig, Filter, FilterOp};
+use mqdb::{Database, DatabaseConfig, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 use std::collections::HashSet;
 use tempfile::TempDir;
@@ -17,7 +17,9 @@ async fn test_concurrent_id_generation_no_duplicates() {
                 "name": format!("User {}", i),
                 "email": format!("user{}@example.com", i),
             });
-            db_clone.create("users".into(), user).await
+            db_clone
+                .create("users".into(), user, None, &ScopeConfig::default())
+                .await
         });
         handles.push(handle);
     }
@@ -58,7 +60,9 @@ async fn test_concurrent_delete_and_read() {
             "name": format!("User {}", i),
             "status": "active"
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let mut handles = vec![];
@@ -66,7 +70,9 @@ async fn test_concurrent_delete_and_read() {
     for i in 1..=25 {
         let db_clone = db.clone();
         let handle = tokio::spawn(async move {
-            let _ = db_clone.delete("users".into(), i.to_string()).await;
+            let _ = db_clone
+                .delete("users".into(), i.to_string(), None, &ScopeConfig::default())
+                .await;
         });
         handles.push(handle);
     }
@@ -163,7 +169,9 @@ async fn test_max_list_results_limit_enforcement() {
             "name": format!("User {i}"),
             "email": format!("user{i}@example.com"),
         });
-        db.create("users".into(), user).await.unwrap();
+        db.create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     let all_users = db

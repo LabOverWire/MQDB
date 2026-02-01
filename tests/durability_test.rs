@@ -1,4 +1,4 @@
-use mqdb::{Database, DatabaseConfig, DurabilityMode, Filter, FilterOp};
+use mqdb::{Database, DatabaseConfig, DurabilityMode, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -20,7 +20,10 @@ async fn test_durability_immediate_survives_reopen() {
             "status": "active"
         });
 
-        let created = db.create("users".into(), user).await.unwrap();
+        let created = db
+            .create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
         id = created["id"].as_str().unwrap().to_string();
     }
 
@@ -61,7 +64,10 @@ async fn test_index_consistency_after_crash_during_delete() {
             "status": "active"
         });
 
-        let created = db.create("users".into(), user).await.unwrap();
+        let created = db
+            .create("users".into(), user, None, &ScopeConfig::default())
+            .await
+            .unwrap();
         id = created["id"].as_str().unwrap().to_string();
 
         let verify_exists = db
@@ -88,7 +94,9 @@ async fn test_index_consistency_after_crash_during_delete() {
             "Should find entity by index before delete"
         );
 
-        db.delete("users".into(), id.clone()).await.unwrap();
+        db.delete("users".into(), id.clone(), None, &ScopeConfig::default())
+            .await
+            .unwrap();
     }
 
     {

@@ -32,6 +32,7 @@ impl ClusterConfig {
             ws_bind_address: None,
             http_config: None,
             ownership: crate::types::OwnershipConfig::default(),
+            scope_config: crate::types::ScopeConfig::default(),
         }
     }
 
@@ -183,6 +184,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_ownership(mut self, ownership: crate::types::OwnershipConfig) -> Self {
         self.ownership = ownership;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope_config(mut self, scope_config: crate::types::ScopeConfig) -> Self {
+        self.scope_config = scope_config;
         self
     }
 }

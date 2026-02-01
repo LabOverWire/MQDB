@@ -1,4 +1,4 @@
-use mqdb::Database;
+use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -15,7 +15,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Alice",
         "email": "alice@example.com"
     });
-    let created = db.create("users".into(), user1).await?;
+    let created = db
+        .create("users".into(), user1, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created: {created}\n");
 
     println!("Creating another user with different email...");
@@ -23,7 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Bob",
         "email": "bob@example.com"
     });
-    let created = db.create("users".into(), user2).await?;
+    let created = db
+        .create("users".into(), user2, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created: {created}\n");
 
     println!("Attempting to create user with duplicate email...");
@@ -31,7 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Charlie",
         "email": "alice@example.com"
     });
-    match db.create("users".into(), duplicate).await {
+    match db
+        .create("users".into(), duplicate, None, &ScopeConfig::default())
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Unique constraint violation: {e}\n"),
     }
@@ -47,7 +54,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello World"
     });
-    db.create("posts".into(), post1).await?;
+    db.create("posts".into(), post1, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created\n");
 
     println!("Creating post with same slug but different user_id...");
@@ -56,7 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello from Bob"
     });
-    db.create("posts".into(), post2).await?;
+    db.create("posts".into(), post2, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created (different user_id, so allowed)\n");
 
     println!("Attempting to create duplicate (user_id=1, slug='hello')...");
@@ -65,7 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Duplicate"
     });
-    match db.create("posts".into(), duplicate).await {
+    match db
+        .create("posts".into(), duplicate, None, &ScopeConfig::default())
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Unique constraint violation: {e}\n"),
     }

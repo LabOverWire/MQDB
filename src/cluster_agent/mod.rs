@@ -112,6 +112,7 @@ pub struct ClusterConfig {
     pub ws_bind_address: Option<SocketAddr>,
     pub http_config: Option<crate::http::HttpServerConfig>,
     pub ownership: crate::types::OwnershipConfig,
+    pub scope_config: crate::types::ScopeConfig,
 }
 
 pub struct ClusteredAgent {

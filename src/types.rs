@@ -3,6 +3,69 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Default)]
+pub struct ScopeConfig {
+    scope_entity: String,
+    scope_field: String,
+}
+
+impl ScopeConfig {
+    #[must_use]
+    pub fn new(scope_entity: String, scope_field: String) -> Self {
+        Self {
+            scope_entity,
+            scope_field,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if the spec is not in `entity=field` format.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Ok(Self::default());
+        }
+        let parts: Vec<&str> = spec.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid event-scope spec '{spec}': expected entity=field"
+            ));
+        }
+        Ok(Self {
+            scope_entity: parts[0].to_string(),
+            scope_field: parts[1].to_string(),
+        })
+    }
+
+    #[must_use]
+    pub fn scope_entity(&self) -> &str {
+        &self.scope_entity
+    }
+
+    #[must_use]
+    pub fn scope_field(&self) -> &str {
+        &self.scope_field
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scope_entity.is_empty()
+    }
+
+    #[must_use]
+    pub fn resolve_scope(&self, entity_name: &str, data: &Value) -> Option<(String, String)> {
+        if self.is_empty() {
+            return None;
+        }
+        if entity_name == self.scope_entity {
+            let id = data.get("id").and_then(Value::as_str)?;
+            return Some((self.scope_entity.clone(), id.to_string()));
+        }
+        let scope_value = data.get(&self.scope_field).and_then(Value::as_str)?;
+        Some((self.scope_entity.clone(), scope_value.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct OwnershipConfig {
     pub entity_owner_fields: HashMap<String, String>,
     admin_users: HashSet<String>,

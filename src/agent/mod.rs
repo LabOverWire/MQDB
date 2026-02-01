@@ -29,6 +29,7 @@ pub struct MqdbAgent {
     pub(super) ws_bind_address: Option<SocketAddr>,
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
     pub(super) ownership_config: Arc<crate::types::OwnershipConfig>,
+    pub(super) scope_config: Arc<crate::types::ScopeConfig>,
 }
 
 impl MqdbAgent {
@@ -51,6 +52,7 @@ impl MqdbAgent {
             ws_bind_address: None,
             http_config: std::sync::Mutex::new(None),
             ownership_config: Arc::new(crate::types::OwnershipConfig::default()),
+            scope_config: Arc::new(crate::types::ScopeConfig::default()),
         }
     }
 
@@ -155,6 +157,12 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_ownership_config(mut self, config: crate::types::OwnershipConfig) -> Self {
         self.ownership_config = Arc::new(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope_config(mut self, config: crate::types::ScopeConfig) -> Self {
+        self.scope_config = Arc::new(config);
         self
     }
 

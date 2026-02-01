@@ -1,4 +1,4 @@
-use mqdb::Database;
+use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -12,7 +12,10 @@ async fn test_update_race_condition_within_transaction() {
         "name": "Alice",
         "value": "initial",
     });
-    let created = db.create("users".into(), user).await.unwrap();
+    let created = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
     let mut handles = vec![];
@@ -25,6 +28,8 @@ async fn test_update_race_condition_within_transaction() {
                     "users".into(),
                     id_clone,
                     json!({"value": format!("update-{}", i)}),
+                    None,
+                    &ScopeConfig::default(),
                 )
                 .await
         });
@@ -52,15 +57,24 @@ async fn test_dirty_read_prevented() {
         "name": "Bob",
         "status": "active",
     });
-    let created = db.create("users".into(), user).await.unwrap();
+    let created = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await
+        .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
     let db1 = Arc::clone(&db);
     let id1 = id.clone();
 
     let handle = tokio::spawn(async move {
-        db1.update("users".into(), id1, json!({"status": "suspended"}))
-            .await
+        db1.update(
+            "users".into(),
+            id1,
+            json!({"status": "suspended"}),
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
     });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
@@ -90,9 +104,15 @@ async fn test_atomicity_all_or_nothing() {
     let user2 = json!({"name": "User2", "group": "A"});
     let user3 = json!({"name": "User3", "group": "A"});
 
-    db.create("users".into(), user1).await.unwrap();
-    db.create("users".into(), user2).await.unwrap();
-    db.create("users".into(), user3).await.unwrap();
+    db.create("users".into(), user1, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    db.create("users".into(), user2, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    db.create("users".into(), user3, None, &ScopeConfig::default())
+        .await
+        .unwrap();
 
     let all_users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
@@ -124,11 +144,21 @@ async fn test_concurrent_updates_to_different_entities() {
     let db = Arc::new(Database::open(tmp.path()).await.unwrap());
 
     let user1 = db
-        .create("users".into(), json!({"name": "User1", "count": 0}))
+        .create(
+            "users".into(),
+            json!({"name": "User1", "count": 0}),
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user2 = db
-        .create("users".into(), json!({"name": "User2", "count": 0}))
+        .create(
+            "users".into(),
+            json!({"name": "User2", "count": 0}),
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
 
@@ -142,7 +172,13 @@ async fn test_concurrent_updates_to_different_entities() {
         let id1_clone = id1.clone();
         let handle = tokio::spawn(async move {
             db_clone
-                .update("users".into(), id1_clone, json!({"count": i}))
+                .update(
+                    "users".into(),
+                    id1_clone,
+                    json!({"count": i}),
+                    None,
+                    &ScopeConfig::default(),
+                )
                 .await
         });
         handles.push(handle);
@@ -153,7 +189,13 @@ async fn test_concurrent_updates_to_different_entities() {
         let id2_clone = id2.clone();
         let handle = tokio::spawn(async move {
             db_clone
-                .update("users".into(), id2_clone, json!({"count": i + 100}))
+                .update(
+                    "users".into(),
+                    id2_clone,
+                    json!({"count": i + 100}),
+                    None,
+                    &ScopeConfig::default(),
+                )
                 .await
         });
         handles.push(handle);
@@ -188,6 +230,8 @@ async fn test_create_operations_are_atomic() {
                         "name": format!("User{}", i),
                         "email": format!("user{}@example.com", i),
                     }),
+                    None,
+                    &ScopeConfig::default(),
                 )
                 .await
         });
@@ -234,6 +278,8 @@ async fn test_delete_operations_are_atomic() {
                     "name": format!("User{}", i),
                     "status": "active",
                 }),
+                None,
+                &ScopeConfig::default(),
             )
             .await
             .unwrap();
@@ -244,7 +290,11 @@ async fn test_delete_operations_are_atomic() {
     for id in &ids[0..10] {
         let db_clone = Arc::clone(&db);
         let id_clone = id.clone();
-        let handle = tokio::spawn(async move { db_clone.delete("users".into(), id_clone).await });
+        let handle = tokio::spawn(async move {
+            db_clone
+                .delete("users".into(), id_clone, None, &ScopeConfig::default())
+                .await
+        });
         handles.push(handle);
     }
 

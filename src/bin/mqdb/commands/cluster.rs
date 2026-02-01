@@ -31,6 +31,7 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) ws_bind: Option<SocketAddr>,
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
+    pub(crate) event_scope: Option<String>,
 }
 
 pub(crate) async fn cmd_cluster_start(
@@ -97,6 +98,11 @@ pub(crate) async fn cmd_cluster_start(
             .map_err(|e| format!("invalid --ownership: {e}"))?
             .with_admin_users(admin_set);
         config = config.with_ownership(ownership);
+    }
+    if let Some(event_scope_spec) = args.event_scope {
+        let scope_config = mqdb::ScopeConfig::parse(&event_scope_spec)
+            .map_err(|e| format!("invalid --event-scope: {e}"))?;
+        config = config.with_scope_config(scope_config);
     }
 
     let mut agent = ClusteredAgent::new(config)?;

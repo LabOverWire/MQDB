@@ -19,6 +19,10 @@ pub struct ChangeEvent {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    #[serde(skip)]
+    pub sender: Option<String>,
+    #[serde(skip)]
+    pub scope: Option<(String, String)>,
 }
 
 impl ChangeEvent {
@@ -35,12 +39,26 @@ impl ChangeEvent {
             operation,
             data,
             operation_id: None,
+            sender: None,
+            scope: None,
         }
     }
 
     #[must_use]
     pub fn with_operation_id(mut self, operation_id: String) -> Self {
         self.operation_id = Some(operation_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_sender(mut self, sender: Option<String>) -> Self {
+        self.sender = sender;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<(String, String)>) -> Self {
+        self.scope = scope;
         self
     }
 
