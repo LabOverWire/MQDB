@@ -60,6 +60,56 @@ impl WasmDatabase {
         js_sys::JSON::parse(&json_str)
             .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
     }
+    /// # Errors
+    /// Returns an error if options are invalid or the backend is not memory-based.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn list_sync(&self, entity: String, options: JsValue) -> Result<JsValue, JsValue> {
+        let opts: ListOptions = if options.is_null() || options.is_undefined() {
+            ListOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
+        };
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+
+        let mut results = Vec::new();
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+            if opts
+                .filters
+                .iter()
+                .all(|f| Self::matches_filter(&parsed, f))
+            {
+                results.push(parsed);
+            }
+        }
+
+        if !opts.sort.is_empty() {
+            Self::sort_results(&mut results, &opts.sort);
+        }
+
+        if let Some(pagination) = &opts.pagination {
+            let offset = pagination.offset;
+            let limit = pagination.limit;
+            results = results.into_iter().skip(offset).take(limit).collect();
+        }
+
+        if let Some(ref projection) = opts.projection {
+            results = results
+                .into_iter()
+                .map(|v| Self::project_fields(v, projection))
+                .collect();
+        }
+
+        let json_str = serde_json::to_string(&results)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+        js_sys::JSON::parse(&json_str)
+            .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
+    }
 }
 
 impl WasmDatabase {

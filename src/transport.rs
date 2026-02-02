@@ -137,7 +137,7 @@ impl From<Error> for Response {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 mod execute {
     use super::{Request, Response};
     use crate::Database;
@@ -344,6 +344,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "agent")]
     #[tokio::test]
     async fn execute_with_sender_update_forbidden_for_non_owner() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -377,6 +378,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "agent")]
     #[tokio::test]
     async fn execute_with_sender_update_allowed_for_owner() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -409,6 +411,7 @@ mod tests {
         assert!(resp.is_ok());
     }
 
+    #[cfg(feature = "agent")]
     #[tokio::test]
     async fn execute_with_sender_delete_forbidden_for_non_owner() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -443,6 +446,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "agent")]
     #[tokio::test]
     async fn execute_with_sender_list_filters_by_owner() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -486,6 +490,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "agent")]
     #[tokio::test]
     async fn execute_with_sender_none_bypasses_ownership() {
         let tmp = tempfile::TempDir::new().unwrap();

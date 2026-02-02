@@ -408,4 +408,224 @@ impl WasmDatabase {
 
         Ok(())
     }
+
+    pub(crate) fn validate_unique_sync(
+        &self,
+        entity: &str,
+        value: &serde_json::Value,
+        current_id: Option<&str>,
+    ) -> Result<(), JsValue> {
+        let constraints: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.unique_constraints.get(entity).cloned()
+        };
+
+        if let Some(constraints) = constraints {
+            let prefix = format!("data/{entity}/");
+            let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+
+            for constraint_fields in constraints {
+                let new_values: Vec<Option<&serde_json::Value>> =
+                    constraint_fields.iter().map(|f| value.get(f)).collect();
+
+                for (_key, existing_data) in &items {
+                    let existing: serde_json::Value = serde_json::from_slice(existing_data)
+                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
+                        && current_id == Some(existing_id)
+                    {
+                        continue;
+                    }
+
+                    let existing_values: Vec<Option<&serde_json::Value>> =
+                        constraint_fields.iter().map(|f| existing.get(f)).collect();
+
+                    if new_values == existing_values
+                        && new_values
+                            .iter()
+                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
+                    {
+                        return Err(JsValue::from_str(&format!(
+                            "unique constraint violation: {entity}.{}",
+                            constraint_fields.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_foreign_keys_sync(
+        &self,
+        entity: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), JsValue> {
+        let fks: Vec<ForeignKeyEntry> = {
+            let inner = self.inner.borrow();
+            inner.foreign_keys.clone()
+        };
+
+        for fk in &fks {
+            if fk.source_entity != entity {
+                continue;
+            }
+
+            let field_value = value.get(&fk.source_field);
+            if field_value.is_none() || field_value == Some(&serde_json::Value::Null) {
+                continue;
+            }
+
+            let target_id = field_value
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| JsValue::from_str("foreign key must be a string"))?;
+
+            let target_key = format!("data/{}/{}", fk.target_entity, target_id);
+            if self.storage.get_sync(target_key.as_bytes())?.is_none() {
+                return Err(JsValue::from_str(&format!(
+                    "foreign key violation: {entity}.{} references non-existent {}/{}",
+                    fk.source_field, fk.target_entity, target_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_foreign_key_constraints_sync(
+        &self,
+        entity: &str,
+        id: &str,
+    ) -> Result<Vec<(String, String)>, JsValue> {
+        let fks: Vec<ForeignKeyEntry> = {
+            let inner = self.inner.borrow();
+            inner.foreign_keys.clone()
+        };
+
+        let mut cascade_deletes = Vec::new();
+
+        for fk in &fks {
+            if fk.target_entity != entity {
+                continue;
+            }
+
+            let prefix = format!("data/{}/", fk.source_entity);
+            let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+
+            for (_key, data) in items {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&data).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+                if value.get(&fk.source_field).and_then(|v| v.as_str()) == Some(id) {
+                    match fk.on_delete {
+                        OnDeleteAction::Restrict => {
+                            return Err(JsValue::from_str(&format!(
+                                "foreign key restrict: cannot delete {entity}/{id} - referenced by {}",
+                                fk.source_entity
+                            )));
+                        }
+                        OnDeleteAction::Cascade => {
+                            if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                cascade_deletes
+                                    .push((fk.source_entity.clone(), source_id.to_string()));
+                            }
+                        }
+                        OnDeleteAction::SetNull => {
+                            if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                let mut updated = value.clone();
+                                if let Some(obj) = updated.as_object_mut() {
+                                    obj.insert(fk.source_field.clone(), serde_json::Value::Null);
+                                }
+                                let key = format!("data/{}/{}", fk.source_entity, source_id);
+                                let serialized = serde_json::to_vec(&updated)
+                                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                                self.storage.insert_sync(key.as_bytes(), &serialized)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(cascade_deletes)
+    }
+
+    pub(crate) fn update_indexes_sync(
+        &self,
+        entity: &str,
+        id: &str,
+        value: &serde_json::Value,
+        old_value: Option<&serde_json::Value>,
+    ) -> Result<(), JsValue> {
+        if let Some(old) = old_value {
+            self.remove_indexes_sync(entity, id, old);
+        }
+
+        let index_defs: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.indexes.get(entity).cloned()
+        };
+
+        if let Some(index_defs) = index_defs {
+            for fields in index_defs {
+                let index_values: Vec<String> = fields
+                    .iter()
+                    .filter_map(|f| {
+                        value.get(f).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        })
+                    })
+                    .collect();
+
+                if index_values.len() == fields.len() {
+                    let index_key = format!(
+                        "index/{entity}/{}/{}/{}",
+                        fields.join("_"),
+                        index_values.join("_"),
+                        id
+                    );
+                    self.storage.insert_sync(index_key.as_bytes(), &[])?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn remove_indexes_sync(
+        &self,
+        entity: &str,
+        id: &str,
+        value: &serde_json::Value,
+    ) {
+        let index_defs: Option<Vec<Vec<String>>> = {
+            let inner = self.inner.borrow();
+            inner.indexes.get(entity).cloned()
+        };
+
+        if let Some(index_defs) = index_defs {
+            for fields in index_defs {
+                let index_values: Vec<String> = fields
+                    .iter()
+                    .filter_map(|f| {
+                        value.get(f).map(|v| match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            _ => v.to_string(),
+                        })
+                    })
+                    .collect();
+
+                if index_values.len() == fields.len() {
+                    let index_key = format!(
+                        "index/{entity}/{}/{}/{}",
+                        fields.join("_"),
+                        index_values.join("_"),
+                        id
+                    );
+                    let _ = self.storage.remove_sync(index_key.as_bytes());
+                }
+            }
+        }
+    }
 }

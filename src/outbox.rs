@@ -185,7 +185,7 @@ pub struct OutboxEntry {
     pub dispatched_count: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 mod processor {
     use super::Outbox;
     use crate::config::OutboxConfig;
@@ -296,7 +296,7 @@ mod processor {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 pub use processor::OutboxProcessor;
 
 #[cfg(test)]

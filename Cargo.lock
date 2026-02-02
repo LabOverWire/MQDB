@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "argon2",
  "base64",
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "bebytes",
  "bytes",

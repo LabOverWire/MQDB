@@ -96,7 +96,7 @@ fn match_parts(pattern: &[&str], path: &[&str], p_idx: usize, path_idx: usize) -
     false
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 mod registry {
     use super::Subscription;
     use crate::error::Result;
@@ -183,7 +183,7 @@ mod registry {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 pub use registry::SubscriptionRegistry;
 
 #[cfg(test)]

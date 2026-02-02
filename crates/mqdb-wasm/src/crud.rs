@@ -260,4 +260,160 @@ impl WasmDatabase {
 
         Ok(())
     }
+
+    #[must_use]
+    pub fn is_memory_backend(&self) -> bool {
+        self.storage.is_memory()
+    }
+
+    /// # Errors
+    /// Returns an error if the record is not found or the backend is not memory-based.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn read_sync(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
+        let key = format!("data/{entity}/{id}");
+
+        let data = self
+            .storage
+            .get_sync(key.as_bytes())?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
+        let value: serde_json::Value = serde_json::from_slice(&data)
+            .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+        serialize_js(&value)
+    }
+
+    /// # Errors
+    /// Returns an error if validation fails or the backend is not memory-based.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn create_sync(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
+        let mut value: serde_json::Value = deserialize_js(&data)?;
+
+        let id = if let Some(existing_id) = value.get("id").and_then(|v| v.as_str()) {
+            existing_id.to_string()
+        } else {
+            let mut inner = self.inner.borrow_mut();
+            let counter = inner.id_counters.entry(entity.clone()).or_insert(0);
+            *counter += 1;
+            let generated_id = counter.to_string();
+            if let serde_json::Value::Object(ref mut obj) = value {
+                obj.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(generated_id.clone()),
+                );
+            }
+            generated_id
+        };
+
+        {
+            let inner = self.inner.borrow();
+            if let Some(schema) = inner.schemas.get(&entity) {
+                schema
+                    .apply_defaults(&mut value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                schema
+                    .validate(&value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
+        }
+
+        self.validate_not_null_async(&entity, &value)?;
+        self.validate_unique_sync(&entity, &value, None)?;
+        self.validate_foreign_keys_sync(&entity, &value)?;
+
+        let key = format!("data/{entity}/{id}");
+        let serialized = serde_json::to_vec(&value)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+
+        self.storage.insert_sync(key.as_bytes(), &serialized)?;
+        self.update_indexes_sync(&entity, &id, &value, None)?;
+
+        let event = ChangeEvent::create(entity, id, value.clone());
+        self.dispatch_event(&event);
+
+        serialize_js(&value)
+    }
+
+    /// # Errors
+    /// Returns an error if the record is not found, validation fails, or the backend is not memory-based.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn update_sync(
+        &self,
+        entity: String,
+        id: String,
+        fields: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let key = format!("data/{entity}/{id}");
+        let updates: serde_json::Value = deserialize_js(&fields)?;
+
+        let existing_data = self
+            .storage
+            .get_sync(key.as_bytes())?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
+        let existing: serde_json::Value = serde_json::from_slice(&existing_data)
+            .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+        let mut value = existing.clone();
+
+        if let (serde_json::Value::Object(existing_obj), serde_json::Value::Object(new_fields)) =
+            (&mut value, updates)
+        {
+            for (k, v) in new_fields {
+                existing_obj.insert(k, v);
+            }
+        }
+
+        {
+            let inner = self.inner.borrow();
+            if let Some(schema) = inner.schemas.get(&entity) {
+                schema
+                    .validate(&value)
+                    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            }
+        }
+
+        self.validate_not_null_async(&entity, &value)?;
+        self.validate_unique_sync(&entity, &value, Some(&id))?;
+        self.validate_foreign_keys_sync(&entity, &value)?;
+
+        let serialized = serde_json::to_vec(&value)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+
+        self.storage.insert_sync(key.as_bytes(), &serialized)?;
+        self.update_indexes_sync(&entity, &id, &value, Some(&existing))?;
+
+        let event = ChangeEvent::update(entity, id, value.clone());
+        self.dispatch_event(&event);
+
+        serialize_js(&value)
+    }
+
+    /// # Errors
+    /// Returns an error if the record is not found, foreign key constraints prevent deletion, or the backend is not memory-based.
+    pub fn delete_sync(&self, entity: String, id: String) -> Result<(), JsValue> {
+        let key = format!("data/{entity}/{id}");
+
+        let existing_data = self
+            .storage
+            .get_sync(key.as_bytes())?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
+        let existing: serde_json::Value = serde_json::from_slice(&existing_data)
+            .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+        let cascade_deletes = self.check_foreign_key_constraints_sync(&entity, &id)?;
+
+        self.storage.remove_sync(key.as_bytes())?;
+        self.remove_indexes_sync(&entity, &id, &existing);
+
+        for (cascade_entity, cascade_id) in cascade_deletes {
+            let _ = self.delete_sync(cascade_entity, cascade_id);
+        }
+
+        let event = ChangeEvent::delete(entity, id);
+        self.dispatch_event(&event);
+
+        Ok(())
+    }
 }

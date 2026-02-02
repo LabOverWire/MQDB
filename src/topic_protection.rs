@@ -75,7 +75,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id_owned = client_id.to_string();
         let is_admin = self.is_admin_user(user_id);
         let is_internal = self.is_internal_service(user_id);
@@ -95,7 +95,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
                     reason = %reason,
                     "publish blocked by topic protection"
                 );
-                return Ok(false);
+                return false;
             }
 
             self.inner
@@ -109,7 +109,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
         client_id: &str,
         user_id: Option<&'a str>,
         topic_filter: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         let client_id_owned = client_id.to_string();
         let is_admin = self.is_admin_user(user_id);
         let is_internal = self.is_internal_service(user_id);
@@ -129,7 +129,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
                     reason = %reason,
                     "subscribe blocked by topic protection"
                 );
-                return Ok(false);
+                return false;
             }
 
             self.inner
@@ -195,14 +195,12 @@ mod tests {
                 Some("mqdb-internal-abc123"),
                 "_mqdb/cluster/heartbeat",
             )
-            .await
-            .unwrap();
+            .await;
         assert!(result);
 
         let result = provider
             .authorize_subscribe("any-client-id", Some("mqdb-internal-abc123"), "$DB/_idx/#")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 
@@ -212,8 +210,7 @@ mod tests {
 
         let result = provider
             .authorize_publish("mqdb-hacker", None, "_mqdb/cluster/heartbeat")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
 
         let result = provider
@@ -222,8 +219,7 @@ mod tests {
                 Some("attacker"),
                 "_mqdb/cluster/heartbeat",
             )
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
     }
 
@@ -233,14 +229,12 @@ mod tests {
 
         let result = provider
             .authorize_publish("client-1", None, "_mqdb/cluster/heartbeat")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
 
         let result = provider
             .authorize_subscribe("client-1", None, "$DB/_idx/users")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
     }
 
@@ -250,8 +244,7 @@ mod tests {
 
         let result = provider
             .authorize_subscribe("client-1", None, "$SYS/#")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 
@@ -261,8 +254,7 @@ mod tests {
 
         let result = provider
             .authorize_publish("client-1", None, "$SYS/broker/uptime")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
     }
 
@@ -274,14 +266,12 @@ mod tests {
 
         let result = provider
             .authorize_publish("client-1", Some("admin"), "$DB/_admin/backup")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
 
         let result = provider
             .authorize_subscribe("client-1", Some("admin"), "$DB/_admin/#")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 
@@ -293,14 +283,12 @@ mod tests {
 
         let result = provider
             .authorize_publish("client-1", Some("regular"), "$DB/_admin/backup")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
 
         let result = provider
             .authorize_publish("client-1", None, "$DB/_admin/backup")
-            .await
-            .unwrap();
+            .await;
         assert!(!result);
     }
 
@@ -310,14 +298,12 @@ mod tests {
 
         let result = provider
             .authorize_publish("client-1", None, "$DB/users/create")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
 
         let result = provider
             .authorize_subscribe("client-1", None, "sensors/temperature")
-            .await
-            .unwrap();
+            .await;
         assert!(result);
     }
 }

@@ -3,6 +3,8 @@ use super::{
     OnDeleteAction, Operation, Pagination, Schema, Serialize, SortDirection, SortOrder, Storage,
 };
 
+pub(crate) type KvPairs = Vec<(Vec<u8>, Vec<u8>)>;
+
 pub(crate) enum StorageKind {
     Memory(Arc<Storage>),
     IndexedDb(IdbBackend),
@@ -44,7 +46,7 @@ impl StorageKind {
     pub(crate) async fn prefix_scan(
         &self,
         prefix: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, JsValue> {
+    ) -> Result<KvPairs, JsValue> {
         match self {
             StorageKind::Memory(s) => s
                 .prefix_scan(prefix)
@@ -54,6 +56,55 @@ impl StorageKind {
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string())),
         }
+    }
+
+    pub(crate) fn get_sync(&self, key: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
+        match self {
+            StorageKind::Memory(s) => s.get(key).map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(_) => {
+                Err(JsValue::from_str("sync operations require memory backend"))
+            }
+        }
+    }
+
+    pub(crate) fn insert_sync(&self, key: &[u8], value: &[u8]) -> Result<(), JsValue> {
+        match self {
+            StorageKind::Memory(s) => s
+                .insert(key, value)
+                .map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(_) => {
+                Err(JsValue::from_str("sync operations require memory backend"))
+            }
+        }
+    }
+
+    pub(crate) fn remove_sync(&self, key: &[u8]) -> Result<(), JsValue> {
+        match self {
+            StorageKind::Memory(s) => {
+                s.remove(key).map_err(|e| JsValue::from_str(&e.to_string()))
+            }
+            StorageKind::IndexedDb(_) => {
+                Err(JsValue::from_str("sync operations require memory backend"))
+            }
+        }
+    }
+
+    pub(crate) fn prefix_scan_sync(
+        &self,
+        prefix: &[u8],
+    ) -> Result<KvPairs, JsValue> {
+        match self {
+            StorageKind::Memory(s) => s
+                .prefix_scan(prefix)
+                .map_err(|e| JsValue::from_str(&e.to_string())),
+            StorageKind::IndexedDb(_) => {
+                Err(JsValue::from_str("sync operations require memory backend"))
+            }
+        }
+    }
+
+    pub(crate) fn is_memory(&self) -> bool {
+        matches!(self, StorageKind::Memory(_))
     }
 }
 
