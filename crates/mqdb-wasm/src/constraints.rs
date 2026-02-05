@@ -11,7 +11,7 @@ impl WasmDatabase {
         entity: String,
         fields: Vec<String>,
     ) -> Result<(), JsValue> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
 
         inner
             .indexes
@@ -33,7 +33,7 @@ impl WasmDatabase {
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_not_null(&self, entity: String, field: String) -> Result<(), JsValue> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
         inner
             .not_null_constraints
             .entry(entity)
@@ -60,7 +60,7 @@ impl WasmDatabase {
             _ => OnDeleteAction::Restrict,
         };
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
         inner.foreign_keys.push(ForeignKeyEntry {
             source_entity,
             source_field,
@@ -76,7 +76,7 @@ impl WasmDatabase {
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
         inner.indexes.entry(entity).or_default().push(fields);
         Ok(())
     }
@@ -92,7 +92,7 @@ impl WasmDatabase {
         target_entity: String,
     ) -> Result<(), JsValue> {
         let field_suffix = format!("{field}_id");
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
         inner
             .relationships
             .entry(source_entity)
@@ -107,7 +107,10 @@ impl WasmDatabase {
 
     #[must_use]
     pub fn list_relationships(&self, entity: &str) -> JsValue {
-        let inner = self.inner.borrow();
+        let inner = match self.borrow_inner() {
+            Ok(inner) => inner,
+            Err(e) => return e,
+        };
         let relationships: Vec<serde_json::Value> = inner
             .relationships
             .get(entity)
@@ -130,7 +133,10 @@ impl WasmDatabase {
 
     #[must_use]
     pub fn list_constraints(&self, entity: &str) -> JsValue {
-        let inner = self.inner.borrow();
+        let inner = match self.borrow_inner() {
+            Ok(inner) => inner,
+            Err(e) => return e,
+        };
         let mut constraints = Vec::new();
 
         if let Some(uniques) = inner.unique_constraints.get(entity) {
@@ -173,7 +179,7 @@ impl WasmDatabase {
         entity: &str,
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
-        let inner = self.inner.borrow();
+        let inner = self.borrow_inner()?;
         if let Some(fields) = inner.not_null_constraints.get(entity) {
             for field in fields {
                 let field_value = value.get(field);
@@ -194,7 +200,7 @@ impl WasmDatabase {
         current_id: Option<&str>,
     ) -> Result<(), JsValue> {
         let constraints: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.unique_constraints.get(entity).cloned()
         };
 
@@ -241,7 +247,7 @@ impl WasmDatabase {
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
         let fks: Vec<ForeignKeyEntry> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.foreign_keys.clone()
         };
 
@@ -276,7 +282,7 @@ impl WasmDatabase {
         id: &str,
     ) -> Result<Vec<(String, String)>, JsValue> {
         let fks: Vec<ForeignKeyEntry> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.foreign_keys.clone()
         };
 
@@ -340,7 +346,7 @@ impl WasmDatabase {
         }
 
         let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.indexes.get(entity).cloned()
         };
 
@@ -378,7 +384,7 @@ impl WasmDatabase {
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
         let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.indexes.get(entity).cloned()
         };
 
@@ -416,7 +422,7 @@ impl WasmDatabase {
         current_id: Option<&str>,
     ) -> Result<(), JsValue> {
         let constraints: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.unique_constraints.get(entity).cloned()
         };
 
@@ -463,7 +469,7 @@ impl WasmDatabase {
         value: &serde_json::Value,
     ) -> Result<(), JsValue> {
         let fks: Vec<ForeignKeyEntry> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.foreign_keys.clone()
         };
 
@@ -498,7 +504,7 @@ impl WasmDatabase {
         id: &str,
     ) -> Result<Vec<(String, String)>, JsValue> {
         let fks: Vec<ForeignKeyEntry> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.foreign_keys.clone()
         };
 
@@ -558,11 +564,11 @@ impl WasmDatabase {
         old_value: Option<&serde_json::Value>,
     ) -> Result<(), JsValue> {
         if let Some(old) = old_value {
-            self.remove_indexes_sync(entity, id, old);
+            self.remove_indexes_sync(entity, id, old)?;
         }
 
         let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.indexes.get(entity).cloned()
         };
 
@@ -598,9 +604,9 @@ impl WasmDatabase {
         entity: &str,
         id: &str,
         value: &serde_json::Value,
-    ) {
+    ) -> Result<(), JsValue> {
         let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             inner.indexes.get(entity).cloned()
         };
 
@@ -627,5 +633,7 @@ impl WasmDatabase {
                 }
             }
         }
+
+        Ok(())
     }
 }

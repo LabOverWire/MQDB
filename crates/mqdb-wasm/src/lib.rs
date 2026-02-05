@@ -22,7 +22,7 @@ use mqdb::{
     parse_admin_topic, parse_db_topic,
 };
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -89,6 +89,20 @@ impl WasmDatabase {
                 relationships: HashMap::new(),
             })),
         })
+    }
+}
+
+impl WasmDatabase {
+    pub(crate) fn borrow_inner(&self) -> Result<Ref<'_, DatabaseInner>, JsValue> {
+        self.inner
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("database is busy (concurrent access)"))
+    }
+
+    pub(crate) fn borrow_inner_mut(&self) -> Result<RefMut<'_, DatabaseInner>, JsValue> {
+        self.inner
+            .try_borrow_mut()
+            .map_err(|_| JsValue::from_str("database is busy (concurrent mutable access)"))
     }
 }
 

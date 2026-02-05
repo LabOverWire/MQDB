@@ -54,6 +54,10 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
 
+There are two distinct mechanisms for handling broadcast entities:
+1.  **Fan-out to all partitions**: Used for `_topic_index`, `_wildcards`, and `_db_schema`. This involves creating 64 `ReplicationWrite`s, one for each partition.
+2.  **Gossip-style broadcast to all nodes**: Used for `_client_loc` and `_db_constraint`. This involves creating a single `ReplicationWrite` (often for Partition 0) and then having the `write_or_forward` logic send it to all other alive nodes.
+
 ---
 
 ## A2: Event Flow Architecture
@@ -133,7 +137,7 @@ subscribe_wildcard_replicated() + WildcardBroadcast
 | Pattern Type | Writes Generated | Breakdown |
 |--------------|------------------|-----------|
 | Exact topic (e.g., `sensor/temp`) | 65 | 1 subscription + 64 topic index |
-| Wildcard topic (e.g., `sensor/+/temp`) | 129 | 1 subscription + 64 topic index + 64 wildcards |
+| Wildcard topic (e.g., `sensor/+/temp`) | 65 | 1 subscription + 64 wildcards (TopicIndex is NOT updated for wildcards) |
 
 This amplification is fundamental to the design—without broadcast entities, publish routing would require cross-node queries for every message, destroying throughput.
 
@@ -323,10 +327,11 @@ Each partition maintains independent pagination state, allowing efficient resump
 
 ### A5.4 Retained Message Queries
 
-Wildcard subscriptions require all-partition queries:
+Retained Message Queries:
 
 - Exact topic: `hash(topic) % 64` → single partition
-- Wildcard pattern (`+`, `#`): query all 64 partitions, filter locally
+- Wildcard pattern (`+`, `#`): query all 64 partitions, filter locally.
+  However, the `on_client_subscribe` event handler currently *does not* initiate retained message queries for wildcard subscriptions. Only non-wildcard subscriptions trigger these queries.
 
 **Key Files**: `query_coordinator.rs:1-470`, `cursor.rs:1-140`, `protocol.rs:661-909` (QueryRequest/Response)
 
@@ -918,7 +923,7 @@ Each node can be:
 
 QUIC preferred for multi-node clusters:
 - Better congestion control
-- Stream multiplexing (`StreamStrategy::DataPerTopic`)
+- Stream multiplexing (uses a single bidirectional stream per peer connection, not explicitly a stream per topic)
 - Built-in encryption
 - TCP fallback for testing/development
 

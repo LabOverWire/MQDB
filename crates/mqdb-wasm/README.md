@@ -25,12 +25,19 @@ db.add_schema("users", {
   ]
 });
 
-// CRUD operations
+// Async CRUD operations
 const user = await db.create("users", { name: "Alice", email: "alice@example.com" });
 const found = await db.get("users", user.id);
 await db.update("users", user.id, { name: "Bob" });
 const all = await db.list("users");
 await db.delete("users", user.id);
+
+// Sync CRUD operations (memory backend only)
+const user2 = db.create_sync("users", { name: "Carol", email: "carol@example.com" });
+const found2 = db.read_sync("users", user2.id);
+db.update_sync("users", user2.id, { name: "Dave" });
+const all2 = db.list_sync("users");
+db.delete_sync("users", user2.id);
 
 // Subscribe to changes
 const subId = db.subscribe("*", null, (event) => {
@@ -42,13 +49,31 @@ db.unsubscribe(subId);
 
 ## API
 
+### Async Methods
+
 | Method | Description |
 |--------|-------------|
 | `create(entity, data)` | Create record, returns with generated id |
-| `get(entity, id)` | Get record by id |
+| `read(entity, id)` | Get record by id |
 | `update(entity, id, fields)` | Partial update, returns merged record |
 | `delete(entity, id)` | Delete record |
-| `list(entity)` | List all records for entity |
+| `list(entity, options?)` | List all records for entity |
+
+### Sync Methods (memory backend only)
+
+| Method | Description |
+|--------|-------------|
+| `create_sync(entity, data)` | Create record synchronously |
+| `read_sync(entity, id)` | Get record by id synchronously |
+| `update_sync(entity, id, fields)` | Partial update synchronously |
+| `delete_sync(entity, id)` | Delete record synchronously |
+| `list_sync(entity, options?)` | List records synchronously |
+| `is_memory_backend()` | Returns `true` if using memory storage |
+
+### Other
+
+| Method | Description |
+|--------|-------------|
 | `subscribe(pattern, entity, callback)` | Subscribe to changes, returns subscription id |
 | `unsubscribe(subId)` | Unsubscribe |
 | `add_schema(entity, schema)` | Register schema with validation |
@@ -56,6 +81,8 @@ db.unsubscribe(subId);
 
 ## Notes
 
-- Data is stored in memory only (lost on page refresh)
+- `new WasmDatabase()` creates an in-memory instance (data lost on page refresh)
+- `WasmDatabase.open_persistent(name)` creates an IndexedDB-backed instance
+- Sync methods (`*_sync`) only work with the memory backend; they throw on IndexedDB
 - Field types: `string`, `number`, `boolean`, `array`, `object`
 - Subscription patterns: `*` (all), `entity` (exact), `prefix/*` (prefix match)

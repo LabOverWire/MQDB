@@ -14,7 +14,7 @@ impl WasmDatabase {
         let id = if let Some(existing_id) = value.get("id").and_then(|v| v.as_str()) {
             existing_id.to_string()
         } else {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.borrow_inner_mut()?;
             let counter = inner.id_counters.entry(entity.clone()).or_insert(0);
             *counter += 1;
             let generated_id = counter.to_string();
@@ -28,7 +28,7 @@ impl WasmDatabase {
         };
 
         {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             if let Some(schema) = inner.schemas.get(&entity) {
                 schema
                     .apply_defaults(&mut value)
@@ -125,7 +125,7 @@ impl WasmDatabase {
         }
 
         let relationships: Vec<Relationship> = {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             match inner.relationships.get(entity) {
                 Some(rels) => rels.clone(),
                 None => return Ok(()),
@@ -202,7 +202,7 @@ impl WasmDatabase {
         }
 
         {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             if let Some(schema) = inner.schemas.get(&entity) {
                 schema
                     .validate(&value)
@@ -292,7 +292,7 @@ impl WasmDatabase {
         let id = if let Some(existing_id) = value.get("id").and_then(|v| v.as_str()) {
             existing_id.to_string()
         } else {
-            let mut inner = self.inner.borrow_mut();
+            let mut inner = self.borrow_inner_mut()?;
             let counter = inner.id_counters.entry(entity.clone()).or_insert(0);
             *counter += 1;
             let generated_id = counter.to_string();
@@ -306,7 +306,7 @@ impl WasmDatabase {
         };
 
         {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             if let Some(schema) = inner.schemas.get(&entity) {
                 schema
                     .apply_defaults(&mut value)
@@ -365,7 +365,7 @@ impl WasmDatabase {
         }
 
         {
-            let inner = self.inner.borrow();
+            let inner = self.borrow_inner()?;
             if let Some(schema) = inner.schemas.get(&entity) {
                 schema
                     .validate(&value)
@@ -405,7 +405,7 @@ impl WasmDatabase {
         let cascade_deletes = self.check_foreign_key_constraints_sync(&entity, &id)?;
 
         self.storage.remove_sync(key.as_bytes())?;
-        self.remove_indexes_sync(&entity, &id, &existing);
+        self.remove_indexes_sync(&entity, &id, &existing)?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = self.delete_sync(cascade_entity, cascade_id);

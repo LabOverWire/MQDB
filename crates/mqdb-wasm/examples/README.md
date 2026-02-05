@@ -236,11 +236,12 @@ The WASM database runs entirely in the browser with no server required:
 
 ## API Reference
 
-### Database Operations
+### Database Operations (Async)
 
 | Method | Description |
 |--------|-------------|
-| `new WasmDatabase()` | Create database instance |
+| `new WasmDatabase()` | Create in-memory database instance |
+| `WasmDatabase.open_persistent(name)` | Create IndexedDB-backed instance |
 | `create(entity, data)` | Insert record |
 | `read(entity, id)` | Get record by ID |
 | `read_with_includes(entity, id, includes)` | Get record with related data |
@@ -248,6 +249,37 @@ The WASM database runs entirely in the browser with no server required:
 | `delete(entity, id)` | Remove record |
 | `list(entity, options)` | Query records |
 | `cursor(entity, options)` | Create streaming cursor |
+
+### Database Operations (Sync — memory backend only)
+
+Sync methods perform the same operations as their async counterparts but return
+values directly instead of Promises. They only work on `WasmDatabase` instances
+created with `new WasmDatabase()` (memory backend). Calling them on an
+IndexedDB-backed instance throws an error.
+
+Use `is_memory_backend()` to check at runtime.
+
+| Method | Description |
+|--------|-------------|
+| `create_sync(entity, data)` | Insert record |
+| `read_sync(entity, id)` | Get record by ID |
+| `update_sync(entity, id, fields)` | Update record fields |
+| `delete_sync(entity, id)` | Remove record |
+| `list_sync(entity, options)` | Query records (no `includes` support) |
+| `is_memory_backend()` | Returns `true` if using memory storage |
+
+```javascript
+const db = new WasmDatabase();
+console.log(db.is_memory_backend()); // true
+
+const user = db.create_sync("users", { name: "Alice" });
+const found = db.read_sync("users", user.id);
+const all = db.list_sync("users", {
+    filters: [{ field: "name", op: "eq", value: "Alice" }]
+});
+db.update_sync("users", user.id, { name: "Bob" });
+db.delete_sync("users", user.id);
+```
 
 ### Schema & Constraints
 

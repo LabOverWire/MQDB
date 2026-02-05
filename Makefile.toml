@@ -18,6 +18,7 @@ echo ""
 echo "Building:"
 echo "  cargo make build         Build all targets (debug)"
 echo "  cargo make build-release Build release binary"
+echo "  cargo make build-dist    Build size-optimized dist binary"
 echo "  cargo make install       Install mqdb binary from local codebase"
 echo "  cargo make build-profiling Build with profiling profile"
 echo "  cargo make wasm-build    Build WASM package (pkg/)"
@@ -168,6 +169,11 @@ description = "Profile DB with samply"
 command = "cargo"
 args = ["run", "--release", "--", "dev", "profile", "db"]
 
+[tasks.build-dist]
+description = "Build size-optimized dist binary (lto + strip + abort + opt-z)"
+command = "cargo"
+args = ["build", "--profile=dist"]
+
 [tasks.build-profiling]
 description = "Build with profiling profile"
 command = "cargo"
@@ -175,7 +181,7 @@ args = ["build", "--profile=profiling"]
 
 [tasks.wasm-build]
 description = "Build WASM package (pkg/)"
-dependencies = ["wasm-compile", "wasm-bindgen"]
+dependencies = ["wasm-compile", "wasm-bindgen", "wasm-opt"]
 
 [tasks.wasm-compile]
 description = "Compile WASM binary"
@@ -186,6 +192,18 @@ args = ["build", "--target", "wasm32-unknown-unknown", "--release", "--manifest-
 description = "Generate JS bindings"
 command = "wasm-bindgen"
 args = ["--target", "web", "--out-dir", "crates/mqdb-wasm/pkg", "crates/mqdb-wasm/target/wasm32-unknown-unknown/release/mqdb_wasm.wasm"]
+
+[tasks.wasm-opt]
+description = "Optimize WASM binary with wasm-opt (optional, skipped if not installed)"
+script = '''
+if command -v wasm-opt > /dev/null 2>&1; then
+    echo "Running wasm-opt -O4 on mqdb_wasm_bg.wasm..."
+    wasm-opt -O4 -o crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm
+    echo "wasm-opt complete"
+else
+    echo "wasm-opt not found, skipping (install binaryen for smaller WASM binaries)"
+fi
+'''
 
 [tasks.test-e2e]
 description = "Run E2E cluster tests (requires release build)"

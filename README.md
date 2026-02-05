@@ -420,7 +420,7 @@ Admin users can:
 
 #### Internal Service Bypass
 
-Internal MQDB components authenticate using a randomly-generated service username (`mqdb-internal-<uuid>`) created at startup. This username is only known to the server itself. Topic protection checks the authenticated user identity (not client ID) to grant internal components unrestricted access to cluster topics.
+Internal MQDB components authenticate using a dynamically generated, node-local service username (`mqdb-internal-<UUID>`) and password created at startup. This identity is unique to each node and is automatically registered with its local broker. Topic protection checks the authenticated user identity (not client ID) to grant these internal components unrestricted access to cluster topics. This mechanism is secure because the credentials are random, ephemeral, and node-local, preventing external clients from spoofing internal access.
 
 #### Protection Flow
 
@@ -476,7 +476,7 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 
 - **64 fixed partitions** with configurable replication factor (RF=2 default)
 - **Raft consensus** for cluster topology and partition ownership
-- **MQTT bridges** for inter-node communication
+- **MQTT bridges** for inter-node communication (DEPRECATED)
 - **QUIC transport** for secure, efficient cluster traffic (recommended for production)
 
 ### Starting a Cluster
@@ -806,7 +806,7 @@ cargo run --example parking_lot
 - [x] Last Will Testament cross-node delivery
 
 ### Test Coverage
-- 436 tests passing (unit + integration + cluster)
+- Extensive test suite (unit + integration + cluster)
 - Clippy clean with pedantic warnings enabled
 - Full constraint coverage including multilevel cascade
 - Point-to-point delivery tests with partition verification

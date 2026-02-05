@@ -36,7 +36,7 @@ impl WasmDatabase {
             schema = schema.add_field(field_def);
         }
 
-        let mut inner = self.inner.borrow_mut();
+        let mut inner = self.borrow_inner_mut()?;
         inner.schemas.insert(entity, schema);
 
         Ok(())
@@ -47,7 +47,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if serialization fails.
     pub fn get_schema(&self, entity: &str) -> Result<JsValue, JsValue> {
-        let inner = self.inner.borrow();
+        let inner = self.borrow_inner()?;
         match inner.schemas.get(entity) {
             Some(schema) => {
                 let fields: Vec<FieldDefJs> = schema
