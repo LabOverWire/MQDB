@@ -1,5 +1,5 @@
 use super::cookies::{build_delete_cookie_header, build_set_cookie_header, parse_session_id};
-use super::jwt_signer::{JwtSigningConfig, decode_jwt_payload_unverified, sign_jwt};
+use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::oauth::{self, OAuthConfig};
 use super::pkce::PkceCache;
 use super::rate_limiter::RateLimiter;
@@ -325,20 +325,24 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         return json_response(400, &json!({"error": "missing token field"}));
     };
 
-    let Some(payload) = decode_jwt_payload_unverified(expired_token) else {
-        return json_response(400, &json!({"error": "invalid token format"}));
+    let Some(payload) = verify_jwt_ignore_expiry(expired_token, &state.jwt_config) else {
+        return json_response(401, &json!({"error": "invalid or tampered token"}));
     };
 
     let Some(google_sub) = payload.get("google_sub").and_then(|v| v.as_str()) else {
         return json_response(400, &json!({"error": "token missing google_sub claim"}));
     };
 
-    let stored_refresh_token = match read_oauth_token(&state.mqtt_client, google_sub).await {
-        Some(data) => match data.get("refresh_token").and_then(|v| v.as_str()) {
-            Some(rt) => rt.to_string(),
-            None => return json_response(404, &json!({"error": "no refresh token stored"})),
-        },
-        None => return json_response(404, &json!({"error": "user not found"})),
+    let Some(stored_data) = read_oauth_token(&state.mqtt_client, google_sub).await else {
+        return json_response(404, &json!({"error": "user not found"}));
+    };
+
+    let Some(stored_refresh_token) = stored_data
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
+        return json_response(404, &json!({"error": "no refresh token stored"}));
     };
 
     let token_response =
@@ -362,8 +366,8 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         }
     }
 
-    let email = payload
-        .get("sub")
+    let email = stored_data
+        .get("email")
         .and_then(|v| v.as_str())
         .unwrap_or(google_sub);
     let now = std::time::SystemTime::now()
@@ -377,9 +381,9 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
         "google_sub": google_sub,
-        "email": payload.get("email"),
-        "name": payload.get("name"),
-        "picture": payload.get("picture")
+        "email": stored_data.get("email"),
+        "name": stored_data.get("name"),
+        "picture": stored_data.get("picture")
     });
 
     let new_jwt = sign_jwt(&new_claims, &state.jwt_config);

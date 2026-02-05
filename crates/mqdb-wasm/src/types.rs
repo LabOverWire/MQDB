@@ -43,10 +43,7 @@ impl StorageKind {
         }
     }
 
-    pub(crate) async fn prefix_scan(
-        &self,
-        prefix: &[u8],
-    ) -> Result<KvPairs, JsValue> {
+    pub(crate) async fn prefix_scan(&self, prefix: &[u8]) -> Result<KvPairs, JsValue> {
         match self {
             StorageKind::Memory(s) => s
                 .prefix_scan(prefix)
@@ -80,19 +77,14 @@ impl StorageKind {
 
     pub(crate) fn remove_sync(&self, key: &[u8]) -> Result<(), JsValue> {
         match self {
-            StorageKind::Memory(s) => {
-                s.remove(key).map_err(|e| JsValue::from_str(&e.to_string()))
-            }
+            StorageKind::Memory(s) => s.remove(key).map_err(|e| JsValue::from_str(&e.to_string())),
             StorageKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
         }
     }
 
-    pub(crate) fn prefix_scan_sync(
-        &self,
-        prefix: &[u8],
-    ) -> Result<KvPairs, JsValue> {
+    pub(crate) fn prefix_scan_sync(&self, prefix: &[u8]) -> Result<KvPairs, JsValue> {
         match self {
             StorageKind::Memory(s) => s
                 .prefix_scan(prefix)

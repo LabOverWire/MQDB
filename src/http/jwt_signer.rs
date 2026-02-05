@@ -44,10 +44,18 @@ pub fn sign_jwt(claims: &Value, config: &JwtSigningConfig) -> String {
     }
 }
 
-pub fn decode_jwt_payload_unverified(token: &str) -> Option<Value> {
+pub fn verify_jwt_ignore_expiry(token: &str, config: &JwtSigningConfig) -> Option<Value> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
+    }
+    let message = format!("{}.{}", parts[0], parts[1]);
+    let signature_bytes = URL_SAFE_NO_PAD.decode(parts[2]).ok()?;
+    match config.algorithm {
+        JwtSigningAlgorithm::HS256 => {
+            let key = hmac::Key::new(hmac::HMAC_SHA256, &config.key_bytes);
+            hmac::verify(&key, message.as_bytes(), &signature_bytes).ok()?;
+        }
     }
     let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
     serde_json::from_slice(&payload_bytes).ok()

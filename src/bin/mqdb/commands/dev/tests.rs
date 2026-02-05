@@ -182,7 +182,11 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
     println!("\nResults: {passed} passed, {failed} failed\n");
 }
 
-fn mqdb_cmd(exe: &std::path::Path, args: &[&str], port: u16) -> std::io::Result<std::process::Output> {
+fn mqdb_cmd(
+    exe: &std::path::Path,
+    args: &[&str],
+    port: u16,
+) -> std::io::Result<std::process::Output> {
     let broker = format!("127.0.0.1:{port}");
     let mut full_args: Vec<&str> = args.to_vec();
     full_args.extend_from_slice(&["--broker", &broker, "--user", "admin", "--pass", "admin"]);
@@ -205,7 +209,15 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
 
     let add_output = mqdb_cmd(
         &exe,
-        &["constraint", "add", &entity, "--unique", "sku", "--name", &constraint_name],
+        &[
+            "constraint",
+            "add",
+            &entity,
+            "--unique",
+            "sku",
+            "--name",
+            &constraint_name,
+        ],
         ports[0],
     );
 
@@ -235,7 +247,12 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
 
     let create1 = mqdb_cmd(
         &exe,
-        &["create", &entity, "-d", r#"{"name": "Widget A", "sku": "SKU-001"}"#],
+        &[
+            "create",
+            &entity,
+            "-d",
+            r#"{"name": "Widget A", "sku": "SKU-001"}"#,
+        ],
         ports[0],
     );
 
@@ -253,7 +270,12 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
 
     let create_dup = mqdb_cmd(
         &exe,
-        &["create", &entity, "-d", r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#],
+        &[
+            "create",
+            &entity,
+            "-d",
+            r#"{"name": "Duplicate Widget", "sku": "SKU-001"}"#,
+        ],
         ports[0],
     );
 
