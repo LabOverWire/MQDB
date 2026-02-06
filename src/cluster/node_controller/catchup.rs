@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::NodeController;
 use crate::cluster::protocol::CatchupResponse;
 use crate::cluster::replication::{ReplicaRole, ReplicaState};

@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{AdminRequest, ClusteredAgent};
 use crate::cluster::{NUM_PARTITIONS, NodeId, PartitionId};
 use crate::transport::{ErrorCode, Response};

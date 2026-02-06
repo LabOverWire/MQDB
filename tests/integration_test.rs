@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use mqdb::{Database, Filter, FilterOp, ScopeConfig, SortDirection, SortOrder};
 use serde_json::json;
 use tempfile::TempDir;

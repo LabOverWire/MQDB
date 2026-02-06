@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::super::idempotency_store::{IdempotencyCheck, IdempotencyError};
 use super::super::offset_store::ConsumerOffset;
 use super::super::protocol::ReplicationWrite;

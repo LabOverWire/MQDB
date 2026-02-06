@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 pub const SESSIONS: &str = "_sessions";
 pub const QOS2: &str = "_mqtt_qos2";
 pub const INFLIGHT: &str = "_mqtt_inflight";

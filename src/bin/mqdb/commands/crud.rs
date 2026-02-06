@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use crate::cli_types::{ConnectionArgs, OutputFormat, SubscriptionModeArg};
 use crate::common::{
     connect_client, execute_request, matches_filters, output_response, parse_filters,

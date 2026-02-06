@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{CursorOptions, JsValue, VecDeque, WasmDatabase, serialize_js, wasm_bindgen};
 
 #[wasm_bindgen]

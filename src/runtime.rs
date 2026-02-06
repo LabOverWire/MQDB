@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 #[cfg(all(feature = "agent", not(target_arch = "wasm32")))]
 mod native {
     pub use std::time::{Duration, Instant};

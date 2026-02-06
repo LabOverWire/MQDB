@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::clock::VirtualClock;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};

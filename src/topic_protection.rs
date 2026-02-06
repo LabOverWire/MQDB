@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use crate::topic_rules::check_topic_access;
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;

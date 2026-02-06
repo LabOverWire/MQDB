@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::state::LogEntry;
 use bebytes::BeBytes;
 use std::time::{SystemTime, UNIX_EPOCH};

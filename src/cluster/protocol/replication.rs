@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::types::{AckStatus, Operation};
 use crate::cluster::{Epoch, NodeId, PartitionId};
 use bebytes::BeBytes;

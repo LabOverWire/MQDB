@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 #[derive(Debug, Clone, Copy)]
 pub enum DurabilityMode {
     Immediate,

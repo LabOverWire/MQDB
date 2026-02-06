@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::StoreManager;
 use crate::cluster::inflight_store::{InflightMessage, InflightStoreError};
 use crate::cluster::offset_store::ConsumerOffset;

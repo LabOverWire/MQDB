@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::fmt::Write;
 
 pub const SESSION_COOKIE_NAME: &str = "mqdb_session";

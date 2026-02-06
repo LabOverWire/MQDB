@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use mqtt5::client::MqttClient;
 use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::Value;

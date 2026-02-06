@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::cookies::{build_delete_cookie_header, build_set_cookie_header, parse_session_id};
 use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::oauth::{self, OAuthConfig};

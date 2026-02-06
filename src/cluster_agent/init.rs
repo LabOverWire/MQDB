@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     BATCH_QUEUE_CAPACITY, ClusterConfig, ClusterInitError, ClusterTransportKind, ClusteredAgent,
     MAIN_QUEUE_CAPACITY, MessageProcessorChannels, RAFT_CHANNEL_CAPACITY,

@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::super::entity;
 use super::super::protocol::{self, CatchupResponse, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};

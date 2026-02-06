@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     AdminOperation, FilterJs, JsValue, ListOptions, PaginationJs, Request, SortOrderJs,
     WasmDatabase, build_request, deserialize_js, parse_admin_topic, parse_db_topic, serialize_js,

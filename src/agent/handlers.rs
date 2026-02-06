@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use crate::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::{OwnershipConfig, ScopeConfig};
 use crate::{Database, Response};

@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::protocol::{AckStatus, ReplicationAck, ReplicationWrite};
 use super::{Epoch, NodeId, PartitionId};
 use std::collections::BTreeMap;

@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::super::PartitionId;
 use super::super::db::{self, IndexEntry, data_partition};
 use super::super::db_protocol::{

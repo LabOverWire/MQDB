@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use js_sys::Uint8Array;
 use mqdb::error::{Error, Result};
 use mqdb::storage::{AsyncBatchOperations, AsyncStorageBackend};

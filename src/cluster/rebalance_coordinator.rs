@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::NodeId;
 use super::rebalancer::PartitionReassignment;
 use bebytes::BeBytes;

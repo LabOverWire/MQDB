@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     Arc, AsyncStorageBackend, ChangeEvent, Deserialize, Filter, HashMap, IdbBackend, JsValue,
     OnDeleteAction, Operation, Pagination, Schema, Serialize, SortDirection, SortOrder, Storage,

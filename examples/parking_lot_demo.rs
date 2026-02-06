@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 mod parking_lot_mqtt;
 
 use mqdb::{Database, MqdbAgent};

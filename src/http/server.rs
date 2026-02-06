@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::handlers::{self, ServerState};
 use super::jwt_signer::JwtSigningConfig;
 use super::oauth::OAuthConfig;

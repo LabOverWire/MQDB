@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::super::Epoch;
 use super::super::client_location::{ClientLocationEntry, client_location_key};
 use super::super::entity;

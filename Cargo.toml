@@ -2,6 +2,10 @@
 name = "mqdb"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["LabOverWire"]
+description = "A distributed MQTT broker with embedded reactive database"
+repository = "https://github.com/LabOverWire/MQDB"
 
 [dependencies]
 crc32fast = "1.5"

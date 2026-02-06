@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::handlers::handle_message;
 use super::{MqdbAgent, connect_mqtt_client, resolve_connect_address};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;

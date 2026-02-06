@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::partition::index_partition;
 use crate::cluster::protocol::Operation;
 use crate::cluster::{NodeId, PartitionId};

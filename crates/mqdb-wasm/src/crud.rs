@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     ChangeEvent, JsValue, Relationship, WasmDatabase, deserialize_js, serialize_js, wasm_bindgen,
 };

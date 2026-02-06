@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};

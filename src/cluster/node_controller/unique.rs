@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId,
     UNIQUE_REQUEST_TIMEOUT_SECS, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,

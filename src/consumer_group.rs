@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;

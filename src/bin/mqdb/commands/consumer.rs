@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use bebytes::BeBytes;
 use mqdb::cluster::db::DbEntity;
 use mqdb::cluster::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};

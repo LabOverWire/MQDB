@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{Database, SubscriptionResult};
 use crate::consumer_group::{ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
 use crate::error::{Error, Result};

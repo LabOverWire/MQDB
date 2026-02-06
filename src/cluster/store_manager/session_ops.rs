@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::StoreManager;
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::session::{SessionData, SessionError, session_partition};

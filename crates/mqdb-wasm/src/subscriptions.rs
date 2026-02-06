@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{
     ChangeEvent, HashMap, JsValue, SubscriptionEntry, SubscriptionMode, WasmDatabase,
     match_pattern, serialize_event, wasm_bindgen,
@@ -5,6 +8,8 @@ use super::{
 
 #[wasm_bindgen]
 impl WasmDatabase {
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn subscribe(
         &self,
         pattern: String,
@@ -30,6 +35,8 @@ impl WasmDatabase {
         Ok(sub_id)
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn subscribe_shared(
         &self,
         pattern: String,
@@ -63,6 +70,8 @@ impl WasmDatabase {
         Ok(sub_id)
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn heartbeat(&self, sub_id: &str) -> Result<bool, JsValue> {
         let mut inner = self.borrow_inner_mut()?;
         if let Some(entry) = inner.subscriptions.get_mut(sub_id) {
@@ -73,6 +82,8 @@ impl WasmDatabase {
         }
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn get_subscription_info(&self, sub_id: &str) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         match inner.subscriptions.get(sub_id) {
@@ -96,6 +107,8 @@ impl WasmDatabase {
         }
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn list_consumer_groups(&self) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -132,6 +145,8 @@ impl WasmDatabase {
         Ok(js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL))
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn get_consumer_group(&self, group_name: &str) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         let mut members: Vec<serde_json::Value> = Vec::new();
@@ -165,6 +180,8 @@ impl WasmDatabase {
         }
     }
 
+    /// # Errors
+    /// Returns `JsValue` if the database is currently borrowed.
     pub fn unsubscribe(&self, sub_id: &str) -> Result<bool, JsValue> {
         let mut inner = self.borrow_inner_mut()?;
         Ok(inner.subscriptions.remove(sub_id).is_some())

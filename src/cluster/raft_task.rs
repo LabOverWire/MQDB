@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use crate::cluster::raft::{RaftCommand, RaftCoordinator};
 use crate::cluster::transport::ClusterTransport;
 use crate::cluster::{ClusterMessage, Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};

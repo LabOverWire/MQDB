@@ -824,4 +824,6 @@ cargo run --example parking_lot
 
 ## License
 
-MIT
+MQDB is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+For commercial licensing inquiries, contact [TODO: email].

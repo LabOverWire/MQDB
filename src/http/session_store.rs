@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::sync::RwLock;

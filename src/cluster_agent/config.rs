@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use super::{ClusterConfig, QuicConfig};
 use crate::config::DurabilityMode;
 use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, RateLimitConfig};

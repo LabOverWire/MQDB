@@ -1,3 +1,6 @@
+// Copyright 2027 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 use mqdb::{Database, FieldDefinition, FieldType, Schema, ScopeConfig};
 use serde_json::json;
 
