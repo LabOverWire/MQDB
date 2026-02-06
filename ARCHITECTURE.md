@@ -106,27 +106,38 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 
 **Responsibility:** Persistence and transaction management with pluggable backends
 
-**Architecture:**
+**Architecture (Synchronous API):**
 ```rust
 pub trait StorageBackend: Send + Sync {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
     fn remove(&self, key: &[u8]) -> Result<()>;
     fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
-    fn batch(&self) -> Box<dyn BatchWriter>;
+    fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn batch(&self) -> Box<dyn BatchOperations>;
     fn flush(&self) -> Result<()>;
+}
+
+pub trait BatchOperations: Send {
+    fn insert(&mut self, key: Vec<u8>, value: Vec<u8>);
+    fn remove(&mut self, key: Vec<u8>);
+    fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>);
+    fn commit(self: Box<Self>) -> Result<()>;
 }
 ```
 
+**Asynchronous API:**
+For asynchronous contexts, `AsyncStorageBackend` and `AsyncBatchOperations` traits are provided, mirroring the synchronous API but returning `impl Future`.
+
 **Available Backends:**
 
-| Backend | Use Case | Persistence | Platform |
-|---------|----------|-------------|----------|
-| `FjallBackend` | Production | LSM-based disk | Native |
-| `MemoryBackend` | Testing/WASM | In-memory HashMap | All |
+| Backend | Use Case | Persistence | Platform | Internal Implementation |
+|---------|----------|-------------|----------|-------------------------|
+| `FjallBackend` | Production | LSM-based disk | Native | `fjall::Database` with `Keyspace` |
+| `MemoryBackend` | Testing/WASM | In-memory HashMap | All | `std::collections::BTreeMap` |
 
 **Key Features:**
-- `BatchWriter` for atomic multi-key operations
+- `BatchOperations` for atomic multi-key operations
 - Optimistic locking via preconditions
 - Configurable durability modes (`Immediate`, `Periodic`, `None`)
 
@@ -513,7 +524,7 @@ OutboxConfig {
 ```
 db.create("users", json!({...}))
     ↓
-Generate ID (atomic sequence counter)
+Extract client-provided ID from payload, or generate one (atomic sequence counter)
     ↓
 Apply schema defaults (if schema exists)
     ↓
@@ -1210,7 +1221,7 @@ Cluster nodes communicate via two transport implementations:
 
 | Transport | Class | Characteristics |
 |-----------|-------|-----------------|
-| **MQTT Bridges** | `MqttTransport` | Uses broker infrastructure, bridge overhead |
+| **MQTT Bridges** | `MqttTransport` | Uses broker infrastructure, bridge overhead (DEPRECATED) |
 | **Direct QUIC** | `QuicDirectTransport` | Bypasses broker, 1.2-2.5x faster |
 
 Both implement the `ClusterTransport` trait and support:
@@ -1604,7 +1615,145 @@ db.backup_logical(format!("backups/logical_{}.jsonl", timestamp)).await?;
 
 ---
 
-## 15. Conclusion
+## 15. Security: Topic Protection
+
+### Overview
+
+Topic protection provides defense-in-depth security by enforcing access controls at the broker level, independent of ACL configuration. Even with a permissive ACL like `$DB/#`, internal topics remain protected.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     MQTT Client Request                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              TopicProtectionAuthProvider                         │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │  1. Check if internal client (mqdb-* prefix)            │   │
+│  │     → Yes: Bypass protection, delegate to inner         │   │
+│  │  2. Check against PROTECTED_TOPICS rules                │   │
+│  │     → BlockAll: Return denied                           │   │
+│  │     → ReadOnly: Deny publish, allow subscribe           │   │
+│  │     → AdminRequired: Check admin_users set              │   │
+│  │  3. Check internal entity access ($DB/_*)               │   │
+│  │  4. Delegate to inner AuthProvider (ACL)                │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              CompositeAuthProvider (ACL)                         │
+│              - Password/SCRAM/JWT authentication                 │
+│              - ACL rule evaluation                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Protection Rules
+
+Located in `src/topic_rules.rs`:
+
+| Pattern | Tier | Purpose |
+|---------|------|---------|
+| `_mqdb/#` | BlockAll | Cluster heartbeat, coordination |
+| `$DB/_idx/#` | BlockAll | Secondary index data |
+| `$DB/_unique/#` | BlockAll | Unique constraint enforcement |
+| `$DB/_fk/#` | BlockAll | Foreign key validation |
+| `$DB/_query/#` | BlockAll | Query execution internals |
+| `$DB/p+/#` | BlockAll | Partition-specific topics (p0, p1, ..., p63) |
+| `$SYS/#` | ReadOnly | Broker statistics, monitoring |
+| `$DB/_admin/#` | AdminRequired | Schema, constraints, backup operations |
+| `$DB/_oauth_tokens/#` | AdminRequired | OAuth token storage |
+
+### Pattern Matching
+
+The `matches_pattern` function supports:
+- `#` - Multi-level wildcard (matches any number of levels)
+- `+` - Single-level wildcard (matches exactly one level)
+- `p+` - Prefix wildcard (matches `p` followed by digits: `p0`, `p63`)
+
+Example: `$DB/p+/#` matches `$DB/p0/users/create` but NOT `$DB/posts/create`
+
+### Admin User Management
+
+Admin users are configured via:
+1. CLI: `--admin-users alice,bob`
+2. Config: `auth_config.admin_users: HashSet<String>`
+
+Admin status is checked by matching the MQTT username against the admin_users set.
+
+### Internal Service Exemption
+
+To perform essential background tasks (like managing cluster state), each MQDB node requires privileged access to its own broker. This is achieved through a dynamic, self-registering internal service account, ensuring security without requiring shared static credentials across a cluster.
+
+#### Identity Creation at Startup
+
+On every startup, each MQDB node generates a new, unique identity for its internal client:
+
+1.  **Username:** A random, unpredictable username is created with the format `mqdb-internal-<UUID>`.
+2.  **Password:** A random, unpredictable password is also generated.
+
+This process occurs within the `configure_broker_auth` function in `src/auth_config.rs`.
+
+#### Automatic Registration
+
+A key part of this design is automatic registration. After generating the new credentials, the node immediately makes them valid for its own broker. For example, if using a password file, the node automatically appends the new `username:hashed_password` pair to the file. This ensures the internal client can always authenticate with its own broker instance.
+
+#### Authorization Bypass
+
+The `TopicProtectionAuthProvider` is configured with the dynamically generated `service_username`. When a client connects, the provider performs the following check:
+
+1.  It compares the authenticated `user_id` of the connecting client against the stored `service_username`.
+2.  If they match exactly, the client is identified as the internal service client.
+3.  The provider then **bypasses all topic protection rules** (`BlockAll`, `AdminRequired`, etc.) and delegates the authorization decision to the next provider in the chain (e.g., the ACL provider).
+
+This mechanism is secure because the credentials are node-local, random, and ephemeral. An external client cannot guess the credentials, and simply using a client ID with an `mqdb-` prefix provides no special access, as the check is performed on the authenticated username.
+
+#### Cluster Interaction
+
+In a cluster, each node's internal client only ever connects to its own local broker instance to perform privileged operations. The results of these operations (e.g., a state change) are then propagated to other nodes via the underlying cluster transport (which is secured by mTLS), not by having one node's internal client connect to another node.
+
+### Source Files
+
+| File | Purpose |
+|------|---------|
+| `src/topic_rules.rs` | Protection rules, pattern matching, tier definitions |
+| `src/topic_protection.rs` | AuthProvider wrapper implementation |
+| `src/auth_config.rs` | Admin user configuration |
+| `src/agent.rs` | Wraps broker auth with protection (agent mode) |
+| `src/cluster_agent.rs` | Wraps broker auth with protection (cluster mode) |
+
+### Block Reasons
+
+When topic protection blocks access, internal logging captures:
+
+| Reason | Description |
+|--------|-------------|
+| `InternalTopicBlocked` | Tier BlockAll - completely blocked |
+| `ReadOnlyTopic` | Tier ReadOnly - publish attempt blocked |
+| `AdminRequired` | Tier AdminRequired - non-admin user |
+| `InternalEntityAccess` | Entity starting with `_` accessed by non-admin |
+
+### Integration with ACL
+
+Topic protection runs **before** ACL evaluation:
+
+1. **Topic Protection** (hardcoded, cannot override):
+   - Blocks internal topics regardless of ACL rules
+   - Enforces read-only on `$SYS/#`
+   - Requires admin for sensitive topics
+
+2. **ACL Layer** (user-configured):
+   - Evaluates user rules, role rules, assignments
+   - Applies `readwrite`, `read`, `write`, `deny` permissions
+
+This layered approach ensures that even if an ACL grants broad access like `user * topic # permission readwrite`, internal MQDB topics remain protected.
+
+---
+
+## 16. Conclusion
 
 ### MQDB is Optimized For:
 

@@ -39,6 +39,10 @@ impl EventDispatcher {
     /// # Errors
     /// Returns an error if dispatching fails.
     pub async fn dispatch(&self, event: ChangeEvent) -> Result<()> {
+        if let Err(e) = self.sender.send(event.clone()) {
+            tracing::trace!("no broadcast receivers for event: {e}");
+        }
+
         let matching = self.registry.find_matching(&event).await;
 
         if matching.is_empty() {
@@ -57,15 +61,6 @@ impl EventDispatcher {
                     share_groups.entry(group.clone()).or_default().push(sub);
                 }
             }
-        }
-
-        if !broadcast_subs.is_empty()
-            && let Err(e) = self.sender.send(event.clone())
-        {
-            tracing::warn!(
-                "failed to dispatch event to broadcast channel: {} (channel full or no receivers)",
-                e
-            );
         }
 
         let listeners = self.listeners.read().await;

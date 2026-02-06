@@ -336,7 +336,7 @@ agent.run().await?;
 ### MQTT Topic Structure
 
 **CRUD Operations:**
-- `$DB/{entity}/create` - Create entity
+- `$DB/{entity}/create` - Create entity (include `"id"` in payload to use a client-provided ID)
 - `$DB/{entity}/{id}` - Read entity
 - `$DB/{entity}/{id}/update` - Update entity
 - `$DB/{entity}/{id}/delete` - Delete entity
@@ -361,17 +361,111 @@ agent.run().await?;
 
 ### ACL Configuration
 
+ACL rules control per-user topic access. MQDB supports direct user rules, RBAC roles, and role assignment.
+
 ```
-# Admin has full access
+# Direct user rules
 user admin topic $DB/# permission readwrite
 
-# Alice can only access users
-user alice topic $DB/users/# permission readwrite
-user alice topic $DB/# permission deny
+# Role-based access control (RBAC)
+role editor topic $DB/users/# permission readwrite
+role editor topic $DB/orders/# permission readwrite
 
-# Restrict admin operations
-user * topic $DB/_admin/# permission deny
-user admin topic $DB/_admin/# permission readwrite
+role viewer topic $DB/+/list permission write
+role viewer topic $DB/+/read permission write
+role viewer topic $DB/# permission deny
+
+# Assign roles to users
+assign alice editor
+assign bob viewer
+
+# Wildcard rules (apply to all users)
+user * topic $DB/+/events/# permission read
+user * topic +/responses permission readwrite
+```
+
+Permission values: `readwrite`, `read` (subscribe only), `write` (publish only), `deny`.
+
+### Topic Protection
+
+MQDB enforces hardcoded protection on internal topics that cannot be overridden by ACL configuration. This prevents misconfigured ACLs from exposing internal machinery.
+
+#### Protection Tiers
+
+| Tier | Topics | Behavior |
+|------|--------|----------|
+| BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
+| ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
+| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#` | Requires admin user |
+
+#### Internal Entity Protection
+
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exception: `$DB/_health` is always accessible.
+
+#### Admin User Configuration
+
+```bash
+# Start agent with admin users
+mqdb agent start --db /path/to/db --admin-users alice,bob
+
+# Start cluster with admin users
+mqdb cluster start --node-id 1 --db /path/to/db --admin-users alice,bob \
+    --quic-cert server.pem --quic-key server.key
+```
+
+Admin users can:
+- Access `$DB/_admin/*` topics (schema, constraints, backup)
+- Access `$DB/_oauth_tokens/*` topics
+- Access internal entities (`_sessions`, `_mqtt_subs`, etc.)
+
+#### Internal Service Bypass
+
+Internal MQDB components authenticate using a dynamically generated, node-local service username (`mqdb-internal-<UUID>`) and password created at startup. This identity is unique to each node and is automatically registered with its local broker. Topic protection checks the authenticated user identity (not client ID) to grant these internal components unrestricted access to cluster topics. This mechanism is secure because the credentials are random, ephemeral, and node-local, preventing external clients from spoofing internal access.
+
+#### Protection Flow
+
+```
+Client Request
+     │
+     ▼
+┌─────────────────────────────────┐
+│  Topic Protection Layer         │ ← Hardcoded blocks (cannot override)
+└─────────────────────────────────┘
+     │
+     ▼
+┌─────────────────────────────────┐
+│  ACL Layer                      │ ← User-configured permissions
+└─────────────────────────────────┘
+```
+
+### Authentication
+
+MQDB supports multiple authentication methods, configurable via agent/cluster start flags:
+
+**Password file** (`--passwd`): Simple username:password file (bcrypt hashed via `mqdb passwd`).
+
+**SCRAM-SHA-256** (`--scram-file`): Challenge-response authentication without transmitting passwords. Generate credentials with `mqdb scram`.
+
+**JWT** (`--jwt-algorithm`, `--jwt-key`): Token-based authentication using the MQTT password field. Supports HS256, RS256, ES256 algorithms with optional issuer/audience validation.
+
+**Federated JWT** (`--federated-jwt-config`): Multiple JWT issuers with per-issuer keys and validation rules, configured via a JSON file.
+
+**Rate limiting** (enabled by default): Protects against brute-force attacks. Configurable via `--rate-limit-max-attempts`, `--rate-limit-window-secs`, `--rate-limit-lockout-secs`. Disable with `--no-rate-limit`.
+
+```bash
+# Agent with password + ACL auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb --passwd passwd.txt --acl acl.txt
+
+# Agent with SCRAM + ACL auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb --scram-file scram.txt --acl acl.txt
+
+# Agent with JWT auth
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
+    --jwt-algorithm hs256 --jwt-key secret.key --jwt-issuer myapp --acl acl.txt
+
+# Agent with federated JWT (multiple issuers)
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
+    --federated-jwt-config jwt_providers.json --acl acl.txt
 ```
 
 ## Distributed Clustering
@@ -382,7 +476,7 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 
 - **64 fixed partitions** with configurable replication factor (RF=2 default)
 - **Raft consensus** for cluster topology and partition ownership
-- **MQTT bridges** for inter-node communication
+- **MQTT bridges** for inter-node communication (DEPRECATED)
 - **QUIC transport** for secure, efficient cluster traffic (recommended for production)
 
 ### Starting a Cluster
@@ -443,33 +537,30 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 | `--peers` | Peer nodes to join (format: id@host:port) |
 | `--quic-cert` | TLS certificate for QUIC transport |
 | `--quic-key` | TLS private key for QUIC transport |
-| `--no-quic` | Disable QUIC (use MQTT bridges only) |
-| `--direct-quic` | Use raw QUIC streams instead of MQTT bridges (recommended) |
+| `--no-quic` | Disable QUIC and cluster communication (standalone mode) |
 | `--no-persist-stores` | Disable store persistence (data lost on restart) |
 
-### Cluster Transport Options
+### Cluster Transport
 
-MQDB supports two transport modes for inter-node cluster communication:
-
-**MQTT Bridges (default):** Routes cluster traffic through MQTT pub/sub. Simple but can cause contention with client traffic on busy nodes.
-
-**Direct QUIC (`--direct-quic`):** Uses raw QUIC streams for cluster communication, bypassing the MQTT broker entirely. Recommended for production workloads.
+MQDB uses QUIC streams for all inter-node cluster communication. This provides:
+- Direct node-to-node communication without broker overhead
+- Multiplexed streams with built-in flow control
+- TLS encryption for all cluster traffic
 
 ```bash
-# Start cluster with direct QUIC transport (recommended)
-mqdb dev start-cluster --nodes 3 --clean --direct-quic
+# Start a 3-node cluster (QUIC transport is the default)
+mqdb dev start-cluster --nodes 3 --clean
 ```
 
-**Performance comparison (DB insert throughput):**
+**Performance (DB insert throughput):**
 
-| Topology | Transport | Node 1 | Node 2 | Node 3 |
-|----------|-----------|--------|--------|--------|
-| Partial Mesh | MQTT Bridges | 2,902 ops/s | 3,343 ops/s | 1,456 ops/s |
-| Partial Mesh | Direct QUIC | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
-| Full Mesh | MQTT Bridges | 3,001 ops/s | 3,309 ops/s | 1,596 ops/s |
-| Full Mesh | Direct QUIC | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
+| Topology | Node 1 | Node 2 | Node 3 |
+|----------|--------|--------|--------|
+| Partial Mesh | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
+| Full Mesh | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
 
-Direct QUIC provides 1.2-2.5x throughput improvement, with the biggest gains on nodes that would otherwise have heavy MQTT bridge traffic.
+> **Note:** MQTT bridge transport is deprecated and retained only for historical reference.
+> All production deployments should use the default QUIC transport.
 
 ### Data Persistence
 
@@ -492,7 +583,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 - Cross-node pub/sub with automatic routing
 - TTL expiration (60-second cleanup interval)
 - Schema validation and registration
-- Authentication with password file (auto-generated internal credentials)
+- Authentication (password file, SCRAM-SHA-256, JWT, federated JWT, rate limiting; auto-generated internal credentials for inter-node traffic)
 
 **Limited Support:**
 - **Backups**: Creates per-node backup only (not cluster-wide snapshot)
@@ -518,11 +609,12 @@ cargo build --release --bin mqdb
 ### Commands
 
 ```bash
-# Start agent
-mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb
+# Start agent (with optional auth)
+mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl acl.txt
 
 # CRUD operations
 mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
+mqdb create users '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
 mqdb read users 1
 mqdb update users 1 '{"name": "Alice Smith"}'
 mqdb delete users 1
@@ -553,6 +645,25 @@ mqdb constraint list users
 mqdb backup create --name daily_backup
 mqdb backup list
 mqdb restore --name daily_backup
+
+# Password management
+mqdb passwd admin -b admin123 -f passwd.txt
+mqdb passwd admin --delete -f passwd.txt
+
+# SCRAM credential management
+mqdb scram admin -b admin123 -f scram.txt
+mqdb scram admin -b admin123 -f scram.txt -i 8192
+
+# ACL management
+mqdb acl add admin '$DB/#' readwrite -f acl.txt
+mqdb acl remove admin -f acl.txt
+mqdb acl role-add editor '$DB/users/#' readwrite -f acl.txt
+mqdb acl role-remove editor -f acl.txt
+mqdb acl assign alice editor -f acl.txt
+mqdb acl unassign alice editor -f acl.txt
+mqdb acl check alice '$DB/users/create' pub -f acl.txt
+mqdb acl list -f acl.txt
+mqdb acl user-roles alice -f acl.txt
 ```
 
 ### Filter Syntax
@@ -652,7 +763,12 @@ cargo run --example parking_lot
 ### Phase 6: MQTT Integration ✓
 - [x] Embedded MQTT broker (MqdbAgent)
 - [x] Authentication with password file
-- [x] ACL-based authorization
+- [x] SCRAM-SHA-256 challenge-response authentication
+- [x] JWT authentication (HS256, RS256, ES256)
+- [x] Federated JWT (multiple issuers)
+- [x] Authentication rate limiting (brute-force protection)
+- [x] ACL-based authorization with RBAC roles
+- [x] ACL CLI management (add/remove/role-add/assign/check/list)
 - [x] CRUD operations via MQTT topics
 - [x] Admin topics for schema/constraint/backup
 - [x] CLI tool with all operations
@@ -690,7 +806,7 @@ cargo run --example parking_lot
 - [x] Last Will Testament cross-node delivery
 
 ### Test Coverage
-- 436 tests passing (unit + integration + cluster)
+- Extensive test suite (unit + integration + cluster)
 - Clippy clean with pedantic warnings enabled
 - Full constraint coverage including multilevel cascade
 - Point-to-point delivery tests with partition verification

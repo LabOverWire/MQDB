@@ -1,4 +1,4 @@
-use mqdb::{Database, FieldDefinition, FieldType, Schema};
+use mqdb::{Database, FieldDefinition, FieldType, Schema, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -21,7 +21,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "age": 30,
         "active": true
     });
-    let created = db.create("users".into(), user1).await?;
+    let created = db
+        .create("users".into(), user1, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created user: {created}");
     println!("  Note: 'status' defaulted to 'active'\n");
 
@@ -29,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user2 = json!({
         "name": "Bob"
     });
-    let created = db.create("users".into(), user2).await?;
+    let created = db
+        .create("users".into(), user2, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created user: {created}\n");
 
     println!("Attempting to create user with wrong type (age as string)...");
@@ -37,7 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Charlie",
         "age": "thirty"
     });
-    match db.create("users".into(), invalid_user).await {
+    match db
+        .create("users".into(), invalid_user, None, &ScopeConfig::default())
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Validation error: {e}\n"),
     }
@@ -46,7 +53,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let missing_required = json!({
         "age": 25
     });
-    match db.create("users".into(), missing_required).await {
+    match db
+        .create(
+            "users".into(),
+            missing_required,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Validation error: {e}\n"),
     }

@@ -1,15 +1,6 @@
-use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    WildcardBroadcast,
-};
-use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
-    RequestVoteResponse,
-};
-use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
+#![allow(deprecated)]
+
+use super::protocol::ForwardedPublish;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -25,6 +16,10 @@ const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
 const FORWARD_TOPIC_PREFIX: &str = "_mqdb/forward";
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
 
+#[deprecated(
+    since = "0.2.0",
+    note = "use QuicDirectTransport instead - MQTT bridges are retained for historical reference only"
+)]
 #[derive(Clone)]
 pub struct MqttTransport {
     node_id: NodeId,
@@ -226,186 +221,14 @@ impl MqttTransport {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     fn parse_message(payload: &[u8], local_node: NodeId) -> Option<InboundMessage> {
-        if payload.len() < 3 {
-            return None;
-        }
-
-        let from_id = u16::from_be_bytes([payload[0], payload[1]]);
-        let from = NodeId::validated(from_id)?;
-
-        if from == local_node {
-            return None;
-        }
-
-        let msg_type = payload[2];
-        let data = &payload[3..];
-
-        let message = match msg_type {
-            0 => {
-                let (hb, _) = Heartbeat::try_from_be_bytes(data).ok()?;
-                ClusterMessage::Heartbeat(hb)
-            }
-            10 => {
-                let w = ReplicationWrite::from_bytes(data)?;
-                ClusterMessage::Write(w)
-            }
-            15 => {
-                let w = ReplicationWrite::from_bytes(data)?;
-                ClusterMessage::WriteRequest(w)
-            }
-            11 => {
-                let (ack, _) = ReplicationAck::try_from_be_bytes(data).ok()?;
-                ClusterMessage::Ack(ack)
-            }
-            2 => {
-                if data.len() < 2 {
-                    return None;
-                }
-                let dead_id = u16::from_be_bytes([data[0], data[1]]);
-                let dead_node = NodeId::validated(dead_id)?;
-                ClusterMessage::DeathNotice { node_id: dead_node }
-            }
-            3 => {
-                if data.len() < 2 {
-                    return None;
-                }
-                let drain_id = u16::from_be_bytes([data[0], data[1]]);
-                let drain_node = NodeId::validated(drain_id)?;
-                ClusterMessage::DrainNotification {
-                    node_id: drain_node,
-                }
-            }
-            20 => {
-                let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::RequestVote(req)
-            }
-            21 => {
-                let (resp, _) = RequestVoteResponse::try_from_be_bytes(data).ok()?;
-                ClusterMessage::RequestVoteResponse(resp)
-            }
-            22 => {
-                let req = AppendEntriesRequest::from_bytes(data)?;
-                ClusterMessage::AppendEntries(req)
-            }
-            23 => {
-                let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
-                ClusterMessage::AppendEntriesResponse(resp)
-            }
-            12 => {
-                let (req, _) = CatchupRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::CatchupRequest(req)
-            }
-            13 => {
-                let resp = CatchupResponse::from_bytes(data)?;
-                ClusterMessage::CatchupResponse(resp)
-            }
-            30 => {
-                let fwd = ForwardedPublish::from_bytes(data)?;
-                ClusterMessage::ForwardedPublish(fwd)
-            }
-            40 => {
-                let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::SnapshotRequest(req)
-            }
-            41 => {
-                let chunk = SnapshotChunk::from_bytes(data)?;
-                ClusterMessage::SnapshotChunk(chunk)
-            }
-            42 => {
-                let (complete, _) = SnapshotComplete::try_from_be_bytes(data).ok()?;
-                ClusterMessage::SnapshotComplete(complete)
-            }
-            50 => {
-                if data.len() < 2 {
-                    return None;
-                }
-                let partition_id = u16::from_be_bytes([data[0], data[1]]);
-                let partition = PartitionId::new(partition_id)?;
-                let request = QueryRequest::from_bytes(&data[2..])?;
-                ClusterMessage::QueryRequest { partition, request }
-            }
-            51 => {
-                let response = QueryResponse::from_bytes(data)?;
-                ClusterMessage::QueryResponse(response)
-            }
-            52 => {
-                let request = BatchReadRequest::from_bytes(data)?;
-                ClusterMessage::BatchReadRequest(request)
-            }
-            53 => {
-                let response = BatchReadResponse::from_bytes(data)?;
-                ClusterMessage::BatchReadResponse(response)
-            }
-            60 => {
-                let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
-                ClusterMessage::WildcardBroadcast(broadcast)
-            }
-            61 => {
-                let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(data).ok()?;
-                ClusterMessage::TopicSubscriptionBroadcast(broadcast)
-            }
-            70 => {
-                let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
-                ClusterMessage::PartitionUpdate(update)
-            }
-            54 => {
-                if data.len() < 2 {
-                    return None;
-                }
-                let partition_id = u16::from_be_bytes([data[0], data[1]]);
-                let partition = PartitionId::new(partition_id)?;
-                let request = JsonDbRequest::from_bytes(&data[2..])?;
-                ClusterMessage::JsonDbRequest { partition, request }
-            }
-            55 => {
-                let response = JsonDbResponse::from_bytes(data)?;
-                ClusterMessage::JsonDbResponse(response)
-            }
-            80 => {
-                let (req, _) = UniqueReserveRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueReserveRequest(req)
-            }
-            81 => {
-                let (resp, _) = UniqueReserveResponse::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueReserveResponse(resp)
-            }
-            82 => {
-                let (req, _) = UniqueCommitRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueCommitRequest(req)
-            }
-            83 => {
-                let (resp, _) = UniqueCommitResponse::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueCommitResponse(resp)
-            }
-            84 => {
-                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueReleaseRequest(req)
-            }
-            85 => {
-                let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
-                ClusterMessage::UniqueReleaseResponse(resp)
-            }
-            _ => return None,
-        };
-
-        #[allow(clippy::cast_possible_truncation)]
-        let received_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
-
+        let inbound = InboundMessage::parse_from_payload(payload, local_node)?;
         tracing::trace!(
-            from = from.get(),
-            msg_type = message.message_type(),
+            from = inbound.from.get(),
+            msg_type = inbound.message.message_type(),
             "received cluster message"
         );
-
-        Some(InboundMessage {
-            from,
-            message,
-            received_at,
-        })
+        Some(inbound)
     }
 
     fn serialize_message(&self, message: &ClusterMessage) -> Vec<u8> {
@@ -734,6 +557,7 @@ impl ClusterTransport for MqttTransport {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::Heartbeat;
     use super::*;
 
     fn serialize_message_for_test(node_id: NodeId, message: &ClusterMessage) -> Vec<u8> {

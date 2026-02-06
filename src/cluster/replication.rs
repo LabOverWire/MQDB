@@ -229,7 +229,7 @@ mod tests {
     use super::*;
 
     fn partition() -> PartitionId {
-        PartitionId::new(0).unwrap()
+        PartitionId::ZERO
     }
 
     fn node() -> NodeId {

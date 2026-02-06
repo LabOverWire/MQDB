@@ -1,4 +1,4 @@
-use mqdb::{Database, FieldDefinition, FieldType, OnDeleteAction, Schema};
+use mqdb::{Database, FieldDefinition, FieldType, OnDeleteAction, Schema, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -48,6 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             json!({"name": "Alice", "email": "alice@example.com"}),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
     let alice_id = alice["id"].as_str().unwrap();
@@ -57,6 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             json!({"name": "Bob", "email": "bob@example.com"}),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
     let bob_id = bob["id"].as_str().unwrap();
@@ -67,6 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             json!({"name": "Charlie", "email": "alice@example.com"}),
+            None,
+            &ScopeConfig::default(),
         )
         .await
     {
@@ -79,6 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "posts".into(),
             json!({"title": "Hello World", "author_id": alice_id}),
+            None,
+            &ScopeConfig::default(),
         )
         .await?;
     let post1_id = post1["id"].as_str().unwrap();
@@ -86,12 +94,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create(
         "posts".into(),
         json!({"title": "Rust Tips", "author_id": alice_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
 
     db.create(
         "posts".into(),
         json!({"title": "Bob's Post", "author_id": bob_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     println!("✓ Created 3 posts\n");
@@ -100,11 +112,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create(
         "comments".into(),
         json!({"text": "Great post!", "post_id": post1_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     db.create(
         "comments".into(),
         json!({"text": "Thanks!", "post_id": post1_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     println!("✓ Created 2 comments\n");
@@ -114,6 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "posts".into(),
             json!({"title": "Orphan", "author_id": "nonexistent"}),
+            None,
+            &ScopeConfig::default(),
         )
         .await
     {
@@ -139,7 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("Deleting Alice (cascade to posts and comments)...");
-    db.delete("users".into(), alice_id.to_string()).await?;
+    db.delete(
+        "users".into(),
+        alice_id.to_string(),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ Deleted\n");
 
     let stats_after = (

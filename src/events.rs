@@ -19,6 +19,10 @@ pub struct ChangeEvent {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<(String, String)>,
 }
 
 impl ChangeEvent {
@@ -35,12 +39,26 @@ impl ChangeEvent {
             operation,
             data,
             operation_id: None,
+            sender: None,
+            scope: None,
         }
     }
 
     #[must_use]
     pub fn with_operation_id(mut self, operation_id: String) -> Self {
         self.operation_id = Some(operation_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_sender(mut self, sender: Option<String>) -> Self {
+        self.sender = sender;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope(mut self, scope: Option<(String, String)>) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -57,6 +75,32 @@ impl ChangeEvent {
     #[must_use]
     pub fn delete(entity: String, id: String) -> Self {
         Self::new(entity, id, Operation::Delete, None)
+    }
+
+    #[must_use]
+    pub fn event_topic(&self, num_partitions: u8) -> String {
+        let event_type = match self.operation {
+            Operation::Create => "created",
+            Operation::Update => "updated",
+            Operation::Delete => "deleted",
+        };
+
+        if let Some((ref scope_entity, ref scope_value)) = self.scope {
+            if *scope_entity == self.entity {
+                return format!("$DB/{scope_entity}/{scope_value}/events/{event_type}");
+            }
+            return format!(
+                "$DB/{scope_entity}/{scope_value}/{}/events/{event_type}",
+                self.entity
+            );
+        }
+
+        if num_partitions > 0 {
+            let partition = self.partition(num_partitions);
+            format!("$DB/{}/events/p{partition}/{}", self.entity, self.id)
+        } else {
+            format!("$DB/{}/events/{}", self.entity, self.id)
+        }
     }
 
     #[must_use]

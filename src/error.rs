@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[cfg(feature = "native")]
+    #[cfg(feature = "agent")]
     #[error("storage error: {0}")]
     Storage(#[from] fjall::Error),
 
@@ -77,6 +77,9 @@ pub enum Error {
 
     #[error("invalid foreign key value type")]
     InvalidForeignKey,
+
+    #[error("forbidden: {0}")]
+    Forbidden(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

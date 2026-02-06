@@ -1,11 +1,42 @@
+use std::fmt;
+
 use crate::transport::Request;
 use crate::types::{Filter, Pagination, SortOrder};
 use serde_json::Value;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("missing required ID for {0} operation")]
+    MissingId(DbOp),
+    #[error("invalid JSON payload: {0}")]
+    InvalidPayload(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbOp {
+    Create,
+    Read,
+    Update,
+    Delete,
+    List,
+}
+
+impl fmt::Display for DbOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Create => f.write_str("create"),
+            Self::Read => f.write_str("read"),
+            Self::Update => f.write_str("update"),
+            Self::Delete => f.write_str("delete"),
+            Self::List => f.write_str("list"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DbOperation {
     pub entity: String,
-    pub operation: String,
+    pub operation: DbOp,
     pub id: Option<String>,
 }
 
@@ -24,6 +55,18 @@ pub enum AdminOperation {
     ConsumerGroupList,
     ConsumerGroupShow { name: String },
     Health,
+    UserAdd,
+    UserDelete,
+    UserList,
+    AclRuleAdd,
+    AclRuleRemove,
+    AclRuleList,
+    AclRoleAdd,
+    AclRoleDelete,
+    AclRoleList,
+    AclAssignmentAssign,
+    AclAssignmentUnassign,
+    AclAssignmentList,
 }
 
 type ListOptions = (
@@ -76,6 +119,18 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
         ["consumer-groups", name] => Some(AdminOperation::ConsumerGroupShow {
             name: (*name).to_string(),
         }),
+        ["users", "add"] => Some(AdminOperation::UserAdd),
+        ["users", "delete"] => Some(AdminOperation::UserDelete),
+        ["users", "list"] => Some(AdminOperation::UserList),
+        ["acl", "rules", "add"] => Some(AdminOperation::AclRuleAdd),
+        ["acl", "rules", "remove"] => Some(AdminOperation::AclRuleRemove),
+        ["acl", "rules", "list"] => Some(AdminOperation::AclRuleList),
+        ["acl", "roles", "add"] => Some(AdminOperation::AclRoleAdd),
+        ["acl", "roles", "delete"] => Some(AdminOperation::AclRoleDelete),
+        ["acl", "roles", "list"] => Some(AdminOperation::AclRoleList),
+        ["acl", "assignments", "assign"] => Some(AdminOperation::AclAssignmentAssign),
+        ["acl", "assignments", "unassign"] => Some(AdminOperation::AclAssignmentUnassign),
+        ["acl", "assignments", "list"] => Some(AdminOperation::AclAssignmentList),
         _ => None,
     }
 }
@@ -85,19 +140,29 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     let parts: Vec<&str> = topic.strip_prefix("$DB/")?.split('/').collect();
 
     match parts.as_slice() {
-        [entity, op] if *op == "create" || *op == "list" => Some(DbOperation {
+        [entity, "create"] => Some(DbOperation {
             entity: (*entity).to_string(),
-            operation: (*op).to_string(),
+            operation: DbOp::Create,
+            id: None,
+        }),
+        [entity, "list"] => Some(DbOperation {
+            entity: (*entity).to_string(),
+            operation: DbOp::List,
             id: None,
         }),
         [entity, id] => Some(DbOperation {
             entity: (*entity).to_string(),
-            operation: "read".to_string(),
+            operation: DbOp::Read,
             id: Some((*id).to_string()),
         }),
-        [entity, id, op] if *op == "update" || *op == "delete" => Some(DbOperation {
+        [entity, id, "update"] => Some(DbOperation {
             entity: (*entity).to_string(),
-            operation: (*op).to_string(),
+            operation: DbOp::Update,
+            id: Some((*id).to_string()),
+        }),
+        [entity, id, "delete"] => Some(DbOperation {
+            entity: (*entity).to_string(),
+            operation: DbOp::Delete,
             id: Some((*id).to_string()),
         }),
         _ => None,
@@ -107,21 +172,21 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
 /// Builds a database request from an operation descriptor and payload.
 ///
 /// # Errors
-/// Returns an error if JSON deserialization fails, required ID is missing, or operation is unknown.
-pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String> {
+/// Returns an error if JSON deserialization fails or a required ID is missing.
+pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, ProtocolError> {
     let data: Value = if payload.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(payload).map_err(|e| e.to_string())?
+        serde_json::from_slice(payload)?
     };
 
-    match op.operation.as_str() {
-        "create" => Ok(Request::Create {
+    match op.operation {
+        DbOp::Create => Ok(Request::Create {
             entity: op.entity,
             data,
         }),
-        "read" => {
-            let id = op.id.ok_or("read requires id in topic")?;
+        DbOp::Read => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Read))?;
             let (includes, projection) = extract_read_options(&data);
             Ok(Request::Read {
                 entity: op.entity,
@@ -130,22 +195,22 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String>
                 projection,
             })
         }
-        "update" => {
-            let id = op.id.ok_or("update requires id in topic")?;
+        DbOp::Update => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Update))?;
             Ok(Request::Update {
                 entity: op.entity,
                 id,
                 fields: data,
             })
         }
-        "delete" => {
-            let id = op.id.ok_or("delete requires id in topic")?;
+        DbOp::Delete => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Delete))?;
             Ok(Request::Delete {
                 entity: op.entity,
                 id,
             })
         }
-        "list" => {
+        DbOp::List => {
             let (filters, sort, pagination, includes, projection) = extract_list_options(&data);
             Ok(Request::List {
                 entity: op.entity,
@@ -156,7 +221,6 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, String>
                 projection,
             })
         }
-        _ => Err(format!("unknown operation: {}", op.operation)),
     }
 }
 
@@ -245,7 +309,7 @@ mod tests {
     fn test_parse_db_topic_create() {
         let op = parse_db_topic("$DB/users/create").unwrap();
         assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "create");
+        assert_eq!(op.operation, DbOp::Create);
         assert!(op.id.is_none());
     }
 
@@ -253,7 +317,7 @@ mod tests {
     fn test_parse_db_topic_read() {
         let op = parse_db_topic("$DB/users/123").unwrap();
         assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "read");
+        assert_eq!(op.operation, DbOp::Read);
         assert_eq!(op.id, Some("123".to_string()));
     }
 
@@ -261,7 +325,7 @@ mod tests {
     fn test_parse_db_topic_update() {
         let op = parse_db_topic("$DB/users/123/update").unwrap();
         assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "update");
+        assert_eq!(op.operation, DbOp::Update);
         assert_eq!(op.id, Some("123".to_string()));
     }
 
@@ -269,7 +333,7 @@ mod tests {
     fn test_parse_db_topic_delete() {
         let op = parse_db_topic("$DB/users/123/delete").unwrap();
         assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "delete");
+        assert_eq!(op.operation, DbOp::Delete);
         assert_eq!(op.id, Some("123".to_string()));
     }
 
@@ -277,7 +341,7 @@ mod tests {
     fn test_parse_db_topic_list() {
         let op = parse_db_topic("$DB/users/list").unwrap();
         assert_eq!(op.entity, "users");
-        assert_eq!(op.operation, "list");
+        assert_eq!(op.operation, DbOp::List);
         assert!(op.id.is_none());
     }
 
@@ -292,7 +356,7 @@ mod tests {
     fn test_build_create_request() {
         let op = DbOperation {
             entity: "users".to_string(),
-            operation: "create".to_string(),
+            operation: DbOp::Create,
             id: None,
         };
         let payload = br#"{"name": "Alice"}"#;
@@ -311,7 +375,7 @@ mod tests {
     fn test_build_read_request() {
         let op = DbOperation {
             entity: "users".to_string(),
-            operation: "read".to_string(),
+            operation: DbOp::Read,
             id: Some("123".to_string()),
         };
         let payload = br#"{"projection": ["name", "email"]}"#;
@@ -339,7 +403,7 @@ mod tests {
     fn test_build_list_request() {
         let op = DbOperation {
             entity: "users".to_string(),
-            operation: "list".to_string(),
+            operation: DbOp::List,
             id: None,
         };
         let payload = br#"{"filters": [{"field": "age", "op": "gt", "value": 18}]}"#;
@@ -361,7 +425,7 @@ mod tests {
     fn test_read_without_id_fails() {
         let op = DbOperation {
             entity: "users".to_string(),
-            operation: "read".to_string(),
+            operation: DbOp::Read,
             id: None,
         };
         let result = build_request(op, &[]);

@@ -13,6 +13,8 @@ struct StoredOutboxEntry {
     events: Vec<ChangeEvent>,
     retry_count: u32,
     created_at: u64,
+    #[serde(default)]
+    dispatched_count: usize,
 }
 
 pub struct Outbox {
@@ -43,6 +45,7 @@ impl Outbox {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            dispatched_count: 0,
         };
         let value = serde_json::to_vec(&stored).unwrap_or_default();
         batch.insert(key.into_bytes(), value);
@@ -71,6 +74,7 @@ impl Outbox {
                     events: stored.events,
                     retry_count: stored.retry_count,
                     created_at: stored.created_at,
+                    dispatched_count: stored.dispatched_count,
                 });
             } else if let Ok(event) = serde_json::from_slice::<ChangeEvent>(&value) {
                 entries.push(OutboxEntry {
@@ -78,6 +82,7 @@ impl Outbox {
                     events: vec![event],
                     retry_count: 0,
                     created_at: 0,
+                    dispatched_count: 0,
                 });
             } else if let Ok(events) = serde_json::from_slice::<Vec<ChangeEvent>>(&value) {
                 entries.push(OutboxEntry {
@@ -85,6 +90,7 @@ impl Outbox {
                     events,
                     retry_count: 0,
                     created_at: 0,
+                    dispatched_count: 0,
                 });
             }
         }
@@ -113,6 +119,21 @@ impl Outbox {
         if let Some(value) = self.storage.get(key.as_bytes())?
             && let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value)
         {
+            stored.retry_count += 1;
+            let new_value = serde_json::to_vec(&stored).unwrap_or_default();
+            self.storage.insert(key.as_bytes(), &new_value)?;
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns an error if reading or writing to storage fails.
+    pub fn update_dispatched_count(&self, operation_id: &str, count: usize) -> Result<()> {
+        let key = format!("_outbox/{operation_id}");
+        if let Some(value) = self.storage.get(key.as_bytes())?
+            && let Ok(mut stored) = serde_json::from_slice::<StoredOutboxEntry>(&value)
+        {
+            stored.dispatched_count = count;
             stored.retry_count += 1;
             let new_value = serde_json::to_vec(&stored).unwrap_or_default();
             self.storage.insert(key.as_bytes(), &new_value)?;
@@ -161,9 +182,10 @@ pub struct OutboxEntry {
     pub events: Vec<ChangeEvent>,
     pub retry_count: u32,
     pub created_at: u64,
+    pub dispatched_count: usize,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 mod processor {
     use super::Outbox;
     use crate::config::OutboxConfig;
@@ -232,34 +254,41 @@ mod processor {
                     continue;
                 }
 
-                let mut success = true;
-                for event in &entry.events {
+                let mut dispatched = entry.dispatched_count;
+                let mut failed = false;
+                for event in entry.events.iter().skip(entry.dispatched_count) {
                     let event_with_op_id =
                         event.clone().with_operation_id(entry.operation_id.clone());
                     if let Err(e) = self.dispatcher.dispatch(event_with_op_id).await {
                         tracing::warn!(
                             op_id = %entry.operation_id,
                             err = %e,
+                            dispatched,
+                            total = entry.events.len(),
                             "dispatch failed"
                         );
-                        success = false;
+                        failed = true;
                         break;
                     }
+                    dispatched += 1;
                 }
 
-                if success {
-                    if let Err(e) = self.outbox.mark_delivered(&entry.operation_id) {
+                if failed {
+                    if let Err(e) = self
+                        .outbox
+                        .update_dispatched_count(&entry.operation_id, dispatched)
+                    {
                         tracing::error!(
                             op_id = %entry.operation_id,
                             err = %e,
-                            "failed to mark as delivered"
+                            "failed to update dispatched count"
                         );
                     }
-                } else if let Err(e) = self.outbox.increment_retry(&entry.operation_id) {
+                } else if let Err(e) = self.outbox.mark_delivered(&entry.operation_id) {
                     tracing::error!(
                         op_id = %entry.operation_id,
                         err = %e,
-                        "failed to increment retry count"
+                        "failed to mark as delivered"
                     );
                 }
             }
@@ -267,7 +296,7 @@ mod processor {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 pub use processor::OutboxProcessor;
 
 #[cfg(test)]
@@ -436,5 +465,60 @@ mod tests {
 
         let pending = outbox.pending_events().unwrap();
         assert!(pending[0].created_at > 0);
+    }
+
+    #[test]
+    fn test_outbox_update_dispatched_count() {
+        let backend = Arc::new(MemoryBackend::new());
+        let storage = Arc::new(Storage::with_backend(backend));
+        let outbox = Outbox::new(Arc::clone(&storage));
+
+        let events = vec![
+            ChangeEvent::create("users".to_string(), "1".to_string(), serde_json::json!({})),
+            ChangeEvent::create("users".to_string(), "2".to_string(), serde_json::json!({})),
+            ChangeEvent::create("users".to_string(), "3".to_string(), serde_json::json!({})),
+        ];
+
+        let mut batch = storage.batch();
+        outbox.enqueue_events(&mut batch, "op-partial", &events);
+        batch.commit().unwrap();
+
+        let pending = outbox.pending_events().unwrap();
+        assert_eq!(pending[0].dispatched_count, 0);
+        assert_eq!(pending[0].retry_count, 0);
+
+        outbox.update_dispatched_count("op-partial", 1).unwrap();
+
+        let pending = outbox.pending_events().unwrap();
+        assert_eq!(pending[0].dispatched_count, 1);
+        assert_eq!(pending[0].retry_count, 1);
+        assert_eq!(pending[0].events.len(), 3);
+
+        outbox.update_dispatched_count("op-partial", 2).unwrap();
+
+        let pending = outbox.pending_events().unwrap();
+        assert_eq!(pending[0].dispatched_count, 2);
+        assert_eq!(pending[0].retry_count, 2);
+    }
+
+    #[test]
+    fn test_outbox_backward_compat_missing_dispatched_count() {
+        let backend = Arc::new(MemoryBackend::new());
+        let storage = Arc::new(Storage::with_backend(backend));
+        let outbox = Outbox::new(Arc::clone(&storage));
+
+        let legacy = serde_json::json!({
+            "events": [{"sequence": 0, "entity": "users", "id": "1", "operation": "Create", "data": {}}],
+            "retry_count": 3,
+            "created_at": 1000
+        });
+        storage
+            .insert(b"_outbox/legacy-op", &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+
+        let pending = outbox.pending_events().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].dispatched_count, 0);
+        assert_eq!(pending[0].retry_count, 3);
     }
 }

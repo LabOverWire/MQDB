@@ -1,9 +1,8 @@
-use mqdb::{Database, Filter, FilterOp};
+use mqdb::{Database, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::open("./data/example_db").await?;
+async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    let scope = ScopeConfig::default();
 
     println!("Creating index on email field...");
     db.add_index("users".into(), vec!["email".into(), "status".into()])
@@ -31,13 +30,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "age": 35
     });
 
-    let created_alice = db.create("users".into(), alice).await?;
+    let created_alice = db.create("users".into(), alice, None, &scope).await?;
     println!("Created: {created_alice}");
 
-    let created_bob = db.create("users".into(), bob).await?;
+    let created_bob = db.create("users".into(), bob, None, &scope).await?;
     println!("Created: {created_bob}");
 
-    let created_charlie = db.create("users".into(), charlie).await?;
+    let created_charlie = db.create("users".into(), charlie, None, &scope).await?;
     println!("Created: {created_charlie}");
 
     println!("\nReading user...");
@@ -50,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nUpdating user...");
     let updates = json!({"age": 31});
     let updated_alice = db
-        .update("users".into(), alice_id.to_string(), updates)
+        .update("users".into(), alice_id.to_string(), updates, None, &scope)
         .await?;
     println!("Updated: {updated_alice}");
 
@@ -101,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "david@example.com",
         "status": "active"
     });
-    db.create("users".into(), david).await?;
+    db.create("users".into(), david, None, &scope).await?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -109,6 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete(
         "users".into(),
         created_charlie["id"].as_str().unwrap().to_string(),
+        None,
+        &scope,
     )
     .await?;
 
@@ -120,4 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nExample completed successfully!");
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::open("./data/example_db").await?;
+    run_example(&db).await
 }

@@ -1,4 +1,4 @@
-use mqdb::Database;
+use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -14,14 +14,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Alice",
         "email": "alice@example.com"
     });
-    let created = db.create("users".into(), user1).await?;
+    let created = db
+        .create("users".into(), user1, None, &ScopeConfig::default())
+        .await?;
     println!("✓ Created: {created}\n");
 
     println!("Attempting to create user with missing email field...");
     let missing_field = json!({
         "name": "Bob"
     });
-    match db.create("users".into(), missing_field).await {
+    match db
+        .create("users".into(), missing_field, None, &ScopeConfig::default())
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }
@@ -31,7 +36,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Charlie",
         "email": null
     });
-    match db.create("users".into(), null_email).await {
+    match db
+        .create("users".into(), null_email, None, &ScopeConfig::default())
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }
@@ -41,7 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "David",
         "email": "david@example.com"
     });
-    let created = db.create("users".into(), user).await?;
+    let created = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await?;
     let user_id = created["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
 
@@ -50,7 +60,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "David",
         "email": null
     });
-    match db.update("users".into(), user_id.to_string(), update).await {
+    match db
+        .update(
+            "users".into(),
+            user_id.to_string(),
+            update,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+    {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Not-null constraint violation: {e}\n"),
     }

@@ -10,3 +10,4 @@ docs/
 test_certs/
 .playwright-mcp/
 benchmark_results/
+specs/FRONTEND_OWNERSHIP_INTEGRATION.md

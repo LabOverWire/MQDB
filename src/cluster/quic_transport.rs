@@ -1,15 +1,3 @@
-use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    WildcardBroadcast,
-};
-use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
-    RequestVoteResponse,
-};
-use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -54,6 +42,8 @@ pub struct QuicDirectTransport {
     server_addr: Arc<RwLock<Option<SocketAddr>>>,
     local_publish_tx: flume::Sender<LocalPublishRequest>,
     local_publish_rx: flume::Receiver<LocalPublishRequest>,
+    ca_file: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
+    #[cfg(feature = "dev-insecure")]
     insecure: Arc<AtomicBool>,
 }
 
@@ -79,6 +69,8 @@ impl Clone for QuicDirectTransport {
             server_addr: self.server_addr.clone(),
             local_publish_tx: self.local_publish_tx.clone(),
             local_publish_rx: self.local_publish_rx.clone(),
+            ca_file: self.ca_file.clone(),
+            #[cfg(feature = "dev-insecure")]
             insecure: self.insecure.clone(),
         }
     }
@@ -102,10 +94,19 @@ impl QuicDirectTransport {
             server_addr: Arc::new(RwLock::new(None)),
             local_publish_tx,
             local_publish_rx,
+            ca_file: Arc::new(std::sync::RwLock::new(None)),
+            #[cfg(feature = "dev-insecure")]
             insecure: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    pub fn set_ca_file(&self, ca_path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.ca_file.write() {
+            *guard = Some(ca_path);
+        }
+    }
+
+    #[cfg(feature = "dev-insecure")]
     pub fn set_insecure(&self, insecure: bool) {
         self.insecure.store(insecure, Ordering::SeqCst);
         if insecure {
@@ -124,11 +125,7 @@ impl QuicDirectTransport {
         let inbox_len = self.inbox_rx.len();
         let publish_len = self.local_publish_rx.len();
         if inbox_len > 100 || publish_len > 100 {
-            warn!(
-                inbox_len,
-                publish_len,
-                "quic transport queue backlog"
-            );
+            warn!(inbox_len, publish_len, "quic transport queue backlog");
         }
     }
 
@@ -180,11 +177,15 @@ impl QuicDirectTransport {
             .as_ref()
             .ok_or(TransportError::NotConnected)?;
 
+        let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
+        #[cfg(feature = "dev-insecure")]
         let client_config = if self.insecure.load(Ordering::SeqCst) {
             build_client_config_insecure()?
         } else {
-            build_client_config_secure()?
+            build_client_config_secure(ca_file.as_deref())?
         };
+        #[cfg(not(feature = "dev-insecure"))]
+        let client_config = build_client_config_secure(ca_file.as_deref())?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -192,10 +193,17 @@ impl QuicDirectTransport {
             .await
             .map_err(|e| TransportError::SendFailed(format!("connection to peer failed: {e}")))?;
 
+        #[cfg(feature = "dev-insecure")]
         info!(
             peer = peer_id.get(),
             addr = %peer_addr,
             insecure = self.insecure.load(Ordering::SeqCst),
+            "connected to peer via QUIC"
+        );
+        #[cfg(not(feature = "dev-insecure"))]
+        info!(
+            peer = peer_id.get(),
+            addr = %peer_addr,
             "connected to peer via QUIC"
         );
 
@@ -464,7 +472,10 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             retain: true,
         }) {
-            warn!(topic, "local_publish queue full, dropping retained message: {e}");
+            warn!(
+                topic,
+                "local_publish queue full, dropping retained message: {e}"
+            );
         }
     }
 }
@@ -586,7 +597,10 @@ async fn receiver_task(
                     ClusterMessage::SnapshotComplete(_) => "SnapshotComplete",
                     _ => "Other",
                 };
-                warn!(peer = peer_node.get(), msg_type, "inbox queue full, dropping message");
+                warn!(
+                    peer = peer_node.get(),
+                    msg_type, "inbox queue full, dropping message"
+                );
             } else {
                 notify.notify_one();
             }
@@ -596,186 +610,14 @@ async fn receiver_task(
     debug!(peer = peer_node.get(), "receiver task ended");
 }
 
-#[allow(clippy::too_many_lines)]
 fn parse_message(payload: &[u8], local_node: NodeId) -> Option<InboundMessage> {
-    if payload.len() < 3 {
-        return None;
-    }
-
-    let from_id = u16::from_be_bytes([payload[0], payload[1]]);
-    let from = NodeId::validated(from_id)?;
-
-    if from == local_node {
-        return None;
-    }
-
-    let msg_type = payload[2];
-    let data = &payload[3..];
-
-    let message = match msg_type {
-        0 => {
-            let (hb, _) = Heartbeat::try_from_be_bytes(data).ok()?;
-            ClusterMessage::Heartbeat(hb)
-        }
-        10 => {
-            let w = ReplicationWrite::from_bytes(data)?;
-            ClusterMessage::Write(w)
-        }
-        15 => {
-            let w = ReplicationWrite::from_bytes(data)?;
-            ClusterMessage::WriteRequest(w)
-        }
-        11 => {
-            let (ack, _) = ReplicationAck::try_from_be_bytes(data).ok()?;
-            ClusterMessage::Ack(ack)
-        }
-        2 => {
-            if data.len() < 2 {
-                return None;
-            }
-            let dead_id = u16::from_be_bytes([data[0], data[1]]);
-            let dead_node = NodeId::validated(dead_id)?;
-            ClusterMessage::DeathNotice { node_id: dead_node }
-        }
-        3 => {
-            if data.len() < 2 {
-                return None;
-            }
-            let drain_id = u16::from_be_bytes([data[0], data[1]]);
-            let drain_node = NodeId::validated(drain_id)?;
-            ClusterMessage::DrainNotification {
-                node_id: drain_node,
-            }
-        }
-        20 => {
-            let (req, _) = RequestVoteRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::RequestVote(req)
-        }
-        21 => {
-            let (resp, _) = RequestVoteResponse::try_from_be_bytes(data).ok()?;
-            ClusterMessage::RequestVoteResponse(resp)
-        }
-        22 => {
-            let req = AppendEntriesRequest::from_bytes(data)?;
-            ClusterMessage::AppendEntries(req)
-        }
-        23 => {
-            let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
-            ClusterMessage::AppendEntriesResponse(resp)
-        }
-        12 => {
-            let (req, _) = CatchupRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::CatchupRequest(req)
-        }
-        13 => {
-            let resp = CatchupResponse::from_bytes(data)?;
-            ClusterMessage::CatchupResponse(resp)
-        }
-        30 => {
-            let fwd = ForwardedPublish::from_bytes(data)?;
-            ClusterMessage::ForwardedPublish(fwd)
-        }
-        40 => {
-            let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::SnapshotRequest(req)
-        }
-        41 => {
-            let chunk = SnapshotChunk::from_bytes(data)?;
-            ClusterMessage::SnapshotChunk(chunk)
-        }
-        42 => {
-            let (complete, _) = SnapshotComplete::try_from_be_bytes(data).ok()?;
-            ClusterMessage::SnapshotComplete(complete)
-        }
-        50 => {
-            if data.len() < 2 {
-                return None;
-            }
-            let partition_id = u16::from_be_bytes([data[0], data[1]]);
-            let partition = PartitionId::new(partition_id)?;
-            let request = QueryRequest::from_bytes(&data[2..])?;
-            ClusterMessage::QueryRequest { partition, request }
-        }
-        51 => {
-            let response = QueryResponse::from_bytes(data)?;
-            ClusterMessage::QueryResponse(response)
-        }
-        52 => {
-            let request = BatchReadRequest::from_bytes(data)?;
-            ClusterMessage::BatchReadRequest(request)
-        }
-        53 => {
-            let response = BatchReadResponse::from_bytes(data)?;
-            ClusterMessage::BatchReadResponse(response)
-        }
-        60 => {
-            let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(data).ok()?;
-            ClusterMessage::WildcardBroadcast(broadcast)
-        }
-        61 => {
-            let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(data).ok()?;
-            ClusterMessage::TopicSubscriptionBroadcast(broadcast)
-        }
-        70 => {
-            let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
-            ClusterMessage::PartitionUpdate(update)
-        }
-        54 => {
-            if data.len() < 2 {
-                return None;
-            }
-            let partition_id = u16::from_be_bytes([data[0], data[1]]);
-            let partition = PartitionId::new(partition_id)?;
-            let request = JsonDbRequest::from_bytes(&data[2..])?;
-            ClusterMessage::JsonDbRequest { partition, request }
-        }
-        55 => {
-            let response = JsonDbResponse::from_bytes(data)?;
-            ClusterMessage::JsonDbResponse(response)
-        }
-        80 => {
-            let (req, _) = UniqueReserveRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueReserveRequest(req)
-        }
-        81 => {
-            let (resp, _) = UniqueReserveResponse::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueReserveResponse(resp)
-        }
-        82 => {
-            let (req, _) = UniqueCommitRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueCommitRequest(req)
-        }
-        83 => {
-            let (resp, _) = UniqueCommitResponse::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueCommitResponse(resp)
-        }
-        84 => {
-            let (req, _) = UniqueReleaseRequest::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueReleaseRequest(req)
-        }
-        85 => {
-            let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
-            ClusterMessage::UniqueReleaseResponse(resp)
-        }
-        _ => return None,
-    };
-
-    #[allow(clippy::cast_possible_truncation)]
-    let received_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64);
-
+    let inbound = InboundMessage::parse_from_payload(payload, local_node)?;
     trace!(
-        from = from.get(),
-        msg_type = message.message_type(),
+        from = inbound.from.get(),
+        msg_type = inbound.message.message_type(),
         "received QUIC cluster message"
     );
-
-    Some(InboundMessage {
-        from,
-        message,
-        received_at,
-    })
+    Some(inbound)
 }
 
 fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig, TransportError> {
@@ -814,22 +656,39 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
     Ok(server_config)
 }
 
-fn build_client_config_secure() -> Result<quinn::ClientConfig, TransportError> {
+fn build_client_config_secure(
+    ca_file: Option<&Path>,
+) -> Result<quinn::ClientConfig, TransportError> {
     let mut root_store = rustls::RootCertStore::empty();
 
-    let cert_result = rustls_native_certs::load_native_certs();
-    for err in &cert_result.errors {
-        debug!(error = %err, "error loading native certificate");
-    }
-    for cert in cert_result.certs {
-        if let Err(e) = root_store.add(cert) {
-            debug!(error = %e, "failed to add certificate to root store");
+    if let Some(ca_path) = ca_file {
+        let ca_file = std::fs::File::open(ca_path)
+            .map_err(|e| TransportError::SendFailed(format!("failed to open CA file: {e}")))?;
+        let certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| TransportError::SendFailed(format!("failed to parse CA cert: {e}")))?;
+        for cert in certs {
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::SendFailed(format!("failed to add CA cert: {e}")))?;
+        }
+        debug!(ca_path = %ca_path.display(), "loaded custom CA certificate");
+    } else {
+        let cert_result = rustls_native_certs::load_native_certs();
+        for err in &cert_result.errors {
+            debug!(error = %err, "error loading native certificate");
+        }
+        for cert in cert_result.certs {
+            if let Err(e) = root_store.add(cert) {
+                debug!(error = %e, "failed to add certificate to root store");
+            }
         }
     }
 
     if root_store.is_empty() {
         return Err(TransportError::SendFailed(
-            "no trusted root certificates found - use --quic-insecure for self-signed certs"
+            "no trusted root certificates found - use --quic-ca to specify a CA certificate"
                 .to_string(),
         ));
     }
@@ -845,6 +704,7 @@ fn build_client_config_secure() -> Result<quinn::ClientConfig, TransportError> {
     Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
+#[cfg(feature = "dev-insecure")]
 fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError> {
     let crypto = rustls::ClientConfig::builder()
         .dangerous()
@@ -858,9 +718,11 @@ fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError>
     Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
+#[cfg(feature = "dev-insecure")]
 #[derive(Debug)]
 struct SkipServerVerification;
 
+#[cfg(feature = "dev-insecure")]
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,
@@ -909,6 +771,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::Heartbeat;
     use super::*;
 
     #[test]

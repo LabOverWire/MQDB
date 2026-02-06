@@ -6,12 +6,12 @@
 
 ## Overview
 
-MQDB is a distributed MQTT broker with embedded database capabilities. The cluster supports two transport modes: MQTT bridges (default) and Direct QUIC (`--direct-quic`), with Raft consensus for partition management.
+MQDB is a distributed MQTT broker with embedded database capabilities. The cluster uses Direct QUIC transport (default since v0.2.0) with Raft consensus for partition management. MQTT bridges are deprecated but retained for historical reference.
 
 **Design Foundations** (specified before implementation):
 - **BeBytes crate** for all protocol encoding/decoding (custom, modifiable as needed)
 - **QUIC preferred** for inter-node transport (UDP port mirrors TCP port 1883)
-- **Two transport modes**: MQTT bridges (default) or Direct QUIC (bypasses broker, recommended for production)
+- **Direct QUIC transport**: Default transport that bypasses MQTT broker for cluster traffic (MQTT bridges deprecated)
 - **64 fixed partitions** (never changes)
 - **Replication Factor = 2** (primary + one replica)
 
@@ -53,6 +53,10 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 - DB Constraint (`_db_constraint`) → constraint definitions
 
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
+
+There are two distinct mechanisms for handling broadcast entities:
+1.  **Fan-out to all partitions**: Used for `_topic_index`, `_wildcards`, and `_db_schema`. This involves creating 64 `ReplicationWrite`s, one for each partition.
+2.  **Gossip-style broadcast to all nodes**: Used for `_client_loc` and `_db_constraint`. This involves creating a single `ReplicationWrite` (often for Partition 0) and then having the `write_or_forward` logic send it to all other alive nodes.
 
 ---
 
@@ -133,7 +137,7 @@ subscribe_wildcard_replicated() + WildcardBroadcast
 | Pattern Type | Writes Generated | Breakdown |
 |--------------|------------------|-----------|
 | Exact topic (e.g., `sensor/temp`) | 65 | 1 subscription + 64 topic index |
-| Wildcard topic (e.g., `sensor/+/temp`) | 129 | 1 subscription + 64 topic index + 64 wildcards |
+| Wildcard topic (e.g., `sensor/+/temp`) | 65 | 1 subscription + 64 wildcards (TopicIndex is NOT updated for wildcards) |
 
 This amplification is fundamental to the design—without broadcast entities, publish routing would require cross-node queries for every message, destroying throughput.
 
@@ -323,10 +327,11 @@ Each partition maintains independent pagination state, allowing efficient resump
 
 ### A5.4 Retained Message Queries
 
-Wildcard subscriptions require all-partition queries:
+Retained Message Queries:
 
 - Exact topic: `hash(topic) % 64` → single partition
-- Wildcard pattern (`+`, `#`): query all 64 partitions, filter locally
+- Wildcard pattern (`+`, `#`): query all 64 partitions, filter locally.
+  However, the `on_client_subscribe` event handler currently *does not* initiate retained message queries for wildcard subscriptions. Only non-wildcard subscriptions trigger these queries.
 
 **Key Files**: `query_coordinator.rs:1-470`, `cursor.rs:1-140`, `protocol.rs:661-909` (QueryRequest/Response)
 
@@ -583,9 +588,11 @@ Use **partial** or **upper** topology for production until this is resolved.
 - **Agent mode is fastest**: No replication overhead, 6-9k DB ops/s, 155k pubsub msg/s
 - **Full mesh unstable**: Raft flapping makes it unsuitable for production (Issue 11.16)
 
-### A6.5 Direct QUIC Transport (`--direct-quic`)
+### A6.5 Direct QUIC Transport (Default)
 
-The bridge overhead problem (A6.4) is caused by cluster traffic competing with client connections on the same MQTT broker event loop. The `--direct-quic` flag enables an alternative transport that bypasses MQTT bridges entirely.
+> **Note**: As of v0.2.0, Direct QUIC is the default transport for all cluster deployments. MQTT bridges are deprecated and retained only for historical reference.
+
+The bridge overhead problem (A6.4) was caused by cluster traffic competing with client connections on the same MQTT broker event loop. Direct QUIC transport bypasses MQTT bridges entirely and is now the default.
 
 **Architecture**:
 ```
@@ -649,11 +656,11 @@ struct QuicDirectTransport {
 
 **Usage**:
 ```bash
-mqdb dev start-cluster --nodes 3 --clean --direct-quic
+mqdb dev start-cluster --nodes 3 --clean
 
 # Or manually:
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/n1 \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --direct-quic
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
 ```
 
 **Key Files**: `quic_transport.rs`, `cluster_agent.rs` (transport selection)
@@ -916,7 +923,7 @@ Each node can be:
 
 QUIC preferred for multi-node clusters:
 - Better congestion control
-- Stream multiplexing (`StreamStrategy::DataPerTopic`)
+- Stream multiplexing (uses a single bidirectional stream per peer connection, not explicitly a stream per topic)
 - Built-in encryption
 - TCP fallback for testing/development
 
@@ -1593,7 +1600,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Root Cause**: MQTT bridges share the broker's event loop with client connections. Each bridge creates bidirectional MQTT sessions that compete for processing time.
 
-**Mitigation**: Use `--direct-quic` transport which bypasses bridges entirely and provides uniform performance across all nodes (see A6.5).
+**Mitigation**: Use Direct QUIC transport (now the default) which bypasses bridges entirely and provides uniform performance across all nodes (see A6.5).
 
 ### 11.16 Raft Leader Flapping in Full-Mesh Topology
 
@@ -1603,7 +1610,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Root Cause**: With `BridgeDirection::Out` in full mesh, heartbeats are sent by leader but not reliably received by followers. Election timeout (3-5s) expires, triggering new elections.
 
-**Mitigation**: Use **partial** or **upper** topology with MQTT bridges, OR use `--direct-quic` transport.
+**Mitigation**: Use Direct QUIC transport (now the default). MQTT bridges are deprecated and should not be used in production.
 
 ### 11.17 Single-Node Cluster Partition Initialization
 

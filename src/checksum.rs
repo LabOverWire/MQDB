@@ -1,5 +1,13 @@
 use crc32fast::Hasher;
 
+#[derive(Debug, thiserror::Error)]
+pub enum ChecksumError {
+    #[error("data too short for checksum")]
+    DataTooShort,
+    #[error("checksum mismatch")]
+    ChecksumMismatch,
+}
+
 #[must_use]
 pub fn compute_checksum(data: &[u8]) -> u32 {
     let mut hasher = Hasher::new();
@@ -18,9 +26,9 @@ pub fn encode_with_checksum(data: &[u8]) -> Vec<u8> {
 
 /// # Errors
 /// Returns an error if data is too short or checksum doesn't match.
-pub fn decode_and_verify(data: &[u8]) -> Result<&[u8], String> {
+pub fn decode_and_verify(data: &[u8]) -> Result<&[u8], ChecksumError> {
     if data.len() < 4 {
-        return Err("data too short for checksum".to_string());
+        return Err(ChecksumError::DataTooShort);
     }
 
     let stored_checksum = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -30,7 +38,7 @@ pub fn decode_and_verify(data: &[u8]) -> Result<&[u8], String> {
     if stored_checksum == computed_checksum {
         Ok(payload)
     } else {
-        Err("checksum mismatch".to_string())
+        Err(ChecksumError::ChecksumMismatch)
     }
 }
 

@@ -1,4 +1,4 @@
-use mqdb::{Database, OnDeleteAction};
+use mqdb::{Database, OnDeleteAction, ScopeConfig};
 use serde_json::json;
 
 #[tokio::main]
@@ -27,17 +27,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating user...");
     let user = json!({"name": "Alice"});
-    let created_user = db.create("users".into(), user).await?;
+    let created_user = db
+        .create("users".into(), user, None, &ScopeConfig::default())
+        .await?;
     let user_id = created_user["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
 
     println!("Creating 2 posts by this user...");
     let post1 = json!({"title": "First Post", "author_id": user_id});
-    let created_post1 = db.create("posts".into(), post1).await?;
+    let created_post1 = db
+        .create("posts".into(), post1, None, &ScopeConfig::default())
+        .await?;
     let post1_id = created_post1["id"].as_str().unwrap();
 
     let post2 = json!({"title": "Second Post", "author_id": user_id});
-    let created_post2 = db.create("posts".into(), post2).await?;
+    let created_post2 = db
+        .create("posts".into(), post2, None, &ScopeConfig::default())
+        .await?;
     let post2_id = created_post2["id"].as_str().unwrap();
     println!("✓ Created posts: {post1_id}, {post2_id}\n");
 
@@ -45,16 +51,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create(
         "comments".into(),
         json!({"text": "Nice!", "post_id": post1_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     db.create(
         "comments".into(),
         json!({"text": "Great!", "post_id": post1_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     db.create(
         "comments".into(),
         json!({"text": "Awesome!", "post_id": post2_id}),
+        None,
+        &ScopeConfig::default(),
     )
     .await?;
     println!("✓ Created 3 comments\n");
@@ -70,7 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Comments: {}\n", comments_before.len());
 
     println!("Deleting user (should cascade to posts and comments)...");
-    db.delete("users".into(), user_id.to_string()).await?;
+    db.delete(
+        "users".into(),
+        user_id.to_string(),
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ User deleted\n");
 
     let posts_after = db

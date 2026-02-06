@@ -1,3 +1,6 @@
+#![cfg(feature = "mqtt-bridge")]
+#![allow(deprecated)]
+
 use mqdb::cluster::{
     ClusterMessage, ClusterTransport, Epoch, Heartbeat, MqttTransport, NodeController, NodeId,
     Operation, PartitionId, ReplicationWrite, TransportConfig,

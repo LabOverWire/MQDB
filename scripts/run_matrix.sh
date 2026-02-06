@@ -94,23 +94,19 @@ case "$1" in
         pkill -f "mqdb agent" 2>/dev/null || true
         ;;
 
-    partial-mqtt|partial-quic|upper-mqtt|upper-quic|full-mqtt|full-quic)
-        topo=$(echo $1 | cut -d- -f1)
-        transport=$(echo $1 | cut -d- -f2)
-        quic_flag=""
-        [ "$transport" = "quic" ] && quic_flag="--direct-quic"
-        suffix=$(echo $transport | tr '[:lower:]' '[:upper:]')
+    partial|upper|full)
+        topo=$1
 
         topo_upper=$(echo $topo | tr '[:lower:]' '[:upper:]')
-        log "=== ${topo_upper} ${suffix} ==="
+        log "=== ${topo_upper} QUIC ==="
         $MQDB dev kill 2>/dev/null || true
-        $MQDB dev start-cluster --nodes 3 --clean --topology $topo $quic_flag
+        $MQDB dev start-cluster --nodes 3 --clean --topology $topo
         sleep 8
 
         for run in 1 2 3; do
             for port in 1883 1884 1885; do
                 node=$((port - 1882))
-                run_pubsub "A-${topo}-${suffix}-N${node}" "127.0.0.1:$port" "" "" $run
+                run_pubsub "A-${topo}-N${node}" "127.0.0.1:$port" "" "" $run
             done
         done
 
@@ -120,7 +116,7 @@ case "$1" in
                     [ "$pub" = "$sub" ] && continue
                     pub_node=$((pub - 1882))
                     sub_node=$((sub - 1882))
-                    run_pubsub "B-${topo}-${suffix}-${pub_node}to${sub_node}" "" "127.0.0.1:$pub" "127.0.0.1:$sub" $run
+                    run_pubsub "B-${topo}-${pub_node}to${sub_node}" "" "127.0.0.1:$pub" "127.0.0.1:$sub" $run
                 done
             done
         done
@@ -129,7 +125,7 @@ case "$1" in
             for run in 1 2 3; do
                 for port in 1883 1884 1885; do
                     node=$((port - 1882))
-                    run_sync_db "C${op:0:1}-${topo}-${suffix}-N${node}" "127.0.0.1:$port" "$op" $run
+                    run_sync_db "C${op:0:1}-${topo}-N${node}" "127.0.0.1:$port" "$op" $run
                 done
             done
         done
@@ -138,12 +134,12 @@ case "$1" in
             log "Restarting for async $op"
             $MQDB dev kill 2>/dev/null || true
             sleep 2
-            $MQDB dev start-cluster --nodes 3 --clean --topology $topo $quic_flag
+            $MQDB dev start-cluster --nodes 3 --clean --topology $topo
             sleep 8
             for run in 1 2 3; do
                 for port in 1883 1884 1885; do
                     node=$((port - 1882))
-                    run_async_db "D${op:0:1}-${topo}-${suffix}-N${node}" "127.0.0.1:$port" "$op" $run
+                    run_async_db "D${op:0:1}-${topo}-N${node}" "127.0.0.1:$port" "$op" $run
                 done
             done
             sleep 10
@@ -153,7 +149,7 @@ case "$1" in
         ;;
 
     *)
-        echo "Usage: $0 {agent|partial-mqtt|partial-quic|upper-mqtt|upper-quic|full-mqtt|full-quic}"
+        echo "Usage: $0 {agent|partial|upper|full}"
         exit 1
         ;;
 esac

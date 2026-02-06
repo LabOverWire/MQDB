@@ -18,12 +18,22 @@ echo ""
 echo "Building:"
 echo "  cargo make build         Build all targets (debug)"
 echo "  cargo make build-release Build release binary"
+echo "  cargo make build-dist    Build size-optimized dist binary"
+echo "  cargo make install       Install mqdb binary from local codebase"
 echo "  cargo make build-profiling Build with profiling profile"
+echo "  cargo make wasm-build    Build WASM package (pkg/)"
 echo ""
 echo "Testing:"
 echo "  cargo make test          Run all tests"
 echo "  cargo make test-verbose  Run tests with output"
 echo "  cargo make ci            CI pipeline (format-check + clippy + test)"
+echo "  cargo make test-e2e      Run E2E cluster tests"
+echo "  cargo make ci-full       CI + E2E tests"
+echo ""
+echo "WASM:"
+echo "  cargo make wasm-build    Build WASM package (pkg/)"
+echo "  cargo make wasm-test     Run WASM tests (Node.js)"
+echo "  cargo make ci-wasm       WASM CI (build + test)"
 echo ""
 echo "Benchmarking:"
 echo "  cargo make bench-pubsub  Run pub/sub benchmark"
@@ -79,6 +89,11 @@ args = ["build", "--all-targets"]
 description = "Build release binary"
 command = "cargo"
 args = ["build", "--release"]
+
+[tasks.install]
+description = "Install mqdb binary from local codebase"
+command = "cargo"
+args = ["install", "--path", "."]
 
 [tasks.clippy]
 description = "Lint all crates with pedantic warnings"
@@ -154,7 +169,65 @@ description = "Profile DB with samply"
 command = "cargo"
 args = ["run", "--release", "--", "dev", "profile", "db"]
 
+[tasks.build-dist]
+description = "Build size-optimized dist binary (lto + strip + abort + opt-z)"
+command = "cargo"
+args = ["build", "--profile=dist"]
+
 [tasks.build-profiling]
 description = "Build with profiling profile"
 command = "cargo"
 args = ["build", "--profile=profiling"]
+
+[tasks.wasm-build]
+description = "Build WASM package (pkg/)"
+dependencies = ["wasm-compile", "wasm-bindgen", "wasm-opt"]
+
+[tasks.wasm-compile]
+description = "Compile WASM binary"
+command = "cargo"
+args = ["build", "--target", "wasm32-unknown-unknown", "--release", "--manifest-path", "crates/mqdb-wasm/Cargo.toml"]
+
+[tasks.wasm-bindgen]
+description = "Generate JS bindings"
+command = "wasm-bindgen"
+args = ["--target", "web", "--out-dir", "crates/mqdb-wasm/pkg", "crates/mqdb-wasm/target/wasm32-unknown-unknown/release/mqdb_wasm.wasm"]
+
+[tasks.wasm-opt]
+description = "Optimize WASM binary with wasm-opt (optional, skipped if not installed)"
+script = '''
+if command -v wasm-opt > /dev/null 2>&1; then
+    echo "Running wasm-opt -O4 on mqdb_wasm_bg.wasm..."
+    wasm-opt -O4 -o crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm
+    echo "wasm-opt complete"
+else
+    echo "wasm-opt not found, skipping (install binaryen for smaller WASM binaries)"
+fi
+'''
+
+[tasks.test-e2e]
+description = "Run E2E cluster tests (requires release build)"
+dependencies = ["build-release"]
+script = '''
+./target/release/mqdb dev start-cluster --nodes 3 --clean
+sleep 3
+./target/release/mqdb dev test --all
+RESULT=$?
+./target/release/mqdb dev kill
+exit $RESULT
+'''
+
+[tasks.ci-full]
+description = "Full CI: format-check + clippy + test + E2E"
+dependencies = ["ci", "test-e2e"]
+
+[tasks.wasm-test]
+description = "Run WASM tests in Node.js"
+script = '''
+cd crates/mqdb-wasm
+wasm-pack test --node
+'''
+
+[tasks.ci-wasm]
+description = "WASM CI: build + test"
+dependencies = ["wasm-build", "wasm-test"]

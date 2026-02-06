@@ -1,5 +1,129 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone, Default)]
+pub struct ScopeConfig {
+    scope_entity: String,
+    scope_field: String,
+}
+
+impl ScopeConfig {
+    #[must_use]
+    pub fn new(scope_entity: String, scope_field: String) -> Self {
+        Self {
+            scope_entity,
+            scope_field,
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if the spec is not in `entity=field` format.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Ok(Self::default());
+        }
+        let parts: Vec<&str> = spec.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid event-scope spec '{spec}': expected entity=field"
+            ));
+        }
+        Ok(Self {
+            scope_entity: parts[0].to_string(),
+            scope_field: parts[1].to_string(),
+        })
+    }
+
+    #[must_use]
+    pub fn scope_entity(&self) -> &str {
+        &self.scope_entity
+    }
+
+    #[must_use]
+    pub fn scope_field(&self) -> &str {
+        &self.scope_field
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.scope_entity.is_empty()
+    }
+
+    #[must_use]
+    pub fn resolve_scope(&self, entity_name: &str, data: &Value) -> Option<(String, String)> {
+        if self.is_empty() {
+            return None;
+        }
+        if entity_name == self.scope_entity {
+            let id = data.get("id").and_then(Value::as_str)?;
+            return Some((self.scope_entity.clone(), id.to_string()));
+        }
+        let scope_value = data.get(&self.scope_field).and_then(Value::as_str)?;
+        Some((self.scope_entity.clone(), scope_value.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnershipConfig {
+    pub entity_owner_fields: HashMap<String, String>,
+    admin_users: HashSet<String>,
+}
+
+impl OwnershipConfig {
+    #[must_use]
+    pub fn new(entity_owner_fields: HashMap<String, String>) -> Self {
+        Self {
+            entity_owner_fields,
+            admin_users: HashSet::new(),
+        }
+    }
+
+    /// # Errors
+    /// Returns an error if any pair in the spec string is not in `entity=field` format.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut fields = HashMap::new();
+        for pair in spec.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = pair.splitn(2, '=').collect();
+            if parts.len() != 2 {
+                return Err(format!(
+                    "invalid ownership spec '{pair}': expected entity=field"
+                ));
+            }
+            fields.insert(parts[0].to_string(), parts[1].to_string());
+        }
+        Ok(Self {
+            entity_owner_fields: fields,
+            admin_users: HashSet::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn with_admin_users(mut self, users: HashSet<String>) -> Self {
+        self.admin_users = users;
+        self
+    }
+
+    #[must_use]
+    pub fn owner_field(&self, entity: &str) -> Option<&str> {
+        self.entity_owner_fields.get(entity).map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn is_admin(&self, user: &str) -> bool {
+        self.admin_users.contains(user)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entity_owner_fields.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

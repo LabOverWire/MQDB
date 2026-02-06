@@ -1,4 +1,4 @@
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "agent", not(target_arch = "wasm32")))]
 mod native {
     pub use std::time::{Duration, Instant};
     pub use tokio::sync::Mutex;
@@ -42,7 +42,7 @@ mod wasm {
     }
 }
 
-#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "agent", not(target_arch = "wasm32")))]
 pub use native::*;
 
 #[cfg(target_arch = "wasm32")]

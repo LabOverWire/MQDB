@@ -125,6 +125,7 @@ impl From<Error> for Response {
             Error::Validation(_) | Error::SchemaViolation { .. } => {
                 (ErrorCode::BadRequest, e.to_string())
             }
+            Error::Forbidden(_) => (ErrorCode::Forbidden, e.to_string()),
             Error::ConstraintViolation(_)
             | Error::UniqueViolation { .. }
             | Error::ForeignKeyViolation { .. }
@@ -136,10 +137,11 @@ impl From<Error> for Response {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "agent")]
 mod execute {
     use super::{Request, Response};
     use crate::Database;
+    use crate::types::{OwnershipConfig, ScopeConfig};
     use serde_json::Value;
 
     fn value_from_unit(_: ()) -> Value {
@@ -156,11 +158,29 @@ mod execute {
 
     impl Database {
         pub async fn execute(&self, request: Request) -> Response {
+            self.execute_with_sender(
+                request,
+                None,
+                &OwnershipConfig::default(),
+                &ScopeConfig::default(),
+            )
+            .await
+        }
+
+        pub async fn execute_with_sender(
+            &self,
+            request: Request,
+            sender: Option<&str>,
+            ownership: &OwnershipConfig,
+            scope_config: &ScopeConfig,
+        ) -> Response {
             match request {
-                Request::Create { entity, data } => match self.create(entity, data).await {
-                    Ok(v) => Response::ok(v),
-                    Err(e) => e.into(),
-                },
+                Request::Create { entity, data } => {
+                    match self.create(entity, data, sender, scope_config).await {
+                        Ok(v) => Response::ok(v),
+                        Err(e) => e.into(),
+                    }
+                }
                 Request::Read {
                     entity,
                     id,
@@ -171,23 +191,49 @@ mod execute {
                     Err(e) => e.into(),
                 },
                 Request::Update { entity, id, fields } => {
-                    match self.update(entity, id, fields).await {
+                    if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                        && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    {
+                        return e.into();
+                    }
+                    match self.update(entity, id, fields, sender, scope_config).await {
                         Ok(v) => Response::ok(v),
                         Err(e) => e.into(),
                     }
                 }
-                Request::Delete { entity, id } => match self.delete(entity, id).await {
-                    Ok(()) => Response::ok(value_from_unit(())),
-                    Err(e) => e.into(),
-                },
+                Request::Delete { entity, id } => {
+                    if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                        && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    {
+                        return e.into();
+                    }
+                    match self.delete(entity, id, sender, scope_config).await {
+                        Ok(()) => Response::ok(value_from_unit(())),
+                        Err(e) => e.into(),
+                    }
+                }
                 Request::List {
                     entity,
-                    filters,
+                    mut filters,
                     sort,
                     pagination,
                     includes,
                     projection,
                 } => {
+                    if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                    {
+                        filters.push(crate::Filter::new(
+                            owner_field.to_string(),
+                            crate::FilterOp::Eq,
+                            Value::String(uid.to_string()),
+                        ));
+                    }
                     match self
                         .list(entity, filters, sort, pagination, includes, projection)
                         .await
@@ -228,6 +274,7 @@ mod execute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{OwnershipConfig, ScopeConfig};
 
     #[test]
     fn test_request_serialization() {
@@ -295,5 +342,184 @@ mod tests {
             }
             Response::Ok { .. } => panic!("expected error response"),
         }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn execute_with_sender_update_forbidden_for_non_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_req = Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "My Diagram"}),
+        };
+        let create_resp = db.execute(create_req).await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok response from create"),
+        };
+
+        let update_req = Request::Update {
+            entity: "diagrams".to_string(),
+            id: id.clone(),
+            fields: serde_json::json!({"title": "Stolen"}),
+        };
+        let resp = db
+            .execute_with_sender(update_req, Some("bob"), &ownership, &ScopeConfig::default())
+            .await;
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 403);
+                assert!(message.contains("bob"));
+            }
+            Response::Ok { .. } => panic!("expected forbidden"),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn execute_with_sender_update_allowed_for_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Orig"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Update {
+                    entity: "diagrams".to_string(),
+                    id,
+                    fields: serde_json::json!({"title": "Updated"}),
+                },
+                Some("alice"),
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        assert!(resp.is_ok());
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn execute_with_sender_delete_forbidden_for_non_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Private"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".to_string(),
+                    id,
+                },
+                Some("bob"),
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        match resp {
+            Response::Error { code, .. } => assert_eq!(code, 403),
+            Response::Ok { .. } => panic!("expected forbidden"),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn execute_with_sender_list_filters_by_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice's"}),
+        })
+        .await;
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "bob", "title": "Bob's"}),
+        })
+        .await;
+
+        let resp = db
+            .execute_with_sender(
+                Request::List {
+                    entity: "diagrams".to_string(),
+                    filters: vec![],
+                    sort: vec![],
+                    pagination: None,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("alice"),
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+
+        match resp {
+            Response::Ok { data } => {
+                let items = data.as_array().unwrap();
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0]["userId"], "alice");
+            }
+            Response::Error { .. } => panic!("expected ok"),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn execute_with_sender_none_bypasses_ownership() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Internal"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Update {
+                    entity: "diagrams".to_string(),
+                    id,
+                    fields: serde_json::json!({"title": "System Override"}),
+                },
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        assert!(resp.is_ok());
     }
 }
