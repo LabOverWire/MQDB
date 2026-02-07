@@ -443,6 +443,8 @@ Client Request
 
 ### Authentication
 
+Production deployments should always configure an authentication method. Without one, the broker accepts anonymous connections. The `mqdb dev start-cluster` command handles this automatically by generating a password file with default credentials (`admin` / `admin`).
+
 MQDB supports multiple authentication methods, configurable via agent/cluster start flags:
 
 **Password file** (`--passwd`): Simple username:password file (Argon2 hashed via `mqdb passwd`).
@@ -583,10 +585,21 @@ cargo build --release --bin mqdb
 | `MQDB_USER` | Username for authentication | — |
 | `MQDB_PASS` | Password for authentication | — |
 
+### Authentication in CLI Commands
+
+When the broker requires authentication, every CLI command needs credentials. Pass them with `--user` and `--pass`, or set `MQDB_USER` and `MQDB_PASS` to avoid repeating them:
+
+```bash
+export MQDB_USER=admin
+export MQDB_PASS=admin
+```
+
+The `mqdb dev start-cluster` command creates a password file with `admin` / `admin` automatically, so setting these two variables is enough for all development work. The command examples below omit credentials for readability.
+
 ### Commands
 
 ```bash
-# Start agent (with optional auth)
+# Start agent with authentication
 mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl acl.txt
 
 # CRUD operations
