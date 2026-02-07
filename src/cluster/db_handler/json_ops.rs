@@ -381,17 +381,53 @@ impl DbRequestHandler {
         updates: Value,
         sender: Option<&str>,
     ) -> Option<Vec<u8>> {
-        let merged_data = match self.merge_with_existing(controller, entity, id, updates) {
-            Ok(data) => data,
-            Err(response) => return Some(response),
-        };
+        let (old_data, merged_data) =
+            match self.merge_with_existing(controller, entity, id, updates) {
+                Ok(pair) => pair,
+                Err(response) => return Some(response),
+            };
+
+        let now_ms = Self::current_time_ms();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let partition = data_partition(entity, id);
+
+        let (new_diff, old_diff) =
+            controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
+        let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
+
+        if has_unique_changes
+            && let Err(conflict_field) = controller
+                .check_unique_constraints(entity, id, &new_diff, partition, &request_id, now_ms)
+                .await
+        {
+            return Some(Self::json_error(
+                409,
+                &format!("unique constraint violation on field '{conflict_field}'"),
+            ));
+        }
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-        let now_ms = Self::current_time_ms();
 
         Some(
             match controller.db_update(entity, id, &data_bytes, now_ms).await {
                 Ok(db_entity) => {
+                    if has_unique_changes {
+                        controller
+                            .commit_unique_constraints(
+                                entity,
+                                id,
+                                &new_diff,
+                                partition,
+                                &request_id,
+                                now_ms,
+                            )
+                            .await;
+                        controller
+                            .release_unique_constraints(
+                                entity, id, &old_diff, partition, id, now_ms,
+                            )
+                            .await;
+                    }
                     let scope = self.scope_config.resolve_scope(entity, &merged_data);
                     let event = ChangeEvent::update(
                         entity.to_string(),
@@ -404,9 +440,35 @@ impl DbRequestHandler {
                     Self::json_success(entity, db_entity.id_str(), &merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
+                    if has_unique_changes {
+                        controller
+                            .release_unique_constraints(
+                                entity,
+                                id,
+                                &new_diff,
+                                partition,
+                                &request_id,
+                                now_ms,
+                            )
+                            .await;
+                    }
                     Self::json_error(404, &format!("entity not found: {entity} id={id}"))
                 }
-                Err(_) => Self::json_error(500, "internal error"),
+                Err(_) => {
+                    if has_unique_changes {
+                        controller
+                            .release_unique_constraints(
+                                entity,
+                                id,
+                                &new_diff,
+                                partition,
+                                &request_id,
+                                now_ms,
+                            )
+                            .await;
+                    }
+                    Self::json_error(500, "internal error")
+                }
             },
         )
     }
@@ -417,7 +479,7 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         updates: Value,
-    ) -> Result<Value, Vec<u8>> {
+    ) -> Result<(Value, Value), Vec<u8>> {
         let Some(existing) = controller.db_get(entity, id) else {
             return Err(Self::json_error(
                 404,
@@ -425,18 +487,18 @@ impl DbRequestHandler {
             ));
         };
 
-        let mut existing_data: Value =
+        let existing_data: Value =
             serde_json::from_slice(&existing.data).unwrap_or(Value::Object(serde_json::Map::new()));
+        let old_data = existing_data.clone();
+        let mut merged = existing_data;
 
-        if let (Value::Object(existing_obj), Value::Object(update_obj)) =
-            (&mut existing_data, updates)
-        {
+        if let (Value::Object(existing_obj), Value::Object(update_obj)) = (&mut merged, updates) {
             for (key, value) in update_obj {
                 existing_obj.insert(key, value);
             }
         }
 
-        Ok(existing_data)
+        Ok((old_data, merged))
     }
 
     async fn handle_json_delete<T: ClusterTransport>(

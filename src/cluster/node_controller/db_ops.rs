@@ -6,8 +6,41 @@ use super::{
     NodeController, NodeId, PartitionId, ReplicationWrite, UniqueReservationParams,
     UniqueReserveStatus, entity,
 };
+use serde_json::Value;
+
+fn unique_field_diffs(
+    unique_fields: &[String],
+    old_data: &Value,
+    new_data: &Value,
+) -> (Value, Value) {
+    let mut new_diff = serde_json::Map::new();
+    let mut old_diff = serde_json::Map::new();
+    for field in unique_fields {
+        let old_val = old_data.get(field);
+        let new_val = new_data.get(field);
+        if old_val != new_val {
+            if let Some(nv) = new_val {
+                new_diff.insert(field.clone(), nv.clone());
+            }
+            if let Some(ov) = old_val {
+                old_diff.insert(field.clone(), ov.clone());
+            }
+        }
+    }
+    (Value::Object(new_diff), Value::Object(old_diff))
+}
 
 impl<T: ClusterTransport> NodeController<T> {
+    pub(crate) fn compute_unique_field_diffs(
+        &self,
+        entity: &str,
+        old_data: &Value,
+        new_data: &Value,
+    ) -> (Value, Value) {
+        let unique_fields = self.stores.constraint_get_unique_fields(entity);
+        unique_field_diffs(&unique_fields, old_data, new_data)
+    }
+
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
     pub async fn db_create(
@@ -279,32 +312,62 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         payload: &[u8],
     ) -> Vec<u8> {
-        let data: serde_json::Value = match serde_json::from_slice(payload) {
+        let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
         };
 
-        let merged_data = if let Some(existing) = self.db_get(entity, id) {
-            let mut existing_data: serde_json::Value = serde_json::from_slice(&existing.data)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+        let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
+            let existing_data: Value = serde_json::from_slice(&existing.data)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let old_data = existing_data.clone();
+            let mut merged = existing_data;
 
-            if let (serde_json::Value::Object(existing_obj), serde_json::Value::Object(updates)) =
-                (&mut existing_data, data)
-            {
+            if let (Value::Object(existing_obj), Value::Object(updates)) = (&mut merged, data) {
                 for (key, value) in updates {
                     existing_obj.insert(key, value);
                 }
             }
-            existing_data
+            (old_data, merged)
         } else {
             return Self::json_error(404, &format!("entity not found: {entity} id={id}"));
         };
 
-        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
         let now_ms = Self::current_time_ms();
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let partition = super::super::db::data_partition(entity, id);
+
+        let (new_diff, old_diff) = self.compute_unique_field_diffs(entity, &old_data, &merged_data);
+        let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
+
+        if has_unique_changes
+            && let Err(conflict_field) = self
+                .check_unique_constraints(entity, id, &new_diff, partition, &request_id, now_ms)
+                .await
+        {
+            return Self::json_error(
+                409,
+                &format!("unique constraint violation on field '{conflict_field}'"),
+            );
+        }
+
+        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
         match self.db_update(entity, id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
+                if has_unique_changes {
+                    self.commit_unique_constraints(
+                        entity,
+                        id,
+                        &new_diff,
+                        partition,
+                        &request_id,
+                        now_ms,
+                    )
+                    .await;
+                    self.release_unique_constraints(entity, id, &old_diff, partition, id, now_ms)
+                        .await;
+                }
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -314,9 +377,33 @@ impl<T: ClusterTransport> NodeController<T> {
                 serde_json::to_vec(&result).unwrap_or_default()
             }
             Err(super::db::DbDataStoreError::NotFound) => {
+                if has_unique_changes {
+                    self.release_unique_constraints(
+                        entity,
+                        id,
+                        &new_diff,
+                        partition,
+                        &request_id,
+                        now_ms,
+                    )
+                    .await;
+                }
                 Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(_) => {
+                if has_unique_changes {
+                    self.release_unique_constraints(
+                        entity,
+                        id,
+                        &new_diff,
+                        partition,
+                        &request_id,
+                        now_ms,
+                    )
+                    .await;
+                }
+                Self::json_error(500, "internal error")
+            }
         }
     }
 
@@ -735,5 +822,15 @@ impl<T: ClusterTransport> NodeController<T> {
             "forward_json_request_sent"
         );
         true
+    }
+
+    #[cfg(test)]
+    pub async fn handle_json_update_local_for_test(
+        &mut self,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        self.handle_json_update_local(entity, id, payload).await
     }
 }

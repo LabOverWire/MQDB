@@ -392,6 +392,39 @@ mqdb create users --data '{"name": "User2", "email": "unique@test.com"}'
 error: unique constraint violation on field 'email'
 ```
 
+### Unique Constraint on Update (Conflict)
+
+```bash
+mqdb update users <user1-id> --data '{"email": "unique@test.com"}'
+```
+
+**Expected error:**
+```
+error: unique constraint violation on field 'email'
+```
+
+The update is rejected because another entity already has that email value.
+
+### Unique Constraint on Update (Non-Unique Field Change)
+
+```bash
+mqdb update users <user1-id> --data '{"name": "New Name"}'
+```
+
+**Expected:** Success. Changing a non-unique field does not trigger unique constraint checks.
+
+### Unique Constraint on Update (Value Recycling)
+
+```bash
+# Change user1's email away from its original value
+mqdb update users <user1-id> --data '{"email": "different@test.com"}'
+
+# Now create a new user with the old email — should succeed
+mqdb create users --data '{"name": "User3", "email": "unique@test.com"}'
+```
+
+**Expected:** Both operations succeed. The old unique value is released when the update changes it.
+
 ### Not-Null Constraint
 
 ```bash
@@ -1706,6 +1739,47 @@ mqdb create cluster_users --data '{"name": "Bob", "email": "alice@test.com"}' \
 
 **Expected:** Second create fails with unique constraint violation.
 
+### Unique Constraint on Update Across Nodes (Conflict)
+
+```bash
+# 1. Start cluster
+mqdb dev start-cluster --nodes 2 --clean
+
+# 2. Add unique constraint
+mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883
+
+# 3. Create two entities on different nodes
+mqdb create cluster_users --data '{"name": "Alice", "email": "alice@test.com"}' \
+  --broker 127.0.0.1:1883
+# Note Alice's ID
+
+mqdb create cluster_users --data '{"name": "Bob", "email": "bob@test.com"}' \
+  --broker 127.0.0.1:1884
+# Note Bob's ID
+
+# 4. Update Bob's email to conflict with Alice (should fail)
+mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
+  --broker 127.0.0.1:1884
+```
+
+**Expected:** Update fails with 409 unique constraint violation.
+
+### Unique Constraint on Update Across Nodes (Value Recycling)
+
+```bash
+# 1. Using same cluster and entities from above
+
+# 2. Update Alice's email to a new value
+mqdb update cluster_users <alice-id> --data '{"email": "alice-new@test.com"}' \
+  --broker 127.0.0.1:1883
+
+# 3. Now update Bob's email to Alice's OLD value (should succeed)
+mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
+  --broker 127.0.0.1:1884
+```
+
+**Expected:** Update succeeds — the old unique value was released when Alice changed her email.
+
 ### Foreign Key Across Nodes
 
 ```bash
@@ -1865,6 +1939,9 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Filtering and sorting
 - [ ] Schema validation
 - [ ] Constraints (unique, not-null, foreign key)
+- [ ] Unique constraint enforced on updates (conflict returns 409)
+- [ ] Unique constraint allows non-unique field updates
+- [ ] Unique constraint old value released on update
 - [ ] Watch/Subscribe
 - [ ] Consumer groups
 - [ ] Backup/Restore
@@ -1901,7 +1978,9 @@ Run through this checklist to verify MQDB works completely:
 - [ ] No message duplication under load
 
 ### Constraints (Cluster)
-- [ ] Unique constraint enforced across nodes
+- [ ] Unique constraint enforced across nodes (create)
+- [ ] Unique constraint enforced across nodes (update conflict returns 409)
+- [ ] Unique constraint old value released on update (value recycling)
 - [ ] Foreign key validated across nodes
 
 ### Ownership Enforcement

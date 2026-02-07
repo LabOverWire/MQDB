@@ -237,12 +237,15 @@ impl UniqueStore {
         let key = Self::unique_key(entity, field, value);
         let mut reservations = self.reservations.write().unwrap();
 
-        if let Some(existing) = reservations.get(&key)
-            && !existing.is_committed()
-            && existing.request_id_str() == request_id
-        {
-            reservations.remove(&key);
-            return true;
+        if let Some(existing) = reservations.get(&key) {
+            if !existing.is_committed() && existing.request_id_str() == request_id {
+                reservations.remove(&key);
+                return true;
+            }
+            if existing.is_committed() && existing.record_id_str() == request_id {
+                reservations.remove(&key);
+                return true;
+            }
         }
         false
     }
@@ -706,6 +709,34 @@ mod tests {
         let removed = store.cleanup_expired(3000);
         assert_eq!(removed, 1);
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn release_committed_by_record_id() {
+        let store = UniqueStore::new(node(1));
+
+        store.reserve(
+            "users",
+            "email",
+            b"alice@example.com",
+            "user123",
+            "req-abc",
+            partition(42),
+            5000,
+            1000,
+        );
+        store
+            .commit("users", "email", b"alice@example.com", "req-abc")
+            .unwrap();
+
+        let released = store.release("users", "email", b"alice@example.com", "req-abc");
+        assert!(!released, "should not release committed by request_id");
+
+        let released = store.release("users", "email", b"alice@example.com", "user123");
+        assert!(released, "should release committed by record_id");
+
+        let available = store.check("users", "email", b"alice@example.com", 1000);
+        assert!(available, "value should be available after release");
     }
 
     #[test]

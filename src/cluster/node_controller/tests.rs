@@ -762,3 +762,148 @@ async fn schema_is_valid_for_write_checks_active_state() {
     ctrl.schema_register("users", b"{}").await.unwrap();
     assert!(ctrl.schema_is_valid_for_write("users"));
 }
+
+fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
+    let mut map = PartitionMap::new();
+    for partition_id in 0..64 {
+        if let Some(p) = PartitionId::new(partition_id) {
+            ctrl.become_primary(p, Epoch::new(1));
+            map.set(
+                p,
+                crate::cluster::PartitionAssignment {
+                    primary: Some(node),
+                    replicas: vec![],
+                    epoch: Epoch::new(1),
+                },
+            );
+        }
+    }
+    ctrl.update_partition_map(map);
+}
+
+async fn setup_unique_entity_with_constraint(
+    ctrl: &mut NodeController<MockTransport>,
+    id: &str,
+    data: &[u8],
+    timestamp: u64,
+) {
+    let partition = crate::cluster::db::data_partition("users", id);
+    ctrl.db_create("users", id, data, timestamp).await.unwrap();
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let entity_data: serde_json::Value = serde_json::from_slice(data).unwrap();
+    ctrl.check_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
+        .await
+        .unwrap();
+    ctrl.commit_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
+        .await;
+}
+
+#[tokio::test]
+async fn db_update_enforces_unique_constraint() {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let constraint =
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+    ctrl.constraint_add(&constraint).await.unwrap();
+    setup_all_partitions_primary(&mut ctrl, node1);
+
+    setup_unique_entity_with_constraint(
+        &mut ctrl,
+        "user-a",
+        br#"{"email":"alice@example.com","name":"Alice"}"#,
+        1000,
+    )
+    .await;
+    setup_unique_entity_with_constraint(
+        &mut ctrl,
+        "user-b",
+        br#"{"email":"bob@example.com","name":"Bob"}"#,
+        1001,
+    )
+    .await;
+
+    let result = ctrl
+        .handle_json_update_local_for_test("users", "user-b", br#"{"email":"alice@example.com"}"#)
+        .await;
+    let response: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(response["status"], "error");
+    assert_eq!(response["code"], 409);
+}
+
+#[tokio::test]
+async fn db_update_allows_same_value() {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let constraint =
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+    ctrl.constraint_add(&constraint).await.unwrap();
+    setup_all_partitions_primary(&mut ctrl, node1);
+
+    setup_unique_entity_with_constraint(
+        &mut ctrl,
+        "user-1",
+        br#"{"email":"alice@example.com","name":"Alice"}"#,
+        1000,
+    )
+    .await;
+
+    let result = ctrl
+        .handle_json_update_local_for_test("users", "user-1", br#"{"name":"Alice B."}"#)
+        .await;
+    let response: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(response["status"], "ok");
+}
+
+#[tokio::test]
+async fn db_update_releases_old_unique_value() {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let constraint =
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+    ctrl.constraint_add(&constraint).await.unwrap();
+    setup_all_partitions_primary(&mut ctrl, node1);
+
+    setup_unique_entity_with_constraint(
+        &mut ctrl,
+        "user-a",
+        br#"{"email":"alice@example.com","name":"Alice"}"#,
+        1000,
+    )
+    .await;
+
+    let result = ctrl
+        .handle_json_update_local_for_test(
+            "users",
+            "user-a",
+            br#"{"email":"newalice@example.com"}"#,
+        )
+        .await;
+    let response: serde_json::Value = serde_json::from_slice(&result).unwrap();
+    assert_eq!(response["status"], "ok", "update failed: {response}");
+
+    let partition_b = crate::cluster::db::data_partition("users", "user-b");
+    let request_id_b = uuid::Uuid::new_v4().to_string();
+    let create_data_b: serde_json::Value =
+        serde_json::from_slice(br#"{"email":"alice@example.com"}"#).unwrap();
+    let check_result = ctrl
+        .check_unique_constraints(
+            "users",
+            "user-b",
+            &create_data_b,
+            partition_b,
+            &request_id_b,
+            1002,
+        )
+        .await;
+    assert!(
+        check_result.is_ok(),
+        "old unique value should be available after update changed it"
+    );
+}
