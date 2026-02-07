@@ -4,36 +4,45 @@ A high-performance reactive database with native MQTT integration, point-to-poin
 
 ## Features
 
-- **Reactive Subscriptions**: Built-in change observation with MQTT-style wildcard patterns (`+`, `#`)
-- **Point-to-Point Delivery**: Shared subscriptions with LoadBalanced and Ordered modes
-- **Consumer Groups**: Partition-based message routing with automatic rebalancing
-- **High Performance**: 168k+ writes/sec, 558k+ reads/sec with sub-millisecond latency
-- **ACID Constraints**: Schemas, unique constraints, foreign keys with CASCADE/RESTRICT/SET NULL
-- **Secondary Indexes**: Efficient equality and range indexes for fast queries
-- **Extended Filter Operators**: In, Like (glob patterns), IsNull, IsNotNull
-- **Sorting & Pagination**: Multi-field sorting with offset/limit pagination
-- **Relationships**: Foreign key-style relationships with nested entity loading
-- **TTL Expiration**: Automatic entity cleanup with reactive delete events
-- **Atomic Transactions**: Multi-key atomic batches with ACID guarantees
-- **Outbox Pattern**: Atomic event persistence with retry and dead letter queue
-- **Persistent Subscriptions**: Subscriptions survive restarts
-- **Event Streaming**: Real-time change notifications via async channels
-- **Storage Abstraction**: Pluggable backends (Fjall for native, Memory for WASM)
-- **WASM Support**: Run in browsers with in-memory storage
-- **Idempotent Operations**: Correlation ID-based deduplication
+ACID-compliant database with atomic multi-key transactions and correlation ID dedup.
+
+- Schemas with type validation, required fields, and default values
+- Unique constraints (single and composite), not-null constraints
+- Foreign keys with CASCADE, RESTRICT, and SET NULL delete policies
+
+Secondary indexes accelerate equality lookups. Ten filter operators cover the rest.
+
+- Multi-field sorting with offset/limit pagination
+- `In`, `Like` (glob), `IsNull`, `IsNotNull` and six comparison operators
+- Relationship loading with nested entity expansion
+
+Reactive from the ground up — every write produces an observable event.
+
+- Persistent wildcard subscriptions (`+`, `#`) that survive restarts
+- Real-time event streaming over async channels
+- Outbox pattern with retry, exponential backoff, and dead letter queue
+
+Shared subscriptions distribute work across consumers.
+
+- Broadcast (all receive), load-balanced (round-robin), and ordered (partition-sticky) modes
+- Consumer group rebalancing with heartbeat-based stale detection
+
+TTL-based expiration cleans up stale entities automatically. Pluggable storage backends — Fjall (LSM-tree) for native, in-memory for WASM, async for network storage options.
 
 ## Architecture
 
 ### Core Components
 
-1. **Storage Layer**: Pluggable backend (Fjall for native, Memory for WASM) with atomic batch operations
-2. **Reactive Core**: Subscription registry with prefix/wildcard matching and event dispatching
-3. **Entity Layer**: JSON ↔ KV translation with schema-less storage
-4. **Index Manager**: Secondary indexes for efficient queries
-5. **Event Dispatcher**: Mode-aware routing (Broadcast/LoadBalanced/Ordered)
-6. **Consumer Groups**: Partition assignment with automatic rebalancing
-7. **Outbox**: Atomic event persistence with retry and dead letter queue
-8. **Dedup Store**: Correlation ID-based idempotency
+| Component | Role |
+|-----------|------|
+| Storage Layer | Pluggable backend (Fjall / Memory / Async) with atomic batch operations |
+| Reactive Core | Subscription registry with prefix/wildcard matching and event dispatching |
+| Entity Layer | JSON-to-KV translation with schema-less storage |
+| Index Manager | Secondary indexes for efficient queries |
+| Event Dispatcher | Mode-aware routing (Broadcast / LoadBalanced / Ordered) |
+| Consumer Groups | Partition assignment with automatic rebalancing |
+| Outbox | Atomic event persistence with retry and dead letter queue |
+| Dedup Store | Correlation ID-based idempotency |
 
 ### Key Encoding Scheme
 
@@ -103,9 +112,11 @@ db.create("users".into(), user).await?;
 
 ### Wildcard Patterns
 
-- `users/+` - matches single level (e.g., `users/123`)
-- `users/#` - matches multiple levels (e.g., `users/123`, `users/123/profile`)
-- `+/123` - matches any entity with id `123`
+| Pattern | Matches | Example |
+|---------|---------|---------|
+| `users/+` | Single level | `users/123` |
+| `users/#` | Multiple levels | `users/123`, `users/123/profile` |
+| `+/123` | Any entity with id `123` | `orders/123`, `users/123` |
 
 ## Point-to-Point Delivery
 
@@ -113,9 +124,11 @@ MQDB supports shared subscriptions for distributing events across multiple consu
 
 ### Subscription Modes
 
-- **Broadcast** (default): All subscribers receive all events
-- **LoadBalanced**: Round-robin distribution across consumers in a group
-- **Ordered**: Partition-based routing ensuring same entity:id always goes to same consumer
+| Mode | Behavior |
+|------|----------|
+| **Broadcast** (default) | All subscribers receive all events |
+| **LoadBalanced** | Round-robin distribution across consumers in a group |
+| **Ordered** | Partition-based routing — same entity:id always goes to same consumer |
 
 ```rust
 use mqdb::SubscriptionMode;
@@ -166,18 +179,18 @@ for user in active_users {
 }
 ```
 
-### Supported Filter Operations
+### Filter Operations
 
-- `Eq` - equality
-- `Neq` - not equal
-- `Lt` - less than
-- `Lte` - less than or equal
-- `Gt` - greater than
-- `Gte` - greater than or equal
-- `In` - value in array
-- `Like` - glob pattern matching with `*` wildcard
-- `IsNull` - field is null
-- `IsNotNull` - field is not null
+| Operator | Meaning | Notes |
+|----------|---------|-------|
+| `Eq` | Equal | |
+| `Neq` | Not equal | |
+| `Lt` / `Lte` | Less than (or equal) | |
+| `Gt` / `Gte` | Greater than (or equal) | |
+| `In` | Value in array | |
+| `Like` | Glob pattern | Uses `*` wildcard |
+| `IsNull` | Field is null | |
+| `IsNotNull` | Field is not null | |
 
 ### Extended Filtering
 
@@ -267,19 +280,23 @@ db.add_foreign_key(
 ).await?;
 ```
 
-**Delete Policies:**
-- `OnDeleteAction::Cascade` - Automatically delete referencing entities
-- `OnDeleteAction::Restrict` - Prevent deletion if references exist
-- `OnDeleteAction::SetNull` - Set foreign key field to null
+| Delete Policy | Behavior |
+|---------------|----------|
+| `OnDeleteAction::Cascade` | Automatically delete referencing entities |
+| `OnDeleteAction::Restrict` | Prevent deletion if references exist |
+| `OnDeleteAction::SetNull` | Set foreign key field to null |
 
-See constraint examples for detailed usage:
-- `constraints_01_schemas.rs` - Type validation and default values
-- `constraints_02_unique.rs` - Single and composite unique constraints
-- `constraints_03_not_null.rs` - Required field enforcement
-- `constraints_04_fk_cascade.rs` - Cascade deletion (multilevel)
-- `constraints_05_fk_restrict.rs` - Prevent deletion with references
-- `constraints_06_fk_set_null.rs` - Optional relationships
-- `constraints_07_combined.rs` - All constraints working together
+### Constraint Examples
+
+| Example | Demonstrates |
+|---------|-------------|
+| `constraints_01_schemas.rs` | Type validation and default values |
+| `constraints_02_unique.rs` | Single and composite unique constraints |
+| `constraints_03_not_null.rs` | Required field enforcement |
+| `constraints_04_fk_cascade.rs` | Cascade deletion (multilevel) |
+| `constraints_05_fk_restrict.rs` | Prevent deletion with references |
+| `constraints_06_fk_set_null.rs` | Optional relationships |
+| `constraints_07_combined.rs` | All constraints working together |
 
 ## TTL (Time-To-Live)
 
@@ -297,22 +314,6 @@ let session = json!({
 });
 
 db.create("sessions".into(), session).await?;
-```
-
-## Performance
-
-Benchmark results (release mode on M-series Mac):
-
-| Operation | Throughput | p50 Latency | p95 Latency | p99 Latency |
-|-----------|------------|-------------|-------------|-------------|
-| Writes    | 168k/s     | 0.01ms      | 0.01ms      | 0.01ms      |
-| Reads     | 558k/s     | 0.00ms      | 0.00ms      | 0.01ms      |
-| Updates   | 191k/s     | 0.00ms      | 0.01ms      | 0.01ms      |
-| List/Scan | 91/s       | 10.96ms     | -           | -           |
-
-Run benchmarks:
-```bash
-cargo run --example benchmark --release
 ```
 
 ## MQTT Agent
@@ -335,29 +336,38 @@ agent.run().await?;
 
 ### MQTT Topic Structure
 
-**CRUD Operations:**
-- `$DB/{entity}/create` - Create entity (include `"id"` in payload to use a client-provided ID)
-- `$DB/{entity}/{id}` - Read entity
-- `$DB/{entity}/{id}/update` - Update entity
-- `$DB/{entity}/{id}/delete` - Delete entity
-- `$DB/{entity}/list` - List entities with filters
-- `$DB/{entity}/events/#` - Subscribe to change events
+#### CRUD Operations
 
-**Admin Operations:**
-- `$DB/_admin/schema/{entity}/set` - Set schema
-- `$DB/_admin/schema/{entity}/get` - Get schema
-- `$DB/_admin/constraint/{entity}/add` - Add constraint
-- `$DB/_admin/constraint/{entity}/list` - List constraints
-- `$DB/_admin/backup` - Create backup
-- `$DB/_admin/backup/list` - List backups
-- `$DB/_admin/restore` - Restore (requires restart)
-- `$DB/_admin/consumer-groups` - List consumer groups
-- `$DB/_admin/consumer-groups/{name}` - Show consumer group details
+| Topic | Action |
+|-------|--------|
+| `$DB/{entity}/create` | Create entity (include `"id"` in payload for client-provided ID) |
+| `$DB/{entity}/{id}` | Read entity |
+| `$DB/{entity}/{id}/update` | Update entity |
+| `$DB/{entity}/{id}/delete` | Delete entity |
+| `$DB/{entity}/list` | List entities with filters |
+| `$DB/{entity}/events/#` | Subscribe to change events |
 
-**Subscription Management:**
-- `$DB/_sub/subscribe` - Create subscription (supports shared subscriptions)
-- `$DB/_sub/{id}/heartbeat` - Send heartbeat for shared subscription
-- `$DB/_sub/{id}/unsubscribe` - Remove subscription
+#### Admin Operations
+
+| Topic | Action |
+|-------|--------|
+| `$DB/_admin/schema/{entity}/set` | Set schema |
+| `$DB/_admin/schema/{entity}/get` | Get schema |
+| `$DB/_admin/constraint/{entity}/add` | Add constraint |
+| `$DB/_admin/constraint/{entity}/list` | List constraints |
+| `$DB/_admin/backup` | Create backup |
+| `$DB/_admin/backup/list` | List backups |
+| `$DB/_admin/restore` | Restore (requires restart) |
+| `$DB/_admin/consumer-groups` | List consumer groups |
+| `$DB/_admin/consumer-groups/{name}` | Show consumer group details |
+
+#### Subscription Management
+
+| Topic | Action |
+|-------|--------|
+| `$DB/_sub/subscribe` | Create subscription (supports shared subscriptions) |
+| `$DB/_sub/{id}/heartbeat` | Send heartbeat for shared subscription |
+| `$DB/_sub/{id}/unsubscribe` | Remove subscription |
 
 ### ACL Configuration
 
@@ -398,25 +408,18 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#` | Requires admin user |
 
-#### Internal Entity Protection
-
 Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exception: `$DB/_health` is always accessible.
 
 #### Admin User Configuration
 
 ```bash
-# Start agent with admin users
 mqdb agent start --db /path/to/db --admin-users alice,bob
 
-# Start cluster with admin users
 mqdb cluster start --node-id 1 --db /path/to/db --admin-users alice,bob \
     --quic-cert server.pem --quic-key server.key
 ```
 
-Admin users can:
-- Access `$DB/_admin/*` topics (schema, constraints, backup)
-- Access `$DB/_oauth_tokens/*` topics
-- Access internal entities (`_sessions`, `_mqtt_subs`, etc.)
+Admin users have access to `$DB/_admin/*` topics (schema, constraints, backup), `$DB/_oauth_tokens/*` topics, and internal entities (`_sessions`, `_mqtt_subs`, etc.).
 
 #### Internal Service Bypass
 
@@ -442,7 +445,7 @@ Client Request
 
 MQDB supports multiple authentication methods, configurable via agent/cluster start flags:
 
-**Password file** (`--passwd`): Simple username:password file (bcrypt hashed via `mqdb passwd`).
+**Password file** (`--passwd`): Simple username:password file (Argon2 hashed via `mqdb passwd`).
 
 **SCRAM-SHA-256** (`--scram-file`): Challenge-response authentication without transmitting passwords. Generate credentials with `mqdb scram`.
 
@@ -470,14 +473,7 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 
 ## Distributed Clustering
 
-MQDB supports distributed clustering with automatic failover and partition rebalancing.
-
-### Architecture
-
-- **64 fixed partitions** with configurable replication factor (RF=2 default)
-- **Raft consensus** for cluster topology and partition ownership
-- **MQTT bridges** for inter-node communication (DEPRECATED)
-- **QUIC transport** for secure, efficient cluster traffic (recommended for production)
+MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 64 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams, providing multiplexed, TLS-encrypted, low-overhead transport.
 
 ### Starting a Cluster
 
@@ -542,53 +538,32 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 
 ### Cluster Transport
 
-MQDB uses QUIC streams for all inter-node cluster communication. This provides:
-- Direct node-to-node communication without broker overhead
-- Multiplexed streams with built-in flow control
-- TLS encryption for all cluster traffic
+MQDB uses QUIC streams for all inter-node cluster communication — direct node-to-node with multiplexed streams, built-in flow control, and TLS encryption for all cluster traffic.
 
 ```bash
 # Start a 3-node cluster (QUIC transport is the default)
 mqdb dev start-cluster --nodes 3 --clean
 ```
 
-**Performance (DB insert throughput):**
-
-| Topology | Node 1 | Node 2 | Node 3 |
-|----------|--------|--------|--------|
-| Partial Mesh | 3,576 ops/s | 4,171 ops/s | 3,649 ops/s |
-| Full Mesh | 3,817 ops/s | 3,971 ops/s | 3,477 ops/s |
-
-> **Note:** MQTT bridge transport is deprecated and retained only for historical reference.
-> All production deployments should use the default QUIC transport.
-
 ### Data Persistence
 
-Cluster nodes persist all data to disk by default:
-
-- **Sessions**: MQTT client session state
-- **Subscriptions**: Topic subscriptions per client
-- **Retained messages**: Messages with retain flag
-- **QoS state**: In-flight QoS 1/2 message tracking
-- **Database records**: All `$DB/#` entity data
-
-Data is stored in `{db-path}/stores/` using an LSM-tree backend. On startup, nodes automatically recover persisted data and rebuild routing indexes.
+Cluster nodes persist all data to disk by default: sessions, topic subscriptions, retained messages, QoS 1/2 in-flight state, and all `$DB/#` entity data. Storage uses an LSM-tree backend at `{db-path}/stores/`. On startup, nodes automatically recover persisted data and rebuild routing indexes.
 
 Use `--no-persist-stores` for testing or ephemeral deployments where data doesn't need to survive restarts.
 
 ### Cluster Mode Features
 
-**Fully Supported:**
-- CRUD operations (create, read, update, delete, list)
-- Cross-node pub/sub with automatic routing
-- TTL expiration (60-second cleanup interval)
-- Schema validation and registration
-- Authentication (password file, SCRAM-SHA-256, JWT, federated JWT, rate limiting; auto-generated internal credentials for inter-node traffic)
-
-**Limited Support:**
-- **Backups**: Creates per-node backup only (not cluster-wide snapshot)
-- **Constraints**: Unique constraints fully supported; foreign key and NOT NULL constraints not yet available in cluster mode
-- **Consumer Groups**: Returns empty list (shared subscriptions work, but group tracking is local)
+| Feature | Status | Notes |
+|---------|--------|-------|
+| CRUD operations | Full | create, read, update, delete, list |
+| Cross-node pub/sub | Full | Automatic routing with topic index broadcast |
+| TTL expiration | Full | 60-second cleanup interval |
+| Schema validation | Full | Registration and enforcement across nodes |
+| Authentication | Full | Password, SCRAM, JWT, federated JWT, rate limiting |
+| Backups | Partial | Per-node only (no cluster-wide snapshot) |
+| Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
+| FK / NOT NULL constraints | — | Not yet available in cluster mode |
+| Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
 ## CLI Tool
 
@@ -602,9 +577,11 @@ cargo build --release --bin mqdb
 
 ### Environment Variables
 
-- `MQDB_BROKER` - Broker address (default: `127.0.0.1:1883`)
-- `MQDB_USER` - Username for authentication
-- `MQDB_PASS` - Password for authentication
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_BROKER` | Broker address | `127.0.0.1:1883` |
+| `MQDB_USER` | Username for authentication | — |
+| `MQDB_PASS` | Password for authentication | — |
 
 ### Commands
 
@@ -668,15 +645,15 @@ mqdb acl user-roles alice -f acl.txt
 
 ### Filter Syntax
 
-- `field=value` - Equals
-- `field!=value` - Not equals
-- `field>value` - Greater than
-- `field<value` - Less than
-- `field>=value` - Greater than or equal
-- `field<=value` - Less than or equal
-- `field~pattern` - Like (glob pattern)
-- `field?` - Is null
-- `field!?` - Is not null
+| Operator | Meaning |
+|----------|---------|
+| `field=value` | Equals |
+| `field!=value` | Not equals |
+| `field>value` / `field>=value` | Greater than (or equal) |
+| `field<value` / `field<=value` | Less than (or equal) |
+| `field~pattern` | Like (glob pattern) |
+| `field?` | Is null |
+| `field!?` | Is not null |
 
 ### Output Formats
 
@@ -696,29 +673,28 @@ cargo test --test integration_test
 ## Examples
 
 ### Basic Usage
-- `basic_usage.rs` - Complete CRUD operations and subscriptions
-- `benchmark.rs` - Performance testing
+
+| Example | Demonstrates |
+|---------|-------------|
+| `basic_usage.rs` | Complete CRUD operations and subscriptions |
+| `benchmark.rs` | Performance testing |
 
 ### Constraint Examples
-- `constraints_01_schemas.rs` - Type validation and default values
-- `constraints_02_unique.rs` - Single and composite unique constraints
-- `constraints_03_not_null.rs` - Required field enforcement
-- `constraints_04_fk_cascade.rs` - Cascade deletion (multilevel)
-- `constraints_05_fk_restrict.rs` - Prevent deletion with references
-- `constraints_06_fk_set_null.rs` - Optional relationships
-- `constraints_07_combined.rs` - All constraints working together
+
+| Example | Demonstrates |
+|---------|-------------|
+| `constraints_01_schemas.rs` | Type validation and default values |
+| `constraints_02_unique.rs` | Single and composite unique constraints |
+| `constraints_03_not_null.rs` | Required field enforcement |
+| `constraints_04_fk_cascade.rs` | Cascade deletion (multilevel) |
+| `constraints_05_fk_restrict.rs` | Prevent deletion with references |
+| `constraints_06_fk_set_null.rs` | Optional relationships |
+| `constraints_07_combined.rs` | All constraints working together |
 
 ### Real-World Application
-- `parking_lot.rs` - Complete parking lot management system demonstrating:
-  - Complex schema with 5+ entities and comprehensive constraints
-  - Foreign keys with CASCADE/RESTRICT/SET_NULL policies
-  - Reactive event system with MQTT bridge pattern
-  - Bidirectional DB ↔ MQTT integration
-  - Complete entry/exit flows with IoT device simulation
-  - Real-time status updates via subscriptions
-  - TTL-based reservation expiration
 
-Run examples:
+The `parking_lot.rs` example implements a complete parking lot management system with 5+ entities, comprehensive constraints (CASCADE/RESTRICT/SET_NULL foreign keys), reactive events via MQTT bridge, bidirectional DB-MQTT integration, full entry/exit flows with IoT simulation, real-time status updates, and TTL-based reservation expiration.
+
 ```bash
 cargo run --example basic_usage
 cargo run --example benchmark --release
@@ -727,103 +703,23 @@ cargo run --example constraints_07_combined
 cargo run --example parking_lot
 ```
 
-## Design Inspiration
-
-- **Fjall**: Rust-native LSM storage engine
-- **BadgerDB**: Value log separation, efficient compaction
-- **MQTT**: Wildcard subscription patterns for reactive updates
-
-## Implementation Status
-
-### Phase 1-3: Core Features ✓
-- [x] Core reactive database with CRUD operations
-- [x] Transactional wrapper with atomic batches
-- [x] Reactive subscription engine with persistence
-- [x] Secondary indexes (equality and range)
-- [x] Event dispatcher with async notifications
-- [x] Correlation ID-based deduplication
-- [x] Comprehensive tests and benchmarks
-
-### Phase 4: Advanced Features ✓
-- [x] Extended filter operators (In, Like, IsNull, IsNotNull)
-- [x] Sorting and pagination for list operations
-- [x] Relationships and nested entity loading
-- [x] TTL-based cleanup with reactive notifications
-
-### Phase 5: ACID Constraint System ✓
-- [x] Schema validation with type checking
-- [x] Field-level constraints (required, default values)
-- [x] Unique constraints (single and composite)
-- [x] Not-null constraints
-- [x] Foreign key constraints with CASCADE/RESTRICT/SET NULL
-- [x] Recursive cascade deletion
-- [x] Atomic constraint validation
-- [x] Constraint persistence across restarts
-
-### Phase 6: MQTT Integration ✓
-- [x] Embedded MQTT broker (MqdbAgent)
-- [x] Authentication with password file
-- [x] SCRAM-SHA-256 challenge-response authentication
-- [x] JWT authentication (HS256, RS256, ES256)
-- [x] Federated JWT (multiple issuers)
-- [x] Authentication rate limiting (brute-force protection)
-- [x] ACL-based authorization with RBAC roles
-- [x] ACL CLI management (add/remove/role-add/assign/check/list)
-- [x] CRUD operations via MQTT topics
-- [x] Admin topics for schema/constraint/backup
-- [x] CLI tool with all operations
-- [x] Request/response pattern with response_topic
-- [x] Server-side backup management
-
-### Phase 7: Point-to-Point & Reliability ✓
-- [x] Shared subscriptions with consumer groups
-- [x] LoadBalanced mode (round-robin distribution)
-- [x] Ordered mode (partition-based routing)
-- [x] Consumer group rebalancing on join/leave
-- [x] Heartbeat mechanism for stale consumer detection
-- [x] Mode validation (prevent mixing modes in same group)
-- [x] Outbox pattern for atomic event persistence
-- [x] Retry with exponential backoff
-- [x] Dead letter queue for failed events
-- [x] CLI commands for subscribe and consumer-group
-
-### Phase 8: Platform Support ✓
-- [x] Storage abstraction with pluggable backends
-- [x] Fjall backend for native (LSM-based persistence)
-- [x] Memory backend for WASM (in-memory storage)
-- [x] Feature flags for conditional compilation
-- [x] WASM crate with JavaScript bindings
-
-### Phase 9-10: Distributed Clustering ✓
-- [x] 64-partition data distribution with RF=2
-- [x] Raft consensus for cluster topology
-- [x] MQTT bridges for inter-node communication
-- [x] Heartbeat-based node failure detection
-- [x] Automatic partition reassignment on node death
-- [x] Cross-node pub/sub message routing
-- [x] Session migration and cleanup
-- [x] QoS state replication
-- [x] Last Will Testament cross-node delivery
-
-### Test Coverage
-- Extensive test suite (unit + integration + cluster)
-- Clippy clean with pedantic warnings enabled
-- Full constraint coverage including multilevel cascade
-- Point-to-point delivery tests with partition verification
-- Comprehensive cluster integration tests (failover, split-brain, rebalancing)
-
 ## Future Enhancements
 
-- Cluster-wide constraints (unique across all nodes)
-- Cluster-wide consumer group tracking
-- Coordinated cluster backup/restore
-- Reactive query language (subscribe to expressions)
-- Persistence metrics and tracing
-- Optimized TTL cleanup with expiration index
-- Horizontal scaling beyond 64 partitions
+| Area | Goal |
+|------|------|
+| Consumer group tracking | Cluster-wide group membership (currently node-local) |
+| Coordinated backup/restore | Consistent cluster-wide snapshots |
+| Reactive query language | Subscribe to expressions, not just topics |
+| Metrics and tracing | Persistence-layer observability |
+| TTL optimization | Expiration index to avoid full scans |
+| Horizontal scaling | Partition counts beyond the current 64 |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. All contributions require signing our [Contributor License Agreement](CLA.md).
 
 ## License
 
 MQDB is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
-For commercial licensing inquiries, contact [TODO: email].
+For commercial licensing inquiries, contact contact@laboverwire.ca.
