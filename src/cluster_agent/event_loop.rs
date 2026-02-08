@@ -254,15 +254,53 @@ impl ClusteredAgent {
     ) {
         const BATCH_SIZE: u32 = 8;
         let mut ctrl = self.controller.write().await;
-        ctrl.handle_filtered_message(msg).await;
+        if let Some(pending) = ctrl.handle_filtered_message(msg).await {
+            drop(ctrl);
+            Self::spawn_unique_completion(self.controller.clone(), pending);
+            let mut ctrl = self.controller.write().await;
+            let mut count = 1u32;
+            while let Ok(msg) = rx_main_queue.try_recv() {
+                if let Some(pending) = ctrl.handle_filtered_message(msg).await {
+                    drop(ctrl);
+                    Self::spawn_unique_completion(self.controller.clone(), pending);
+                    ctrl = self.controller.write().await;
+                }
+                count += 1;
+                if count.is_multiple_of(BATCH_SIZE) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            return;
+        }
         let mut count = 1u32;
         while let Ok(msg) = rx_main_queue.try_recv() {
-            ctrl.handle_filtered_message(msg).await;
+            if let Some(pending) = ctrl.handle_filtered_message(msg).await {
+                drop(ctrl);
+                Self::spawn_unique_completion(self.controller.clone(), pending);
+                ctrl = self.controller.write().await;
+            }
             count += 1;
             if count.is_multiple_of(BATCH_SIZE) {
                 tokio::task::yield_now().await;
             }
         }
+    }
+
+    fn spawn_unique_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingUniqueWork,
+    ) {
+        use crate::cluster::node_controller::unique::await_unique_reserves;
+
+        let local_reserved = pending.phase1.local_reserved;
+        let pending_remote = pending.phase1.pending_remote;
+        let continuation = pending.continuation;
+        tokio::spawn(async move {
+            let remote_results = await_unique_reserves(pending_remote).await;
+            let mut ctrl = controller.write().await;
+            ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
+                .await;
+        });
     }
 
     async fn handle_ttl_cleanup(&self) {
