@@ -12,7 +12,7 @@ MQDB is a distributed MQTT broker with embedded database capabilities. The clust
 - **BeBytes crate** for all protocol encoding/decoding (custom, modifiable as needed)
 - **QUIC preferred** for inter-node transport (UDP port mirrors TCP port 1883)
 - **Direct QUIC transport**: Default transport that bypasses MQTT broker for cluster traffic (MQTT bridges deprecated)
-- **64 fixed partitions** (never changes)
+- **256 fixed partitions** (never changes)
 - **Replication Factor = 2** (primary + one replica)
 
 ---
@@ -33,7 +33,7 @@ Every mutation in MQDB—whether from an MQTT client subscribing or a database i
 
 - **What changed**: Entity type, identifier, serialized data
 - **How it changed**: Insert, Update, or Delete operation
-- **Where it lives**: Partition ID (0-63) for routing
+- **Where it lives**: Partition ID (0-255) for routing
 - **When it changed**: Epoch and sequence for ordering
 
 The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determines which store processes the write on each node.
@@ -41,9 +41,9 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 ### A1.3 Two Classes of Entities
 
 **Partitioned Entities** follow standard hash-based distribution:
-- Sessions, subscriptions, QoS state → partitioned by `hash(client_id) % 64`
-- Retained messages → partitioned by `hash(topic) % 64`
-- Database records → partitioned by `hash(entity/id) % 64`
+- Sessions, subscriptions, QoS state → partitioned by `hash(client_id) % 256`
+- Retained messages → partitioned by `hash(topic) % 256`
+- Database records → partitioned by `hash(entity/id) % 256`
 
 **Broadcast Entities** must exist completely on every node:
 - TopicIndex (`_topic_index`) → maps topics to subscribers
@@ -55,7 +55,7 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
 
 There are two distinct mechanisms for handling broadcast entities:
-1.  **Fan-out to all partitions**: Used for `_topic_index`, `_wildcards`, and `_db_schema`. This involves creating 64 `ReplicationWrite`s, one for each partition.
+1.  **Fan-out to all partitions**: Used for `_topic_index`, `_wildcards`, and `_db_schema`. This involves creating 256 `ReplicationWrite`s, one for each partition.
 2.  **Gossip-style broadcast to all nodes**: Used for `_client_loc` and `_db_constraint`. This involves creating a single `ReplicationWrite` (often for Partition 0) and then having the `write_or_forward` logic send it to all other alive nodes.
 
 ---
@@ -113,15 +113,15 @@ A single MQTT subscription demonstrates how broadcast entities create write ampl
 The subscription itself is stored in `_mqtt_subs`, partitioned by client_id:
 ```
 add_subscription_replicated(client_id, topic, qos)
-→ 1 ReplicationWrite to partition hash(client_id) % 64
+→ 1 ReplicationWrite to partition hash(client_id) % 256
 ```
 
 **Step 2: TopicIndex Broadcast** (`event_handler.rs:334-342`)
 
-Every node needs the complete topic→subscriber mapping for publish routing. The TopicIndex is a broadcast entity, so it writes to all 64 partitions:
+Every node needs the complete topic→subscriber mapping for publish routing. The TopicIndex is a broadcast entity, so it writes to all 256 partitions:
 ```
 subscribe_topic_replicated(topic, client_id, partition, qos)
-→ 64 ReplicationWrites, one per partition (store_manager.rs:868-880)
+→ 256 ReplicationWrites, one per partition (store_manager.rs:868-880)
 ```
 
 **Step 3: Wildcard Broadcast** (`event_handler.rs:299-317`, only if pattern contains `+` or `#`)
@@ -129,15 +129,15 @@ subscribe_topic_replicated(topic, client_id, partition, qos)
 Wildcard patterns also need cluster-wide visibility:
 ```
 subscribe_wildcard_replicated() + WildcardBroadcast
-→ 64 ReplicationWrites to _wildcards entity
+→ 256 ReplicationWrites to _wildcards entity
 ```
 
 **Total writes per subscription:**
 
 | Pattern Type | Writes Generated | Breakdown |
 |--------------|------------------|-----------|
-| Exact topic (e.g., `sensor/temp`) | 65 | 1 subscription + 64 topic index |
-| Wildcard topic (e.g., `sensor/+/temp`) | 65 | 1 subscription + 64 wildcards (TopicIndex is NOT updated for wildcards) |
+| Exact topic (e.g., `sensor/temp`) | 257 | 1 subscription + 256 topic index |
+| Wildcard topic (e.g., `sensor/+/temp`) | 257 | 1 subscription + 256 wildcards (TopicIndex is NOT updated for wildcards) |
 
 This amplification is fundamental to the design—without broadcast entities, publish routing would require cross-node queries for every message, destroying throughput.
 
@@ -314,7 +314,7 @@ Single-ID queries can skip scatter-gather:
 
 - Query for specific `entity/id` → hash to single partition
 - Filter with `id=VALUE` → extract value, hash to single partition
-- Otherwise → query all 64 partitions
+- Otherwise → query all 256 partitions
 
 ### A5.3 Pagination via ScatterCursor
 
@@ -329,8 +329,8 @@ Each partition maintains independent pagination state, allowing efficient resump
 
 Retained Message Queries:
 
-- Exact topic: `hash(topic) % 64` → single partition
-- Wildcard pattern (`+`, `#`): query all 64 partitions, filter locally.
+- Exact topic: `hash(topic) % 256` → single partition
+- Wildcard pattern (`+`, `#`): query all 256 partitions, filter locally.
   However, the `on_client_subscribe` event handler currently *does not* initiate retained message queries for wildcard subscriptions. Only non-wildcard subscriptions trigger these queries.
 
 **Key Files**: `query_coordinator.rs:1-470`, `cursor.rs:1-140`, `protocol.rs:661-909` (QueryRequest/Response)
@@ -757,7 +757,7 @@ The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/clu
 **Status Response** includes:
 - `node_id`, `node_name`, `is_raft_leader`, `raft_term`
 - `alive_nodes` - list of other alive node IDs
-- `partitions` - all 64 partitions with primary, replicas, epoch
+- `partitions` - all 256 partitions with primary, replicas, epoch
 
 **CLI Commands**:
 ```bash
@@ -815,9 +815,9 @@ mqdb cluster rebalance --broker 127.0.0.1:1883
 
 | Type | Definition | Range | File:Line |
 |------|------------|-------|-----------|
-| `NUM_PARTITIONS` | `64` (u16 const) | Fixed, never changes | `partition.rs:3` |
+| `NUM_PARTITIONS` | `256` (u16 const) | Fixed, never changes | `partition.rs:3` |
 | `NodeId` | Newtype(u16) | 1-65535, 0=INVALID | `node.rs:4-72` |
-| `PartitionId` | Newtype(u16) | 0-63 | `partition.rs:5-94` |
+| `PartitionId` | Newtype(u16) | 0-255 | `partition.rs:5-94` |
 | `Epoch` | Newtype(u64) | 0-MAX, saturating add | `epoch.rs:4-95` |
 
 **NodeId** (`src/cluster/node.rs:4-72`):
@@ -839,7 +839,7 @@ impl NodeId {
 
 **PartitionId** (`src/cluster/partition.rs:5-94`):
 ```rust
-pub const NUM_PARTITIONS: u16 = 64;
+pub const NUM_PARTITIONS: u16 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PartitionId(u16);
@@ -895,9 +895,9 @@ All cluster-managed data types (`src/cluster/entity.rs`):
 
 ### 1.4 Partitioning Scheme
 
-- **64 fixed partitions** (0-63) - count NEVER changes
+- **256 fixed partitions** (0-255) - count NEVER changes
 - **Replication Factor (RF) = 2** - primary + 1 replica
-- Partition ID = `crc32fast::hash(key.as_bytes()) % 64`
+- Partition ID = `crc32fast::hash(key.as_bytes()) % 256`
 - Partition map managed by Raft consensus
 
 ### 1.5 Node Roles Per Partition
@@ -976,19 +976,19 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | 84 | `UniqueReleaseRequest` | Release reserved unique value |
 | 85 | `UniqueReleaseResponse` | Unique release response |
 
-### 2.3 Heartbeat Message (27 bytes)
+### 2.3 Heartbeat Message (75 bytes)
 
 `src/cluster/protocol.rs` - BeBytes serialization:
 
 ```rust
 struct Heartbeat {
-    version: u8,           // 1 byte, = 1
-    node_id: u16,          // 2 bytes, sender BE
-    timestamp_ms: u64,     // 8 bytes, current time BE
-    primary_bitmap: u64,   // 8 bytes, bit N = primary for partition N
-    replica_bitmap: u64,   // 8 bytes, bit N = replica for partition N
+    version: u8,              // 1 byte, = 1
+    node_id: u16,             // 2 bytes, sender BE
+    timestamp_ms: u64,        // 8 bytes, current time BE
+    primary_bitmap: [u64; 4], // 32 bytes, bit N = primary for partition N (256 bits)
+    replica_bitmap: [u64; 4], // 32 bytes, bit N = replica for partition N (256 bits)
 }
-// Total: 1 + 2 + 8 + 8 + 8 = 27 bytes
+// Total: 1 + 2 + 8 + 32 + 32 = 75 bytes
 ```
 
 ### 2.4 ReplicationWrite Message (variable)
@@ -1143,11 +1143,11 @@ struct SnapshotComplete {
 
 ```rust
 struct Heartbeat {
-    version: u8,           // Protocol version
-    node_id: u16,          // Sender node ID
-    timestamp_ms: u64,     // Sender timestamp
-    primary_bitmap: u64,   // Bit N = this node is primary for partition N
-    replica_bitmap: u64,   // Bit N = this node is replica for partition N
+    version: u8,              // Protocol version
+    node_id: u16,             // Sender node ID
+    timestamp_ms: u64,        // Sender timestamp
+    primary_bitmap: [u64; 4], // 256 bits, bit N = this node is primary for partition N
+    replica_bitmap: [u64; 4], // 256 bits, bit N = this node is replica for partition N
 }
 ```
 
@@ -1365,7 +1365,7 @@ struct PartitionUpdate {
 
 When first node starts:
 1. Becomes Raft leader (single-node cluster)
-2. Proposes UpdatePartition for all 64 partitions
+2. Proposes UpdatePartition for all 256 partitions
 3. Assigns itself as primary for all partitions
 4. Waits for other nodes to join
 
@@ -1489,13 +1489,13 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Symptom**: 2-node and 3-node clusters experienced repeated death/revival cycles. Nodes marked each other as dead every 15-30 seconds despite being healthy.
 
-**Root Cause**: Synchronous disk I/O in Raft storage. When a follower received `AppendEntries` with 64 partition updates, each log entry was persisted with a separate `flush()` call. 64 flushes took 20+ seconds, blocking the async event loop and causing heartbeat timeouts.
+**Root Cause**: Synchronous disk I/O in Raft storage. When a follower received `AppendEntries` with 256 partition updates, each log entry was persisted with a separate `flush()` call. 256 flushes took 20+ seconds, blocking the async event loop and causing heartbeat timeouts.
 
 **Code path**:
 1. `RaftNode::handle_append_entries()` loops over entries calling `persist_log_entry()`
 2. `persist_log_entry()` calls `RaftStorage::append_log_entry()`
 3. `append_log_entry()` does `backend.insert()` + `backend.flush()` per entry
-4. 64 entries × 1 flush each = event loop blocked for 20+ seconds
+4. 256 entries × 1 flush each = event loop blocked for 20+ seconds
 
 **Fix Applied**:
 1. Added `RaftStorage::append_log_entries_batch()` that uses batch writes with single flush (`storage.rs:76-88`)
@@ -1548,7 +1548,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 **Status**: FIXED
 
-**Symptom**: When Node 3 joined a cluster, it sometimes received zero partitions even though auto-rebalancing should assign ~21 partitions (64/3).
+**Symptom**: When Node 3 joined a cluster, it sometimes received zero partitions even though auto-rebalancing should assign ~85 partitions (256/3).
 
 **Root Cause**: Race condition in `handle_node_alive()`. When a new node joined, `trigger_rebalance()` was called which proposed multiple `AssignPartition` commands via Raft. However, `compute_balanced_assignments()` was called based on pre-rebalance state, and if multiple nodes joined quickly, the partition counts became inconsistent.
 
@@ -2179,7 +2179,7 @@ Bridge settings:
 When Raft leader and partitions not initialized:
 1. Calculate primary for each partition: `partition % node_count`
 2. Calculate replica: `(primary_idx + 1) % node_count`
-3. Propose `RaftCommand::update_partition()` for all 64 partitions
+3. Propose `RaftCommand::update_partition()` for all 256 partitions
 
 ---
 

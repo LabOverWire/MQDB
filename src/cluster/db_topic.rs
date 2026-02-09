@@ -357,20 +357,20 @@ mod tests {
     fn parse_invalid_topics() {
         assert!(ParsedDbTopic::parse("not/a/db/topic").is_none());
         assert!(ParsedDbTopic::parse("$DB/").is_none());
-        assert!(ParsedDbTopic::parse("$DB/p99/users").is_none());
-        assert!(ParsedDbTopic::parse("$DB/p64/users/create").is_none());
+        assert!(ParsedDbTopic::parse("$DB/p999/users").is_none());
+        assert!(ParsedDbTopic::parse("$DB/p256/users/create").is_none());
         assert!(ParsedDbTopic::parse("$DB/_unknown/p5/op").is_none());
     }
 
     #[test]
-    fn partition_63_is_valid() {
-        let parsed = ParsedDbTopic::parse("$DB/p63/test/create").unwrap();
-        assert_eq!(parsed.partition, PartitionId::new(63));
+    fn partition_255_is_valid() {
+        let parsed = ParsedDbTopic::parse("$DB/p255/test/create").unwrap();
+        assert_eq!(parsed.partition, PartitionId::new(255));
     }
 
     #[test]
-    fn partition_64_is_invalid() {
-        assert!(ParsedDbTopic::parse("$DB/p64/test/create").is_none());
+    fn partition_256_is_invalid() {
+        assert!(ParsedDbTopic::parse("$DB/p256/test/create").is_none());
     }
 
     #[test]

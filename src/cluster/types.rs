@@ -90,7 +90,7 @@ impl From<u64> for Epoch {
     }
 }
 
-pub const NUM_PARTITIONS: u16 = 64;
+pub const NUM_PARTITIONS: u16 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PartitionId(u16);
@@ -236,9 +236,9 @@ mod tests {
     #[test]
     fn partition_new_validates_bounds() {
         assert!(PartitionId::new(0).is_some());
-        assert!(PartitionId::new(63).is_some());
-        assert!(PartitionId::new(64).is_none());
-        assert!(PartitionId::new(100).is_none());
+        assert!(PartitionId::new(NUM_PARTITIONS - 1).is_some());
+        assert!(PartitionId::new(NUM_PARTITIONS).is_none());
+        assert!(PartitionId::new(NUM_PARTITIONS + 100).is_none());
     }
 
     #[test]
@@ -246,6 +246,9 @@ mod tests {
         let partitions: Vec<_> = PartitionId::all().collect();
         assert_eq!(partitions.len(), NUM_PARTITIONS as usize);
         assert_eq!(partitions[0].get(), 0);
-        assert_eq!(partitions[63].get(), 63);
+        assert_eq!(
+            partitions[NUM_PARTITIONS as usize - 1].get(),
+            NUM_PARTITIONS - 1
+        );
     }
 }

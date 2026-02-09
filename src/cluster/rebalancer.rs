@@ -454,8 +454,10 @@ mod tests {
             assert!(!replicas.contains(&primary));
         }
 
+        let expected_min = NUM_PARTITIONS as usize / 3;
+        let expected_max = expected_min + 1;
         for count in counts {
-            assert!((20..=23).contains(&count));
+            assert!((expected_min..=expected_max).contains(&count));
         }
     }
 
@@ -502,15 +504,16 @@ mod tests {
         let config = RebalanceConfig::default();
         let map = compute_balanced_assignments(&initial_nodes, &config, Epoch::ZERO);
 
-        assert_eq!(map.primary_count(node(1)), 32);
-        assert_eq!(map.primary_count(node(2)), 32);
+        assert_eq!(map.primary_count(node(1)), NUM_PARTITIONS as usize / 2);
+        assert_eq!(map.primary_count(node(2)), NUM_PARTITIONS as usize / 2);
         assert_eq!(map.primary_count(node(3)), 0);
 
         let all_nodes = vec![node(1), node(2), node(3)];
         let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
 
+        let expected_per_node = NUM_PARTITIONS as usize / 3;
         assert!(!reassignments.is_empty());
-        assert!(reassignments.len() >= 20);
+        assert!(reassignments.len() >= expected_per_node);
 
         let mut new_node3_count = 0;
         for r in &reassignments {
@@ -518,7 +521,7 @@ mod tests {
                 new_node3_count += 1;
             }
         }
-        assert!(new_node3_count >= 20);
+        assert!(new_node3_count >= expected_per_node);
     }
 
     #[test]
@@ -534,20 +537,20 @@ mod tests {
             );
         }
 
-        assert_eq!(map.primary_count(node(1)), 64);
+        assert_eq!(map.primary_count(node(1)), NUM_PARTITIONS as usize);
         assert_eq!(map.replica_count(node(1)), 0);
 
         let all_nodes = vec![node(1), node(2)];
         let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
 
         assert!(!reassignments.is_empty());
-        assert_eq!(reassignments.len(), 64);
+        assert_eq!(reassignments.len(), NUM_PARTITIONS as usize);
 
         let primary_moves: Vec<_> = reassignments
             .iter()
             .filter(|r| r.new_primary != r.old_primary.unwrap())
             .collect();
-        assert_eq!(primary_moves.len(), 32);
+        assert_eq!(primary_moves.len(), NUM_PARTITIONS as usize / 2);
 
         let replica_adds: Vec<_> = reassignments
             .iter()
@@ -555,7 +558,7 @@ mod tests {
                 r.new_primary == r.old_primary.unwrap() && r.new_replicas.contains(&node(2))
             })
             .collect();
-        assert_eq!(replica_adds.len(), 32);
+        assert_eq!(replica_adds.len(), NUM_PARTITIONS as usize / 2);
 
         for r in &reassignments {
             let has_node2 = r.new_primary == node(2) || r.new_replicas.contains(&node(2));
@@ -573,10 +576,11 @@ mod tests {
         let config = RebalanceConfig::default();
         let map = compute_balanced_assignments(&initial_nodes, &config, Epoch::ZERO);
 
-        assert_eq!(map.primary_count(node(1)), 32);
-        assert_eq!(map.primary_count(node(2)), 32);
-        assert_eq!(map.replica_count(node(1)), 32);
-        assert_eq!(map.replica_count(node(2)), 32);
+        let half = NUM_PARTITIONS as usize / 2;
+        assert_eq!(map.primary_count(node(1)), half);
+        assert_eq!(map.primary_count(node(2)), half);
+        assert_eq!(map.replica_count(node(1)), half);
+        assert_eq!(map.replica_count(node(2)), half);
         assert_eq!(map.replica_count(node(3)), 0);
 
         let all_nodes = vec![node(1), node(2), node(3)];
@@ -597,13 +601,14 @@ mod tests {
             }
         }
 
+        let expected_per_node = NUM_PARTITIONS as usize / 3;
         assert!(
-            node3_primaries >= 20,
-            "expected ~21 primaries, got {node3_primaries}"
+            node3_primaries >= expected_per_node,
+            "expected ~{expected_per_node} primaries, got {node3_primaries}"
         );
         assert!(
-            node3_replicas >= 20,
-            "expected ~21 replicas, got {node3_replicas}"
+            node3_replicas >= expected_per_node,
+            "expected ~{expected_per_node} replicas, got {node3_replicas}"
         );
     }
 }

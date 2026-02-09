@@ -4,8 +4,8 @@
 use crate::error::Result;
 use crate::storage::StorageBackend;
 
-use super::PartitionId;
 use super::protocol::{Operation, ReplicationWrite};
+use super::{NUM_PARTITIONS, PartitionId};
 
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ impl PartitionStorage {
     /// Returns an error if the storage backend fails to scan.
     pub fn scan_entity(&self, entity: &str) -> Result<Vec<(PartitionId, String, Vec<u8>)>> {
         let mut results = Vec::new();
-        for p in 0..64u16 {
+        for p in 0..NUM_PARTITIONS {
             let prefix = format!("{p:02x}/{entity}/");
             let entries = self.backend.prefix_scan(prefix.as_bytes())?;
             for (key, value) in entries {
@@ -244,7 +244,7 @@ mod tests {
     fn batch_write_all_partitions() {
         let storage = storage();
 
-        let writes: Vec<_> = (0..64u16)
+        let writes: Vec<_> = (0..NUM_PARTITIONS)
             .map(|p| {
                 ReplicationWrite::new(
                     partition(p),
@@ -261,7 +261,7 @@ mod tests {
         storage.write_batch(&writes).unwrap();
 
         let entries = storage.scan_entity("_topic_index").unwrap();
-        assert_eq!(entries.len(), 64);
+        assert_eq!(entries.len(), NUM_PARTITIONS as usize);
     }
 
     #[test]

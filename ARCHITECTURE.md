@@ -6,7 +6,7 @@
 
 MQDB is a message-oriented reactive database built in Rust that combines:
 - **Native MQTT integration** with embedded broker and topic-based API
-- **Distributed clustering** with 64-partition sharding, Raft consensus, and automatic rebalancing
+- **Distributed clustering** with 256-partition sharding, Raft consensus, and automatic rebalancing
 - **Point-to-point delivery** with consumer groups and partition-based routing
 - **Reactive subscriptions** with MQTT-style pub/sub patterns
 - **Schema-less JSON** entities with optional schema validation
@@ -1179,7 +1179,7 @@ MQDB supports two deployment modes:
 Both modes share the same database API, but cluster mode adds:
 - Raft consensus for partition management
 - MQTT bridges or direct QUIC for inter-node transport
-- 64 fixed partitions with replication factor 2
+- 256 fixed partitions with replication factor 2
 - Automatic rebalancing and failover
 
 ### 9.2 Storage Layer in Cluster Mode
@@ -1202,9 +1202,9 @@ In cluster mode, the `StorageBackend` trait is used by multiple subsystems:
 Cluster mode introduces two classes of entities:
 
 **Partitioned Entities** (hash-based distribution):
-- Sessions: `hash(client_id) % 64`
-- Database records: `hash(entity/id) % 64`
-- Retained messages: `hash(topic) % 64`
+- Sessions: `hash(client_id) % 256`
+- Database records: `hash(entity/id) % 256`
+- Retained messages: `hash(topic) % 256`
 
 **Broadcast Entities** (replicated to all nodes):
 - `_topic_index`: Topic → subscriber mappings
@@ -1766,7 +1766,7 @@ This layered approach ensures that even if an ACL grants broad access like `user
 ### Key Strengths:
 
 1. **Native MQTT Integration:** Embedded broker with topic-based database API
-2. **Distributed Clustering:** 64-partition sharding with Raft consensus and automatic rebalancing
+2. **Distributed Clustering:** 256-partition sharding with Raft consensus and automatic rebalancing
 3. **Point-to-Point Delivery:** Consumer groups with LoadBalanced and Ordered modes
 4. **ACID Transactions:** Full transactional guarantees with outbox pattern
 5. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications

@@ -5,10 +5,10 @@ mod simulation;
 
 use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 use mqdb::cluster::{
-    ClusterTransport, Epoch, NodeController, NodeId, NodeStatus, Operation, PartitionAssignment,
-    PartitionId, PartitionMap, PublishRouter, Qos2Store, RaftEvent, RaftMessage, ReplicationWrite,
-    RetainedStore, SessionStore, SubscriptionCache, TopicIndex, TransportConfig, WildcardStore,
-    session_partition, topic_partition,
+    ClusterTransport, Epoch, NUM_PARTITIONS, NodeController, NodeId, NodeStatus, Operation,
+    PartitionAssignment, PartitionId, PartitionMap, PublishRouter, Qos2Store, RaftEvent,
+    RaftMessage, ReplicationWrite, RetainedStore, SessionStore, SubscriptionCache, TopicIndex,
+    TransportConfig, WildcardStore, session_partition, topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
@@ -112,7 +112,7 @@ impl TestCluster {
         }
 
         let mut partition_map = PartitionMap::new();
-        for i in 0..64 {
+        for i in 0..NUM_PARTITIONS {
             let partition = PartitionId::new(i).unwrap();
             let primary_idx = i as usize % node_count;
             let replica_idx = (i as usize + 1) % node_count;
@@ -139,7 +139,7 @@ impl TestCluster {
     }
 
     async fn setup_all_primaries(&mut self) {
-        for i in 0..64 {
+        for i in 0..NUM_PARTITIONS {
             let partition = PartitionId::new(i).unwrap();
             self.nodes[0]
                 .controller
@@ -257,7 +257,7 @@ impl TestCluster {
         let new_rx_messages = rx_raft_messages;
         let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
         let mut partition_map = PartitionMap::new();
-        for i in 0..64 {
+        for i in 0..NUM_PARTITIONS {
             let partition = PartitionId::new(i).unwrap();
             let primary_idx = i as usize % node_count;
             let replica_idx = (i as usize + 1) % node_count;
@@ -2777,7 +2777,7 @@ async fn db_crud_replication_to_replicas() {
 async fn db_list_returns_entities_by_type() {
     let mut cluster = TestCluster::new(3);
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -2835,7 +2835,7 @@ async fn schema_broadcast_to_all_nodes() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -2868,7 +2868,11 @@ async fn schema_broadcast_to_all_nodes() {
 
     assert_eq!(schema.entity_str(), "users");
     assert_eq!(schema.schema_version, 1);
-    assert_eq!(writes.len(), 64, "Should broadcast to all 64 partitions");
+    assert_eq!(
+        writes.len(),
+        NUM_PARTITIONS as usize,
+        "Should broadcast to all partitions"
+    );
 
     for write in writes {
         cluster.nodes[0]
@@ -2931,7 +2935,7 @@ async fn schema_update_increments_version() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3005,7 +3009,7 @@ async fn index_add_and_lookup() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3073,7 +3077,7 @@ async fn index_multiple_records_same_value() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3251,7 +3255,7 @@ async fn unique_constraint_expires_after_ttl() {
 
     let mut cluster = TestCluster::new(3);
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3311,7 +3315,7 @@ async fn fk_validation_request_lifecycle() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3432,7 +3436,7 @@ async fn fk_validation_cleanup_expired() {
 
     let mut cluster = TestCluster::new(3);
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
@@ -3831,7 +3835,7 @@ async fn unique_constraint_cross_node_message_flow() {
     let mut cluster = TestCluster::new(2);
     cluster.runtime.network().set_base_latency_ms(0);
 
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
             .controller
