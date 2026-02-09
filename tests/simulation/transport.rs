@@ -8,10 +8,11 @@ use mqdb::cluster::raft::{
 use mqdb::cluster::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
     ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, JsonDbRequest,
-    JsonDbResponse, NodeId, PartitionId, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest, TopicSubscriptionBroadcast,
-    TransportError, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    JsonDbResponse, NUM_PARTITIONS, NodeId, PartitionId, QueryRequest, QueryResponse,
+    ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest,
+    TopicSubscriptionBroadcast, TransportError, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -41,7 +42,7 @@ impl SimulatedTransport {
             clock,
             state: Arc::new(Mutex::new(TransportState {
                 registered_nodes: vec![node_id.get()],
-                partition_primaries: vec![None; 64],
+                partition_primaries: vec![None; NUM_PARTITIONS as usize],
             })),
         }
     }

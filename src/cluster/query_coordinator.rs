@@ -385,9 +385,9 @@ mod tests {
     }
 
     #[test]
-    fn all_partitions_returns_64() {
+    fn all_partitions_returns_expected_count() {
         let partitions = QueryCoordinator::all_partitions();
-        assert_eq!(partitions.len(), 64);
+        assert_eq!(partitions.len(), NUM_PARTITIONS as usize);
     }
 
     #[test]

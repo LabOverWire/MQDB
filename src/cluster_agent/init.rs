@@ -107,7 +107,7 @@ impl ClusteredAgent {
         }
         let executor = DedicatedExecutor::new("msg-processor", 2);
         executor.handle().spawn(async move {
-            processor.run(channels.tx_batch).await;
+            Box::pin(processor.run(channels.tx_batch)).await;
         });
         info!("started message processor on dedicated executor");
         executor
@@ -267,7 +267,7 @@ impl ClusteredAgent {
             all_nodes,
         );
         tokio::spawn(async move {
-            raft_task.run().await;
+            Box::pin(raft_task.run()).await;
         });
         info!("spawned Raft task");
 

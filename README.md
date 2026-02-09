@@ -475,7 +475,7 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 
 ## Distributed Clustering
 
-MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 64 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams, providing multiplexed, TLS-encrypted, low-overhead transport.
+MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 256 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams, providing multiplexed, TLS-encrypted, low-overhead transport.
 
 ### Starting a Cluster
 
@@ -725,7 +725,7 @@ cargo run --example parking_lot
 | Reactive query language | Subscribe to expressions, not just topics |
 | Metrics and tracing | Persistence-layer observability |
 | TTL optimization | Expiration index to avoid full scans |
-| Horizontal scaling | Partition counts beyond the current 64 |
+| Horizontal scaling | Partition counts beyond the current 256 |
 
 ## Contributing
 

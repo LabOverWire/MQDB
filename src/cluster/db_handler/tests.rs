@@ -5,7 +5,7 @@ use super::super::db::data_partition;
 use super::super::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use super::super::node_controller::NodeController;
 use super::super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
-use super::super::{Epoch, NodeId, PartitionId, PartitionMap};
+use super::super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
 use super::DbRequestHandler;
 use crate::types::OwnershipConfig;
 use bebytes::BeBytes;
@@ -124,7 +124,7 @@ fn setup_controller_all_partitions() -> NodeController<MockTransport> {
     let mut ctrl = create_test_controller(node1, transport);
 
     let mut map = PartitionMap::default();
-    for i in 0..64_u16 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         ctrl.become_primary(partition, Epoch::new(1));
         map.set(

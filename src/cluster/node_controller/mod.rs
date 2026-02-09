@@ -317,7 +317,7 @@ impl<T: ClusterTransport> NodeController<T> {
     /// Pick a local partition for creating new entities (round-robin).
     ///
     /// # Panics
-    /// Panics if no valid partition can be created (should never happen with 64 partitions).
+    /// Panics if no valid partition can be created.
     #[must_use]
     pub fn pick_partition_for_create(&self) -> PartitionId {
         use std::sync::atomic::{AtomicU16, Ordering};

@@ -53,14 +53,14 @@ impl ClusteredAgent {
 
         self.setup_and_spawn_raft().await?;
 
-        self.run_event_loop(
+        Box::pin(self.run_event_loop(
             synced_retained_topics,
             broker_handle,
             admin_client,
             admin_rx,
             service_username.as_ref(),
             service_password.as_ref(),
-        )
+        ))
         .await
     }
 
@@ -105,7 +105,7 @@ impl ClusteredAgent {
                 biased;
 
                 _ = tick_interval.tick() => {
-                    self.handle_tick(&tx_tick).await;
+                    Box::pin(self.handle_tick(&tx_tick)).await;
                 }
                 Ok(batch) = rx_batch.recv_async() => {
                     self.handle_processing_batch(batch).await;

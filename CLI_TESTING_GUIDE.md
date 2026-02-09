@@ -847,7 +847,7 @@ Raft leader initializing partition assignments
 
 The node should:
 - Become Raft leader immediately (single-node quorum)
-- Assign all 64 partitions to itself
+- Assign all 256 partitions to itself
 
 ### Starting a Multi-Node Cluster
 
@@ -944,7 +944,7 @@ mqdb cluster status --broker 127.0.0.1:1883
     {"id": 2, "name": "node-2", "status": "alive"},
     {"id": 3, "name": "node-3", "status": "alive"}
   ],
-  "partitions": 64
+  "partitions": 256
 }
 ```
 
@@ -1179,7 +1179,7 @@ Verify that JSON creates on non-local partitions are forwarded to the correct pr
 mqdb dev start-cluster --nodes 3 --clean
 sleep 5
 
-# Create entities on each node (with 64 partitions across 3 nodes,
+# Create entities on each node (with 256 partitions across 3 nodes,
 # ~2/3 of creates will hit non-local partitions and require forwarding)
 mqdb create testfw -d '{"name":"from-node1"}' --broker 127.0.0.1:1883
 mqdb create testfw -d '{"name":"from-node2"}' --broker 127.0.0.1:1884
@@ -1429,7 +1429,7 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t '$DB/_health' -m ''
     "node_name": "node-1",
     "raft_leader": 1,
     "alive_nodes": [1, 2, 3],
-    "partition_count": 64,
+    "partition_count": 256,
     "primary_partitions": 22,
     "replica_partitions": 21
   }
@@ -1950,7 +1950,7 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Single-node cluster start
 - [ ] Multi-node cluster formation
 - [ ] Raft leader election
-- [ ] Partition assignment (64 partitions distributed)
+- [ ] Partition assignment (256 partitions distributed)
 - [ ] Cross-node data routing
 - [ ] Cluster status command
 - [ ] Cluster CRUD (create, read, update, delete, list)

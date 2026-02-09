@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use crate::cluster::NUM_PARTITIONS;
 use crate::cluster::protocol::{Heartbeat, Operation};
 use crate::cluster::quorum::QuorumResult;
 use crate::cluster::session_partition;
@@ -272,11 +273,11 @@ fn subscribe_wildcard_broadcast_creates_64_writes() {
         .subscribe_wildcard_broadcast("sensors/+/temp", "client1", partition, 1)
         .unwrap();
 
-    assert_eq!(writes.len(), 64);
+    assert_eq!(writes.len(), NUM_PARTITIONS as usize);
 
     let mut partitions_covered: Vec<u16> = writes.iter().map(|w| w.partition.get()).collect();
     partitions_covered.sort_unstable();
-    let expected: Vec<u16> = (0..64).collect();
+    let expected: Vec<u16> = (0..NUM_PARTITIONS).collect();
     assert_eq!(partitions_covered, expected);
 }
 
@@ -765,7 +766,7 @@ async fn schema_is_valid_for_write_checks_active_state() {
 
 fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
     let mut map = PartitionMap::new();
-    for partition_id in 0..64 {
+    for partition_id in 0..NUM_PARTITIONS {
         if let Some(p) = PartitionId::new(partition_id) {
             ctrl.become_primary(p, Epoch::new(1));
             map.set(

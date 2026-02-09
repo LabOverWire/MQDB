@@ -5,8 +5,8 @@ mod simulation;
 
 use mqdb::cluster::raft::RaftConfig;
 use mqdb::cluster::{
-    Epoch, NodeController, NodeId, Operation, PartitionAssignment, PartitionId, PartitionMap,
-    PartitionRole, ReplicationWrite, TransportConfig,
+    Epoch, NUM_PARTITIONS, NodeController, NodeId, Operation, PartitionAssignment, PartitionId,
+    PartitionMap, PartitionRole, ReplicationWrite, TransportConfig,
 };
 use simulation::transport::SimulatedTransport;
 
@@ -52,7 +52,11 @@ async fn partition_id_always_in_valid_range() {
         let entity = format!("entity_{i}");
         let id = format!("id_{}", i * 7);
         let partition = PartitionId::from_entity_id(&entity, &id);
-        assert!(partition.get() < 64, "partition {} >= 64", partition.get());
+        assert!(
+            partition.get() < NUM_PARTITIONS,
+            "partition {} >= {NUM_PARTITIONS}",
+            partition.get()
+        );
     }
 }
 
@@ -245,7 +249,7 @@ async fn heartbeat_detection() {
     ctrl2.register_peer(node1_id);
 
     let mut partition_map = PartitionMap::new();
-    for i in 0..64 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         let primary = if i % 2 == 0 { node1_id } else { node2_id };
         let replica = if i % 2 == 0 { node2_id } else { node1_id };
@@ -839,7 +843,7 @@ async fn rebalancer_assigns_partitions_to_node_with_zero_primaries() {
     let node3 = NodeId::validated(3).unwrap();
 
     let mut map = PartitionMap::new();
-    for i in 0..64u16 {
+    for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         let primary = if i % 2 == 0 { node1 } else { node2 };
         let replica = if i % 2 == 0 { node2 } else { node1 };
@@ -849,8 +853,8 @@ async fn rebalancer_assigns_partitions_to_node_with_zero_primaries() {
         );
     }
 
-    assert_eq!(map.primary_count(node1), 32);
-    assert_eq!(map.primary_count(node2), 32);
+    assert_eq!(map.primary_count(node1), NUM_PARTITIONS as usize / 2);
+    assert_eq!(map.primary_count(node2), NUM_PARTITIONS as usize / 2);
     assert_eq!(map.primary_count(node3), 0);
 
     let all_nodes = vec![node1, node2, node3];
@@ -862,13 +866,14 @@ async fn rebalancer_assigns_partitions_to_node_with_zero_primaries() {
         "rebalancer must propose changes when node has zero partitions"
     );
 
+    let expected_per_node = NUM_PARTITIONS as usize / 3;
     let node3_primaries = reassignments
         .iter()
         .filter(|r| r.new_primary == node3)
         .count();
     assert!(
-        node3_primaries >= 20,
-        "node3 should receive at least 20 primaries (got {node3_primaries})"
+        node3_primaries >= expected_per_node,
+        "node3 should receive at least {expected_per_node} primaries (got {node3_primaries})"
     );
 }
 
@@ -888,22 +893,24 @@ async fn rebalancer_distributes_partitions_fairly() {
     let n2_count = map.primary_count(nodes[1]);
     let n3_count = map.primary_count(nodes[2]);
 
+    let per_node_min = NUM_PARTITIONS as usize / 3;
+    let per_node_max = per_node_min + 1;
     assert!(
-        (21..=22).contains(&n1_count),
-        "node1 should have ~21-22 primaries"
+        (per_node_min..=per_node_max).contains(&n1_count),
+        "node1 should have ~{per_node_min}-{per_node_max} primaries, got {n1_count}"
     );
     assert!(
-        (21..=22).contains(&n2_count),
-        "node2 should have ~21-22 primaries"
+        (per_node_min..=per_node_max).contains(&n2_count),
+        "node2 should have ~{per_node_min}-{per_node_max} primaries, got {n2_count}"
     );
     assert!(
-        (21..=22).contains(&n3_count),
-        "node3 should have ~21-22 primaries"
+        (per_node_min..=per_node_max).contains(&n3_count),
+        "node3 should have ~{per_node_min}-{per_node_max} primaries, got {n3_count}"
     );
     assert_eq!(
         n1_count + n2_count + n3_count,
-        64,
-        "total should be 64 partitions"
+        NUM_PARTITIONS as usize,
+        "total should be {NUM_PARTITIONS} partitions"
     );
 
     for partition in PartitionId::all() {
