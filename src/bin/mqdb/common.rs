@@ -10,10 +10,11 @@ use std::time::Duration;
 pub(crate) async fn connect_client(
     conn: &ConnectionArgs,
 ) -> Result<MqttClient, Box<dyn std::error::Error>> {
-    let client = MqttClient::new("mqdb-cli");
+    let client_id = format!("mqdb-cli-{}", uuid::Uuid::new_v4());
+    let client = MqttClient::new(&client_id);
 
     if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-        let options = ConnectOptions::new("mqdb-cli").with_credentials(user.clone(), pass.clone());
+        let options = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
         Box::pin(client.connect_with_options(&conn.broker, options)).await?;
     } else {
         client.connect(&conn.broker).await?;
@@ -188,6 +189,19 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
         true
     } else {
         pos == text.len()
+    }
+}
+
+pub(crate) fn check_response_status(response: &Value) -> Result<(), String> {
+    match response.get("status").and_then(Value::as_str) {
+        Some("ok") | None => Ok(()),
+        Some(_) => {
+            let msg = response
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed");
+            Err(msg.to_string())
+        }
     }
 }
 

@@ -3,7 +3,8 @@
 
 use crate::cli_types::{ConnectionArgs, OutputFormat, SubscriptionModeArg};
 use crate::common::{
-    connect_client, execute_request, matches_filters, output_response, parse_filters,
+    check_response_status, connect_client, execute_request, matches_filters, output_response,
+    parse_filters,
 };
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ pub(crate) async fn cmd_create(
     let topic = format!("$DB/{entity}/create");
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(&response, &format);
+    check_response_status(&response)?;
     Ok(())
 }
 
@@ -40,6 +42,7 @@ pub(crate) async fn cmd_read(
     };
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(&response, &format);
+    check_response_status(&response)?;
     Ok(())
 }
 
@@ -54,6 +57,7 @@ pub(crate) async fn cmd_update(
     let topic = format!("$DB/{entity}/{id}/update");
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
     output_response(&response, &format);
+    check_response_status(&response)?;
     Ok(())
 }
 
@@ -66,6 +70,7 @@ pub(crate) async fn cmd_delete(
     let topic = format!("$DB/{entity}/{id}/delete");
     let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
     output_response(&response, &format);
+    check_response_status(&response)?;
     Ok(())
 }
 

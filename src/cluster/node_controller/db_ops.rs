@@ -3,8 +3,8 @@
 
 use super::{
     ClusterMessage, ClusterTransport, Epoch, JsonDbOp, JsonDbRequest, JsonDbResponse,
-    NodeController, NodeId, PartitionId, ReplicationWrite, UniqueReservationParams,
-    UniqueReserveStatus, entity,
+    NodeController, NodeId, PartitionId, PendingUniqueWork, ReplicationWrite,
+    UniqueCheckContinuation, UniqueReservationParams, entity,
 };
 use serde_json::Value;
 
@@ -226,27 +226,47 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         partition: PartitionId,
         request: &JsonDbRequest,
-    ) {
-        let response_payload = match request.op {
+    ) -> Option<PendingUniqueWork> {
+        let (response_payload, pending) = match request.op {
             JsonDbOp::Read => {
                 let id = request.id.as_deref().unwrap_or("");
-                self.handle_json_read_local(&request.entity, id)
+                (self.handle_json_read_local(&request.entity, id), None)
             }
             JsonDbOp::Update => {
                 let id = request.id.as_deref().unwrap_or("");
-                self.handle_json_update_local(&request.entity, id, &request.payload)
-                    .await
+                let (payload, pending) = self
+                    .handle_json_update_local(&request.entity, id, &request.payload, request, from)
+                    .await;
+                (payload, pending)
             }
             JsonDbOp::Delete => {
                 let id = request.id.as_deref().unwrap_or("");
-                self.handle_json_delete_local(&request.entity, id).await
+                (
+                    self.handle_json_delete_local(&request.entity, id).await,
+                    None,
+                )
             }
             JsonDbOp::Create => {
-                self.handle_json_create_local(partition, &request.entity, &request.payload)
-                    .await
+                let (payload, pending) = self
+                    .handle_json_create_local(
+                        partition,
+                        &request.entity,
+                        &request.payload,
+                        request,
+                        from,
+                    )
+                    .await;
+                (payload, pending)
             }
-            JsonDbOp::List => self.handle_json_list_local(&request.entity, &request.payload),
+            JsonDbOp::List => (
+                self.handle_json_list_local(&request.entity, &request.payload),
+                None,
+            ),
         };
+
+        if let Some(pending) = pending {
+            return Some(pending);
+        }
 
         let response = JsonDbResponse::new(
             request.request_id,
@@ -259,6 +279,8 @@ impl<T: ClusterTransport> NodeController<T> {
             .transport
             .send(from, ClusterMessage::JsonDbResponse(response))
             .await;
+
+        None
     }
 
     pub(crate) async fn handle_json_db_response(&mut self, response: &JsonDbResponse) {
@@ -306,15 +328,18 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_json_update_local(
         &mut self,
         entity: &str,
         id: &str,
         payload: &[u8],
-    ) -> Vec<u8> {
+        request: &JsonDbRequest,
+        from: NodeId,
+    ) -> (Vec<u8>, Option<PendingUniqueWork>) {
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+            Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
         };
 
         let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
@@ -330,7 +355,10 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             (old_data, merged)
         } else {
-            return Self::json_error(404, &format!("entity not found: {entity} id={id}"));
+            return (
+                Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+                None,
+            );
         };
 
         let now_ms = Self::current_time_ms();
@@ -340,20 +368,58 @@ impl<T: ClusterTransport> NodeController<T> {
         let (new_diff, old_diff) = self.compute_unique_field_diffs(entity, &old_data, &merged_data);
         let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
 
-        if has_unique_changes
-            && let Err(conflict_field) = self
-                .check_unique_constraints(entity, id, &new_diff, partition, &request_id, now_ms)
+        if has_unique_changes {
+            match self
+                .start_unique_constraint_check(
+                    entity,
+                    id,
+                    &new_diff,
+                    partition,
+                    &request_id,
+                    now_ms,
+                )
                 .await
-        {
-            return Self::json_error(
-                409,
-                &format!("unique constraint violation on field '{conflict_field}'"),
-            );
+            {
+                Err(conflict_field) => {
+                    return (
+                        Self::json_error(
+                            409,
+                            &format!("unique constraint violation on field '{conflict_field}'"),
+                        ),
+                        None,
+                    );
+                }
+                Ok(phase1) => {
+                    if !phase1.pending_remote.is_empty() {
+                        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
+                        return (
+                            Vec::new(),
+                            Some(PendingUniqueWork {
+                                phase1,
+                                continuation: UniqueCheckContinuation::UpdateFromNodeController {
+                                    from,
+                                    entity: entity.to_string(),
+                                    id: id.to_string(),
+                                    merged_data,
+                                    data_bytes,
+                                    partition,
+                                    request_id,
+                                    now_ms,
+                                    new_diff,
+                                    old_diff,
+                                    response_topic: request.response_topic.clone(),
+                                    correlation_data: request.correlation_data.clone(),
+                                },
+                            }),
+                        );
+                    }
+                }
+            }
         }
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-        match self.db_update(entity, id, &data_bytes, now_ms).await {
+        let result = match self.db_update(entity, id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
                 if has_unique_changes {
                     self.commit_unique_constraints(
@@ -404,7 +470,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Self::json_error(500, "internal error")
             }
-        }
+        };
+
+        (result, None)
     }
 
     async fn handle_json_delete_local(&mut self, entity: &str, id: &str) -> Vec<u8> {
@@ -425,15 +493,18 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
         entity: &str,
         payload: &[u8],
-    ) -> Vec<u8> {
+        request: &JsonDbRequest,
+        from: NodeId,
+    ) -> (Vec<u8>, Option<PendingUniqueWork>) {
         let mut data: serde_json::Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Self::json_error(400, "invalid JSON payload"),
+            Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
         };
 
         Self::apply_ttl_expiry(&mut data);
@@ -448,7 +519,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+        let remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+        let mut pending_remote_reserves = Vec::new();
 
         for field in &unique_fields {
             let value = match data.get(field) {
@@ -465,9 +537,42 @@ impl<T: ClusterTransport> NodeController<T> {
                 partition,
                 now_ms,
             };
-            let is_conflict = self
-                .reserve_unique_field(&params, &mut local_reserved, &mut remote_reserved)
-                .await;
+
+            let unique_part =
+                super::db::unique_partition(params.entity, params.field, params.value);
+            let primary = self.partition_map.primary(unique_part);
+
+            let is_conflict = if primary == Some(self.node_id) {
+                self.reserve_unique_local(&params, &mut local_reserved)
+                    .await
+            } else if let Some(target_node) = primary {
+                match self
+                    .send_unique_reserve_request_async(
+                        target_node,
+                        params.entity,
+                        params.field,
+                        params.value,
+                        params.id,
+                        params.request_id,
+                        params.partition,
+                        30_000,
+                    )
+                    .await
+                {
+                    Ok(rx) => {
+                        pending_remote_reserves.push(super::PendingUniqueReserve {
+                            field: field.clone(),
+                            value,
+                            target_node,
+                            receiver: rx,
+                        });
+                        false
+                    }
+                    Err(_) => true,
+                }
+            } else {
+                true
+            };
 
             if is_conflict {
                 self.release_all_reservations(
@@ -477,16 +582,47 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
-                return Self::json_error(
-                    409,
-                    &format!("unique constraint violation on field '{field}'"),
+                for pending in pending_remote_reserves {
+                    drop(pending.receiver);
+                }
+                return (
+                    Self::json_error(
+                        409,
+                        &format!("unique constraint violation on field '{field}'"),
+                    ),
+                    None,
                 );
             }
         }
 
+        if !pending_remote_reserves.is_empty() {
+            let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+            return (
+                Vec::new(),
+                Some(PendingUniqueWork {
+                    phase1: super::UniqueCheckPhase1Result {
+                        local_reserved,
+                        pending_remote: pending_remote_reserves,
+                    },
+                    continuation: UniqueCheckContinuation::CreateFromNodeController {
+                        from,
+                        entity: entity.to_string(),
+                        id,
+                        data,
+                        data_bytes,
+                        partition,
+                        request_id,
+                        now_ms,
+                        response_topic: request.response_topic.clone(),
+                        correlation_data: request.correlation_data.clone(),
+                    },
+                }),
+            );
+        }
+
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
-        match self.db_create(entity, &id, &data_bytes, now_ms).await {
+        let result = match self.db_create(entity, &id, &data_bytes, now_ms).await {
             Ok(db_entity) => {
                 self.commit_all_reservations(
                     entity,
@@ -523,7 +659,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 .await;
                 Self::json_error(500, "internal error")
             }
-        }
+        };
+
+        (result, None)
     }
 
     fn apply_ttl_expiry(data: &mut serde_json::Value) {
@@ -540,25 +678,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 serde_json::Value::Number(expires_at.into()),
             );
             obj.remove("ttl_secs");
-        }
-    }
-
-    async fn reserve_unique_field(
-        &mut self,
-        params: &UniqueReservationParams<'_>,
-        local_reserved: &mut Vec<(String, Vec<u8>)>,
-        remote_reserved: &mut Vec<(String, Vec<u8>, NodeId)>,
-    ) -> bool {
-        let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
-        let primary = self.partition_map.primary(unique_part);
-
-        if primary == Some(self.node_id) {
-            self.reserve_unique_local(params, local_reserved).await
-        } else if let Some(target_node) = primary {
-            self.reserve_unique_remote(params, target_node, remote_reserved)
-                .await
-        } else {
-            true
         }
     }
 
@@ -594,34 +713,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn reserve_unique_remote(
-        &mut self,
-        params: &UniqueReservationParams<'_>,
-        target_node: NodeId,
-        remote_reserved: &mut Vec<(String, Vec<u8>, NodeId)>,
-    ) -> bool {
-        let result = self
-            .send_unique_reserve_request(
-                target_node,
-                params.entity,
-                params.field,
-                params.value,
-                params.id,
-                params.request_id,
-                params.partition,
-                30_000,
-            )
-            .await;
-
-        match result {
-            Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved) => {
-                remote_reserved.push((params.field.to_owned(), params.value.to_vec(), target_node));
-                false
-            }
-            Ok(UniqueReserveStatus::Conflict | UniqueReserveStatus::Error) | Err(_) => true,
-        }
-    }
-
     async fn release_all_reservations(
         &mut self,
         entity: &str,
@@ -638,8 +729,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         for (f, v, target) in remote_reserved {
-            let _ = self
-                .send_unique_release_request(*target, entity, f, v, request_id)
+            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id)
                 .await;
         }
     }
@@ -660,8 +750,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         for (field, value, target) in remote_reserved {
-            let _ = self
-                .send_unique_commit_request(*target, entity, field, value, request_id)
+            self.send_unique_commit_fire_and_forget(*target, entity, field, value, request_id)
                 .await;
         }
     }
@@ -713,7 +802,7 @@ impl<T: ClusterTransport> NodeController<T> {
         true
     }
 
-    fn json_error(code: u16, message: &str) -> Vec<u8> {
+    pub(crate) fn json_error(code: u16, message: &str) -> Vec<u8> {
         let result = serde_json::json!({
             "status": "error",
             "code": code,
@@ -831,6 +920,18 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         payload: &[u8],
     ) -> Vec<u8> {
-        self.handle_json_update_local(entity, id, payload).await
+        let request = JsonDbRequest::new(
+            0,
+            JsonDbOp::Update,
+            entity.to_string(),
+            Some(id.to_string()),
+            payload.to_vec(),
+            String::new(),
+            None,
+        );
+        let (result, _) = self
+            .handle_json_update_local(entity, id, payload, &request, self.node_id)
+            .await;
+        result
     }
 }

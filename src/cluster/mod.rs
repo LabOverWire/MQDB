@@ -37,7 +37,7 @@ mod migration;
 #[cfg(feature = "mqtt-bridge")]
 mod mqtt_transport;
 #[cfg(feature = "agent")]
-mod node_controller;
+pub(crate) mod node_controller;
 #[cfg(feature = "agent")]
 mod offset_store;
 #[cfg(feature = "agent")]

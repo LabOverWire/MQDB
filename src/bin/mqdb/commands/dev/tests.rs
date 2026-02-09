@@ -63,11 +63,19 @@ pub(crate) fn cmd_dev_test(
     retained: bool,
     lwt: bool,
     ownership: bool,
+    stress_constraints: bool,
     all: bool,
     nodes: u8,
 ) {
-    let run_all =
-        all || (!pubsub && !db && !constraints && !wildcards && !retained && !lwt && !ownership);
+    let run_all = all
+        || (!pubsub
+            && !db
+            && !constraints
+            && !wildcards
+            && !retained
+            && !lwt
+            && !ownership
+            && !stress_constraints);
 
     wait_for_cluster_ready(nodes, 10);
     let ports: Vec<u16> = (0..nodes).map(|i| 1883 + u16::from(i)).collect();
@@ -98,6 +106,10 @@ pub(crate) fn cmd_dev_test(
 
     if ownership {
         run_test_ownership(nodes, &ports);
+    }
+
+    if stress_constraints {
+        run_test_stress_constraints(nodes, &ports);
     }
 }
 
@@ -954,6 +966,163 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
 
     let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
     let _ = std::fs::remove_file(passwd_path);
+
+    println!("\nResults: {passed} passed, {failed} failed\n");
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
+    if nodes < 2 {
+        println!("=== Stress Test: Cross-Node Unique Constraints (skipped, need >= 2 nodes) ===\n");
+        return;
+    }
+
+    println!("=== Stress Test: Cross-Node Unique Constraints ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0;
+    let mut failed = 0;
+
+    let ts = std::time::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let entity = format!("stress_products_{ts}");
+    let constraint_name = format!("unique_{entity}_sku");
+
+    let add_output = mqdb_cmd(
+        &exe,
+        &[
+            "constraint",
+            "add",
+            &entity,
+            "--unique",
+            "sku",
+            "--name",
+            &constraint_name,
+        ],
+        ports[0],
+    );
+
+    let constraint_added = add_output
+        .as_ref()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
+        })
+        .unwrap_or(false);
+
+    if !constraint_added {
+        println!("  Add unique constraint: ✗ (aborting stress test)");
+        if let Ok(o) = &add_output {
+            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
+            eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
+        }
+        println!("\nResults: 0 passed, 1 failed\n");
+        return;
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let thread_count: u32 = 20;
+    let creates_per_thread: u32 = 10;
+    let total = thread_count * creates_per_thread;
+
+    println!("Phase 1: {total} concurrent creates with unique SKUs across {nodes} nodes...");
+
+    let mut handles = Vec::with_capacity(thread_count as usize);
+
+    for thread_id in 0..thread_count {
+        let exe = exe.clone();
+        let entity = entity.clone();
+        let port = ports[thread_id as usize % ports.len()];
+
+        handles.push(std::thread::spawn(move || {
+            let mut successes: u32 = 0;
+            let mut failures: u32 = 0;
+
+            for seq in 0..creates_per_thread {
+                let sku = format!("STRESS-{thread_id:03}-{seq:03}");
+                let data = format!(r#"{{"name": "Item {sku}", "sku": "{sku}"}}"#);
+                let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
+
+                if result.map(|o| o.status.success()).unwrap_or(false) {
+                    successes += 1;
+                } else {
+                    failures += 1;
+                }
+            }
+
+            (successes, failures)
+        }));
+    }
+
+    let mut total_successes: u32 = 0;
+    let mut total_failures: u32 = 0;
+
+    for handle in handles {
+        if let Ok((s, f)) = handle.join() {
+            total_successes += s;
+            total_failures += f;
+        }
+    }
+
+    if total_failures == 0 {
+        println!("  Results: {total_successes} succeeded, {total_failures} false conflicts ✓");
+        passed += 1;
+    } else {
+        println!("  Results: {total_successes} succeeded, {total_failures} false conflicts ✗");
+        failed += 1;
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let conflict_threads: u32 = 10;
+    let conflict_sku = format!("CONFLICT-{ts}");
+
+    println!(
+        "\nPhase 2: {conflict_threads} concurrent creates with same SKU across {nodes} nodes..."
+    );
+
+    let mut conflict_handles = Vec::with_capacity(conflict_threads as usize);
+
+    for i in 0..conflict_threads {
+        let exe = exe.clone();
+        let entity = entity.clone();
+        let sku = conflict_sku.clone();
+        let port = ports[i as usize % ports.len()];
+
+        conflict_handles.push(std::thread::spawn(move || {
+            let data = format!(r#"{{"name": "Conflict Item {i}", "sku": "{sku}"}}"#);
+            let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
+            result.map(|o| o.status.success()).unwrap_or(false)
+        }));
+    }
+
+    let mut conflict_successes: u32 = 0;
+    let mut conflict_rejections: u32 = 0;
+
+    for handle in conflict_handles {
+        if let Ok(succeeded) = handle.join() {
+            if succeeded {
+                conflict_successes += 1;
+            } else {
+                conflict_rejections += 1;
+            }
+        }
+    }
+
+    if conflict_successes <= 1 {
+        println!(
+            "  Results: {conflict_successes} succeeded, {conflict_rejections} correctly rejected ✓"
+        );
+        passed += 1;
+    } else {
+        println!(
+            "  Results: {conflict_successes} succeeded (expected ≤1), {conflict_rejections} rejected ✗"
+        );
+        failed += 1;
+    }
 
     println!("\nResults: {passed} passed, {failed} failed\n");
 }

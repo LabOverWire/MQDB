@@ -316,6 +316,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             retained,
             lwt,
             ownership,
+            stress_constraints,
             all,
             nodes,
         } => commands::dev::cmd_dev_test(
@@ -326,6 +327,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             retained,
             lwt,
             ownership,
+            stress_constraints,
             all,
             nodes,
         ),

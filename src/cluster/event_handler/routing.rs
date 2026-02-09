@@ -143,12 +143,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
+        use super::super::db_handler::DbPublishResult;
+        use super::super::node_controller::unique::await_unique_reserves;
+
         debug!(topic = %event.topic, "handling $DB/ request");
         let start = std::time::Instant::now();
         let mut ctrl = self.controller.write().await;
         #[allow(clippy::cast_possible_truncation)]
         let t_lock = start.elapsed().as_micros() as u64;
-        if let Some(response) = self
+        let result = self
             .db_handler
             .handle_publish(
                 &mut ctrl,
@@ -158,22 +161,48 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 event.correlation_data.as_deref(),
                 event.user_id.as_deref(),
             )
-            .await
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            let t_handle = start.elapsed().as_micros() as u64;
-            ctrl.transport()
-                .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
-                .await;
-            #[allow(clippy::cast_possible_truncation)]
-            let t_queue = start.elapsed().as_micros() as u64;
-            tracing::info!(
-                node = node_id.get(),
-                t_lock,
-                t_handle,
-                t_queue,
-                "db_event_timing"
-            );
+            .await;
+
+        match result {
+            DbPublishResult::Response(response) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let t_handle = start.elapsed().as_micros() as u64;
+                ctrl.transport()
+                    .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                    .await;
+                #[allow(clippy::cast_possible_truncation)]
+                let t_queue = start.elapsed().as_micros() as u64;
+                tracing::info!(
+                    node = node_id.get(),
+                    t_lock,
+                    t_handle,
+                    t_queue,
+                    "db_event_timing"
+                );
+            }
+            DbPublishResult::NoResponse => {}
+            DbPublishResult::PendingUniqueCheck(pending) => {
+                let local_reserved = pending.phase1.local_reserved;
+                let pending_remote = pending.phase1.pending_remote;
+                let continuation = pending.continuation;
+                drop(ctrl);
+                let remote_results = await_unique_reserves(pending_remote).await;
+                let mut ctrl = self.controller.write().await;
+                if let Some(response) = self
+                    .db_handler
+                    .complete_pending_unique_check(
+                        &mut ctrl,
+                        local_reserved,
+                        remote_results,
+                        continuation,
+                    )
+                    .await
+                {
+                    ctrl.transport()
+                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                        .await;
+                }
+            }
         }
     }
 

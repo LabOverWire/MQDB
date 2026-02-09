@@ -9,7 +9,7 @@ mod tests;
 
 use super::NodeId;
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};
-use super::node_controller::NodeController;
+use super::node_controller::{NodeController, PendingUniqueWork};
 use super::transport::ClusterTransport;
 use crate::types::{OwnershipConfig, ScopeConfig};
 use std::sync::Arc;
@@ -18,6 +18,33 @@ pub struct DbPublishResponse {
     pub topic: String,
     pub payload: Vec<u8>,
     pub correlation_data: Option<Vec<u8>>,
+}
+
+pub enum DbPublishResult {
+    Response(DbPublishResponse),
+    NoResponse,
+    PendingUniqueCheck(Box<PendingUniqueWork>),
+}
+
+impl DbPublishResult {
+    #[cfg(test)]
+    fn is_some(&self) -> bool {
+        matches!(self, Self::Response(_))
+    }
+
+    #[cfg(test)]
+    fn is_none(&self) -> bool {
+        matches!(self, Self::NoResponse)
+    }
+
+    #[cfg(test)]
+    fn unwrap(self) -> DbPublishResponse {
+        match self {
+            Self::Response(r) => r,
+            Self::NoResponse => panic!("called unwrap on NoResponse"),
+            Self::PendingUniqueCheck(_) => panic!("called unwrap on PendingUniqueCheck"),
+        }
+    }
 }
 
 pub struct DbRequestHandler {
@@ -57,32 +84,53 @@ impl DbRequestHandler {
         response_topic: Option<&str>,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
-    ) -> Option<DbPublishResponse> {
-        let parsed = ParsedDbTopic::parse(topic)?;
+    ) -> DbPublishResult {
+        let Some(parsed) = ParsedDbTopic::parse(topic) else {
+            return DbPublishResult::NoResponse;
+        };
 
         let response_payload = match parsed.operation {
             DbTopicOperation::QueryRequest { .. } | DbTopicOperation::QueryResponse { .. } => {
-                return None;
+                return DbPublishResult::NoResponse;
             }
             ref op if op.is_binary() => {
-                self.handle_binary_operation(controller, &parsed, payload)
-                    .await?
+                match self
+                    .handle_binary_operation(controller, &parsed, payload)
+                    .await
+                {
+                    Some(payload) => payload,
+                    None => return DbPublishResult::NoResponse,
+                }
             }
             ref op => {
-                self.handle_json_operation(
-                    controller,
-                    op,
-                    payload,
-                    response_topic?,
-                    correlation_data,
-                    sender,
-                )
-                .await?
+                let Some(resp_topic) = response_topic else {
+                    return DbPublishResult::NoResponse;
+                };
+                match self
+                    .handle_json_operation(
+                        controller,
+                        op,
+                        payload,
+                        resp_topic,
+                        correlation_data,
+                        sender,
+                    )
+                    .await
+                {
+                    json_ops::JsonOpResult::Response(payload) => payload,
+                    json_ops::JsonOpResult::NoResponse => return DbPublishResult::NoResponse,
+                    json_ops::JsonOpResult::PendingUniqueCheck(pending) => {
+                        return DbPublishResult::PendingUniqueCheck(pending);
+                    }
+                }
             }
         };
 
-        let resp_topic = response_topic?;
-        Some(DbPublishResponse {
+        let Some(resp_topic) = response_topic else {
+            return DbPublishResult::NoResponse;
+        };
+
+        DbPublishResult::Response(DbPublishResponse {
             topic: resp_topic.to_string(),
             payload: response_payload,
             correlation_data: correlation_data.map(<[u8]>::to_vec),

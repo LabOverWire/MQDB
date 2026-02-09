@@ -47,6 +47,8 @@ pub(crate) enum DevAction {
         #[arg(long)]
         ownership: bool,
         #[arg(long)]
+        stress_constraints: bool,
+        #[arg(long)]
         all: bool,
         #[arg(long, default_value = "3")]
         nodes: u8,

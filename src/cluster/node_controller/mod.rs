@@ -9,7 +9,7 @@ mod replication_ops;
 mod retained;
 mod session_ops;
 mod snapshot;
-mod unique;
+pub(crate) mod unique;
 
 #[cfg(test)]
 mod tests;
@@ -55,7 +55,6 @@ static WRITE_REQUEST_SENT: AtomicU64 = AtomicU64::new(0);
 static WRITE_RECEIVED: AtomicU64 = AtomicU64::new(0);
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
-const UNIQUE_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 #[derive(Default)]
 pub struct TickOutput {
@@ -81,6 +80,78 @@ struct UniqueReservationParams<'a> {
     request_id: &'a str,
     partition: PartitionId,
     now_ms: u64,
+}
+
+pub struct PendingUniqueReserve {
+    pub field: String,
+    pub value: Vec<u8>,
+    pub target_node: NodeId,
+    pub receiver: oneshot::Receiver<UniqueReserveStatus>,
+}
+
+pub struct UniqueCheckPhase1Result {
+    pub local_reserved: Vec<(String, Vec<u8>)>,
+    pub pending_remote: Vec<PendingUniqueReserve>,
+}
+
+pub struct PendingUniqueWork {
+    pub phase1: UniqueCheckPhase1Result,
+    pub continuation: UniqueCheckContinuation,
+}
+
+pub enum UniqueCheckContinuation {
+    CreateFromDbHandler {
+        entity: String,
+        id: String,
+        data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        sender: Option<String>,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    UpdateFromDbHandler {
+        entity: String,
+        id: String,
+        merged_data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        new_diff: serde_json::Value,
+        old_diff: serde_json::Value,
+        sender: Option<String>,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    CreateFromNodeController {
+        from: NodeId,
+        entity: String,
+        id: String,
+        data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    UpdateFromNodeController {
+        from: NodeId,
+        entity: String,
+        id: String,
+        merged_data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        new_diff: serde_json::Value,
+        old_diff: serde_json::Value,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
 }
 
 #[derive(Debug)]
@@ -128,8 +199,6 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pub(super) pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
-    pub(super) pending_unique_commit_requests: HashMap<u64, oneshot::Sender<bool>>,
-    pub(super) pending_unique_release_requests: HashMap<u64, oneshot::Sender<bool>>,
     pub(super) next_unique_request_id: u64,
 }
 
@@ -194,8 +263,6 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_retained_queries: HashMap::new(),
             pending_scatter_requests: HashMap::new(),
             pending_unique_requests: HashMap::new(),
-            pending_unique_commit_requests: HashMap::new(),
-            pending_unique_release_requests: HashMap::new(),
             next_unique_request_id: 1,
         }
     }
@@ -615,32 +682,40 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub async fn handle_filtered_message(&mut self, msg: InboundMessage) {
+    pub async fn handle_filtered_message(
+        &mut self,
+        msg: InboundMessage,
+    ) -> Option<PendingUniqueWork> {
         match msg.message {
             ClusterMessage::Heartbeat(_)
             | ClusterMessage::RequestVote(_)
             | ClusterMessage::RequestVoteResponse(_)
             | ClusterMessage::AppendEntries(_)
-            | ClusterMessage::AppendEntriesResponse(_) => {}
+            | ClusterMessage::AppendEntriesResponse(_) => None,
 
             ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write).await;
+                None
             }
             ClusterMessage::WriteRequest(write) => {
                 self.handle_write_request(msg.from, write).await;
+                None
             }
             ClusterMessage::Ack(ack) => {
                 self.handle_ack(ack).await;
+                None
             }
             ClusterMessage::DeathNotice { node_id } => {
                 self.heartbeat.handle_death_notice(node_id);
                 self.handle_node_death(node_id);
+                None
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");
                 let _ = self
                     .tx_raft_events
                     .send(RaftEvent::DrainNotification(node_id));
+                None
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -650,16 +725,17 @@ impl<T: ClusterTransport> NodeController<T> {
                     req.to_sequence(),
                 )
                 .await;
+                None
             }
             ClusterMessage::CatchupResponse(resp) => {
                 self.handle_catchup_response(resp).await;
+                None
             }
             ClusterMessage::ForwardedPublish(ref fwd) => {
                 self.handle_forwarded_publish_no_dedup(msg.from, fwd).await;
+                None
             }
-            ref data_plane => {
-                self.dispatch_data_plane_message(msg.from, data_plane).await;
-            }
+            ref data_plane => self.dispatch_data_plane_message(msg.from, data_plane).await,
         }
     }
 
@@ -839,7 +915,11 @@ impl<T: ClusterTransport> NodeController<T> {
             .try_send(RaftMessage::AppendEntriesResponse { from, response });
     }
 
-    async fn dispatch_data_plane_message(&mut self, from: NodeId, message: &ClusterMessage) {
+    async fn dispatch_data_plane_message(
+        &mut self,
+        from: NodeId,
+        message: &ClusterMessage,
+    ) -> Option<PendingUniqueWork> {
         match message {
             ClusterMessage::SnapshotRequest(req) => {
                 self.handle_snapshot_request(from, req).await;
@@ -870,7 +950,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_partition_update_received(update).await;
             }
             ClusterMessage::JsonDbRequest { partition, request } => {
-                self.handle_json_db_request(from, *partition, request).await;
+                return self.handle_json_db_request(from, *partition, request).await;
             }
             ClusterMessage::JsonDbResponse(response) => {
                 self.handle_json_db_response(response).await;
@@ -884,17 +964,12 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::UniqueCommitRequest(req) => {
                 self.handle_unique_commit_request(from, req).await;
             }
-            ClusterMessage::UniqueCommitResponse(resp) => {
-                self.handle_unique_commit_response(resp);
-            }
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
             }
-            ClusterMessage::UniqueReleaseResponse(resp) => {
-                self.handle_unique_release_response(resp);
-            }
             _ => {}
         }
+        None
     }
 
     async fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
@@ -1028,6 +1103,185 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn active_migrations_count(&self) -> usize {
         self.migration_manager.migration_count()
+    }
+
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    pub async fn complete_pending_unique_work(
+        &mut self,
+        local_reserved: Vec<(String, Vec<u8>)>,
+        remote_results: Result<
+            Vec<(String, Vec<u8>, NodeId)>,
+            (String, Vec<(String, Vec<u8>, NodeId)>),
+        >,
+        continuation: UniqueCheckContinuation,
+    ) {
+        match continuation {
+            UniqueCheckContinuation::CreateFromNodeController {
+                from,
+                entity,
+                id,
+                data,
+                data_bytes,
+                partition,
+                request_id,
+                now_ms,
+                response_topic,
+                correlation_data,
+            } => {
+                let response_payload = match remote_results {
+                    Err((conflict_field, confirmed)) => {
+                        self.release_unique_check_reservations(
+                            &entity,
+                            &request_id,
+                            &local_reserved,
+                            &confirmed,
+                        )
+                        .await;
+                        Self::json_error(
+                            409,
+                            &format!("unique constraint violation on field '{conflict_field}'"),
+                        )
+                    }
+                    Ok(confirmed_remotes) => {
+                        match self.db_create(&entity, &id, &data_bytes, now_ms).await {
+                            Ok(db_entity) => {
+                                self.commit_unique_constraints(
+                                    &entity,
+                                    &id,
+                                    &data,
+                                    partition,
+                                    &request_id,
+                                    now_ms,
+                                )
+                                .await;
+                                let result = serde_json::json!({
+                                    "status": "ok",
+                                    "id": db_entity.id_str(),
+                                    "entity": entity,
+                                    "data": data
+                                });
+                                serde_json::to_vec(&result).unwrap_or_default()
+                            }
+                            Err(super::db::DbDataStoreError::AlreadyExists) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                Self::json_error(409, "entity already exists")
+                            }
+                            Err(_) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                Self::json_error(500, "internal error")
+                            }
+                        }
+                    }
+                };
+
+                let response =
+                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::JsonDbResponse(response))
+                    .await;
+            }
+            UniqueCheckContinuation::UpdateFromNodeController {
+                from,
+                entity,
+                id,
+                merged_data,
+                data_bytes,
+                partition,
+                request_id,
+                now_ms,
+                new_diff,
+                old_diff,
+                response_topic,
+                correlation_data,
+            } => {
+                let response_payload = match remote_results {
+                    Err((conflict_field, confirmed)) => {
+                        self.release_unique_check_reservations(
+                            &entity,
+                            &request_id,
+                            &local_reserved,
+                            &confirmed,
+                        )
+                        .await;
+                        Self::json_error(
+                            409,
+                            &format!("unique constraint violation on field '{conflict_field}'"),
+                        )
+                    }
+                    Ok(confirmed_remotes) => {
+                        match self.db_update(&entity, &id, &data_bytes, now_ms).await {
+                            Ok(db_entity) => {
+                                self.commit_unique_constraints(
+                                    &entity,
+                                    &id,
+                                    &new_diff,
+                                    partition,
+                                    &request_id,
+                                    now_ms,
+                                )
+                                .await;
+                                self.release_unique_constraints(
+                                    &entity, &id, &old_diff, partition, &id, now_ms,
+                                )
+                                .await;
+                                let result = serde_json::json!({
+                                    "status": "ok",
+                                    "id": db_entity.id_str(),
+                                    "entity": entity,
+                                    "data": merged_data
+                                });
+                                serde_json::to_vec(&result).unwrap_or_default()
+                            }
+                            Err(super::db::DbDataStoreError::NotFound) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                Self::json_error(
+                                    404,
+                                    &format!("entity not found: {entity} id={id}"),
+                                )
+                            }
+                            Err(_) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                Self::json_error(500, "internal error")
+                            }
+                        }
+                    }
+                };
+
+                let response =
+                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::JsonDbResponse(response))
+                    .await;
+            }
+            UniqueCheckContinuation::CreateFromDbHandler { .. }
+            | UniqueCheckContinuation::UpdateFromDbHandler { .. } => {}
+        }
     }
 }
 

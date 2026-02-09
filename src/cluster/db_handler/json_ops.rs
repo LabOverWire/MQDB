@@ -4,15 +4,22 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
-use super::super::node_controller::NodeController;
+use super::super::node_controller::{NodeController, PendingUniqueWork, UniqueCheckContinuation};
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use crate::events::ChangeEvent;
 use serde_json::{Value, json};
 
-#[allow(clippy::unused_self)]
+pub(super) enum JsonOpResult {
+    Response(Vec<u8>),
+    NoResponse,
+    PendingUniqueCheck(Box<PendingUniqueWork>),
+}
+
+#[allow(clippy::unused_self, clippy::too_many_arguments)]
 impl DbRequestHandler {
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -21,7 +28,7 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
-    ) -> Option<Vec<u8>> {
+    ) -> JsonOpResult {
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
                 self.handle_json_create(
@@ -45,7 +52,7 @@ impl DbRequestHandler {
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
-                    return Some(err);
+                    return JsonOpResult::Response(err);
                 }
                 let partition = data_partition(entity, id);
                 if !controller.is_local_partition(partition) {
@@ -61,16 +68,24 @@ impl DbRequestHandler {
                         )
                         .await;
                     return if forwarded {
-                        None
+                        JsonOpResult::NoResponse
                     } else {
-                        Some(Self::json_error(
+                        JsonOpResult::Response(Self::json_error(
                             503,
                             "partition not local and forwarding failed",
                         ))
                     };
                 }
-                self.handle_json_update(controller, entity, id, payload, sender)
-                    .await
+                self.handle_json_update(
+                    controller,
+                    entity,
+                    id,
+                    payload,
+                    sender,
+                    response_topic,
+                    correlation_data,
+                )
+                .await
             }
             DbTopicOperation::JsonDelete { entity, id } => {
                 if let Some(uid) = sender
@@ -79,7 +94,7 @@ impl DbRequestHandler {
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
-                    return Some(err);
+                    return JsonOpResult::Response(err);
                 }
                 let partition = data_partition(entity, id);
                 if !controller.is_local_partition(partition) {
@@ -95,22 +110,32 @@ impl DbRequestHandler {
                         )
                         .await;
                     return if forwarded {
-                        None
+                        JsonOpResult::NoResponse
                     } else {
-                        Some(Self::json_error(
+                        JsonOpResult::Response(Self::json_error(
                             503,
                             "partition not local and forwarding failed",
                         ))
                     };
                 }
-                self.handle_json_delete(controller, entity, id, sender)
+                match self
+                    .handle_json_delete(controller, entity, id, sender)
                     .await
+                {
+                    Some(payload) => JsonOpResult::Response(payload),
+                    None => JsonOpResult::NoResponse,
+                }
             }
             DbTopicOperation::JsonList { entity } => {
-                self.handle_json_list(controller, entity, payload, response_topic, sender)
+                match self
+                    .handle_json_list(controller, entity, payload, response_topic, sender)
                     .await
+                {
+                    Some(payload) => JsonOpResult::Response(payload),
+                    None => JsonOpResult::NoResponse,
+                }
             }
-            _ => None,
+            _ => JsonOpResult::NoResponse,
         }
     }
 
@@ -144,10 +169,10 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
-    ) -> Option<Vec<u8>> {
+    ) -> JsonOpResult {
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
+            Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
 
         let (partition, id) = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
@@ -158,7 +183,7 @@ impl DbRequestHandler {
         };
 
         if !controller.is_local_partition(partition) {
-            return self
+            return match self
                 .try_forward_create(
                     controller,
                     partition,
@@ -167,11 +192,24 @@ impl DbRequestHandler {
                     response_topic,
                     correlation_data,
                 )
-                .await;
+                .await
+            {
+                Some(payload) => JsonOpResult::Response(payload),
+                None => JsonOpResult::NoResponse,
+            };
         }
 
-        self.execute_local_create(controller, entity, &id, &data, partition, sender)
-            .await
+        self.execute_local_create(
+            controller,
+            entity,
+            &id,
+            &data,
+            partition,
+            sender,
+            response_topic,
+            correlation_data,
+        )
+        .await
     }
 
     async fn try_forward_create<T: ClusterTransport>(
@@ -213,26 +251,75 @@ impl DbRequestHandler {
         data: &Value,
         partition: PartitionId,
         sender: Option<&str>,
-    ) -> Option<Vec<u8>> {
-        let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> JsonOpResult {
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        if let Err(conflict_field) = controller
-            .check_unique_constraints(entity, id, data, partition, &request_id, now_ms)
+        let phase1 = match controller
+            .start_unique_constraint_check(entity, id, data, partition, &request_id, now_ms)
             .await
         {
-            return Some(Self::json_error(
-                409,
-                &format!("unique constraint violation on field '{conflict_field}'"),
-            ));
+            Ok(p) => p,
+            Err(conflict_field) => {
+                return JsonOpResult::Response(Self::json_error(
+                    409,
+                    &format!("unique constraint violation on field '{conflict_field}'"),
+                ));
+            }
+        };
+
+        if !phase1.pending_remote.is_empty() {
+            let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+            return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
+                phase1,
+                continuation: UniqueCheckContinuation::CreateFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    data: data.clone(),
+                    data_bytes,
+                    partition,
+                    request_id,
+                    now_ms,
+                    sender: sender.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
         }
 
-        Some(
+        self.complete_create(
+            controller,
+            entity,
+            id,
+            data,
+            partition,
+            &request_id,
+            now_ms,
+            sender,
+        )
+        .await
+    }
+
+    async fn complete_create<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        data: &Value,
+        partition: PartitionId,
+        request_id: &str,
+        now_ms: u64,
+        sender: Option<&str>,
+    ) -> JsonOpResult {
+        let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+
+        JsonOpResult::Response(
             match controller.db_create(entity, id, &data_bytes, now_ms).await {
                 Ok(db_entity) => {
                     controller
-                        .commit_unique_constraints(entity, id, data, partition, &request_id, now_ms)
+                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
                         .await;
                     let scope = self.scope_config.resolve_scope(entity, data);
                     let event = ChangeEvent::create(
@@ -247,27 +334,13 @@ impl DbRequestHandler {
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
                     controller
-                        .release_unique_constraints(
-                            entity,
-                            id,
-                            data,
-                            partition,
-                            &request_id,
-                            now_ms,
-                        )
+                        .release_unique_constraints(entity, id, data, partition, request_id, now_ms)
                         .await;
                     Self::json_error(409, "entity already exists")
                 }
                 Err(_) => {
                     controller
-                        .release_unique_constraints(
-                            entity,
-                            id,
-                            data,
-                            partition,
-                            &request_id,
-                            now_ms,
-                        )
+                        .release_unique_constraints(entity, id, data, partition, request_id, now_ms)
                         .await;
                     Self::json_error(500, "internal error")
                 }
@@ -283,7 +356,7 @@ impl DbRequestHandler {
         id: &str,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
-    ) -> Option<Vec<u8>> {
+    ) -> JsonOpResult {
         let start = std::time::Instant::now();
         let partition = data_partition(entity, id);
         let can_serve = controller.can_serve_reads(partition);
@@ -317,7 +390,7 @@ impl DbRequestHandler {
                     forwarded = true,
                     "json_read_forwarded"
                 );
-                return None;
+                return JsonOpResult::NoResponse;
             }
             tracing::warn!(
                 node = node_id,
@@ -325,7 +398,7 @@ impl DbRequestHandler {
                 elapsed_us = start.elapsed().as_micros() as u64,
                 "json_read_forward_failed"
             );
-            return Some(Self::json_error(
+            return JsonOpResult::Response(Self::json_error(
                 503,
                 "partition not local and forwarding failed",
             ));
@@ -353,7 +426,7 @@ impl DbRequestHandler {
             "json_read_complete"
         );
 
-        Some(result)
+        JsonOpResult::Response(result)
     }
 
     async fn handle_json_update<T: ClusterTransport>(
@@ -363,14 +436,24 @@ impl DbRequestHandler {
         id: &str,
         payload: &[u8],
         sender: Option<&str>,
-    ) -> Option<Vec<u8>> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> JsonOpResult {
         let updates: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
-            Err(_) => return Some(Self::json_error(400, "invalid JSON payload")),
+            Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
 
-        self.execute_local_update(controller, entity, id, updates, sender)
-            .await
+        self.execute_local_update(
+            controller,
+            entity,
+            id,
+            updates,
+            sender,
+            response_topic,
+            correlation_data,
+        )
+        .await
     }
 
     async fn execute_local_update<T: ClusterTransport>(
@@ -380,11 +463,13 @@ impl DbRequestHandler {
         id: &str,
         updates: Value,
         sender: Option<&str>,
-    ) -> Option<Vec<u8>> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> JsonOpResult {
         let (old_data, merged_data) =
             match self.merge_with_existing(controller, entity, id, updates) {
                 Ok(pair) => pair,
-                Err(response) => return Some(response),
+                Err(response) => return JsonOpResult::Response(response),
             };
 
         let now_ms = Self::current_time_ms();
@@ -395,40 +480,95 @@ impl DbRequestHandler {
             controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
         let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
 
-        if has_unique_changes
-            && let Err(conflict_field) = controller
-                .check_unique_constraints(entity, id, &new_diff, partition, &request_id, now_ms)
+        if has_unique_changes {
+            let phase1 = match controller
+                .start_unique_constraint_check(
+                    entity,
+                    id,
+                    &new_diff,
+                    partition,
+                    &request_id,
+                    now_ms,
+                )
                 .await
-        {
-            return Some(Self::json_error(
-                409,
-                &format!("unique constraint violation on field '{conflict_field}'"),
-            ));
+            {
+                Ok(p) => p,
+                Err(conflict_field) => {
+                    return JsonOpResult::Response(Self::json_error(
+                        409,
+                        &format!("unique constraint violation on field '{conflict_field}'"),
+                    ));
+                }
+            };
+
+            if !phase1.pending_remote.is_empty() {
+                let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
+                return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
+                    phase1,
+                    continuation: UniqueCheckContinuation::UpdateFromDbHandler {
+                        entity: entity.to_string(),
+                        id: id.to_string(),
+                        merged_data,
+                        data_bytes,
+                        partition,
+                        request_id,
+                        now_ms,
+                        new_diff,
+                        old_diff,
+                        sender: sender.map(str::to_string),
+                        response_topic: response_topic.to_string(),
+                        correlation_data: correlation_data.map(<[u8]>::to_vec),
+                    },
+                }));
+            }
         }
 
-        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
+        self.complete_update(
+            controller,
+            entity,
+            id,
+            &merged_data,
+            partition,
+            &request_id,
+            now_ms,
+            has_unique_changes,
+            &new_diff,
+            &old_diff,
+            sender,
+        )
+        .await
+    }
 
-        Some(
+    async fn complete_update<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        merged_data: &Value,
+        partition: PartitionId,
+        request_id: &str,
+        now_ms: u64,
+        has_unique_changes: bool,
+        new_diff: &Value,
+        old_diff: &Value,
+        sender: Option<&str>,
+    ) -> JsonOpResult {
+        let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
+
+        JsonOpResult::Response(
             match controller.db_update(entity, id, &data_bytes, now_ms).await {
                 Ok(db_entity) => {
                     if has_unique_changes {
                         controller
                             .commit_unique_constraints(
-                                entity,
-                                id,
-                                &new_diff,
-                                partition,
-                                &request_id,
-                                now_ms,
+                                entity, id, new_diff, partition, request_id, now_ms,
                             )
                             .await;
                         controller
-                            .release_unique_constraints(
-                                entity, id, &old_diff, partition, id, now_ms,
-                            )
+                            .release_unique_constraints(entity, id, old_diff, partition, id, now_ms)
                             .await;
                     }
-                    let scope = self.scope_config.resolve_scope(entity, &merged_data);
+                    let scope = self.scope_config.resolve_scope(entity, merged_data);
                     let event = ChangeEvent::update(
                         entity.to_string(),
                         db_entity.id_str().to_string(),
@@ -437,18 +577,13 @@ impl DbRequestHandler {
                     .with_sender(sender.map(str::to_string))
                     .with_scope(scope);
                     self.publish_change_event(controller, event).await;
-                    Self::json_success(entity, db_entity.id_str(), &merged_data)
+                    Self::json_success(entity, db_entity.id_str(), merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
                     if has_unique_changes {
                         controller
                             .release_unique_constraints(
-                                entity,
-                                id,
-                                &new_diff,
-                                partition,
-                                &request_id,
-                                now_ms,
+                                entity, id, new_diff, partition, request_id, now_ms,
                             )
                             .await;
                     }
@@ -458,12 +593,7 @@ impl DbRequestHandler {
                     if has_unique_changes {
                         controller
                             .release_unique_constraints(
-                                entity,
-                                id,
-                                &new_diff,
-                                partition,
-                                &request_id,
-                                now_ms,
+                                entity, id, new_diff, partition, request_id, now_ms,
                             )
                             .await;
                     }
@@ -620,6 +750,226 @@ impl DbRequestHandler {
         });
 
         Some(serde_json::to_vec(&result).unwrap_or_default())
+    }
+
+    #[allow(clippy::too_many_lines, clippy::type_complexity)]
+    pub async fn complete_pending_unique_check<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        local_reserved: Vec<(String, Vec<u8>)>,
+        remote_results: Result<
+            Vec<(String, Vec<u8>, super::NodeId)>,
+            (String, Vec<(String, Vec<u8>, super::NodeId)>),
+        >,
+        continuation: UniqueCheckContinuation,
+    ) -> Option<super::super::db_handler::DbPublishResponse> {
+        match continuation {
+            UniqueCheckContinuation::CreateFromDbHandler {
+                entity,
+                id,
+                data,
+                partition,
+                request_id,
+                now_ms,
+                sender,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let response_payload = match remote_results {
+                    Err((conflict_field, confirmed)) => {
+                        controller
+                            .release_unique_check_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &confirmed,
+                            )
+                            .await;
+                        Self::json_error(
+                            409,
+                            &format!("unique constraint violation on field '{conflict_field}'"),
+                        )
+                    }
+                    Ok(confirmed_remotes) => {
+                        for (f, v, target) in &confirmed_remotes {
+                            controller
+                                .send_unique_commit_fire_and_forget(
+                                    *target,
+                                    &entity,
+                                    f,
+                                    v,
+                                    &request_id,
+                                )
+                                .await;
+                        }
+                        let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+                        match controller
+                            .db_create(&entity, &id, &data_bytes, now_ms)
+                            .await
+                        {
+                            Ok(db_entity) => {
+                                controller
+                                    .commit_unique_constraints(
+                                        &entity,
+                                        &id,
+                                        &data,
+                                        partition,
+                                        &request_id,
+                                        now_ms,
+                                    )
+                                    .await;
+                                let scope = self.scope_config.resolve_scope(&entity, &data);
+                                let event = ChangeEvent::create(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_scope(scope);
+                                self.publish_change_event(controller, event).await;
+                                Self::json_success(&entity, db_entity.id_str(), &data)
+                            }
+                            Err(db::DbDataStoreError::AlreadyExists) => {
+                                controller
+                                    .release_unique_check_reservations(
+                                        &entity,
+                                        &request_id,
+                                        &local_reserved,
+                                        &confirmed_remotes,
+                                    )
+                                    .await;
+                                Self::json_error(409, "entity already exists")
+                            }
+                            Err(_) => {
+                                controller
+                                    .release_unique_check_reservations(
+                                        &entity,
+                                        &request_id,
+                                        &local_reserved,
+                                        &confirmed_remotes,
+                                    )
+                                    .await;
+                                Self::json_error(500, "internal error")
+                            }
+                        }
+                    }
+                };
+                Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload: response_payload,
+                    correlation_data,
+                })
+            }
+            UniqueCheckContinuation::UpdateFromDbHandler {
+                entity,
+                id,
+                merged_data,
+                partition,
+                request_id,
+                now_ms,
+                new_diff,
+                old_diff,
+                sender,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let response_payload = match remote_results {
+                    Err((conflict_field, confirmed)) => {
+                        controller
+                            .release_unique_check_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &confirmed,
+                            )
+                            .await;
+                        Self::json_error(
+                            409,
+                            &format!("unique constraint violation on field '{conflict_field}'"),
+                        )
+                    }
+                    Ok(confirmed_remotes) => {
+                        for (f, v, target) in &confirmed_remotes {
+                            controller
+                                .send_unique_commit_fire_and_forget(
+                                    *target,
+                                    &entity,
+                                    f,
+                                    v,
+                                    &request_id,
+                                )
+                                .await;
+                        }
+                        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
+                        match controller
+                            .db_update(&entity, &id, &data_bytes, now_ms)
+                            .await
+                        {
+                            Ok(db_entity) => {
+                                controller
+                                    .commit_unique_constraints(
+                                        &entity,
+                                        &id,
+                                        &new_diff,
+                                        partition,
+                                        &request_id,
+                                        now_ms,
+                                    )
+                                    .await;
+                                controller
+                                    .release_unique_constraints(
+                                        &entity, &id, &old_diff, partition, &id, now_ms,
+                                    )
+                                    .await;
+                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
+                                let event = ChangeEvent::update(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    merged_data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_scope(scope);
+                                self.publish_change_event(controller, event).await;
+                                Self::json_success(&entity, db_entity.id_str(), &merged_data)
+                            }
+                            Err(db::DbDataStoreError::NotFound) => {
+                                controller
+                                    .release_unique_check_reservations(
+                                        &entity,
+                                        &request_id,
+                                        &local_reserved,
+                                        &confirmed_remotes,
+                                    )
+                                    .await;
+                                Self::json_error(
+                                    404,
+                                    &format!("entity not found: {entity} id={id}"),
+                                )
+                            }
+                            Err(_) => {
+                                controller
+                                    .release_unique_check_reservations(
+                                        &entity,
+                                        &request_id,
+                                        &local_reserved,
+                                        &confirmed_remotes,
+                                    )
+                                    .await;
+                                Self::json_error(500, "internal error")
+                            }
+                        }
+                    }
+                };
+                Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload: response_payload,
+                    correlation_data,
+                })
+            }
+            _ => None,
+        }
     }
 
     async fn publish_change_event<T: ClusterTransport>(
