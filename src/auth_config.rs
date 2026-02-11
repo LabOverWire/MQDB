@@ -70,28 +70,32 @@ pub async fn configure_broker_auth(
         AuthMethod::ScramSha256 | AuthMethod::Jwt | AuthMethod::JwtFederated
     );
 
+    let mut service_username = None;
     let mut service_password = None;
-    let service_username = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
 
     if let Some(ref path) = config.password_file {
+        let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
         let svc_pass = uuid::Uuid::new_v4().to_string();
         let hash = PasswordAuthProvider::hash_password(&svc_pass)?;
 
-        let prefix = format!("{service_username}:");
+        let prefix = format!("{svc_user}:");
         let mut contents = tokio::fs::read_to_string(path).await.unwrap_or_default();
         let has_user = contents.lines().any(|line| line.starts_with(&prefix));
         if !has_user {
             use std::fmt::Write;
-            let _ = writeln!(contents, "{service_username}:{hash}");
+            let _ = writeln!(contents, "{svc_user}:{hash}");
             tokio::fs::write(path, &contents).await?;
         }
 
         auth_config.password_file = Some(path.clone());
         auth_config.allow_anonymous = config.allow_anonymous;
+        service_username = Some(svc_user);
         service_password = Some(svc_pass);
         info!("password authentication configured with service account");
     } else if uses_enhanced_auth {
+        let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
         let svc_pass = uuid::Uuid::new_v4().to_string();
+        service_username = Some(svc_user);
         service_password = Some(svc_pass);
         auth_config.allow_anonymous = false;
     } else {
@@ -131,7 +135,7 @@ pub async fn configure_broker_auth(
     }
 
     Ok(AuthSetupResult {
-        service_username: Some(service_username),
+        service_username,
         service_password,
         needs_composite: uses_enhanced_auth,
         admin_users: config.admin_users.clone(),

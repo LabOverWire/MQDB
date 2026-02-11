@@ -33,15 +33,14 @@ impl MqdbAgent {
             let addr = resolve_connect_address(bind_addr);
 
             let response_creds = (handler_username.clone(), handler_password.clone());
-            let connect_result = if let Some(user) = handler_username {
-                let options = mqtt5::types::ConnectOptions::new("mqdb-internal-handler")
-                    .with_credentials(user, handler_password.as_deref().unwrap_or(""));
-                Box::pin(client.connect_with_options(&addr, options))
-                    .await
-                    .map(|_| ())
-            } else {
-                client.connect(&addr).await
-            };
+            let connect_result = connect_mqtt_client(
+                &client,
+                "mqdb-internal-handler",
+                &addr,
+                handler_username,
+                handler_password,
+            )
+            .await;
 
             if let Err(e) = connect_result {
                 error!("Failed to connect internal handler: {e}");
@@ -146,10 +145,10 @@ impl MqdbAgent {
                                     qos: mqtt5::QoS::AtLeastOnce,
                                     ..Default::default()
                                 };
-                                if let Some(ref sender_id) = change_event.sender {
+                                if let Some(ref cid) = change_event.client_id {
                                     options.properties.user_properties.push((
                                         "x-origin-client-id".to_string(),
-                                        sender_id.clone(),
+                                        cid.clone(),
                                     ));
                                 }
                                 if let Err(e) = client.publish_with_options(&topic, payload, options).await {
