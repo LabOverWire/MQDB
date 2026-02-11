@@ -39,7 +39,7 @@ async fn benchmark_writes(db: &Database, count: usize) -> Result<(), Box<dyn std
             "value": i
         });
 
-        db.create("users".into(), data, None, &ScopeConfig::default())
+        db.create("users".into(), data, None, None, &ScopeConfig::default())
             .await?;
 
         let record_elapsed = record_start.elapsed();
@@ -131,6 +131,7 @@ async fn benchmark_updates(db: &Database, count: usize) -> Result<(), Box<dyn st
                 "users".into(),
                 i.to_string(),
                 updates,
+                None,
                 None,
                 &ScopeConfig::default(),
             )

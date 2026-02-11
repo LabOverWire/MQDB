@@ -22,28 +22,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating categories...");
     let tech = json!({"name": "Technology"});
     let created_tech = db
-        .create("categories".into(), tech, None, &ScopeConfig::default())
+        .create(
+            "categories".into(),
+            tech,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     let tech_id = created_tech["id"].as_str().unwrap();
 
     let sports = json!({"name": "Sports"});
     let created_sports = db
-        .create("categories".into(), sports, None, &ScopeConfig::default())
+        .create(
+            "categories".into(),
+            sports,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     let sports_id = created_sports["id"].as_str().unwrap();
     println!("✓ Created categories: {tech_id}, {sports_id}\n");
 
     println!("Creating posts with categories...");
     let post1 = json!({"title": "AI Trends", "category_id": tech_id});
-    db.create("posts".into(), post1, None, &ScopeConfig::default())
+    db.create("posts".into(), post1, None, None, &ScopeConfig::default())
         .await?;
 
     let post2 = json!({"title": "Cloud Computing", "category_id": tech_id});
-    db.create("posts".into(), post2, None, &ScopeConfig::default())
+    db.create("posts".into(), post2, None, None, &ScopeConfig::default())
         .await?;
 
     let post3 = json!({"title": "World Cup", "category_id": sports_id});
-    db.create("posts".into(), post3, None, &ScopeConfig::default())
+    db.create("posts".into(), post3, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created 3 posts\n");
 
@@ -60,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete(
         "categories".into(),
         tech_id.to_string(),
+        None,
         None,
         &ScopeConfig::default(),
     )

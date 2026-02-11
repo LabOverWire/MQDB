@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.22.1"
+version = "0.22.4"
 dependencies = [
  "argon2",
  "base64",
@@ -1354,7 +1354,6 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
- "log",
  "mqtt5-protocol",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1380,11 +1379,12 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "webpki-roots",
+ "zeroize",
 ]
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "bebytes",
  "bytes",

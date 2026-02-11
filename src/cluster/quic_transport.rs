@@ -31,6 +31,7 @@ pub struct LocalPublishRequest {
     pub payload: Vec<u8>,
     pub qos: u8,
     pub retain: bool,
+    pub user_properties: Vec<(String, String)>,
 }
 
 pub struct QuicDirectTransport {
@@ -463,6 +464,29 @@ impl ClusterTransport for QuicDirectTransport {
             payload,
             qos,
             retain: false,
+            user_properties: Vec::new(),
+        }) {
+            warn!(topic, "local_publish queue full, dropping message: {e}");
+        }
+    }
+
+    async fn queue_local_publish_with_properties(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        user_properties: Vec<(String, String)>,
+    ) {
+        let queue_len = self.local_publish_tx.len();
+        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
+            warn!(topic, queue_len, "local_publish queue growing");
+        }
+        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
+            topic: topic.clone(),
+            payload,
+            qos,
+            retain: false,
+            user_properties,
         }) {
             warn!(topic, "local_publish queue full, dropping message: {e}");
         }
@@ -474,6 +498,7 @@ impl ClusterTransport for QuicDirectTransport {
             payload,
             qos,
             retain: true,
+            user_properties: Vec::new(),
         }) {
             warn!(
                 topic,

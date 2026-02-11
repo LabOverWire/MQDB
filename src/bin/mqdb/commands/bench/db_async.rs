@@ -56,8 +56,7 @@ pub(super) async fn cmd_bench_db_async(
         client.set_insecure_tls(true).await;
     }
     if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-        let opts =
-            ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+        let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
         Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
     } else {
         client.connect(&args.conn.broker).await?;

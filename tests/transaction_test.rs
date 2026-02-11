@@ -16,7 +16,7 @@ async fn test_update_race_condition_within_transaction() {
         "value": "initial",
     });
     let created = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -31,6 +31,7 @@ async fn test_update_race_condition_within_transaction() {
                     "users".into(),
                     id_clone,
                     json!({"value": format!("update-{}", i)}),
+                    None,
                     None,
                     &ScopeConfig::default(),
                 )
@@ -61,7 +62,7 @@ async fn test_dirty_read_prevented() {
         "status": "active",
     });
     let created = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -74,6 +75,7 @@ async fn test_dirty_read_prevented() {
             "users".into(),
             id1,
             json!({"status": "suspended"}),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -107,13 +109,13 @@ async fn test_atomicity_all_or_nothing() {
     let user2 = json!({"name": "User2", "group": "A"});
     let user3 = json!({"name": "User3", "group": "A"});
 
-    db.create("users".into(), user1, None, &ScopeConfig::default())
+    db.create("users".into(), user1, None, None, &ScopeConfig::default())
         .await
         .unwrap();
-    db.create("users".into(), user2, None, &ScopeConfig::default())
+    db.create("users".into(), user2, None, None, &ScopeConfig::default())
         .await
         .unwrap();
-    db.create("users".into(), user3, None, &ScopeConfig::default())
+    db.create("users".into(), user3, None, None, &ScopeConfig::default())
         .await
         .unwrap();
 
@@ -151,6 +153,7 @@ async fn test_concurrent_updates_to_different_entities() {
             "users".into(),
             json!({"name": "User1", "count": 0}),
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await
@@ -159,6 +162,7 @@ async fn test_concurrent_updates_to_different_entities() {
         .create(
             "users".into(),
             json!({"name": "User2", "count": 0}),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -180,6 +184,7 @@ async fn test_concurrent_updates_to_different_entities() {
                     id1_clone,
                     json!({"count": i}),
                     None,
+                    None,
                     &ScopeConfig::default(),
                 )
                 .await
@@ -196,6 +201,7 @@ async fn test_concurrent_updates_to_different_entities() {
                     "users".into(),
                     id2_clone,
                     json!({"count": i + 100}),
+                    None,
                     None,
                     &ScopeConfig::default(),
                 )
@@ -233,6 +239,7 @@ async fn test_create_operations_are_atomic() {
                         "name": format!("User{}", i),
                         "email": format!("user{}@example.com", i),
                     }),
+                    None,
                     None,
                     &ScopeConfig::default(),
                 )
@@ -282,6 +289,7 @@ async fn test_delete_operations_are_atomic() {
                     "status": "active",
                 }),
                 None,
+                None,
                 &ScopeConfig::default(),
             )
             .await
@@ -295,7 +303,13 @@ async fn test_delete_operations_are_atomic() {
         let id_clone = id.clone();
         let handle = tokio::spawn(async move {
             db_clone
-                .delete("users".into(), id_clone, None, &ScopeConfig::default())
+                .delete(
+                    "users".into(),
+                    id_clone,
+                    None,
+                    None,
+                    &ScopeConfig::default(),
+                )
                 .await
         });
         handles.push(handle);

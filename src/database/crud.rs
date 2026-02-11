@@ -17,6 +17,7 @@ impl Database {
         entity_name: String,
         mut data: Value,
         sender: Option<&str>,
+        client_id: Option<&str>,
         scope_config: &ScopeConfig,
     ) -> Result<Value> {
         let schema_registry = self.schema_registry.read().await;
@@ -65,6 +66,7 @@ impl Database {
         let scope = scope_config.resolve_scope(&entity_name, &data);
         let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
             .with_sender(sender.map(String::from))
+            .with_client_id(client_id.map(String::from))
             .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
@@ -118,6 +120,7 @@ impl Database {
         id: String,
         fields: Value,
         sender: Option<&str>,
+        client_id: Option<&str>,
         scope_config: &ScopeConfig,
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
@@ -166,6 +169,7 @@ impl Database {
             updated_entity.data.clone(),
         )
         .with_sender(sender.map(String::from))
+        .with_client_id(client_id.map(String::from))
         .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
@@ -185,6 +189,7 @@ impl Database {
         entity_name: String,
         id: String,
         sender: Option<&str>,
+        client_id: Option<&str>,
         scope_config: &ScopeConfig,
     ) -> Result<()> {
         use crate::constraint::DeleteOperation;
@@ -265,6 +270,7 @@ impl Database {
         let mut events = vec![
             ChangeEvent::delete(entity_name, id)
                 .with_sender(sender.map(String::from))
+                .with_client_id(client_id.map(String::from))
                 .with_scope(primary_scope),
         ];
         for (cascade_entity, cascade_id, cascade_data) in &deleted_entities {
@@ -272,6 +278,7 @@ impl Database {
             events.push(
                 ChangeEvent::delete(cascade_entity.clone(), cascade_id.clone())
                     .with_sender(sender.map(String::from))
+                    .with_client_id(client_id.map(String::from))
                     .with_scope(cascade_scope),
             );
         }

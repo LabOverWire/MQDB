@@ -25,6 +25,8 @@ pub struct ChangeEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<(String, String)>,
 }
 
@@ -43,6 +45,7 @@ impl ChangeEvent {
             data,
             operation_id: None,
             sender: None,
+            client_id: None,
             scope: None,
         }
     }
@@ -56,6 +59,12 @@ impl ChangeEvent {
     #[must_use]
     pub fn with_sender(mut self, sender: Option<String>) -> Self {
         self.sender = sender;
+        self
+    }
+
+    #[must_use]
+    pub fn with_client_id(mut self, client_id: Option<String>) -> Self {
+        self.client_id = client_id;
         self
     }
 

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "active": true
     });
     let created = db
-        .create("users".into(), user1, None, &ScopeConfig::default())
+        .create("users".into(), user1, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created user: {created}");
     println!("  Note: 'status' defaulted to 'active'\n");
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Bob"
     });
     let created = db
-        .create("users".into(), user2, None, &ScopeConfig::default())
+        .create("users".into(), user2, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created user: {created}\n");
 
@@ -45,7 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "age": "thirty"
     });
     match db
-        .create("users".into(), invalid_user, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            invalid_user,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -60,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             missing_required,
+            None,
             None,
             &ScopeConfig::default(),
         )

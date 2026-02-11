@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "users".into(),
             json!({"name": "Alice", "email": "alice@example.com"}),
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -62,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             json!({"name": "Bob", "email": "bob@example.com"}),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -74,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             json!({"name": "Charlie", "email": "alice@example.com"}),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -89,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "posts".into(),
             json!({"title": "Hello World", "author_id": alice_id}),
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -98,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "posts".into(),
         json!({"title": "Rust Tips", "author_id": alice_id}),
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
@@ -105,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.create(
         "posts".into(),
         json!({"title": "Bob's Post", "author_id": bob_id}),
+        None,
         None,
         &ScopeConfig::default(),
     )
@@ -116,12 +122,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "comments".into(),
         json!({"text": "Great post!", "post_id": post1_id}),
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
     db.create(
         "comments".into(),
         json!({"text": "Thanks!", "post_id": post1_id}),
+        None,
         None,
         &ScopeConfig::default(),
     )
@@ -133,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "posts".into(),
             json!({"title": "Orphan", "author_id": "nonexistent"}),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -163,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete(
         "users".into(),
         alice_id.to_string(),
+        None,
         None,
         &ScopeConfig::default(),
     )

@@ -142,6 +142,27 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
+    async fn queue_local_publish_with_properties(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        user_properties: Vec<(String, String)>,
+    ) {
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(t) => {
+                t.queue_local_publish_with_properties(topic, payload, qos, user_properties)
+                    .await;
+            }
+            Self::Quic(t) => {
+                t.queue_local_publish_with_properties(topic, payload, qos, user_properties)
+                    .await;
+            }
+        }
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         match self {
             #[cfg(feature = "mqtt-bridge")]

@@ -164,22 +164,28 @@ mod execute {
             self.execute_with_sender(
                 request,
                 None,
+                None,
                 &OwnershipConfig::default(),
                 &ScopeConfig::default(),
             )
             .await
         }
 
+        #[allow(clippy::too_many_lines)]
         pub async fn execute_with_sender(
             &self,
             request: Request,
             sender: Option<&str>,
+            client_id: Option<&str>,
             ownership: &OwnershipConfig,
             scope_config: &ScopeConfig,
         ) -> Response {
             match request {
                 Request::Create { entity, data } => {
-                    match self.create(entity, data, sender, scope_config).await {
+                    match self
+                        .create(entity, data, sender, client_id, scope_config)
+                        .await
+                    {
                         Ok(v) => Response::ok(v),
                         Err(e) => e.into(),
                     }
@@ -201,7 +207,10 @@ mod execute {
                     {
                         return e.into();
                     }
-                    match self.update(entity, id, fields, sender, scope_config).await {
+                    match self
+                        .update(entity, id, fields, sender, client_id, scope_config)
+                        .await
+                    {
                         Ok(v) => Response::ok(v),
                         Err(e) => e.into(),
                     }
@@ -214,7 +223,10 @@ mod execute {
                     {
                         return e.into();
                     }
-                    match self.delete(entity, id, sender, scope_config).await {
+                    match self
+                        .delete(entity, id, sender, client_id, scope_config)
+                        .await
+                    {
                         Ok(()) => Response::ok(value_from_unit(())),
                         Err(e) => e.into(),
                     }
@@ -370,7 +382,13 @@ mod tests {
             fields: serde_json::json!({"title": "Stolen"}),
         };
         let resp = db
-            .execute_with_sender(update_req, Some("bob"), &ownership, &ScopeConfig::default())
+            .execute_with_sender(
+                update_req,
+                Some("bob"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
             .await;
         match resp {
             Response::Error { code, message } => {
@@ -407,6 +425,7 @@ mod tests {
                     fields: serde_json::json!({"title": "Updated"}),
                 },
                 Some("alice"),
+                None,
                 &ownership,
                 &ScopeConfig::default(),
             )
@@ -439,6 +458,7 @@ mod tests {
                     id,
                 },
                 Some("bob"),
+                None,
                 &ownership,
                 &ScopeConfig::default(),
             )
@@ -478,6 +498,7 @@ mod tests {
                     projection: None,
                 },
                 Some("alice"),
+                None,
                 &ownership,
                 &ScopeConfig::default(),
             )
@@ -518,6 +539,7 @@ mod tests {
                     id,
                     fields: serde_json::json!({"title": "System Override"}),
                 },
+                None,
                 None,
                 &ownership,
                 &ScopeConfig::default(),

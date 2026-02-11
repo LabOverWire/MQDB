@@ -19,7 +19,7 @@ async fn test_crud_operations() {
     });
 
     let created = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     assert_eq!(created["name"], "Alice");
@@ -44,6 +44,7 @@ async fn test_crud_operations() {
             id.clone(),
             updates,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await
@@ -51,9 +52,15 @@ async fn test_crud_operations() {
     assert_eq!(updated_user["name"], "Alice Smith");
     assert_eq!(updated_user["email"], "alice@example.com");
 
-    db.delete("users".into(), id.clone(), None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.delete(
+        "users".into(),
+        id.clone(),
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let result = db.read("users".into(), id, vec![], None).await;
     assert!(result.is_err());
@@ -75,7 +82,7 @@ async fn test_list_operations() {
     ];
 
     for user in users {
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -135,7 +142,7 @@ async fn test_reactive_subscriptions() {
 
     let user = json!({"name": "Test User", "email": "test@example.com"});
     let created = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -171,7 +178,7 @@ async fn test_subscription_persistence() {
         let mut receiver = db.event_receiver();
 
         let user = json!({"name": "Persisted Test", "email": "test@example.com"});
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
 
@@ -201,12 +208,12 @@ async fn test_wildcard_subscriptions() {
         .unwrap();
 
     let user = json!({"name": "User 1"});
-    db.create("users".into(), user, None, &ScopeConfig::default())
+    db.create("users".into(), user, None, None, &ScopeConfig::default())
         .await
         .unwrap();
 
     let post = json!({"title": "Post 1"});
-    db.create("posts".into(), post, None, &ScopeConfig::default())
+    db.create("posts".into(), post, None, None, &ScopeConfig::default())
         .await
         .unwrap();
 
@@ -241,7 +248,7 @@ async fn test_extended_filter_operators() {
     ];
 
     for user in users {
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -331,7 +338,7 @@ async fn test_sorting_and_pagination() {
             "age": 20 + i,
             "score": (i * 3) % 10,
         });
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -461,7 +468,7 @@ async fn test_relationships_and_includes() {
         "email": "alice@example.com"
     });
     let created_author = db
-        .create("users".into(), author, None, &ScopeConfig::default())
+        .create("users".into(), author, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let author_id = created_author["id"].as_str().unwrap().to_string();
@@ -472,7 +479,7 @@ async fn test_relationships_and_includes() {
         "author_id": author_id.clone()
     });
     let created_post = db
-        .create("posts".into(), post, None, &ScopeConfig::default())
+        .create("posts".into(), post, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let post_id = created_post["id"].as_str().unwrap().to_string();
@@ -482,7 +489,13 @@ async fn test_relationships_and_includes() {
         "post_id": post_id.clone()
     });
     let created_comment = db
-        .create("comments".into(), comment, None, &ScopeConfig::default())
+        .create(
+            "comments".into(),
+            comment,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let comment_id = created_comment["id"].as_str().unwrap().to_string();
@@ -539,7 +552,13 @@ async fn test_ttl_expiration() {
     });
 
     let created = db
-        .create("temp".into(), short_lived, None, &ScopeConfig::default())
+        .create(
+            "temp".into(),
+            short_lived,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -588,7 +607,7 @@ async fn test_ttl_disabled() {
     });
 
     let created = db
-        .create("items".into(), entity, None, &ScopeConfig::default())
+        .create("items".into(), entity, None, None, &ScopeConfig::default())
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -618,9 +637,15 @@ async fn test_ttl_with_indexes() {
         "ttl_secs": 2
     });
 
-    db.create("sessions".into(), session, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "sessions".into(),
+        session,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let filter = Filter::new("user_id".into(), FilterOp::Eq, json!("user123"));
     let results = db
@@ -658,7 +683,7 @@ async fn test_cursor_api() {
             "age": 20 + (i % 30),
             "status": if i % 2 == 0 { "active" } else { "inactive" }
         });
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -705,7 +730,7 @@ async fn test_cursor_with_sorting() {
             "age": 50 - i,
             "score": (i * 3) % 10,
         });
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -776,7 +801,7 @@ async fn test_physical_backup_and_restore() {
             "name": format!("User {}", i),
             "email": format!("user{}@example.com", i),
         });
-        db.create("users".into(), user, None, &ScopeConfig::default())
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
             .await
             .unwrap();
     }
@@ -812,9 +837,15 @@ async fn test_logical_backup_and_restore() {
             "price": 10.0 + f64::from(i),
             "stock": 100 - i,
         });
-        db.create("products".into(), product, None, &ScopeConfig::default())
-            .await
-            .unwrap();
+        db.create(
+            "products".into(),
+            product,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
     }
 
     db.backup_logical(&backup_file).unwrap();
@@ -853,6 +884,7 @@ async fn test_backup_fails_if_destination_exists() {
     db.create(
         "users".into(),
         json!({"name": "Test"}),
+        None,
         None,
         &ScopeConfig::default(),
     )

@@ -198,7 +198,7 @@ description = "Optimize WASM binary with wasm-opt (optional, skipped if not inst
 script = '''
 if command -v wasm-opt > /dev/null 2>&1; then
     echo "Running wasm-opt -O4 on mqdb_wasm_bg.wasm..."
-    wasm-opt -O4 -o crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm
+    wasm-opt -O4 --enable-bulk-memory --enable-nontrapping-float-to-int -o crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm crates/mqdb-wasm/pkg/mqdb_wasm_bg.wasm
     echo "wasm-opt complete"
 else
     echo "wasm-opt not found, skipping (install binaryen for smaller WASM binaries)"

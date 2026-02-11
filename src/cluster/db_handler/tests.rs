@@ -185,6 +185,7 @@ async fn handle_create_success() {
             Some("$DB/_resp/client1"),
             Some(b"corr-123"),
             None,
+            None,
         )
         .await;
 
@@ -221,6 +222,7 @@ async fn handle_read_not_found() {
             Some("$DB/_resp/client1"),
             None,
             None,
+            None,
         )
         .await;
 
@@ -252,6 +254,7 @@ async fn handle_invalid_partition_returns_error() {
             Some("$DB/_resp/client1"),
             None,
             None,
+            None,
         )
         .await;
 
@@ -276,7 +279,7 @@ async fn no_response_without_response_topic() {
     let topic = "$DB/p0/users/create";
 
     let response = handler
-        .handle_publish(&mut ctrl, topic, &payload, None, None, None)
+        .handle_publish(&mut ctrl, topic, &payload, None, None, None, None)
         .await;
 
     assert!(response.is_none());
@@ -296,6 +299,7 @@ async fn parse_invalid_topic_returns_none() {
             "not/a/db/topic",
             &[],
             Some("$DB/_resp/client1"),
+            None,
             None,
             None,
         )
@@ -332,6 +336,7 @@ async fn json_update_forbidden_for_non_owner() {
             Some("$DB/_resp/client1"),
             None,
             Some("bob"),
+            None,
         )
         .await;
 
@@ -367,6 +372,7 @@ async fn json_update_allowed_for_owner() {
             Some("$DB/_resp/client1"),
             None,
             Some("alice"),
+            None,
         )
         .await;
 
@@ -399,6 +405,7 @@ async fn json_delete_forbidden_for_non_owner() {
             Some("$DB/_resp/client1"),
             None,
             Some("bob"),
+            None,
         )
         .await;
 
@@ -432,6 +439,7 @@ async fn json_delete_allowed_for_owner() {
             Some("$DB/_resp/client1"),
             None,
             Some("alice"),
+            None,
         )
         .await;
 
@@ -465,6 +473,7 @@ async fn json_update_bypasses_ownership_when_no_sender() {
             &topic,
             &update_payload,
             Some("$DB/_resp/client1"),
+            None,
             None,
             None,
         )
@@ -514,6 +523,7 @@ async fn json_list_filters_by_sender_ownership() {
             Some("$DB/_resp/client1"),
             None,
             Some("alice"),
+            None,
         )
         .await;
 
@@ -563,6 +573,7 @@ async fn json_list_returns_all_when_no_sender() {
             Some("$DB/_resp/client1"),
             None,
             None,
+            None,
         )
         .await;
 
@@ -597,6 +608,7 @@ async fn json_update_no_ownership_config_allows_any_sender() {
             Some("$DB/_resp/client1"),
             None,
             Some("eve"),
+            None,
         )
         .await;
 
@@ -635,6 +647,7 @@ async fn admin_bypasses_ownership_on_update() {
             Some("$DB/_resp/c1"),
             None,
             Some("admin"),
+            None,
         )
         .await;
 
@@ -672,6 +685,7 @@ async fn admin_bypasses_ownership_on_delete() {
             Some("$DB/_resp/c1"),
             None,
             Some("admin"),
+            None,
         )
         .await;
 
@@ -718,6 +732,7 @@ async fn admin_sees_all_records_on_list() {
             Some("$DB/_resp/c1"),
             None,
             Some("admin"),
+            None,
         )
         .await;
 

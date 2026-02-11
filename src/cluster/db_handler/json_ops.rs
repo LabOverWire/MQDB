@@ -28,6 +28,7 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> JsonOpResult {
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
@@ -38,6 +39,7 @@ impl DbRequestHandler {
                     response_topic,
                     correlation_data,
                     sender,
+                    client_id,
                 )
                 .await
             }
@@ -82,6 +84,7 @@ impl DbRequestHandler {
                     id,
                     payload,
                     sender,
+                    client_id,
                     response_topic,
                     correlation_data,
                 )
@@ -119,7 +122,7 @@ impl DbRequestHandler {
                     };
                 }
                 match self
-                    .handle_json_delete(controller, entity, id, sender)
+                    .handle_json_delete(controller, entity, id, sender, client_id)
                     .await
                 {
                     Some(payload) => JsonOpResult::Response(payload),
@@ -169,6 +172,7 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> JsonOpResult {
         let data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
@@ -206,6 +210,7 @@ impl DbRequestHandler {
             &data,
             partition,
             sender,
+            client_id,
             response_topic,
             correlation_data,
         )
@@ -243,6 +248,7 @@ impl DbRequestHandler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_local_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -251,6 +257,7 @@ impl DbRequestHandler {
         data: &Value,
         partition: PartitionId,
         sender: Option<&str>,
+        client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
@@ -283,6 +290,7 @@ impl DbRequestHandler {
                     request_id,
                     now_ms,
                     sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
                     response_topic: response_topic.to_string(),
                     correlation_data: correlation_data.map(<[u8]>::to_vec),
                 },
@@ -298,10 +306,12 @@ impl DbRequestHandler {
             &request_id,
             now_ms,
             sender,
+            client_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -312,6 +322,7 @@ impl DbRequestHandler {
         request_id: &str,
         now_ms: u64,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> JsonOpResult {
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
 
@@ -328,6 +339,7 @@ impl DbRequestHandler {
                         data.clone(),
                     )
                     .with_sender(sender.map(str::to_string))
+                    .with_client_id(client_id.map(str::to_string))
                     .with_scope(scope);
                     self.publish_change_event(controller, event).await;
                     Self::json_success(entity, db_entity.id_str(), data)
@@ -429,6 +441,7 @@ impl DbRequestHandler {
         JsonOpResult::Response(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_json_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -436,6 +449,7 @@ impl DbRequestHandler {
         id: &str,
         payload: &[u8],
         sender: Option<&str>,
+        client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
@@ -450,12 +464,14 @@ impl DbRequestHandler {
             id,
             updates,
             sender,
+            client_id,
             response_topic,
             correlation_data,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -463,6 +479,7 @@ impl DbRequestHandler {
         id: &str,
         updates: Value,
         sender: Option<&str>,
+        client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
@@ -516,6 +533,7 @@ impl DbRequestHandler {
                         new_diff,
                         old_diff,
                         sender: sender.map(str::to_string),
+                        client_id: client_id.map(str::to_string),
                         response_topic: response_topic.to_string(),
                         correlation_data: correlation_data.map(<[u8]>::to_vec),
                     },
@@ -535,10 +553,12 @@ impl DbRequestHandler {
             &new_diff,
             &old_diff,
             sender,
+            client_id,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -552,6 +572,7 @@ impl DbRequestHandler {
         new_diff: &Value,
         old_diff: &Value,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> JsonOpResult {
         let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
 
@@ -575,6 +596,7 @@ impl DbRequestHandler {
                         merged_data.clone(),
                     )
                     .with_sender(sender.map(str::to_string))
+                    .with_client_id(client_id.map(str::to_string))
                     .with_scope(scope);
                     self.publish_change_event(controller, event).await;
                     Self::json_success(entity, db_entity.id_str(), merged_data)
@@ -637,6 +659,7 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> Option<Vec<u8>> {
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
@@ -651,6 +674,7 @@ impl DbRequestHandler {
             Ok(_) => {
                 let event = ChangeEvent::delete(entity.to_string(), id.to_string())
                     .with_sender(sender.map(str::to_string))
+                    .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
                 self.publish_change_event(controller, event).await;
                 let result = json!({
@@ -772,6 +796,7 @@ impl DbRequestHandler {
                 request_id,
                 now_ms,
                 sender,
+                client_id,
                 response_topic,
                 correlation_data,
                 ..
@@ -826,6 +851,7 @@ impl DbRequestHandler {
                                     data.clone(),
                                 )
                                 .with_sender(sender)
+                                .with_client_id(client_id)
                                 .with_scope(scope);
                                 self.publish_change_event(controller, event).await;
                                 Self::json_success(&entity, db_entity.id_str(), &data)
@@ -871,6 +897,7 @@ impl DbRequestHandler {
                 new_diff,
                 old_diff,
                 sender,
+                client_id,
                 response_topic,
                 correlation_data,
                 ..
@@ -930,6 +957,7 @@ impl DbRequestHandler {
                                     merged_data.clone(),
                                 )
                                 .with_sender(sender)
+                                .with_client_id(client_id)
                                 .with_scope(scope);
                                 self.publish_change_event(controller, event).await;
                                 Self::json_success(&entity, db_entity.id_str(), &merged_data)
@@ -978,12 +1006,17 @@ impl DbRequestHandler {
         event: ChangeEvent,
     ) {
         let topic = event.event_topic(0);
+        let user_properties: Vec<(String, String)> = event
+            .client_id
+            .as_ref()
+            .map(|s| vec![("x-origin-client-id".to_string(), s.clone())])
+            .unwrap_or_default();
         match serde_json::to_vec(&event) {
             Ok(payload) => {
                 tracing::debug!(topic, "publishing change event");
                 controller
                     .transport()
-                    .queue_local_publish(topic, payload, 1)
+                    .queue_local_publish_with_properties(topic, payload, 1, user_properties)
                     .await;
             }
             Err(e) => {

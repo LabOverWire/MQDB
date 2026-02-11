@@ -63,6 +63,13 @@ pub(super) async fn handle_message(
         .find(|(k, _)| k == "x-mqtt-sender")
         .map(|(_, v)| v.as_str());
 
+    let mqtt_client_id = message
+        .properties
+        .user_properties
+        .iter()
+        .find(|(k, _)| k == "x-mqtt-client-id")
+        .map(|(_, v)| v.as_str());
+
     let span = info_span!(
         "database_operation",
         entity = %op.entity,
@@ -92,7 +99,7 @@ pub(super) async fn handle_message(
     };
 
     let response = db
-        .execute_with_sender(request, sender_uid, ownership, scope_config)
+        .execute_with_sender(request, sender_uid, mqtt_client_id, ownership, scope_config)
         .instrument(span)
         .await;
 

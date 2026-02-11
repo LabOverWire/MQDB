@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     let created = db
-        .create("users".into(), user1, None, &ScopeConfig::default())
+        .create("users".into(), user1, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created: {created}\n");
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "bob@example.com"
     });
     let created = db
-        .create("users".into(), user2, None, &ScopeConfig::default())
+        .create("users".into(), user2, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created: {created}\n");
 
@@ -39,7 +39,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     match db
-        .create("users".into(), duplicate, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            duplicate,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -57,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello World"
     });
-    db.create("posts".into(), post1, None, &ScopeConfig::default())
+    db.create("posts".into(), post1, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created\n");
 
@@ -67,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello from Bob"
     });
-    db.create("posts".into(), post2, None, &ScopeConfig::default())
+    db.create("posts".into(), post2, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created (different user_id, so allowed)\n");
 
@@ -78,7 +84,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "title": "Duplicate"
     });
     match db
-        .create("posts".into(), duplicate, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            duplicate,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),

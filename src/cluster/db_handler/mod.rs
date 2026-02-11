@@ -76,6 +76,7 @@ impl DbRequestHandler {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_publish<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -84,6 +85,7 @@ impl DbRequestHandler {
         response_topic: Option<&str>,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
+        client_id: Option<&str>,
     ) -> DbPublishResult {
         let Some(parsed) = ParsedDbTopic::parse(topic) else {
             return DbPublishResult::NoResponse;
@@ -114,6 +116,7 @@ impl DbRequestHandler {
                         resp_topic,
                         correlation_data,
                         sender,
+                        client_id,
                     )
                     .await
                 {

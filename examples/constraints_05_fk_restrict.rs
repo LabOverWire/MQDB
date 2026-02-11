@@ -22,14 +22,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating user...");
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await?;
     let user_id = created_user["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
 
     println!("Creating post by this user...");
     let post = json!({"title": "My Post", "author_id": user_id});
-    db.create("posts".into(), post, None, &ScopeConfig::default())
+    db.create("posts".into(), post, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created post\n");
 
@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .delete(
             "users".into(),
             user_id.to_string(),
+            None,
             None,
             &ScopeConfig::default(),
         )
@@ -66,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "posts".into(),
         post_id.to_string(),
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
@@ -75,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.delete(
         "users".into(),
         user_id.to_string(),
+        None,
         None,
         &ScopeConfig::default(),
     )

@@ -423,11 +423,12 @@ impl ClusteredAgent {
         rx_local_publish: Option<&flume::Receiver<crate::cluster::LocalPublishRequest>>,
     ) {
         const BATCH_SIZE: u32 = 64;
-        let options = mqtt5::PublishOptions {
+        let mut options = mqtt5::PublishOptions {
             qos: mqtt5::QoS::from(req.qos),
             retain: req.retain,
             ..Default::default()
         };
+        options.properties.user_properties = req.user_properties;
         if let Err(e) = admin_client
             .publish_with_options(&req.topic, req.payload, options)
             .await
@@ -438,11 +439,12 @@ impl ClusteredAgent {
         if let Some(rx) = rx_local_publish {
             let mut count = 1u32;
             while let Ok(req) = rx.try_recv() {
-                let options = mqtt5::PublishOptions {
+                let mut options = mqtt5::PublishOptions {
                     qos: mqtt5::QoS::from(req.qos),
                     retain: req.retain,
                     ..Default::default()
                 };
+                options.properties.user_properties = req.user_properties;
                 if let Err(e) = admin_client
                     .publish_with_options(&req.topic, req.payload, options)
                     .await

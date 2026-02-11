@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     let created = db
-        .create("users".into(), user1, None, &ScopeConfig::default())
+        .create("users".into(), user1, None, None, &ScopeConfig::default())
         .await?;
     println!("✓ Created: {created}\n");
 
@@ -27,7 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "name": "Bob"
     });
     match db
-        .create("users".into(), missing_field, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            missing_field,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -40,7 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": null
     });
     match db
-        .create("users".into(), null_email, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            null_email,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
     {
         Ok(_) => println!("✗ Should have failed!"),
@@ -53,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "david@example.com"
     });
     let created = db
-        .create("users".into(), user, None, &ScopeConfig::default())
+        .create("users".into(), user, None, None, &ScopeConfig::default())
         .await?;
     let user_id = created["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
@@ -68,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "users".into(),
             user_id.to_string(),
             update,
+            None,
             None,
             &ScopeConfig::default(),
         )
