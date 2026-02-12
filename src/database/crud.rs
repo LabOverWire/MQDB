@@ -104,6 +104,10 @@ impl Database {
         }
 
         let result = if let Some(ref fields) = projection {
+            let schema_registry = self.schema_registry.read().await;
+            let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+            schema_registry.validate_fields_exist(&entity_name, &field_refs, "projection")?;
+            drop(schema_registry);
             Self::project_fields(result, fields)
         } else {
             result

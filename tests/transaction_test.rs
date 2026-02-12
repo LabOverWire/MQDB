@@ -103,7 +103,9 @@ async fn test_atomicity_all_or_nothing() {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
 
-    db.add_index("users".into(), vec!["group".into()]).await;
+    db.add_index("users".into(), vec!["group".into()])
+        .await
+        .unwrap();
 
     let user1 = json!({"name": "User1", "group": "A"});
     let user2 = json!({"name": "User2", "group": "A"});
@@ -226,7 +228,9 @@ async fn test_create_operations_are_atomic() {
     let tmp = TempDir::new().unwrap();
     let db = Arc::new(Database::open(tmp.path()).await.unwrap());
 
-    db.add_index("users".into(), vec!["email".into()]).await;
+    db.add_index("users".into(), vec!["email".into()])
+        .await
+        .unwrap();
 
     let mut handles = vec![];
     for i in 0..50 {
@@ -277,7 +281,9 @@ async fn test_delete_operations_are_atomic() {
     let tmp = TempDir::new().unwrap();
     let db = Arc::new(Database::open(tmp.path()).await.unwrap());
 
-    db.add_index("users".into(), vec!["status".into()]).await;
+    db.add_index("users".into(), vec!["status".into()])
+        .await
+        .unwrap();
 
     let mut ids = vec![];
     for i in 0..20 {

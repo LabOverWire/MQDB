@@ -210,6 +210,28 @@ impl SchemaRegistry {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns `SchemaViolation` if any field doesn't exist in the entity's schema.
+    pub fn validate_fields_exist(
+        &self,
+        entity_name: &str,
+        fields: &[&str],
+        context: &str,
+    ) -> Result<()> {
+        if let Some(schema) = self.schemas.get(entity_name) {
+            for field in fields {
+                if *field != "id" && !schema.fields.contains_key(*field) {
+                    return Err(Error::SchemaViolation {
+                        entity: entity_name.to_string(),
+                        field: (*field).to_string(),
+                        reason: format!("{context} field does not exist in schema"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn remove_schema(&mut self, batch: &mut BatchWriter, entity: &str) {
         self.schemas.remove(entity);
         let key = keys::encode_schema_key(entity);

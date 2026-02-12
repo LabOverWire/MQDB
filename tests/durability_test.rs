@@ -60,7 +60,8 @@ async fn test_index_consistency_after_crash_during_delete() {
         let db = Database::open_with_config(config).await.unwrap();
 
         db.add_index("users".into(), vec!["email".into(), "status".into()])
-            .await;
+            .await
+            .unwrap();
 
         let user = json!({
             "name": "Charlie",

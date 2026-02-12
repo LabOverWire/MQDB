@@ -136,16 +136,16 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
 
     println!("Creating indexes...");
     db.add_index("spots".into(), vec!["status".into(), "spot_type".into()])
-        .await;
+        .await?;
     db.add_index("vehicles".into(), vec!["license_plate".into()])
-        .await;
+        .await?;
     db.add_index(
         "parking_sessions".into(),
         vec!["session_status".into(), "spot_id".into()],
     )
-    .await;
+    .await?;
     db.add_index("payments".into(), vec!["receipt_code".into()])
-        .await;
+        .await?;
 
     println!("Seeding parking spots...");
     for i in 1..=5 {

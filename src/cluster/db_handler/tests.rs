@@ -742,3 +742,101 @@ async fn admin_sees_all_records_on_list() {
     let items = json["data"].as_array().unwrap();
     assert_eq!(items.len(), 2);
 }
+
+#[tokio::test]
+async fn json_create_rejects_wrong_type_with_schema() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let schema_json = serde_json::json!({
+        "entity": "users",
+        "fields": {
+            "name": {"name": "name", "field_type": "String", "required": true, "default": null}
+        }
+    });
+    let schema_bytes = serde_json::to_vec(&schema_json).unwrap();
+    ctrl.stores_mut()
+        .db_schema
+        .register("users", &schema_bytes)
+        .unwrap();
+
+    let payload = serde_json::to_vec(&serde_json::json!({"name": 123})).unwrap();
+    let topic = "$DB/users/create";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &payload,
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 400);
+    assert!(
+        json["message"].as_str().unwrap().contains("name"),
+        "expected error to mention 'name', got: {}",
+        json["message"]
+    );
+}
+
+#[tokio::test]
+async fn json_list_rejects_nonexistent_filter_field() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let schema_json = serde_json::json!({
+        "entity": "users",
+        "fields": {
+            "name": {"name": "name", "field_type": "String", "required": false, "default": null}
+        }
+    });
+    let schema_bytes = serde_json::to_vec(&schema_json).unwrap();
+    ctrl.stores_mut()
+        .db_schema
+        .register("users", &schema_bytes)
+        .unwrap();
+
+    let data = serde_json::json!({"name": "Alice"});
+    ctrl.db_create("users", "u-1", &serde_json::to_vec(&data).unwrap(), 1000)
+        .await
+        .unwrap();
+
+    let list_payload = serde_json::to_vec(&serde_json::json!({
+        "filters": [{"field": "nonexistent", "op": "eq", "value": "x"}]
+    }))
+    .unwrap();
+    let topic = "$DB/users/list";
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &list_payload,
+            Some("$DB/_resp/client1"),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 400);
+    assert!(
+        json["message"].as_str().unwrap().contains("nonexistent"),
+        "expected error to mention 'nonexistent', got: {}",
+        json["message"]
+    );
+}
