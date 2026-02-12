@@ -239,6 +239,12 @@ mod execute {
                     includes,
                     projection,
                 } => {
+                    if let Err(e) = self
+                        .validate_list_fields(&entity, &filters, &sort, projection.as_deref())
+                        .await
+                    {
+                        return e.into();
+                    }
                     if let Some(uid) = sender
                         && !ownership.is_admin(uid)
                         && let Some(owner_field) = ownership.owner_field(&entity)
@@ -250,7 +256,7 @@ mod execute {
                         ));
                     }
                     match self
-                        .list(entity, filters, sort, pagination, includes, projection)
+                        .list_core(entity, filters, sort, pagination, includes, projection)
                         .await
                     {
                         Ok(v) => Response::ok(value_from_vec(v)),
@@ -546,5 +552,147 @@ mod tests {
             )
             .await;
         assert!(resp.is_ok());
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn list_succeeds_when_ownership_field_not_in_schema() {
+        use crate::schema::{FieldDefinition, FieldType, Schema};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+
+        let schema =
+            Schema::new("diagrams").add_field(FieldDefinition::new("title", FieldType::String));
+        db.add_schema(schema).await.unwrap();
+
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Test"}),
+        })
+        .await;
+
+        let resp = db
+            .execute_with_sender(
+                Request::List {
+                    entity: "diagrams".to_string(),
+                    filters: vec![],
+                    sort: vec![],
+                    pagination: None,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+
+        match resp {
+            Response::Ok { data } => {
+                let items = data.as_array().unwrap();
+                assert_eq!(items.len(), 1);
+            }
+            Response::Error { code, message } => {
+                panic!("expected ok, got error {code}: {message}");
+            }
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn list_works_when_ownership_field_in_schema() {
+        use crate::schema::{FieldDefinition, FieldType, Schema};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+
+        let schema = Schema::new("diagrams")
+            .add_field(FieldDefinition::new("title", FieldType::String))
+            .add_field(FieldDefinition::new("userId", FieldType::String));
+        db.add_schema(schema).await.unwrap();
+
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Test"}),
+        })
+        .await;
+
+        let resp = db
+            .execute_with_sender(
+                Request::List {
+                    entity: "diagrams".to_string(),
+                    filters: vec![],
+                    sort: vec![],
+                    pagination: None,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+
+        match resp {
+            Response::Ok { data } => {
+                let items = data.as_array().unwrap();
+                assert_eq!(items.len(), 1);
+            }
+            Response::Error { code, message } => {
+                panic!("expected ok, got error {code}: {message}");
+            }
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn list_rejects_filter_on_nonexistent_schema_field() {
+        use crate::schema::{FieldDefinition, FieldType, Schema};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+
+        let schema =
+            Schema::new("users").add_field(FieldDefinition::new("name", FieldType::String));
+        db.add_schema(schema).await.unwrap();
+
+        db.execute(Request::Create {
+            entity: "users".to_string(),
+            data: serde_json::json!({"name": "Alice"}),
+        })
+        .await;
+
+        let resp = db
+            .execute(Request::List {
+                entity: "users".to_string(),
+                filters: vec![crate::Filter::new(
+                    "bogus".to_string(),
+                    crate::FilterOp::Eq,
+                    serde_json::json!("x"),
+                )],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            })
+            .await;
+
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 400);
+                assert!(
+                    message.contains("bogus"),
+                    "expected error to mention 'bogus', got: {message}"
+                );
+            }
+            Response::Ok { .. } => panic!("expected schema validation error for bogus field"),
+        }
     }
 }

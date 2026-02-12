@@ -19,6 +19,46 @@ pub(super) enum JsonOpResult {
 
 #[allow(clippy::unused_self, clippy::too_many_arguments)]
 impl DbRequestHandler {
+    fn validate_against_schema<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        entity: &str,
+        data: &Value,
+    ) -> Option<Vec<u8>> {
+        let cluster_schema = controller.stores().schema_get(entity)?;
+        let schema: crate::schema::Schema = match serde_json::from_slice(&cluster_schema.data) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        if let Err(e) = schema.validate(data) {
+            return Some(Self::json_error(400, &e.to_string()));
+        }
+        None
+    }
+
+    fn validate_filter_fields<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        entity: &str,
+        filters: &[crate::Filter],
+    ) -> Option<Vec<u8>> {
+        let cluster_schema = controller.stores().schema_get(entity)?;
+        let schema: crate::schema::Schema = match serde_json::from_slice(&cluster_schema.data) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        for filter in filters {
+            if filter.field != "id" && !schema.fields.contains_key(&filter.field) {
+                return Some(Self::json_error(
+                    400,
+                    &format!(
+                        "schema violation for '{}': filter field '{}' does not exist in schema",
+                        entity, filter.field
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
@@ -178,6 +218,10 @@ impl DbRequestHandler {
             Ok(v) => v,
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
+
+        if let Some(err) = Self::validate_against_schema(controller, entity, &data) {
+            return JsonOpResult::Response(err);
+        }
 
         let (partition, id) = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
             (data_partition(entity, client_id), client_id.to_string())
@@ -489,6 +533,10 @@ impl DbRequestHandler {
                 Err(response) => return JsonOpResult::Response(response),
             };
 
+        if let Some(err) = Self::validate_against_schema(controller, entity, &merged_data) {
+            return JsonOpResult::Response(err);
+        }
+
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let partition = data_partition(entity, id);
@@ -710,6 +758,12 @@ impl DbRequestHandler {
         } else {
             Vec::new()
         };
+
+        if !filters.is_empty()
+            && let Some(err) = Self::validate_filter_fields(controller, entity, &filters)
+        {
+            return Some(err);
+        }
 
         if let Some(uid) = sender
             && !self.ownership.is_admin(uid)
