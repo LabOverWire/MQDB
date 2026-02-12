@@ -29,9 +29,17 @@ impl Database {
         registry.get_schema(entity).cloned()
     }
 
-    pub async fn add_index(&self, entity: String, fields: Vec<String>) {
+    /// # Errors
+    /// Returns an error if any index field doesn't exist in the entity's schema.
+    pub async fn add_index(&self, entity: String, fields: Vec<String>) -> Result<()> {
+        let schema_registry = self.schema_registry.read().await;
+        let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+        schema_registry.validate_fields_exist(&entity, &field_refs, "index")?;
+        drop(schema_registry);
+
         let mut manager = self.index_manager.write().await;
         manager.add_index(crate::index::IndexDefinition::new(entity, fields));
+        Ok(())
     }
 
     pub async fn add_relationship(
@@ -56,11 +64,11 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if persisting the constraint fails.
+    /// Returns an error if field validation or persisting the constraint fails.
     pub async fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<()> {
         use crate::constraint::{Constraint, UniqueConstraint};
 
-        self.add_index(entity.clone(), fields.clone()).await;
+        self.add_index(entity.clone(), fields.clone()).await?;
 
         let constraint = Constraint::Unique(UniqueConstraint::new(entity, fields));
 
@@ -79,9 +87,13 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if persisting the constraint fails.
+    /// Returns an error if field validation or persisting the constraint fails.
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
         use crate::constraint::{Constraint, NotNullConstraint};
+
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.validate_fields_exist(&entity, &[field.as_str()], "not-null constraint")?;
+        drop(schema_registry);
 
         let constraint = Constraint::NotNull(NotNullConstraint::new(entity, field));
 
@@ -100,7 +112,7 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if persisting the constraint fails.
+    /// Returns an error if field validation or persisting the constraint fails.
     pub async fn add_foreign_key(
         &self,
         source_entity: String,
@@ -110,6 +122,19 @@ impl Database {
         on_delete: crate::constraint::OnDeleteAction,
     ) -> Result<()> {
         use crate::constraint::{Constraint, ForeignKeyConstraint};
+
+        let schema_registry = self.schema_registry.read().await;
+        schema_registry.validate_fields_exist(
+            &source_entity,
+            &[source_field.as_str()],
+            "foreign key",
+        )?;
+        schema_registry.validate_fields_exist(
+            &target_entity,
+            &[target_field.as_str()],
+            "foreign key",
+        )?;
+        drop(schema_registry);
 
         let constraint = Constraint::ForeignKey(ForeignKeyConstraint::new(
             source_entity,

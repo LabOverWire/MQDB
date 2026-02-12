@@ -161,7 +161,9 @@ async fn test_recovery_with_indexes() {
         let db = Database::open_without_background_tasks(&db_path)
             .await
             .unwrap();
-        db.add_index("users".into(), vec!["email".into()]).await;
+        db.add_index("users".into(), vec!["email".into()])
+            .await
+            .unwrap();
 
         for i in 0..30 {
             let user = json!({
@@ -177,7 +179,9 @@ async fn test_recovery_with_indexes() {
     let db = Database::open_without_background_tasks(&db_path)
         .await
         .unwrap();
-    db.add_index("users".into(), vec!["email".into()]).await;
+    db.add_index("users".into(), vec!["email".into()])
+        .await
+        .unwrap();
 
     let filter = Filter::new("email".into(), FilterOp::Eq, json!("user15@example.com"));
     let results = db

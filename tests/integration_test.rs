@@ -73,7 +73,9 @@ async fn test_list_operations() {
         .await
         .unwrap();
 
-    db.add_index("users".into(), vec!["status".into()]).await;
+    db.add_index("users".into(), vec!["status".into()])
+        .await
+        .unwrap();
 
     let users = vec![
         json!({"name": "Alice", "email": "alice@example.com", "status": "active"}),
@@ -238,7 +240,8 @@ async fn test_extended_filter_operators() {
         .unwrap();
 
     db.add_index("users".into(), vec!["status".into(), "role".into()])
-        .await;
+        .await
+        .unwrap();
 
     let users = vec![
         json!({"name": "Alice", "email": "alice@example.com", "status": "active", "role": "admin", "age": 30}),
@@ -629,7 +632,8 @@ async fn test_ttl_with_indexes() {
     let db = Database::open_with_config(config).await.unwrap();
 
     db.add_index("sessions".into(), vec!["user_id".into()])
-        .await;
+        .await
+        .unwrap();
 
     let session = json!({
         "user_id": "user123",
@@ -688,7 +692,7 @@ async fn test_cursor_api() {
             .unwrap();
     }
 
-    let mut cursor = db.cursor("users".into(), vec![], vec![]).unwrap();
+    let mut cursor = db.cursor("users".into(), vec![], vec![]).await.unwrap();
 
     let mut count = 0;
     while let Some(_user) = cursor.next().unwrap() {
@@ -697,7 +701,10 @@ async fn test_cursor_api() {
     assert_eq!(count, 50);
 
     let filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
-    let mut filtered_cursor = db.cursor("users".into(), vec![filter], vec![]).unwrap();
+    let mut filtered_cursor = db
+        .cursor("users".into(), vec![filter], vec![])
+        .await
+        .unwrap();
 
     let mut active_count = 0;
     while let Some(user) = filtered_cursor.next().unwrap() {
@@ -707,7 +714,10 @@ async fn test_cursor_api() {
     assert_eq!(active_count, 25);
 
     let age_filter = Filter::new("age".into(), FilterOp::Gt, json!(30));
-    let mut age_cursor = db.cursor("users".into(), vec![age_filter], vec![]).unwrap();
+    let mut age_cursor = db
+        .cursor("users".into(), vec![age_filter], vec![])
+        .await
+        .unwrap();
 
     let batch = age_cursor.next_batch(10).unwrap();
     assert!(!batch.is_empty());
@@ -736,7 +746,10 @@ async fn test_cursor_with_sorting() {
     }
 
     let sort_by_age_asc = vec![SortOrder::new("age".into(), SortDirection::Asc)];
-    let mut cursor = db.cursor("users".into(), vec![], sort_by_age_asc).unwrap();
+    let mut cursor = db
+        .cursor("users".into(), vec![], sort_by_age_asc)
+        .await
+        .unwrap();
 
     let mut prev_age = 0;
     let mut count = 0;
@@ -749,7 +762,10 @@ async fn test_cursor_with_sorting() {
     assert_eq!(count, 20);
 
     let sort_by_age_desc = vec![SortOrder::new("age".into(), SortDirection::Desc)];
-    let mut desc_cursor = db.cursor("users".into(), vec![], sort_by_age_desc).unwrap();
+    let mut desc_cursor = db
+        .cursor("users".into(), vec![], sort_by_age_desc)
+        .await
+        .unwrap();
 
     let mut prev_age = u64::MAX;
     while let Some(user) = desc_cursor.next().unwrap() {
@@ -762,7 +778,7 @@ async fn test_cursor_with_sorting() {
         SortOrder::new("score".into(), SortDirection::Asc),
         SortOrder::new("age".into(), SortDirection::Desc),
     ];
-    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).unwrap();
+    let mut multi_cursor = db.cursor("users".into(), vec![], multi_sort).await.unwrap();
 
     let mut results = vec![];
     while let Some(user) = multi_cursor.next().unwrap() {

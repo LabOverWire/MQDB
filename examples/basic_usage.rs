@@ -10,7 +10,7 @@ async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating index on email field...");
     db.add_index("users".into(), vec!["email".into(), "status".into()])
-        .await;
+        .await?;
 
     println!("\nCreating users...");
     let alice = json!({

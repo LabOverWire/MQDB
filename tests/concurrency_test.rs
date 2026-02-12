@@ -56,7 +56,9 @@ async fn test_concurrent_delete_and_read() {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
 
-    db.add_index("users".into(), vec!["status".into()]).await;
+    db.add_index("users".into(), vec!["status".into()])
+        .await
+        .unwrap();
 
     for i in 0..50 {
         let user = json!({

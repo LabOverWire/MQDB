@@ -22,6 +22,22 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
+        {
+            let schema_registry = self.schema_registry.read().await;
+            if !filters.is_empty() {
+                let fields: Vec<&str> = filters.iter().map(|f| f.field.as_str()).collect();
+                schema_registry.validate_fields_exist(&entity_name, &fields, "filter")?;
+            }
+            if !sort.is_empty() {
+                let fields: Vec<&str> = sort.iter().map(|s| s.field.as_str()).collect();
+                schema_registry.validate_fields_exist(&entity_name, &fields, "sort")?;
+            }
+            if let Some(ref fields) = projection {
+                let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+                schema_registry.validate_fields_exist(&entity_name, &field_refs, "projection")?;
+            }
+        }
+
         let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
             (
                 self.list_with_early_pagination(&entity_name, pagination.as_ref())?,
@@ -142,13 +158,24 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if cursor initialization fails.
-    pub fn cursor(
+    /// Returns an error if cursor initialization or field validation fails.
+    pub async fn cursor(
         &self,
         entity_name: String,
         filters: Vec<Filter>,
         sort: Vec<SortOrder>,
     ) -> Result<crate::cursor::Cursor> {
+        {
+            let schema_registry = self.schema_registry.read().await;
+            if !filters.is_empty() {
+                let fields: Vec<&str> = filters.iter().map(|f| f.field.as_str()).collect();
+                schema_registry.validate_fields_exist(&entity_name, &fields, "filter")?;
+            }
+            if !sort.is_empty() {
+                let fields: Vec<&str> = sort.iter().map(|s| s.field.as_str()).collect();
+                schema_registry.validate_fields_exist(&entity_name, &fields, "sort")?;
+            }
+        }
         crate::cursor::Cursor::new(
             entity_name,
             &self.storage,

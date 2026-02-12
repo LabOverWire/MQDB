@@ -173,7 +173,7 @@ async fn benchmark_list(
     println!("List/Scan Performance Test");
     println!("--------------------------");
 
-    db.add_index("users".into(), vec!["status".into()]).await;
+    db.add_index("users".into(), vec!["status".into()]).await?;
 
     let start = Instant::now();
 
