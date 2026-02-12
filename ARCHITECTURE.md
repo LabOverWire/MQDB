@@ -1753,7 +1753,95 @@ This layered approach ensures that even if an ACL grants broad access like `user
 
 ---
 
-## 16. Conclusion
+## 16. MQTT User Properties: Identity & Echo Suppression
+
+### Broker-Injected Properties (Anti-Spoof)
+
+The broker (mqtt-lib) automatically injects user properties on every PUBLISH packet. It strips any client-supplied values first, then injects the real ones — clients cannot spoof these.
+
+| Property | Value | Purpose |
+|----------|-------|---------|
+| `x-mqtt-sender` | Authenticated username (absent in anonymous mode) | Ownership enforcement, access control |
+| `x-mqtt-client-id` | MQTT `client_id` from CONNECT | Client identification passed to DB layer |
+
+Both are set in `mqtt-lib/crates/mqtt5/src/broker/client_handler/publish.rs` via `Properties::inject_sender()` and `Properties::inject_client_id()`.
+
+### Application-Level Property
+
+| Property | Value | Purpose |
+|----------|-------|---------|
+| `x-origin-client-id` | The `client_id` that triggered the DB mutation | Echo suppression in change-event subscribers |
+
+Set by MQDB's event publisher when emitting change events:
+- Agent mode: `src/agent/tasks.rs`
+- Cluster mode: `src/cluster/db_handler/json_ops.rs`
+
+### Why Both `x-mqtt-client-id` and `x-origin-client-id` Exist
+
+Change events flow through an intermediary — the internal event publisher client. The broker injects the event publisher's own identity on that re-publish, not the originating client's:
+
+```
+1. Client "browser-abc" → PUBLISH $DB/users/create
+   Broker injects: x-mqtt-sender = "alice@gmail.com"
+                   x-mqtt-client-id = "browser-abc"
+
+2. agent/handlers.rs extracts both properties,
+   passes to execute_with_sender(sender, client_id)
+
+3. Database creates record, emits ChangeEvent {
+       sender: Some("alice@gmail.com"),
+       client_id: Some("browser-abc"),
+   }
+
+4. Internal event publisher → PUBLISH $DB/users/events/create/{id}
+   MQDB sets:       x-origin-client-id = "browser-abc"  (from ChangeEvent)
+   Broker injects:  x-mqtt-client-id = "mqdb-internal-<uuid>"  (publisher's own)
+                    x-mqtt-sender = "mqdb-internal-<uuid>"     (publisher's own)
+```
+
+Subscribers receiving the change event see:
+
+| Property | Value | Useful for echo suppression? |
+|----------|-------|------------------------------|
+| `x-mqtt-client-id` | `mqdb-internal-<uuid>` | No — identifies the event publisher |
+| `x-mqtt-sender` | `mqdb-internal-<uuid>` | No — identifies the event publisher |
+| `x-origin-client-id` | `browser-abc` | **Yes** — identifies the originating client |
+
+For regular pub/sub (non-DB topics), `x-mqtt-client-id` directly identifies the publisher and no `x-origin-client-id` is present.
+
+### Property Usage by Message Type
+
+| Message type | `x-mqtt-sender` | `x-mqtt-client-id` | `x-origin-client-id` |
+|--------------|-----------------|---------------------|-----------------------|
+| DB request (`$DB/.../create`) | Ownership checks | Stored in `ChangeEvent.client_id` | Not present |
+| Regular pub/sub | Available to subscribers | Available to subscribers | Not present |
+| Change event (`$DB/.../events/#`) | Internal publisher (ignore) | Internal publisher (ignore) | **Original client** |
+
+### Echo Suppression in Subscribers
+
+A browser client subscribed to `$DB/users/events/#` will receive its own mutations back as change events. To suppress these echoes, the subscriber compares `x-origin-client-id` against its own MQTT `client_id`:
+
+```
+if event.userProperties["x-origin-client-id"] === myClientId:
+    skip (echo of own operation)
+else:
+    apply (change from another client)
+```
+
+### Source Files
+
+| File | Role |
+|------|------|
+| `mqtt-lib/.../properties/accessors.rs` | `inject_sender()`, `inject_client_id()` |
+| `mqtt-lib/.../client_handler/publish.rs` | Calls inject on every client PUBLISH |
+| `src/agent/handlers.rs:59-71` | Reads `x-mqtt-sender` and `x-mqtt-client-id` for DB operations |
+| `src/agent/tasks.rs:148-152` | Adds `x-origin-client-id` to change events (agent mode) |
+| `src/cluster/db_handler/json_ops.rs:1009-1012` | Adds `x-origin-client-id` to change events (cluster mode) |
+| `src/events.rs:17-31` | `ChangeEvent` struct carries `sender` and `client_id` through the pipeline |
+
+---
+
+## 17. Conclusion
 
 ### MQDB is Optimized For:
 
