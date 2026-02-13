@@ -204,21 +204,70 @@ pub async fn handle_authorize(state: &ServerState) -> HttpResponse {
 }
 
 pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
+    let id_payload = match exchange_and_verify_callback(state, query).await {
+        Ok((payload, token_response)) => {
+            if let Some(refresh_token) = &token_response.refresh_token {
+                persist_oauth_tokens(state, &payload, refresh_token).await;
+            }
+            payload
+        }
+        Err(resp) => return resp,
+    };
+
+    let jwt = mint_callback_jwt(state, &id_payload);
+
+    let Some(session_id) = state.session_store.create(
+        jwt,
+        id_payload.sub.clone(),
+        id_payload.email.clone(),
+        id_payload.name.clone(),
+        id_payload.picture.clone(),
+    ) else {
+        return json_response(500, &json!({"error": "failed to create session"}));
+    };
+
+    let cookie = build_set_cookie_header(&session_id, state.cookie_secure, 86400);
+
+    let redirect_uri = state.frontend_redirect_uri.as_deref().unwrap_or("/");
+    let user_json = serde_json::to_string(&json!({
+        "email": id_payload.email,
+        "name": id_payload.name,
+        "picture": id_payload.picture,
+        "google_sub": id_payload.sub,
+    }))
+    .unwrap_or_else(|_| "{}".into());
+
+    let user_b64 = URL_SAFE_NO_PAD.encode(user_json.as_bytes());
+    let location = format!("{redirect_uri}#user={user_b64}");
+
+    redirect_with_cookie(&location, &cookie)
+}
+
+async fn exchange_and_verify_callback(
+    state: &ServerState,
+    query: &str,
+) -> Result<(oauth::IdTokenPayload, oauth::TokenResponse), HttpResponse> {
     let params = parse_query(query);
 
     let Some(code) = params.get("code") else {
         if let Some(err) = params.get("error") {
             let escaped = escape_html(err);
-            return html_response(
+            return Err(html_response(
                 400,
                 format!("<html><body><h1>OAuth Error</h1><p>{escaped}</p></body></html>"),
-            );
+            ));
         }
-        return json_response(400, &json!({"error": "missing code parameter"}));
+        return Err(json_response(
+            400,
+            &json!({"error": "missing code parameter"}),
+        ));
     };
 
     let Some(oauth_state) = params.get("state") else {
-        return json_response(400, &json!({"error": "missing state parameter"}));
+        return Err(json_response(
+            400,
+            &json!({"error": "missing state parameter"}),
+        ));
     };
 
     let code_verifier = {
@@ -227,7 +276,10 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
     };
 
     let Some(code_verifier) = code_verifier else {
-        return json_response(400, &json!({"error": "invalid or expired state"}));
+        return Err(json_response(
+            400,
+            &json!({"error": "invalid or expired state"}),
+        ));
     };
 
     let token_response = match oauth::exchange_code(code, &code_verifier, &state.oauth_config).await
@@ -235,44 +287,66 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "OAuth token exchange failed");
-            return json_response(
+            return Err(json_response(
                 502,
                 &json!({"error": format!("token exchange failed: {e}")}),
-            );
+            ));
         }
     };
 
     let Some(id_token) = &token_response.id_token else {
-        return json_response(502, &json!({"error": "no id_token in response"}));
+        return Err(json_response(
+            502,
+            &json!({"error": "no id_token in response"}),
+        ));
     };
 
     let id_payload = match oauth::verify_id_token(id_token, &state.oauth_config.client_id).await {
         Ok(payload) => payload,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
-            return json_response(
+            return Err(json_response(
                 401,
                 &json!({"error": format!("id_token verification failed: {e}")}),
-            );
+            ));
         }
     };
 
-    if let Some(refresh_token) = &token_response.refresh_token {
-        let token_data = json!({
-            "id": id_payload.sub,
-            "refresh_token": refresh_token,
-            "email": id_payload.email,
-            "name": id_payload.name,
-            "picture": id_payload.picture,
-            "updated_at": chrono_now_iso()
-        });
-        let topic = "$DB/_oauth_tokens/create".to_string();
-        let payload = serde_json::to_vec(&token_data).unwrap_or_default();
-        if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
-            warn!(error = %e, "failed to store OAuth tokens");
-        }
+    if !id_payload
+        .sub
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(json_response(
+            400,
+            &json!({"error": "invalid subject identifier format"}),
+        ));
     }
 
+    Ok((id_payload, token_response))
+}
+
+async fn persist_oauth_tokens(
+    state: &ServerState,
+    id_payload: &oauth::IdTokenPayload,
+    refresh_token: &str,
+) {
+    let token_data = json!({
+        "id": id_payload.sub,
+        "refresh_token": refresh_token,
+        "email": id_payload.email,
+        "name": id_payload.name,
+        "picture": id_payload.picture,
+        "updated_at": chrono_now_iso()
+    });
+    let topic = "$DB/_oauth_tokens/create".to_string();
+    let payload = serde_json::to_vec(&token_data).unwrap_or_default();
+    if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
+        warn!(error = %e, "failed to store OAuth tokens");
+    }
+}
+
+fn mint_callback_jwt(state: &ServerState, id_payload: &oauth::IdTokenPayload) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -289,55 +363,15 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         "picture": id_payload.picture
     });
 
-    let jwt = sign_jwt(&claims, &state.jwt_config);
-
-    let Some(session_id) = state.session_store.create(
-        jwt,
-        id_payload.sub.clone(),
-        id_payload.email.clone(),
-        id_payload.name.clone(),
-        id_payload.picture.clone(),
-    ) else {
-        return json_response(500, &json!({"error": "failed to create session"}));
-    };
-
-    let cookie = build_set_cookie_header(&session_id, state.cookie_secure, 86400);
-
-    let redirect_uri = state.frontend_redirect_uri.as_deref().unwrap_or("/");
-    let user_json = serde_json::to_string(&serde_json::json!({
-        "email": id_payload.email,
-        "name": id_payload.name,
-        "picture": id_payload.picture,
-        "google_sub": id_payload.sub,
-    }))
-    .unwrap_or_else(|_| "{}".into());
-
-    let user_b64 = URL_SAFE_NO_PAD.encode(user_json.as_bytes());
-    let location = format!("{redirect_uri}#user={user_b64}");
-
-    redirect_with_cookie(&location, &cookie)
+    sign_jwt(&claims, &state.jwt_config)
 }
 
 pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
-    let body_value: serde_json::Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return json_response(400, &json!({"error": "invalid JSON body"})),
-    };
+    let cors = state.cors_origin.as_deref();
 
-    let Some(expired_token) = body_value.get("token").and_then(|v| v.as_str()) else {
-        return json_response(400, &json!({"error": "missing token field"}));
-    };
-
-    let Some(payload) = verify_jwt_ignore_expiry(expired_token, &state.jwt_config) else {
-        return json_response(401, &json!({"error": "invalid or tampered token"}));
-    };
-
-    let Some(google_sub) = payload.get("google_sub").and_then(|v| v.as_str()) else {
-        return json_response(400, &json!({"error": "token missing google_sub claim"}));
-    };
-
-    let Some(stored_data) = read_oauth_token(&state.mqtt_client, google_sub).await else {
-        return json_response(404, &json!({"error": "user not found"}));
+    let (google_sub, stored_data) = match validate_refresh_request(body, state).await {
+        Ok(pair) => pair,
+        Err(resp) => return resp,
     };
 
     let Some(stored_refresh_token) = stored_data
@@ -345,7 +379,11 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         .and_then(|v| v.as_str())
         .map(String::from)
     else {
-        return json_response(404, &json!({"error": "no refresh token stored"}));
+        return json_response_with_credentials(
+            404,
+            &json!({"error": "no refresh token stored"}),
+            cors,
+        );
     };
 
     let token_response =
@@ -353,22 +391,100 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
             Ok(r) => r,
             Err(e) => {
                 error!(error = %e, "Google token refresh failed");
-                return json_response(502, &json!({"error": format!("refresh failed: {e}")}));
+                return json_response_with_credentials(
+                    502,
+                    &json!({"error": format!("refresh failed: {e}")}),
+                    cors,
+                );
             }
         };
 
     if let Some(new_refresh) = &token_response.refresh_token {
-        let update_data = json!({
-            "refresh_token": new_refresh,
-            "updated_at": chrono_now_iso()
-        });
-        let topic = format!("$DB/_oauth_tokens/{google_sub}/update");
-        let update_payload = serde_json::to_vec(&update_data).unwrap_or_default();
-        if let Err(e) = state.mqtt_client.publish(&topic, update_payload).await {
-            warn!(error = %e, "failed to update refresh token");
-        }
+        persist_new_refresh_token(state, &google_sub, new_refresh).await;
     }
 
+    let new_jwt = mint_refresh_jwt(state, &google_sub, &stored_data);
+
+    json_response_with_credentials(
+        200,
+        &json!({
+            "token": new_jwt,
+            "expires_in": state.jwt_config.expiry_secs
+        }),
+        cors,
+    )
+}
+
+async fn validate_refresh_request(
+    body: &[u8],
+    state: &ServerState,
+) -> Result<(String, serde_json::Value), HttpResponse> {
+    let cors = state.cors_origin.as_deref();
+
+    let body_value: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+        json_response_with_credentials(400, &json!({"error": "invalid JSON body"}), cors)
+    })?;
+
+    let expired_token = body_value
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            json_response_with_credentials(400, &json!({"error": "missing token field"}), cors)
+        })?;
+
+    let payload = verify_jwt_ignore_expiry(expired_token, &state.jwt_config).ok_or_else(|| {
+        json_response_with_credentials(401, &json!({"error": "invalid or tampered token"}), cors)
+    })?;
+
+    let google_sub = payload
+        .get("google_sub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            json_response_with_credentials(
+                400,
+                &json!({"error": "token missing google_sub claim"}),
+                cors,
+            )
+        })?
+        .to_string();
+
+    if !google_sub
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(json_response_with_credentials(
+            400,
+            &json!({"error": "invalid google_sub format"}),
+            cors,
+        ));
+    }
+
+    let stored_data = read_oauth_token(&state.mqtt_client, &google_sub)
+        .await
+        .ok_or_else(|| {
+            json_response_with_credentials(404, &json!({"error": "user not found"}), cors)
+        })?;
+
+    Ok((google_sub, stored_data))
+}
+
+async fn persist_new_refresh_token(state: &ServerState, google_sub: &str, new_refresh: &str) {
+    let update_data = json!({
+        "refresh_token": new_refresh,
+        "updated_at": chrono_now_iso()
+    });
+    let topic = format!("$DB/_oauth_tokens/{google_sub}/update");
+    let update_payload = serde_json::to_vec(&update_data).unwrap_or_default();
+    if let Err(e) = state.mqtt_client.publish(&topic, update_payload).await {
+        warn!(error = %e, "failed to update refresh token");
+    }
+}
+
+fn mint_refresh_jwt(
+    state: &ServerState,
+    google_sub: &str,
+    stored_data: &serde_json::Value,
+) -> String {
     let email = stored_data
         .get("email")
         .and_then(|v| v.as_str())
@@ -389,15 +505,7 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         "picture": stored_data.get("picture")
     });
 
-    let new_jwt = sign_jwt(&new_claims, &state.jwt_config);
-
-    json_response(
-        200,
-        &json!({
-            "token": new_jwt,
-            "expires_in": state.jwt_config.expiry_secs
-        }),
-    )
+    sign_jwt(&new_claims, &state.jwt_config)
 }
 
 pub fn handle_options() -> HttpResponse {

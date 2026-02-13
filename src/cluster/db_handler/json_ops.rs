@@ -84,10 +84,6 @@ impl DbRequestHandler {
                 .await
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                self.handle_json_read(controller, entity, id, response_topic, correlation_data)
-                    .await
-            }
-            DbTopicOperation::JsonUpdate { entity, id } => {
                 if let Some(uid) = sender
                     && !self.ownership.is_admin(uid)
                     && let Some(owner_field) = self.ownership.owner_field(entity)
@@ -96,6 +92,32 @@ impl DbRequestHandler {
                 {
                     return JsonOpResult::Response(err);
                 }
+                self.handle_json_read(
+                    controller,
+                    entity,
+                    id,
+                    response_topic,
+                    correlation_data,
+                    sender,
+                )
+                .await
+            }
+            DbTopicOperation::JsonUpdate { entity, id } => {
+                let stripped_payload;
+                let effective_payload = if let Some(uid) = sender
+                    && !self.ownership.is_admin(uid)
+                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                {
+                    if let Some(err) =
+                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                    {
+                        return JsonOpResult::Response(err);
+                    }
+                    stripped_payload = Self::strip_field_from_payload(payload, owner_field);
+                    stripped_payload.as_deref().unwrap_or(payload)
+                } else {
+                    payload
+                };
                 let partition = data_partition(entity, id);
                 if !controller.is_local_partition(partition) {
                     let forwarded = controller
@@ -104,9 +126,10 @@ impl DbRequestHandler {
                             JsonDbOp::Update,
                             entity,
                             Some(id),
-                            payload,
+                            effective_payload,
                             response_topic,
                             correlation_data,
+                            sender,
                         )
                         .await;
                     return if forwarded {
@@ -122,7 +145,7 @@ impl DbRequestHandler {
                     controller,
                     entity,
                     id,
-                    payload,
+                    effective_payload,
                     sender,
                     client_id,
                     response_topic,
@@ -150,6 +173,7 @@ impl DbRequestHandler {
                             &[],
                             response_topic,
                             correlation_data,
+                            sender,
                         )
                         .await;
                     return if forwarded {
@@ -180,6 +204,16 @@ impl DbRequestHandler {
             }
             _ => JsonOpResult::NoResponse,
         }
+    }
+
+    fn strip_field_from_payload(payload: &[u8], field: &str) -> Option<Vec<u8>> {
+        let mut data: Value = serde_json::from_slice(payload).ok()?;
+        if let Value::Object(ref mut map) = data
+            && map.remove(field).is_some()
+        {
+            return serde_json::to_vec(&data).ok();
+        }
+        None
     }
 
     fn check_cluster_ownership<T: ClusterTransport>(
@@ -239,6 +273,7 @@ impl DbRequestHandler {
                     payload,
                     response_topic,
                     correlation_data,
+                    sender,
                 )
                 .await
             {
@@ -261,6 +296,7 @@ impl DbRequestHandler {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn try_forward_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -269,6 +305,7 @@ impl DbRequestHandler {
         payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let forwarded = controller
             .forward_json_db_request(
@@ -279,6 +316,7 @@ impl DbRequestHandler {
                 payload,
                 response_topic,
                 correlation_data,
+                sender,
             )
             .await;
         if forwarded {
@@ -412,6 +450,7 @@ impl DbRequestHandler {
         id: &str,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> JsonOpResult {
         let start = std::time::Instant::now();
         let partition = data_partition(entity, id);
@@ -436,6 +475,7 @@ impl DbRequestHandler {
                     &[],
                     response_topic,
                     correlation_data,
+                    sender,
                 )
                 .await;
             if forwarded {

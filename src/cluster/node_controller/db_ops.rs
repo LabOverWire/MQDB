@@ -227,6 +227,20 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         request: &JsonDbRequest,
     ) -> Option<PendingUniqueWork> {
+        if let Some(err) = self.check_forwarded_ownership(request) {
+            let response = JsonDbResponse::new(
+                request.request_id,
+                err,
+                request.response_topic.clone(),
+                request.correlation_data.clone(),
+            );
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::JsonDbResponse(response))
+                .await;
+            return None;
+        }
+
         let (response_payload, pending) = match request.op {
             JsonDbOp::Read => {
                 let id = request.id.as_deref().unwrap_or("");
@@ -309,6 +323,32 @@ impl<T: ClusterTransport> NodeController<T> {
         self.transport
             .queue_local_publish(response.response_topic.clone(), response.payload.clone(), 0)
             .await;
+    }
+
+    fn check_forwarded_ownership(&self, request: &JsonDbRequest) -> Option<Vec<u8>> {
+        let sender = request.sender.as_deref()?;
+        if self.ownership.is_admin(sender) {
+            return None;
+        }
+        let owner_field = self.ownership.owner_field(&request.entity)?;
+        let id = request.id.as_deref()?;
+        if !matches!(
+            request.op,
+            JsonDbOp::Read | JsonDbOp::Update | JsonDbOp::Delete
+        ) {
+            return None;
+        }
+        let existing = self.stores.db_get(&request.entity, id)?;
+        let data: serde_json::Value = serde_json::from_slice(&existing.data).ok()?;
+        if let Some(owner_value) = data.get(owner_field)
+            && owner_value.as_str() != Some(sender)
+        {
+            return Some(Self::json_error(
+                403,
+                &format!("user '{sender}' does not own {}/{id}", request.entity),
+            ));
+        }
+        None
     }
 
     fn handle_json_read_local(&self, entity: &str, id: &str) -> Vec<u8> {
@@ -860,6 +900,7 @@ impl<T: ClusterTransport> NodeController<T> {
         payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
     ) -> bool {
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
@@ -886,6 +927,7 @@ impl<T: ClusterTransport> NodeController<T> {
             payload.to_vec(),
             response_topic.to_string(),
             correlation_data.map(<[u8]>::to_vec),
+            sender.map(String::from),
         );
 
         let msg = ClusterMessage::JsonDbRequest { partition, request };
@@ -927,6 +969,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Some(id.to_string()),
             payload.to_vec(),
             String::new(),
+            None,
             None,
         );
         let (result, _) = self

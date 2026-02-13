@@ -195,17 +195,34 @@ mod execute {
                     id,
                     includes,
                     projection,
-                } => match self.read(entity, id, includes, projection).await {
-                    Ok(v) => Response::ok(v),
-                    Err(e) => e.into(),
-                },
-                Request::Update { entity, id, fields } => {
+                } => {
                     if let Some(uid) = sender
                         && !ownership.is_admin(uid)
                         && let Some(owner_field) = ownership.owner_field(&entity)
                         && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
                     {
                         return e.into();
+                    }
+                    match self.read(entity, id, includes, projection).await {
+                        Ok(v) => Response::ok(v),
+                        Err(e) => e.into(),
+                    }
+                }
+                Request::Update {
+                    entity,
+                    id,
+                    mut fields,
+                } => {
+                    if let Some(uid) = sender
+                        && !ownership.is_admin(uid)
+                        && let Some(owner_field) = ownership.owner_field(&entity)
+                    {
+                        if let Err(e) = self.check_ownership(&entity, &id, owner_field, uid) {
+                            return e.into();
+                        }
+                        if let Value::Object(ref mut map) = fields {
+                            map.remove(owner_field);
+                        }
                     }
                     match self
                         .update(entity, id, fields, sender, client_id, scope_config)
@@ -694,5 +711,109 @@ mod tests {
             }
             Response::Ok { .. } => panic!("expected schema validation error for bogus field"),
         }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn update_strips_ownership_field_for_non_admin() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Orig"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Update {
+                    entity: "diagrams".to_string(),
+                    id: id.clone(),
+                    fields: serde_json::json!({"userId": "bob", "title": "Hijacked"}),
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        assert!(resp.is_ok());
+
+        let read_resp = db
+            .execute(Request::Read {
+                entity: "diagrams".to_string(),
+                id,
+                includes: vec![],
+                projection: None,
+            })
+            .await;
+        match read_resp {
+            Response::Ok { data } => {
+                assert_eq!(data["userId"], "alice");
+                assert_eq!(data["title"], "Hijacked");
+            }
+            Response::Error { .. } => panic!("expected ok"),
+        }
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn read_forbidden_for_non_owner() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        let create_resp = db
+            .execute(Request::Create {
+                entity: "diagrams".to_string(),
+                data: serde_json::json!({"userId": "alice", "title": "Private"}),
+            })
+            .await;
+        let id = match &create_resp {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { .. } => panic!("expected ok"),
+        };
+
+        let resp = db
+            .execute_with_sender(
+                Request::Read {
+                    entity: "diagrams".to_string(),
+                    id: id.clone(),
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("bob"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        match resp {
+            Response::Error { code, .. } => assert_eq!(code, 403),
+            Response::Ok { .. } => panic!("expected forbidden"),
+        }
+
+        let resp = db
+            .execute_with_sender(
+                Request::Read {
+                    entity: "diagrams".to_string(),
+                    id,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &ScopeConfig::default(),
+            )
+            .await;
+        assert!(resp.is_ok());
     }
 }

@@ -12,12 +12,14 @@ pub struct JsonDbRequest {
     pub payload: Vec<u8>,
     pub response_topic: String,
     pub correlation_data: Option<Vec<u8>>,
+    pub sender: Option<String>,
 }
 
 impl JsonDbRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         request_id: u64,
         op: JsonDbOp,
@@ -26,6 +28,7 @@ impl JsonDbRequest {
         payload: Vec<u8>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
+        sender: Option<String>,
     ) -> Self {
         Self {
             request_id,
@@ -35,6 +38,7 @@ impl JsonDbRequest {
             payload,
             response_topic,
             correlation_data,
+            sender,
         }
     }
 
@@ -46,13 +50,16 @@ impl JsonDbRequest {
         let id_len = id_bytes.map_or(0, <[u8]>::len);
         let response_topic_bytes = self.response_topic.as_bytes();
         let corr_len = self.correlation_data.as_ref().map_or(0, Vec::len);
+        let sender_bytes = self.sender.as_ref().map(String::as_bytes);
+        let sender_len = sender_bytes.map_or(0, <[u8]>::len);
 
         let mut buf = Vec::with_capacity(
-            18 + entity_bytes.len()
+            19 + entity_bytes.len()
                 + id_len
                 + self.payload.len()
                 + response_topic_bytes.len()
-                + corr_len,
+                + corr_len
+                + sender_len,
         );
 
         buf.push(Self::VERSION);
@@ -72,6 +79,10 @@ impl JsonDbRequest {
         if let Some(c) = &self.correlation_data {
             buf.extend_from_slice(c);
         }
+        buf.push(sender_len as u8);
+        if let Some(sb) = sender_bytes {
+            buf.extend_from_slice(sb);
+        }
 
         buf
     }
@@ -83,7 +94,7 @@ impl JsonDbRequest {
         }
 
         let version = bytes[0];
-        if version != Self::VERSION {
+        if version != 1 && version != Self::VERSION {
             return None;
         }
 
@@ -156,6 +167,22 @@ impl JsonDbRequest {
         } else {
             None
         };
+        offset += corr_len;
+
+        let sender = if version >= 2 && offset < bytes.len() {
+            let sender_len = bytes[offset] as usize;
+            offset += 1;
+            if sender_len > 0 {
+                if bytes.len() < offset + sender_len {
+                    return None;
+                }
+                Some(String::from_utf8(bytes[offset..offset + sender_len].to_vec()).ok()?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Some(Self {
             request_id,
@@ -165,6 +192,7 @@ impl JsonDbRequest {
             payload,
             response_topic,
             correlation_data,
+            sender,
         })
     }
 }
@@ -272,5 +300,51 @@ impl JsonDbResponse {
             response_topic,
             correlation_data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_roundtrip_with_sender() {
+        let req = JsonDbRequest::new(
+            42,
+            JsonDbOp::Update,
+            "users".to_string(),
+            Some("abc".to_string()),
+            b"payload".to_vec(),
+            "resp/topic".to_string(),
+            Some(b"corr".to_vec()),
+            Some("alice".to_string()),
+        );
+        let bytes = req.to_bytes();
+        let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.request_id, 42);
+        assert_eq!(decoded.entity, "users");
+        assert_eq!(decoded.id.as_deref(), Some("abc"));
+        assert_eq!(decoded.payload, b"payload");
+        assert_eq!(decoded.response_topic, "resp/topic");
+        assert_eq!(decoded.correlation_data.as_deref(), Some(b"corr".as_ref()));
+        assert_eq!(decoded.sender.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn request_roundtrip_without_sender() {
+        let req = JsonDbRequest::new(
+            1,
+            JsonDbOp::Read,
+            "items".to_string(),
+            Some("id1".to_string()),
+            vec![],
+            "resp".to_string(),
+            None,
+            None,
+        );
+        let bytes = req.to_bytes();
+        let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.entity, "items");
+        assert!(decoded.sender.is_none());
     }
 }

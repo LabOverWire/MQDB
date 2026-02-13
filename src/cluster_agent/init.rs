@@ -129,7 +129,8 @@ impl ClusteredAgent {
 
         let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
-        let controller = NodeController::new_with_storage(
+        let ownership_arc = Arc::new(config.ownership.clone());
+        let mut controller = NodeController::new_with_storage(
             node_id,
             transport.clone(),
             transport_config,
@@ -137,6 +138,7 @@ impl ClusteredAgent {
             tx_raft_messages.clone(),
             tx_raft_events.clone(),
         );
+        controller.set_ownership(Arc::clone(&ownership_arc));
 
         if controller.stores().has_persistence() {
             match controller.stores().recover() {
@@ -211,7 +213,7 @@ impl ClusteredAgent {
             rx_batch: Some(rx_batch),
             ws_bind_address: config.ws_bind_address,
             http_config: config.http_config,
-            ownership: Arc::new(config.ownership),
+            ownership: ownership_arc,
             scope_config: Arc::new(config.scope_config),
             auth_providers: None,
         })

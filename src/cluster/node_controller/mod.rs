@@ -37,6 +37,7 @@ use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, Transpo
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::storage::StorageBackend;
+use crate::types::OwnershipConfig;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -202,6 +203,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pub(super) pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
     pub(super) next_unique_request_id: u64,
+    pub(super) ownership: Arc<OwnershipConfig>,
 }
 
 impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
@@ -232,6 +234,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_storage(
         node_id: NodeId,
         transport: T,
@@ -266,7 +269,12 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_scatter_requests: HashMap::new(),
             pending_unique_requests: HashMap::new(),
             next_unique_request_id: 1,
+            ownership: Arc::new(OwnershipConfig::default()),
         }
+    }
+
+    pub fn set_ownership(&mut self, ownership: Arc<OwnershipConfig>) {
+        self.ownership = ownership;
     }
 
     pub fn set_synced_retained_topics(

@@ -65,6 +65,11 @@ pub(crate) async fn cmd_agent_start(
 
     if let Some(http_bind) = args.oauth.http_bind {
         let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
+        if !http_config.cookie_secure {
+            tracing::warn!(
+                "session cookies will be sent without Secure flag — use --cookie-secure in production"
+            );
+        }
         agent = agent.with_http_config(http_config);
     }
 
@@ -98,6 +103,18 @@ pub(crate) fn build_auth_setup_config(
             JwtAlgorithmArg::Rs256 => JwtAlgorithm::RS256,
             JwtAlgorithmArg::Es256 => JwtAlgorithm::ES256,
         };
+        if matches!(algorithm, JwtAlgorithm::HS256) {
+            let key_bytes = std::fs::read(&key_path).map_err(|e| {
+                format!("failed to read JWT key file '{}': {e}", key_path.display())
+            })?;
+            if key_bytes.len() < 32 {
+                return Err(format!(
+                    "JWT HMAC key must be at least 32 bytes (got {})",
+                    key_bytes.len()
+                )
+                .into());
+            }
+        }
         let mut cfg = JwtConfig::new(algorithm, key_path).with_clock_skew(auth.jwt_clock_skew);
         if let Some(ref issuer) = auth.jwt_issuer {
             cfg = cfg.with_issuer(issuer);
@@ -178,6 +195,14 @@ pub(crate) fn build_http_config(
         .trim()
         .as_bytes()
         .to_vec();
+
+    if jwt_key_bytes.len() < 32 {
+        return Err(format!(
+            "JWT signing key is too short ({} bytes) — minimum 32 bytes required",
+            jwt_key_bytes.len()
+        )
+        .into());
+    }
 
     let client_id = if let Some(ref fed_config_path) = auth.federated_jwt_config {
         let content = std::fs::read_to_string(fed_config_path)?;

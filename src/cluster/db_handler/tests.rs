@@ -840,3 +840,73 @@ async fn json_list_rejects_nonexistent_filter_field() {
         json["message"]
     );
 }
+
+#[tokio::test]
+async fn update_strips_ownership_field_for_non_admin() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ownership_fields = std::collections::HashMap::new();
+    ownership_fields.insert("items".to_string(), "userId".to_string());
+    let ownership = OwnershipConfig::new(ownership_fields);
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::new(ownership));
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data = serde_json::json!({"name": "widget", "userId": "alice"});
+    ctrl.db_create("items", "i-1", &serde_json::to_vec(&data).unwrap(), 1000)
+        .await
+        .unwrap();
+
+    let update = serde_json::json!({"name": "gadget", "userId": "bob"});
+    let topic = "$DB/items/i-1/update";
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &serde_json::to_vec(&update).unwrap(),
+            Some("$DB/_resp/client1"),
+            None,
+            Some("alice"),
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["data"]["userId"], "alice");
+    assert_eq!(json["data"]["name"], "gadget");
+}
+
+#[tokio::test]
+async fn read_forbidden_for_non_owner_cluster_path() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ownership_fields = std::collections::HashMap::new();
+    ownership_fields.insert("items".to_string(), "userId".to_string());
+    let ownership = OwnershipConfig::new(ownership_fields);
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::new(ownership));
+
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data = serde_json::json!({"name": "widget", "userId": "alice"});
+    ctrl.db_create("items", "i-1", &serde_json::to_vec(&data).unwrap(), 1000)
+        .await
+        .unwrap();
+
+    let topic = "$DB/items/i-1";
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &[],
+            Some("$DB/_resp/client1"),
+            None,
+            Some("bob"),
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 403);
+}

@@ -116,9 +116,10 @@ async fn handle_request(
     let headers = req.headers().clone();
 
     let response = match (&method, path.as_str()) {
-        (&Method::OPTIONS, "/auth/ticket" | "/auth/logout" | "/auth/session") => {
-            handlers::handle_options_with_credentials(state.cors_origin.as_deref())
-        }
+        (
+            &Method::OPTIONS,
+            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/oauth/refresh",
+        ) => handlers::handle_options_with_credentials(state.cors_origin.as_deref()),
         (&Method::OPTIONS, _) => handlers::handle_options(),
         (&Method::GET, "/health") => handlers::handle_health(&state),
         (&Method::GET, "/oauth/authorize") => handlers::handle_authorize(&state).await,

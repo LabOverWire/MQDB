@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::warn;
 
 const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 const JWKS_CACHE_DURATION_SECS: u64 = 3600;
@@ -190,21 +189,6 @@ pub async fn verify_id_token(
         })?;
 
     Ok(token_data.claims)
-}
-
-#[allow(dead_code)]
-pub fn decode_id_token(id_token: &str) -> Option<IdTokenPayload> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-    warn!("decode_id_token called without verification - use verify_id_token instead");
-
-    let parts: Vec<&str> = id_token.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
-    serde_json::from_slice(&payload_bytes).ok()
 }
 
 pub fn build_authorize_url(config: &OAuthConfig, state: &str, code_challenge: &str) -> String {

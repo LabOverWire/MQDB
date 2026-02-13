@@ -130,6 +130,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 payload.to_vec(),
                 scatter_response_topic.clone(),
                 None,
+                None,
             );
 
             let msg = ClusterMessage::JsonDbRequest {
