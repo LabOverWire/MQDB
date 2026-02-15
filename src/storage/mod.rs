@@ -3,10 +3,14 @@
 
 mod backend;
 #[cfg(feature = "agent")]
+mod encrypted_backend;
+#[cfg(feature = "agent")]
 mod fjall_backend;
 mod memory_backend;
 
 pub use backend::{AsyncBatchOperations, AsyncStorageBackend, BatchOperations, StorageBackend};
+#[cfg(feature = "agent")]
+pub use encrypted_backend::EncryptedBackend;
 #[cfg(feature = "agent")]
 pub use fjall_backend::FjallBackend;
 pub use memory_backend::MemoryBackend;
@@ -29,6 +33,21 @@ impl Storage {
         let backend = FjallBackend::open(path, durability)?;
         Ok(Self {
             backend: Arc::new(backend),
+        })
+    }
+
+    /// # Errors
+    /// Returns an error if the storage backend fails to open or passphrase is invalid.
+    #[cfg(feature = "agent")]
+    pub fn open_encrypted<P: AsRef<std::path::Path>>(
+        path: P,
+        passphrase: &str,
+        durability: crate::config::DurabilityMode,
+    ) -> Result<Self> {
+        let inner = Arc::new(FjallBackend::open(path, durability)?);
+        let encrypted = EncryptedBackend::open(inner, passphrase)?;
+        Ok(Self {
+            backend: Arc::new(encrypted),
         })
     }
 

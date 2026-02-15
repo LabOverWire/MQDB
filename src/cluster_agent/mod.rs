@@ -116,6 +116,7 @@ pub struct ClusterConfig {
     pub http_config: Option<crate::http::HttpServerConfig>,
     pub ownership: crate::types::OwnershipConfig,
     pub scope_config: crate::types::ScopeConfig,
+    pub passphrase: Option<String>,
 }
 
 pub struct ClusteredAgent {

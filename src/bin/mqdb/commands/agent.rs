@@ -22,6 +22,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
+    pub(crate) passphrase_file: Option<PathBuf>,
 }
 
 pub(crate) async fn cmd_agent_start(
@@ -35,7 +36,12 @@ pub(crate) async fn cmd_agent_start(
         DurabilityArg::None => DurabilityMode::None,
     };
 
-    let config = DatabaseConfig::new(&args.db_path).with_durability(durability_mode);
+    let mut config = DatabaseConfig::new(&args.db_path).with_durability(durability_mode);
+    if let Some(ref pf) = args.passphrase_file {
+        let passphrase = std::fs::read_to_string(pf)
+            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
+        config = config.with_passphrase(passphrase.trim().to_string());
+    }
     let db = Database::open_with_config(config).await?;
 
     let auth_setup = build_auth_setup_config(&args.auth)?;

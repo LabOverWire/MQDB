@@ -66,7 +66,15 @@ impl Database {
     /// # Errors
     /// Returns an error if the database cannot be opened.
     pub async fn open_with_config(config: DatabaseConfig) -> crate::error::Result<Self> {
-        let storage = Arc::new(Storage::open(&config.path, config.durability)?);
+        let storage = if let Some(ref passphrase) = config.passphrase {
+            Arc::new(Storage::open_encrypted(
+                &config.path,
+                passphrase,
+                config.durability,
+            )?)
+        } else {
+            Arc::new(Storage::open(&config.path, config.durability)?)
+        };
         Self::init_with_storage(storage, config).await
     }
 

@@ -60,6 +60,7 @@ mod native {
         pub outbox: OutboxConfig,
         pub shared_subscription: SharedSubscriptionConfig,
         pub spawn_background_tasks: bool,
+        pub passphrase: Option<String>,
     }
 
     impl DatabaseConfig {
@@ -76,6 +77,7 @@ mod native {
                 outbox: OutboxConfig::default(),
                 shared_subscription: SharedSubscriptionConfig::default(),
                 spawn_background_tasks: true,
+                passphrase: None,
             }
         }
 
@@ -124,6 +126,12 @@ mod native {
         #[must_use]
         pub fn with_shared_subscription(mut self, config: SharedSubscriptionConfig) -> Self {
             self.shared_subscription = config;
+            self
+        }
+
+        #[must_use]
+        pub fn with_passphrase(mut self, passphrase: String) -> Self {
+            self.passphrase = Some(passphrase);
             self
         }
     }

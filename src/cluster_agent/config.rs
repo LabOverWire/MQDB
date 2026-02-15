@@ -36,6 +36,7 @@ impl ClusterConfig {
             http_config: None,
             ownership: crate::types::OwnershipConfig::default(),
             scope_config: crate::types::ScopeConfig::default(),
+            passphrase: None,
         }
     }
 
@@ -193,6 +194,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_scope_config(mut self, scope_config: crate::types::ScopeConfig) -> Self {
         self.scope_config = scope_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_passphrase(mut self, passphrase: String) -> Self {
+        self.passphrase = Some(passphrase);
         self
     }
 }

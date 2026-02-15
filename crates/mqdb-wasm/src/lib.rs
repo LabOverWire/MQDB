@@ -3,6 +3,7 @@
 
 mod constraints;
 mod crud;
+mod crypto;
 mod cursor;
 mod execute;
 mod indexeddb;
@@ -53,8 +54,77 @@ impl WasmDatabase {
     #[must_use]
     pub fn new() -> WasmDatabase {
         let storage = Arc::new(Storage::memory());
-        WasmDatabase {
-            storage: Rc::new(StorageKind::Memory(storage)),
+        Self::with_storage(StorageKind::memory(storage))
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn open_persistent(db_name: &str) -> Result<WasmDatabase, JsValue> {
+        let backend = IdbBackend::open(db_name)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        Ok(Self::with_storage(StorageKind::indexed_db(backend)))
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub async fn open_encrypted(db_name: &str, passphrase: &str) -> Result<WasmDatabase, JsValue> {
+        use crypto::{CHECK_KEY, CHECK_PLAINTEXT, CryptoHandle, SALT_KEY, generate_salt};
+        use mqdb::storage::AsyncStorageBackend;
+
+        let backend = IdbBackend::open(db_name)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let existing_salt = backend
+            .get(SALT_KEY)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let salt = if let Some(s) = existing_salt {
+            s
+        } else {
+            let new_salt = generate_salt().map_err(|e| JsValue::from_str(&e.to_string()))?;
+            backend
+                .insert(SALT_KEY, &new_salt)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            new_salt.to_vec()
+        };
+
+        let handle = CryptoHandle::derive_from_passphrase(passphrase, &salt)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let existing_check = backend
+            .get(CHECK_KEY)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        if let Some(encrypted_check) = existing_check {
+            handle
+                .decrypt(CHECK_KEY, &encrypted_check)
+                .await
+                .map_err(|_| JsValue::from_str("invalid passphrase"))?;
+        } else {
+            let encrypted = handle
+                .encrypt(CHECK_KEY, CHECK_PLAINTEXT)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            backend
+                .insert(CHECK_KEY, &encrypted)
+                .await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        }
+
+        Ok(Self::with_storage(StorageKind::encrypted_indexed_db(
+            backend, handle,
+        )))
+    }
+}
+
+impl WasmDatabase {
+    fn with_storage(storage: StorageKind) -> Self {
+        Self {
+            storage: Rc::new(storage),
             inner: Rc::new(RefCell::new(DatabaseInner {
                 schemas: HashMap::new(),
                 subscriptions: HashMap::new(),
@@ -67,31 +137,6 @@ impl WasmDatabase {
                 relationships: HashMap::new(),
             })),
         }
-    }
-
-    /// Opens a persistent database backed by `IndexedDB`.
-    ///
-    /// # Errors
-    /// Returns an error if `IndexedDB` is unavailable or the database cannot be opened.
-    pub async fn open_persistent(db_name: &str) -> Result<WasmDatabase, JsValue> {
-        let backend = IdbBackend::open(db_name)
-            .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        Ok(WasmDatabase {
-            storage: Rc::new(StorageKind::IndexedDb(backend)),
-            inner: Rc::new(RefCell::new(DatabaseInner {
-                schemas: HashMap::new(),
-                subscriptions: HashMap::new(),
-                unique_constraints: HashMap::new(),
-                not_null_constraints: HashMap::new(),
-                foreign_keys: Vec::new(),
-                indexes: HashMap::new(),
-                id_counters: HashMap::new(),
-                round_robin_counters: HashMap::new(),
-                relationships: HashMap::new(),
-            })),
-        })
     }
 }
 

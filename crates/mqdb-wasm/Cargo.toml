@@ -35,6 +35,12 @@ web-sys = { version = "0.3", features = [
     "IdbKeyRange",
     "IdbVersionChangeEvent",
     "DomException",
+    "Crypto",
+    "SubtleCrypto",
+    "CryptoKey",
+    "AesGcmParams",
+    "AesKeyGenParams",
+    "Pbkdf2Params",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

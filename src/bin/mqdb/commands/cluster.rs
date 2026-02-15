@@ -35,6 +35,7 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
+    pub(crate) passphrase_file: Option<PathBuf>,
 }
 
 pub(crate) async fn cmd_cluster_start(
@@ -106,6 +107,11 @@ pub(crate) async fn cmd_cluster_start(
         let scope_config = mqdb::ScopeConfig::parse(&event_scope_spec)
             .map_err(|e| format!("invalid --event-scope: {e}"))?;
         config = config.with_scope_config(scope_config);
+    }
+    if let Some(ref pf) = args.passphrase_file {
+        let passphrase = std::fs::read_to_string(pf)
+            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
+        config = config.with_passphrase(passphrase.trim().to_string());
     }
 
     let mut agent = ClusteredAgent::new(config)?;

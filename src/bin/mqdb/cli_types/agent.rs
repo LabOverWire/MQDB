@@ -49,6 +49,8 @@ pub(crate) enum AgentAction {
         ownership: Option<String>,
         #[arg(long, help = "Scope events by entity field (e.g. diagrams=diagramId)")]
         event_scope: Option<String>,
+        #[arg(long, help = "Path to file containing encryption passphrase")]
+        passphrase_file: Option<PathBuf>,
     },
     #[command(about = "Check broker connectivity status")]
     Status {
@@ -129,6 +131,8 @@ pub(crate) struct ClusterStartFields {
     pub(crate) ownership: Option<String>,
     #[arg(long, help = "Scope events by entity field (e.g. diagrams=diagramId)")]
     pub(crate) event_scope: Option<String>,
+    #[arg(long, help = "Path to file containing encryption passphrase")]
+    pub(crate) passphrase_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

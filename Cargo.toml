@@ -54,6 +54,7 @@ agent = [
     "dep:tokio",
     "dep:tracing-subscriber",
     "dep:lru",
+    "dep:ring",
 ]
 
 cluster = [

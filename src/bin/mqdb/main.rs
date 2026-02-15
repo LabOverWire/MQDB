@@ -144,6 +144,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
             oauth,
             ownership,
             event_scope,
+            passphrase_file,
         } => {
             cmd_agent_start(AgentStartArgs {
                 bind,
@@ -157,6 +158,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 oauth: *oauth,
                 ownership,
                 event_scope,
+                passphrase_file,
             })
             .await
         }
@@ -189,6 +191,7 @@ async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::erro
                 oauth: *fields.oauth,
                 ownership: fields.ownership,
                 event_scope: fields.event_scope,
+                passphrase_file: fields.passphrase_file,
             }))
             .await
         }

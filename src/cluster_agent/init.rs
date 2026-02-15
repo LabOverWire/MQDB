@@ -14,7 +14,7 @@ use crate::cluster::{
     QuicDirectTransport, RaftStatus, TransportConfig,
 };
 use crate::config::DurabilityMode;
-use crate::storage::FjallBackend;
+use crate::storage::{EncryptedBackend, FjallBackend};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, watch};
 use tracing::info;
@@ -27,14 +27,25 @@ impl ClusteredAgent {
     ) -> Result<Option<Arc<dyn crate::storage::StorageBackend>>, ClusterInitError> {
         if config.persist_stores {
             let stores_path = config.db_path.join("stores");
-            Ok(Some(Arc::new(
+            let backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
                 FjallBackend::open(&stores_path, config.stores_durability).map_err(|e| {
                     ClusterInitError::StorageOpen {
                         path: stores_path.clone(),
                         source: e,
                     }
                 })?,
-            )))
+            );
+            if let Some(ref passphrase) = config.passphrase {
+                let encrypted = EncryptedBackend::open(backend, passphrase).map_err(|e| {
+                    ClusterInitError::StorageOpen {
+                        path: stores_path,
+                        source: e,
+                    }
+                })?;
+                Ok(Some(Arc::new(encrypted)))
+            } else {
+                Ok(Some(backend))
+            }
         } else {
             Ok(None)
         }

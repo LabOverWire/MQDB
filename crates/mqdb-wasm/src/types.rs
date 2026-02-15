@@ -5,101 +5,155 @@ use super::{
     Arc, AsyncStorageBackend, ChangeEvent, Deserialize, Filter, HashMap, IdbBackend, JsValue,
     OnDeleteAction, Operation, Pagination, Schema, Serialize, SortDirection, SortOrder, Storage,
 };
+use crate::crypto::CryptoHandle;
+use std::rc::Rc;
 
 pub(crate) type KvPairs = Vec<(Vec<u8>, Vec<u8>)>;
 
-pub(crate) enum StorageKind {
+pub(crate) struct StorageKind {
+    backend: BackendKind,
+    crypto: Option<Rc<CryptoHandle>>,
+}
+
+enum BackendKind {
     Memory(Arc<Storage>),
     IndexedDb(IdbBackend),
 }
 
+fn err_to_js(e: impl std::fmt::Display) -> JsValue {
+    JsValue::from_str(&e.to_string())
+}
+
 impl StorageKind {
+    pub(crate) fn memory(storage: Arc<Storage>) -> Self {
+        Self {
+            backend: BackendKind::Memory(storage),
+            crypto: None,
+        }
+    }
+
+    pub(crate) fn indexed_db(backend: IdbBackend) -> Self {
+        Self {
+            backend: BackendKind::IndexedDb(backend),
+            crypto: None,
+        }
+    }
+
+    pub(crate) fn encrypted_indexed_db(backend: IdbBackend, crypto: Rc<CryptoHandle>) -> Self {
+        Self {
+            backend: BackendKind::IndexedDb(backend),
+            crypto: Some(crypto),
+        }
+    }
+
     pub(crate) async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
-        match self {
-            StorageKind::Memory(s) => s.get(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s
-                .get(key)
-                .await
-                .map_err(|e| JsValue::from_str(&e.to_string())),
+        let raw = match &self.backend {
+            BackendKind::Memory(s) => s.get(key).map_err(err_to_js)?,
+            BackendKind::IndexedDb(s) => s.get(key).await.map_err(err_to_js)?,
+        };
+        match (&self.crypto, raw) {
+            (Some(c), Some(encrypted)) => {
+                let plaintext = c.decrypt(key, &encrypted).await.map_err(err_to_js)?;
+                Ok(Some(plaintext))
+            }
+            (_, other) => Ok(other),
         }
     }
 
     pub(crate) async fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), JsValue> {
-        match self {
-            StorageKind::Memory(s) => s
-                .insert(key, value)
-                .map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s
-                .insert(key, value)
-                .await
-                .map_err(|e| JsValue::from_str(&e.to_string())),
+        let stored = if let Some(c) = &self.crypto {
+            c.encrypt(key, value).await.map_err(err_to_js)?
+        } else {
+            value.to_vec()
+        };
+        match &self.backend {
+            BackendKind::Memory(s) => s.insert(key, &stored).map_err(err_to_js),
+            BackendKind::IndexedDb(s) => s.insert(key, &stored).await.map_err(err_to_js),
         }
     }
 
     pub(crate) async fn remove(&self, key: &[u8]) -> Result<(), JsValue> {
-        match self {
-            StorageKind::Memory(s) => s.remove(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s
-                .remove(key)
-                .await
-                .map_err(|e| JsValue::from_str(&e.to_string())),
+        match &self.backend {
+            BackendKind::Memory(s) => s.remove(key).map_err(err_to_js),
+            BackendKind::IndexedDb(s) => s.remove(key).await.map_err(err_to_js),
         }
     }
 
     pub(crate) async fn prefix_scan(&self, prefix: &[u8]) -> Result<KvPairs, JsValue> {
-        match self {
-            StorageKind::Memory(s) => s
-                .prefix_scan(prefix)
-                .map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(s) => s
-                .prefix_scan(prefix)
-                .await
-                .map_err(|e| JsValue::from_str(&e.to_string())),
+        let raw = match &self.backend {
+            BackendKind::Memory(s) => s.prefix_scan(prefix).map_err(err_to_js)?,
+            BackendKind::IndexedDb(s) => s.prefix_scan(prefix).await.map_err(err_to_js)?,
+        };
+        if let Some(c) = &self.crypto {
+            let mut decrypted = Vec::with_capacity(raw.len());
+            for (k, v) in raw {
+                let plaintext = c.decrypt(&k, &v).await.map_err(err_to_js)?;
+                decrypted.push((k, plaintext));
+            }
+            Ok(decrypted)
+        } else {
+            Ok(raw)
         }
     }
 
     pub(crate) fn get_sync(&self, key: &[u8]) -> Result<Option<Vec<u8>>, JsValue> {
-        match self {
-            StorageKind::Memory(s) => s.get(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(_) => {
+        if self.crypto.is_some() {
+            return Err(JsValue::from_str(
+                "sync operations not available with encryption",
+            ));
+        }
+        match &self.backend {
+            BackendKind::Memory(s) => s.get(key).map_err(err_to_js),
+            BackendKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
         }
     }
 
     pub(crate) fn insert_sync(&self, key: &[u8], value: &[u8]) -> Result<(), JsValue> {
-        match self {
-            StorageKind::Memory(s) => s
-                .insert(key, value)
-                .map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(_) => {
+        if self.crypto.is_some() {
+            return Err(JsValue::from_str(
+                "sync operations not available with encryption",
+            ));
+        }
+        match &self.backend {
+            BackendKind::Memory(s) => s.insert(key, value).map_err(err_to_js),
+            BackendKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
         }
     }
 
     pub(crate) fn remove_sync(&self, key: &[u8]) -> Result<(), JsValue> {
-        match self {
-            StorageKind::Memory(s) => s.remove(key).map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(_) => {
+        if self.crypto.is_some() {
+            return Err(JsValue::from_str(
+                "sync operations not available with encryption",
+            ));
+        }
+        match &self.backend {
+            BackendKind::Memory(s) => s.remove(key).map_err(err_to_js),
+            BackendKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
         }
     }
 
     pub(crate) fn prefix_scan_sync(&self, prefix: &[u8]) -> Result<KvPairs, JsValue> {
-        match self {
-            StorageKind::Memory(s) => s
-                .prefix_scan(prefix)
-                .map_err(|e| JsValue::from_str(&e.to_string())),
-            StorageKind::IndexedDb(_) => {
+        if self.crypto.is_some() {
+            return Err(JsValue::from_str(
+                "sync operations not available with encryption",
+            ));
+        }
+        match &self.backend {
+            BackendKind::Memory(s) => s.prefix_scan(prefix).map_err(err_to_js),
+            BackendKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
         }
     }
 
     pub(crate) fn is_memory(&self) -> bool {
-        matches!(self, StorageKind::Memory(_))
+        matches!(self.backend, BackendKind::Memory(_))
     }
 }
 
