@@ -475,27 +475,28 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 
 ## Distributed Clustering
 
-MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 256 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams, providing multiplexed, TLS-encrypted, low-overhead transport.
+MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 256 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams with mTLS mutual authentication.
 
 ### Starting a Cluster
 
 ```bash
-# Generate TLS certificates for QUIC transport
+# Generate TLS certificates for QUIC transport (includes both serverAuth and clientAuth EKU)
 ./scripts/generate_test_certs.sh
 
 # Node 1 (first node becomes Raft leader)
 ./target/release/mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 \
-    --db /tmp/mqdb-node1 --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+    --db /tmp/mqdb-node1 \
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 
 # Node 2 (joins via peer)
 ./target/release/mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 \
     --db /tmp/mqdb-node2 --peers "1@127.0.0.1:1883" \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 
 # Node 3 (joins via peer)
 ./target/release/mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 \
     --db /tmp/mqdb-node3 --peers "1@127.0.0.1:1883" \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
 ### Cluster CLI Commands
@@ -533,17 +534,27 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 | `--bind` | MQTT listener address (default: 0.0.0.0:1883) |
 | `--db` | Database directory path |
 | `--peers` | Peer nodes to join (format: id@host:port) |
-| `--quic-cert` | TLS certificate for QUIC transport |
+| `--quic-cert` | TLS certificate for QUIC transport (must have serverAuth + clientAuth EKU) |
 | `--quic-key` | TLS private key for QUIC transport |
+| `--quic-ca` | CA certificate for mTLS peer verification (required for mTLS) |
 | `--no-quic` | Disable QUIC and cluster communication (standalone mode) |
 | `--no-persist-stores` | Disable store persistence (data lost on restart) |
 
 ### Cluster Transport
 
-MQDB uses QUIC streams for all inter-node cluster communication — direct node-to-node with multiplexed streams, built-in flow control, and TLS encryption for all cluster traffic.
+MQDB uses QUIC streams for all inter-node cluster communication — direct node-to-node with multiplexed streams, built-in flow control, and mTLS mutual authentication.
+
+Each node exposes two QUIC endpoints that share the same certificate:
+
+| Endpoint | Port | Purpose |
+|----------|------|---------|
+| MQTT broker QUIC listener | `--bind` port (e.g., 1883) | MQTT clients connecting over QUIC |
+| Cluster inter-node transport | `--bind` port + 100 (e.g., 1983) | Heartbeats, Raft consensus, data replication |
+
+When `--quic-ca` is provided, the cluster transport enables mTLS: each node verifies the peer's certificate against the CA before accepting or initiating a connection. The same `--quic-cert`/`--quic-key` serves both server and client roles. Without `--quic-ca`, the cluster falls back to one-way TLS with a warning.
 
 ```bash
-# Start a 3-node cluster (QUIC transport is the default)
+# Start a 3-node cluster with mTLS (QUIC transport is the default)
 mqdb dev start-cluster --nodes 3 --clean
 ```
 

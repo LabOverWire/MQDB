@@ -47,6 +47,8 @@ pub struct QuicDirectTransport {
     local_publish_tx: flume::Sender<LocalPublishRequest>,
     local_publish_rx: flume::Receiver<LocalPublishRequest>,
     ca_file: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
+    cert_file: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
+    key_file: Arc<std::sync::RwLock<Option<std::path::PathBuf>>>,
     #[cfg(feature = "dev-insecure")]
     insecure: Arc<AtomicBool>,
 }
@@ -74,6 +76,8 @@ impl Clone for QuicDirectTransport {
             local_publish_tx: self.local_publish_tx.clone(),
             local_publish_rx: self.local_publish_rx.clone(),
             ca_file: self.ca_file.clone(),
+            cert_file: self.cert_file.clone(),
+            key_file: self.key_file.clone(),
             #[cfg(feature = "dev-insecure")]
             insecure: self.insecure.clone(),
         }
@@ -99,6 +103,8 @@ impl QuicDirectTransport {
             local_publish_tx,
             local_publish_rx,
             ca_file: Arc::new(std::sync::RwLock::new(None)),
+            cert_file: Arc::new(std::sync::RwLock::new(None)),
+            key_file: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "dev-insecure")]
             insecure: Arc::new(AtomicBool::new(false)),
         }
@@ -107,6 +113,15 @@ impl QuicDirectTransport {
     pub fn set_ca_file(&self, ca_path: std::path::PathBuf) {
         if let Ok(mut guard) = self.ca_file.write() {
             *guard = Some(ca_path);
+        }
+    }
+
+    pub fn set_cert_key_files(&self, cert_path: std::path::PathBuf, key_path: std::path::PathBuf) {
+        if let Ok(mut guard) = self.cert_file.write() {
+            *guard = Some(cert_path);
+        }
+        if let Ok(mut guard) = self.key_file.write() {
+            *guard = Some(key_path);
         }
     }
 
@@ -143,7 +158,8 @@ impl QuicDirectTransport {
         cert_path: &Path,
         key_path: &Path,
     ) -> Result<(), TransportError> {
-        let server_config = build_server_config(cert_path, key_path)?;
+        let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
+        let server_config = build_server_config(cert_path, key_path, ca_file.as_deref())?;
 
         let endpoint = Endpoint::server(server_config, addr).map_err(|e| {
             TransportError::SendFailed(format!("failed to bind QUIC endpoint: {e}"))
@@ -182,14 +198,24 @@ impl QuicDirectTransport {
             .ok_or(TransportError::NotConnected)?;
 
         let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
+        let client_cert = self.cert_file.read().ok().and_then(|g| g.clone());
+        let client_key = self.key_file.read().ok().and_then(|g| g.clone());
         #[cfg(feature = "dev-insecure")]
         let client_config = if self.insecure.load(Ordering::SeqCst) {
-            build_client_config_insecure()?
+            build_client_config_insecure(client_cert.as_deref(), client_key.as_deref())?
         } else {
-            build_client_config_secure(ca_file.as_deref())?
+            build_client_config_secure(
+                ca_file.as_deref(),
+                client_cert.as_deref(),
+                client_key.as_deref(),
+            )?
         };
         #[cfg(not(feature = "dev-insecure"))]
-        let client_config = build_client_config_secure(ca_file.as_deref())?;
+        let client_config = build_client_config_secure(
+            ca_file.as_deref(),
+            client_cert.as_deref(),
+            client_key.as_deref(),
+        )?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -648,7 +674,11 @@ fn parse_message(payload: &[u8], local_node: NodeId) -> Option<InboundMessage> {
     Some(inbound)
 }
 
-fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig, TransportError> {
+fn build_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+    ca_path: Option<&Path>,
+) -> Result<ServerConfig, TransportError> {
     let cert_file = std::fs::File::open(cert_path)
         .map_err(|e| TransportError::SendFailed(format!("failed to open cert file: {e}")))?;
     let key_file = std::fs::File::open(key_path)
@@ -670,10 +700,39 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
             TransportError::SendFailed("no private key found in key file".to_string())
         })?;
 
-    let server_crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| TransportError::SendFailed(format!("failed to build TLS config: {e}")))?;
+    let server_crypto = if let Some(ca_path) = ca_path {
+        let ca_file = std::fs::File::open(ca_path)
+            .map_err(|e| TransportError::SendFailed(format!("failed to open CA file: {e}")))?;
+        let ca_certs: Vec<CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| {
+                    TransportError::SendFailed(format!("failed to parse CA cert: {e}"))
+                })?;
+        let mut root_store = rustls::RootCertStore::empty();
+        for cert in ca_certs {
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::SendFailed(format!("failed to add CA cert: {e}")))?;
+        }
+        let client_verifier =
+            rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+                .build()
+                .map_err(|e| {
+                    TransportError::SendFailed(format!("failed to build client verifier: {e}"))
+                })?;
+        info!("QUIC server configured with mTLS (client certificate required)");
+        rustls::ServerConfig::builder()
+            .with_client_cert_verifier(client_verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| TransportError::SendFailed(format!("failed to build TLS config: {e}")))?
+    } else {
+        warn!("QUIC server configured WITHOUT mTLS - no CA provided for client verification");
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| TransportError::SendFailed(format!("failed to build TLS config: {e}")))?
+    };
 
     let server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).map_err(|e| {
@@ -686,6 +745,8 @@ fn build_server_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig
 
 fn build_client_config_secure(
     ca_file: Option<&Path>,
+    client_cert_path: Option<&Path>,
+    client_key_path: Option<&Path>,
 ) -> Result<quinn::ClientConfig, TransportError> {
     let mut root_store = rustls::RootCertStore::empty();
 
@@ -721,9 +782,41 @@ fn build_client_config_secure(
         ));
     }
 
-    let crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let crypto =
+        if let (Some(cert_path), Some(key_path)) = (client_cert_path, client_key_path) {
+            let cert_file = std::fs::File::open(cert_path).map_err(|e| {
+                TransportError::SendFailed(format!("failed to open client cert: {e}"))
+            })?;
+            let key_file = std::fs::File::open(key_path).map_err(|e| {
+                TransportError::SendFailed(format!("failed to open client key: {e}"))
+            })?;
+            let client_certs: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut BufReader::new(cert_file))
+                    .filter_map(Result::ok)
+                    .collect();
+            let client_key =
+                rustls_pemfile::private_key(&mut BufReader::new(key_file))
+                    .map_err(|e| {
+                        TransportError::SendFailed(format!("failed to parse client key: {e}"))
+                    })?
+                    .ok_or_else(|| {
+                        TransportError::SendFailed(
+                            "no private key found in client key file".to_string(),
+                        )
+                    })?;
+            info!("QUIC client configured with mTLS (presenting client certificate)");
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(client_certs, client_key)
+                .map_err(|e| {
+                    TransportError::SendFailed(format!("failed to configure client auth: {e}"))
+                })?
+        } else {
+            warn!("QUIC client configured WITHOUT client certificate");
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
         TransportError::SendFailed(format!("failed to create QUIC client config: {e}"))
@@ -733,11 +826,45 @@ fn build_client_config_secure(
 }
 
 #[cfg(feature = "dev-insecure")]
-fn build_client_config_insecure() -> Result<quinn::ClientConfig, TransportError> {
-    let crypto = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-        .with_no_client_auth();
+fn build_client_config_insecure(
+    client_cert_path: Option<&Path>,
+    client_key_path: Option<&Path>,
+) -> Result<quinn::ClientConfig, TransportError> {
+    let crypto =
+        if let (Some(cert_path), Some(key_path)) = (client_cert_path, client_key_path) {
+            let cert_file = std::fs::File::open(cert_path).map_err(|e| {
+                TransportError::SendFailed(format!("failed to open client cert: {e}"))
+            })?;
+            let key_file = std::fs::File::open(key_path).map_err(|e| {
+                TransportError::SendFailed(format!("failed to open client key: {e}"))
+            })?;
+            let client_certs: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut BufReader::new(cert_file))
+                    .filter_map(Result::ok)
+                    .collect();
+            let client_key =
+                rustls_pemfile::private_key(&mut BufReader::new(key_file))
+                    .map_err(|e| {
+                        TransportError::SendFailed(format!("failed to parse client key: {e}"))
+                    })?
+                    .ok_or_else(|| {
+                        TransportError::SendFailed(
+                            "no private key found in client key file".to_string(),
+                        )
+                    })?;
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_client_auth_cert(client_certs, client_key)
+                .map_err(|e| {
+                    TransportError::SendFailed(format!("failed to configure client auth: {e}"))
+                })?
+        } else {
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_no_client_auth()
+        };
 
     let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
         TransportError::SendFailed(format!("failed to create QUIC client config: {e}"))

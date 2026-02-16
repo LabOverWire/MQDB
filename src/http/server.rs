@@ -6,7 +6,7 @@ use super::jwt_signer::JwtSigningConfig;
 use super::oauth::OAuthConfig;
 use super::pkce::PkceCache;
 use super::rate_limiter::RateLimiter;
-use super::session_store::SessionStore;
+use super::session_store::{JtiRevocationStore, SessionStore};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -68,6 +68,7 @@ impl HttpServer {
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
+            jti_revocation: JtiRevocationStore::new(),
         });
 
         loop {

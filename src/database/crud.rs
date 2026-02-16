@@ -316,12 +316,9 @@ impl Database {
             id: id.to_string(),
         })?;
         let entity = Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
-        if let Some(owner_value) = entity.data.get(owner_field)
-            && owner_value.as_str() != Some(sender)
-        {
-            return Err(Error::Forbidden(format!(
-                "user '{sender}' does not own {entity_name}/{id}"
-            )));
+        let owner_value = entity.data.get(owner_field).and_then(|v| v.as_str());
+        if owner_value != Some(sender) {
+            return Err(Error::Forbidden("permission denied".to_string()));
         }
         Ok(())
     }

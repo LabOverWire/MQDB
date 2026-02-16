@@ -124,17 +124,37 @@ impl Response {
 impl From<Error> for Response {
     fn from(e: Error) -> Self {
         let (code, message) = match &e {
-            Error::NotFound { .. } => (ErrorCode::NotFound, e.to_string()),
-            Error::Validation(_) | Error::SchemaViolation { .. } => {
-                (ErrorCode::BadRequest, e.to_string())
+            Error::NotFound { entity, .. } => (ErrorCode::NotFound, format!("not found: {entity}")),
+            Error::Validation(msg) => (ErrorCode::BadRequest, format!("validation error: {msg}")),
+            Error::SchemaViolation { field, reason, .. } => (
+                ErrorCode::BadRequest,
+                format!("schema validation failed: {field} - {reason}"),
+            ),
+            Error::Forbidden(_) => (ErrorCode::Forbidden, "forbidden".to_string()),
+            Error::ConstraintViolation(msg) => {
+                (ErrorCode::Conflict, format!("constraint violation: {msg}"))
             }
-            Error::Forbidden(_) => (ErrorCode::Forbidden, e.to_string()),
-            Error::ConstraintViolation(_)
-            | Error::UniqueViolation { .. }
-            | Error::ForeignKeyViolation { .. }
-            | Error::NotNullViolation { .. }
-            | Error::Conflict(_) => (ErrorCode::Conflict, e.to_string()),
-            _ => (ErrorCode::Internal, e.to_string()),
+            Error::UniqueViolation { entity, field, .. } => (
+                ErrorCode::Conflict,
+                format!("unique constraint violation: {entity}.{field}"),
+            ),
+            Error::ForeignKeyViolation { entity, field, .. } => (
+                ErrorCode::Conflict,
+                format!("foreign key violation: {entity}.{field}"),
+            ),
+            Error::ForeignKeyRestrict { entity, .. } => (
+                ErrorCode::Conflict,
+                format!("cannot delete {entity}: referenced by other entities"),
+            ),
+            Error::NotNullViolation { entity, field } => (
+                ErrorCode::Conflict,
+                format!("not null violation: {entity}.{field}"),
+            ),
+            Error::Conflict(msg) => (ErrorCode::Conflict, format!("conflict: {msg}")),
+            _ => {
+                tracing::error!(error = %e, "internal error in client request");
+                (ErrorCode::Internal, "internal error".to_string())
+            }
         };
         Response::error(code, message)
     }
@@ -416,7 +436,7 @@ mod tests {
         match resp {
             Response::Error { code, message } => {
                 assert_eq!(code, 403);
-                assert!(message.contains("bob"));
+                assert!(message.contains("forbidden"));
             }
             Response::Ok { .. } => panic!("expected forbidden"),
         }

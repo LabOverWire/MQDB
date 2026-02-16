@@ -59,7 +59,7 @@ openssl req -new -key "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" \
 cat > "$CERT_DIR/server_ext.cnf" <<EOF
 basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
+extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = DNS:localhost,IP:127.0.0.1
 EOF
 

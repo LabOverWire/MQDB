@@ -106,6 +106,66 @@ pub struct SessionRef {
     pub picture: Option<String>,
 }
 
+const MAX_REVOKED_JTIS: usize = 10_000;
+const JTI_TTL_SECS: u64 = 30 * 24 * 3600;
+
+pub struct JtiRevocationStore {
+    revoked: RwLock<HashMap<String, SystemTime>>,
+}
+
+impl Default for JtiRevocationStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl JtiRevocationStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            revoked: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn revoke(&self, jti: &str) {
+        let Ok(mut store) = self.revoked.write() else {
+            return;
+        };
+        cleanup_revoked(&mut store);
+        if store.len() < MAX_REVOKED_JTIS {
+            store.insert(jti.to_string(), SystemTime::now());
+        }
+    }
+
+    #[must_use]
+    pub fn is_revoked(&self, jti: &str) -> bool {
+        let Ok(store) = self.revoked.read() else {
+            return true;
+        };
+        store.contains_key(jti)
+    }
+
+    #[must_use]
+    pub fn generate_jti() -> String {
+        let rng = SystemRandom::new();
+        let mut bytes = [0u8; 16];
+        if rng.fill(&mut bytes).is_err() {
+            return hex_encode(
+                &SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+                    .to_le_bytes(),
+            );
+        }
+        hex_encode(&bytes)
+    }
+}
+
+fn cleanup_revoked(store: &mut HashMap<String, SystemTime>) {
+    let ttl = Duration::from_secs(JTI_TTL_SECS);
+    store.retain(|_, added_at| added_at.elapsed().map_or(true, |elapsed| elapsed < ttl));
+}
+
 fn is_expired(session: &Session) -> bool {
     let ttl = Duration::from_secs(SESSION_TTL_SECS);
     session

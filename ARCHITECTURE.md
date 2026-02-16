@@ -1713,7 +1713,7 @@ This mechanism is secure because the credentials are node-local, random, and eph
 
 #### Cluster Interaction
 
-In a cluster, each node's internal client only ever connects to its own local broker instance to perform privileged operations. The results of these operations (e.g., a state change) are then propagated to other nodes via the underlying cluster transport (which is secured by mTLS), not by having one node's internal client connect to another node.
+In a cluster, each node's internal client only ever connects to its own local broker instance to perform privileged operations. The results of these operations (e.g., a state change) are then propagated to other nodes via the underlying cluster transport (secured by mTLS when --quic-ca is provided), not by having one node's internal client connect to another node.
 
 ### Source Files
 

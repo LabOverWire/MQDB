@@ -225,14 +225,12 @@ impl DbRequestHandler {
         sender: &str,
     ) -> Option<Vec<u8>> {
         let existing = controller.db_get(entity, id)?;
-        let data: Value = serde_json::from_slice(&existing.data).ok()?;
-        if let Some(owner_value) = data.get(owner_field)
-            && owner_value.as_str() != Some(sender)
-        {
-            return Some(Self::json_error(
-                403,
-                &format!("user '{sender}' does not own {entity}/{id}"),
-            ));
+        let Ok(data) = serde_json::from_slice::<Value>(&existing.data) else {
+            return Some(Self::json_error(403, "permission denied"));
+        };
+        let owner_value = data.get(owner_field).and_then(Value::as_str);
+        if owner_value != Some(sender) {
+            return Some(Self::json_error(403, "permission denied"));
         }
         None
     }
@@ -1100,17 +1098,13 @@ impl DbRequestHandler {
         event: ChangeEvent,
     ) {
         let topic = event.event_topic(0);
-        let user_properties: Vec<(String, String)> = event
-            .client_id
-            .as_ref()
-            .map(|s| vec![("x-origin-client-id".to_string(), s.clone())])
-            .unwrap_or_default();
-        match serde_json::to_vec(&event) {
+        let sanitized = event.into_notification();
+        match serde_json::to_vec(&sanitized) {
             Ok(payload) => {
                 tracing::debug!(topic, "publishing change event");
                 controller
                     .transport()
-                    .queue_local_publish_with_properties(topic, payload, 1, user_properties)
+                    .queue_local_publish(topic, payload, 1)
                     .await;
             }
             Err(e) => {

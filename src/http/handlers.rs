@@ -6,7 +6,7 @@ use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::oauth::{self, OAuthConfig};
 use super::pkce::PkceCache;
 use super::rate_limiter::RateLimiter;
-use super::session_store::SessionStore;
+use super::session_store::{JtiRevocationStore, SessionStore};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::Response;
@@ -47,6 +47,7 @@ pub struct ServerState {
     pub cookie_secure: bool,
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
+    pub jti_revocation: JtiRevocationStore,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -289,7 +290,7 @@ async fn exchange_and_verify_callback(
             error!(error = %e, "OAuth token exchange failed");
             return Err(json_response(
                 502,
-                &json!({"error": format!("token exchange failed: {e}")}),
+                &json!({"error": "token exchange failed"}),
             ));
         }
     };
@@ -305,10 +306,7 @@ async fn exchange_and_verify_callback(
         Ok(payload) => payload,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
-            return Err(json_response(
-                401,
-                &json!({"error": format!("id_token verification failed: {e}")}),
-            ));
+            return Err(json_response(401, &json!({"error": "authentication failed"})));
         }
     };
 
@@ -357,6 +355,7 @@ fn mint_callback_jwt(state: &ServerState, id_payload: &oauth::IdTokenPayload) ->
         "aud": state.jwt_config.audience,
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
+        "jti": JtiRevocationStore::generate_jti(),
         "google_sub": id_payload.sub,
         "email": id_payload.email,
         "name": id_payload.name,
@@ -393,7 +392,7 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
                 error!(error = %e, "Google token refresh failed");
                 return json_response_with_credentials(
                     502,
-                    &json!({"error": format!("refresh failed: {e}")}),
+                    &json!({"error": "token refresh failed"}),
                     cors,
                 );
             }
@@ -435,6 +434,16 @@ async fn validate_refresh_request(
     let payload = verify_jwt_ignore_expiry(expired_token, &state.jwt_config).ok_or_else(|| {
         json_response_with_credentials(401, &json!({"error": "invalid or tampered token"}), cors)
     })?;
+
+    if let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
+        && state.jti_revocation.is_revoked(jti)
+    {
+        return Err(json_response_with_credentials(
+            401,
+            &json!({"error": "token has been revoked"}),
+            cors,
+        ));
+    }
 
     let google_sub = payload
         .get("google_sub")
@@ -499,6 +508,7 @@ fn mint_refresh_jwt(
         "aud": state.jwt_config.audience,
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
+        "jti": JtiRevocationStore::generate_jti(),
         "google_sub": google_sub,
         "email": stored_data.get("email"),
         "name": stored_data.get("name"),
@@ -574,6 +584,7 @@ pub fn handle_ticket(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
         "aud": state.jwt_config.audience,
         "exp": now + state.ticket_expiry_secs,
         "iat": now,
+        "jti": JtiRevocationStore::generate_jti(),
         "google_sub": session.google_sub,
         "email": session.email,
         "name": session.name,
@@ -601,6 +612,12 @@ pub fn handle_logout(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
         .unwrap_or("");
 
     if let Some(session_id) = parse_session_id(cookie_header) {
+        if let Some(session) = state.session_store.get(session_id)
+            && let Some(payload) = verify_jwt_ignore_expiry(&session.jwt, &state.jwt_config)
+            && let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
+        {
+            state.jti_revocation.revoke(jti);
+        }
         state.session_store.destroy(session_id);
     }
 

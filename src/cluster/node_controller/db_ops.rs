@@ -339,14 +339,12 @@ impl<T: ClusterTransport> NodeController<T> {
             return None;
         }
         let existing = self.stores.db_get(&request.entity, id)?;
-        let data: serde_json::Value = serde_json::from_slice(&existing.data).ok()?;
-        if let Some(owner_value) = data.get(owner_field)
-            && owner_value.as_str() != Some(sender)
-        {
-            return Some(Self::json_error(
-                403,
-                &format!("user '{sender}' does not own {}/{id}", request.entity),
-            ));
+        let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
+            return Some(Self::json_error(403, "permission denied"));
+        };
+        let owner_value = data.get(owner_field).and_then(serde_json::Value::as_str);
+        if owner_value != Some(sender) {
+            return Some(Self::json_error(403, "permission denied"));
         }
         None
     }

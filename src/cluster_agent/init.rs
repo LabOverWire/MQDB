@@ -74,6 +74,9 @@ impl ClusteredAgent {
         if let Some(ca_path) = &config.quic.ca_file {
             quic_transport.set_ca_file(ca_path.clone());
         }
+        if let (Some(cert), Some(key)) = (&config.quic.cert_file, &config.quic.key_file) {
+            quic_transport.set_cert_key_files(cert.clone(), key.clone());
+        }
         let inbox_rx = quic_transport.inbox_rx();
         (ClusterTransportKind::Quic(quic_transport), inbox_rx)
     }

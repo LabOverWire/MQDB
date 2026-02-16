@@ -606,8 +606,27 @@ Direct QUIC:      Node 1 → QUIC stream → Node 2 listener → inbox (bypasses
 - Each node creates QUIC client connections to configured `--peers` via `connect_to_peer()`
 - Messages use length-prefixed framing: `[u32 length][u16 sender][u8 msg_type][payload]`
 - Same binary protocol as MQTT transport (heartbeats, Raft, replication)
-- TLS configuration reuses `--quic-cert` and `--quic-key` files with insecure client verification
 - `receiver_task()` runs for each connection, parsing incoming messages into `InboundMessage`
+
+**TLS / mTLS**:
+
+Each node has two QUIC endpoints that share the same `--quic-cert`, `--quic-key`, and `--quic-ca` files:
+
+| Endpoint | Port | Purpose | Auth |
+|----------|------|---------|------|
+| MQTT broker QUIC listener | `--bind` port (e.g., 1883) | MQTT clients connecting over QUIC | MQTT-level auth (password, SCRAM, JWT) |
+| Cluster inter-node transport | `--bind` port + 100 (e.g., 1983) | Heartbeats, Raft, replication, forwarded publishes | mTLS (when `--quic-ca` provided) |
+
+When `--quic-ca` is provided:
+- **Server side**: `WebPkiClientVerifier` requires connecting nodes to present a valid client certificate signed by the CA
+- **Client side**: Node presents its own `--quic-cert`/`--quic-key` as client identity via `with_client_auth_cert()`
+- The same certificate serves both roles (server and client); it must have both `serverAuth` and `clientAuth` Extended Key Usage
+
+When `--quic-ca` is omitted:
+- Falls back to one-way TLS (server presents cert, client verifies it, but server does not verify client)
+- A warning is logged: "QUIC server configured WITHOUT mTLS"
+
+The `generate_test_certs.sh` script produces certificates with both `serverAuth` and `clientAuth` EKU for this dual-role usage. Production deployments should use a dedicated CA for cluster certificates, separate from any CA used for external client TLS.
 
 **Key Data Structures**:
 ```rust
@@ -658,9 +677,10 @@ struct QuicDirectTransport {
 ```bash
 mqdb dev start-cluster --nodes 3 --clean
 
-# Or manually:
+# Or manually (with mTLS):
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/n1 \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key \
+    --quic-ca test_certs/ca.pem
 ```
 
 **Key Files**: `quic_transport.rs`, `cluster_agent.rs` (transport selection)

@@ -344,7 +344,12 @@ async fn json_update_forbidden_for_non_owner() {
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], 403);
-    assert!(json["message"].as_str().unwrap().contains("bob"));
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap()
+            .contains("permission denied")
+    );
 }
 
 #[tokio::test]

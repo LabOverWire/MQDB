@@ -6,6 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeEventNotification {
+    pub sequence: u64,
+    pub entity: String,
+    pub id: String,
+    pub operation: Operation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operation {
     Create,
@@ -72,6 +80,16 @@ impl ChangeEvent {
     pub fn with_scope(mut self, scope: Option<(String, String)>) -> Self {
         self.scope = scope;
         self
+    }
+
+    #[must_use]
+    pub fn into_notification(self) -> ChangeEventNotification {
+        ChangeEventNotification {
+            sequence: self.sequence,
+            entity: self.entity,
+            id: self.id,
+            operation: self.operation,
+        }
     }
 
     #[must_use]
