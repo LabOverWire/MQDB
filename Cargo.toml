@@ -140,5 +140,5 @@ panic = "abort"
 opt-level = "z"
 
 [patch.crates-io]
-mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }
-mqtt5-protocol = { path = "../mqtt-lib/crates/mqtt5-protocol" }
+mqtt5 = { git = "https://github.com/LabOverWire/mqtt-lib.git" }
+mqtt5-protocol = { git = "https://github.com/LabOverWire/mqtt-lib.git" }

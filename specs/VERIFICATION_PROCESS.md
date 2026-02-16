@@ -6,7 +6,7 @@ Use TLA+ models verified by `tlc-executor` to find real bugs in MQDB's distribut
 
 ## Tool
 
-All models are checked with `tlc-executor` at `/Volumes/SanDisk 4TB/repos/tlc-executor`. Specs live in `/Volumes/SanDisk 4TB/repos/tlc-executor/test_cases/mqdb/`. The Rust implementation lives at `/Volumes/SanDisk 4TB/repos/MQDB/`.
+All models are checked with `tlc-executor`. Specs live in the `test_cases/mqdb/` directory of the `tlc-executor` repository.
 
 Run models with:
 ```bash
