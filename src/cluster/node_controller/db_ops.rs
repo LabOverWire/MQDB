@@ -392,6 +392,18 @@ impl<T: ClusterTransport> NodeController<T> {
                     existing_obj.insert(key, value);
                 }
             }
+
+            let existing_version = old_data
+                .get("_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if let Value::Object(ref mut obj) = merged {
+                obj.insert(
+                    "_version".to_string(),
+                    Value::Number((existing_version + 1).into()),
+                );
+            }
+
             (old_data, merged)
         } else {
             return (
@@ -547,6 +559,11 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         Self::apply_ttl_expiry(&mut data);
+
+        if let serde_json::Value::Object(ref mut obj) = data {
+            obj.remove("_version");
+            obj.insert("_version".to_string(), serde_json::Value::Number(1.into()));
+        }
 
         let id = if let Some(client_id) = data.get("id").and_then(serde_json::Value::as_str) {
             client_id.to_string()

@@ -46,6 +46,11 @@ impl Database {
             obj.remove("ttl_secs");
         }
 
+        if let Value::Object(ref mut obj) = data {
+            obj.remove("_version");
+            obj.insert("_version".to_string(), Value::Number(1.into()));
+        }
+
         let schema_registry = self.schema_registry.read().await;
         schema_registry.validate_entity(&entity_name, &data)?;
         drop(schema_registry);
@@ -141,6 +146,18 @@ impl Database {
             for (key, value) in updates {
                 existing.insert(key, value);
             }
+        }
+
+        let existing_version = existing_entity
+            .data
+            .get("_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if let Value::Object(ref mut obj) = updated_data {
+            obj.insert(
+                "_version".to_string(),
+                Value::Number((existing_version + 1).into()),
+            );
         }
 
         let schema_registry = self.schema_registry.read().await;
@@ -258,6 +275,14 @@ impl Database {
 
                         if let Some(obj) = entity.data.as_object_mut() {
                             obj.insert(set_null_op.field.clone(), serde_json::Value::Null);
+                            let v = obj
+                                .get("_version")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            obj.insert(
+                                "_version".to_string(),
+                                serde_json::Value::Number((v + 1).into()),
+                            );
                         }
 
                         batch.insert(entity_key, entity.serialize()?);

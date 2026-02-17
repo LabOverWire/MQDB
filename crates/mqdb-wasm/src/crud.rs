@@ -46,6 +46,11 @@ impl WasmDatabase {
         self.validate_unique_async(&entity, &value, None).await?;
         self.validate_foreign_keys_async(&entity, &value).await?;
 
+        if let serde_json::Value::Object(ref mut obj) = value {
+            obj.remove("_version");
+            obj.insert("_version".to_string(), serde_json::Value::Number(1.into()));
+        }
+
         let key = format!("data/{entity}/{id}");
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
@@ -204,6 +209,17 @@ impl WasmDatabase {
             }
         }
 
+        let existing_version = existing
+            .get("_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let serde_json::Value::Object(ref mut obj) = value {
+            obj.insert(
+                "_version".to_string(),
+                serde_json::Value::Number((existing_version + 1).into()),
+            );
+        }
+
         {
             let inner = self.borrow_inner()?;
             if let Some(schema) = inner.schemas.get(&entity) {
@@ -324,6 +340,11 @@ impl WasmDatabase {
         self.validate_unique_sync(&entity, &value, None)?;
         self.validate_foreign_keys_sync(&entity, &value)?;
 
+        if let serde_json::Value::Object(ref mut obj) = value {
+            obj.remove("_version");
+            obj.insert("_version".to_string(), serde_json::Value::Number(1.into()));
+        }
+
         let key = format!("data/{entity}/{id}");
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
@@ -365,6 +386,17 @@ impl WasmDatabase {
             for (k, v) in new_fields {
                 existing_obj.insert(k, v);
             }
+        }
+
+        let existing_version = existing
+            .get("_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        if let serde_json::Value::Object(ref mut obj) = value {
+            obj.insert(
+                "_version".to_string(),
+                serde_json::Value::Number((existing_version + 1).into()),
+            );
         }
 
         {
