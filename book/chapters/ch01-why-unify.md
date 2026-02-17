@@ -135,7 +135,7 @@ Not all data behaves the same way. MQDB distinguishes between two classes:
 
 **Broadcast entities** must exist on every node. When a message arrives on Node A, the node must immediately determine which clients — potentially connected to Node B or Node C — subscribe to that topic. Cross-node queries on every publish would destroy throughput. So MQDB replicates certain entities to all nodes: the topic-to-subscriber index, the wildcard subscription trie, and the client-to-node location map.
 
-This distinction is fundamental. Partitioned entities scale horizontally — add more nodes, and each node handles fewer partitions. Broadcast entities trade write amplification for read locality. The cost varies by subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a single broadcast message to other nodes, while a wildcard subscription generates 257 `ReplicationWrite` operations (one subscription record plus one wildcard store entry per partition). In both cases, publish routing requires zero network round trips because every node maintains a complete subscriber map.
+This distinction is fundamental. Partitioned entities scale horizontally — add more nodes, and each node handles fewer partitions. Broadcast entities trade write amplification for read locality. The cost varies by subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a single cluster broadcast message, while a wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, publish routing requires zero network round trips because every node maintains a complete subscriber map.
 
 Chapter 4 covers partitioning in detail. Chapter 8 explains why broadcast entities are necessary for cross-node pub/sub routing.
 
@@ -147,7 +147,7 @@ The decision to use MQTT as the database protocol may seem unusual. MQTT is an I
 
 MQTT 5.0 is not the lightweight protocol people remember from early IoT deployments. Version 5.0 added features that make it surprisingly suitable as a general-purpose application protocol:
 
-**Request/Response.** MQTT 5.0 introduced response topics and correlation data, enabling synchronous-style queries over an asynchronous protocol. A client publishes a database query to `$DB/users/list`, specifying a response topic. The server processes the query and publishes the result to that response topic. The client subscribes to its response topic and receives the answer. From the client's perspective, this behaves like a synchronous API call.
+**Request/Response.** MQTT 5.0 introduced response topics and correlation data, enabling synchronous-style queries over an asynchronous protocol. A client subscribes to a response topic, then publishes a database query to `$DB/users/list` with that response topic attached. The server processes the query and publishes the result back to the response topic. From the client's perspective, this behaves like a synchronous API call.
 
 **Shared Subscriptions.** Multiple clients can share a subscription, with the broker distributing messages among them. This enables load-balanced event processing without an external coordination layer.
 
@@ -198,7 +198,7 @@ At its core, MQDB is a key-value database with a document model. Records are JSO
 
 What makes it reactive is that every write — create, update, delete — produces an observable event. Clients subscribe to entity changes using wildcard patterns (`users/#` catches all user changes, `+/123` catches changes to ID 123 across all entities). Subscriptions can be broadcast (all consumers receive all events), load-balanced (round-robin across a consumer group), or ordered (partition-sticky routing so events for the same key always reach the same consumer).
 
-The reactive core also includes an outbox with retry logic, exponential backoff, and a dead letter queue. This ensures that events derived from writes survive crashes without a separate relay process — because events *are* writes.
+The reactive core also includes an outbox with configurable retry logic and a dead letter queue. This ensures that events derived from writes survive crashes without a separate relay process — because events *are* writes.
 
 ### Layer 2: MQTT Broker
 
@@ -210,13 +210,13 @@ The broker and the database share a single storage layer. MQTT session state (su
 
 For workloads that exceed a single node, MQDB clusters distribute data across multiple nodes using 256 fixed partitions with a replication factor of 2. Raft consensus manages partition assignments — which node is the primary for each partition, and which node holds the replica. Data replication is asynchronous for throughput, while Raft provides strong consistency for the cluster control plane.
 
-Inter-node communication uses direct QUIC streams with mTLS mutual authentication. Each node exposes two QUIC endpoints: one for MQTT client connections (port 1883) and one for cluster traffic (port 1983). Cross-node pub/sub routing works transparently — a subscriber on Node B receives messages published on Node A without either client being aware of the cluster topology.
+Inter-node communication uses direct QUIC streams with mTLS authentication. Each node exposes two endpoints: one for MQTT client connections and one for cluster traffic at a configurable offset (default +100, so a node bound to port 1883 listens for cluster traffic on 1983). Cross-node pub/sub routing works transparently — a subscriber on Node B receives messages published on Node A without either client being aware of the cluster topology.
 
 ### Three Deployment Modes
 
 These three layers map to three deployment modes:
 
-**Library.** Import `mqdb` as a Rust crate and use the `Database` API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and scenarios where MQTT is unnecessary.
+**Library.** Import `mqdb` as a Rust crate and use the `Database` API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
 
 ```rust
 let db = Database::open("./data/mydb").await?;
@@ -243,19 +243,19 @@ The book focuses primarily on the cluster mode, because that is where the distri
 
 Honesty about tradeoffs is the difference between engineering and marketing. MQDB makes deliberate sacrifices, and you should understand them before reading further.
 
-### No SQL
+### No SQL (Yet)
 
-MQDB's query interface is a set of filter operators applied to JSON documents. There is no SELECT, no JOIN, no GROUP BY, no subqueries. Filters support equality, comparison, glob patterns, null checks, and set membership — sufficient for most application queries but nowhere near the expressiveness of SQL.
+MQDB's current query interface is a set of filter operators applied to JSON documents. There is no SELECT, no JOIN, no GROUP BY, no subqueries. Filters support equality, comparison, glob patterns, null checks, and set membership — sufficient for most application queries but nowhere near the expressiveness of SQL.
 
-The decision was deliberate. A full SQL parser and query planner would add substantial complexity to the codebase and the wire protocol. More importantly, MQDB's target workloads — IoT telemetry, reactive dashboards, event-driven microservices — tend to be read-by-key and subscribe-to-changes, not ad-hoc analytical queries.
+The core engine was built without a query language because the primary workloads — IoT telemetry, reactive dashboards, event-driven microservices — tend to be read-by-key and subscribe-to-changes, not ad-hoc analytical queries. A filter API over MQTT was sufficient to ship.
 
-If your workload requires complex joins or aggregations, MQDB is the wrong tool. Use PostgreSQL or DuckDB for analytics and MQDB for the reactive event layer.
+But the architecture does not preclude SQL. The storage layer already supports secondary indexes, and the filter system already performs predicate evaluation over JSON documents. A SQL glue layer — parsing SQL into the existing filter and index primitives — is a natural next step. The unified storage model that merges messaging and database operations can just as well serve a query language on top.
 
 ### Async Replication
 
 MQDB replicates data asynchronously. When a client writes to the primary, the primary applies the write, sends it to replicas, and acknowledges the client — without waiting for replicas to confirm. This means a primary failure can lose writes that were acknowledged but not yet replicated.
 
-The alternative — synchronous replication with quorum writes — would add two or more network round trips to every write. For an MQTT broker processing sensor telemetry at thousands of messages per second, this latency is unacceptable.
+The alternative — synchronous replication with quorum writes — would add a network round trip to every write. For an MQTT broker processing sensor telemetry at thousands of messages per second, this latency is unacceptable.
 
 MQDB's position is that most writes to a message broker are ephemeral (sensor readings, heartbeats, status updates) and losing a few during a node failure is preferable to halving throughput for all writes at all times. The infrastructure for synchronous replication exists in the codebase (a `QuorumTracker` that returns a oneshot receiver for quorum confirmation), but it is not yet exposed as a configurable option.
 
@@ -265,7 +265,7 @@ Chapter 5 covers the replication pipeline and durability tradeoffs in detail.
 
 MQDB uses 256 fixed partitions. This number never changes. There is no online repartitioning, no partition splitting, no dynamic scaling of the partition count.
 
-256 was chosen as a balance between granularity and overhead. With 3 nodes, each node handles ~85 partitions — enough for balanced distribution. With 16 nodes, each handles 16 partitions. Beyond roughly 64 nodes, some partitions would have no replica, which effectively caps the cluster size.
+256 was chosen as a balance between granularity and overhead. With 3 nodes, each node handles ~85 primary partitions — enough for balanced distribution. With 16 nodes, each handles 16. With a replication factor of 2, each partition requires two distinct nodes (one primary, one replica), yielding 512 total role assignments. Beyond ~256 nodes, some nodes would have no primary partitions; beyond ~512, some nodes would have no role at all.
 
 Dynamic partition splitting (as in CockroachDB's ranges or DynamoDB's automatic splitting) would allow MQDB to scale beyond this limit. It would also add considerable complexity to the rebalancing, snapshot, and replication systems. For the target use cases — 3 to 16 node clusters serving IoT or application event workloads — 256 partitions are sufficient.
 
@@ -279,9 +279,9 @@ This is the same tradeoff made by many distributed databases. Google Spanner pro
 
 ### Write Amplification for Broadcast Entities
 
-When a client subscribes to a topic, MQDB writes the subscription record to one partition *and* broadcasts the topic index entry to all 256 partitions. A single SUBSCRIBE generates 257 writes. This amplification ensures every node has a complete subscriber map for publish routing — enabling zero-latency local lookups — but it means that subscription-heavy workloads generate disproportionate write volume.
+Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
 
-For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning subscriptions, it can become a bottleneck.
+For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning wildcard subscriptions, the local persistence writes can become a bottleneck.
 
 ## What Comes Next
 

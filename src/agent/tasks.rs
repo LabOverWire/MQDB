@@ -132,9 +132,9 @@ impl MqdbAgent {
                         match event {
                             Ok(change_event) => {
                                 let topic = change_event.event_topic(num_partitions);
-                                let notification = change_event.into_notification();
+                                let client_id = change_event.client_id.clone();
 
-                                let payload = match serde_json::to_vec(&notification) {
+                                let payload = match serde_json::to_vec(&change_event) {
                                     Ok(p) => p,
                                     Err(e) => {
                                         error!("Failed to serialize event: {e}");
@@ -142,10 +142,16 @@ impl MqdbAgent {
                                     }
                                 };
 
-                                let options = mqtt5::types::PublishOptions {
+                                let mut options = mqtt5::types::PublishOptions {
                                     qos: mqtt5::QoS::AtLeastOnce,
                                     ..Default::default()
                                 };
+                                if let Some(ref cid) = client_id {
+                                    options.properties.user_properties.push((
+                                        "x-origin-client-id".to_string(),
+                                        cid.clone(),
+                                    ));
+                                }
                                 if let Err(e) = client.publish_with_options(&topic, payload, options).await {
                                     warn!("Failed to publish event: {e}");
                                 }
