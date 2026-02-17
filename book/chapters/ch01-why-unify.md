@@ -267,7 +267,7 @@ MQDB uses 256 fixed partitions. This number never changes. There is no online re
 
 256 was chosen as a balance between granularity and overhead. With 3 nodes, each node handles ~85 primary partitions — enough for balanced distribution. With 16 nodes, each handles 16. With a replication factor of 2, each partition requires two distinct nodes (one primary, one replica), yielding 512 total role assignments. Beyond ~256 nodes, some nodes would have no primary partitions; beyond ~512, some nodes would have no role at all.
 
-Dynamic partition splitting (as in CockroachDB's ranges or DynamoDB's automatic splitting) would allow MQDB to scale beyond this limit. It would also add considerable complexity to the rebalancing, snapshot, and replication systems. For the target use cases — 3 to 16 node clusters serving IoT or application event workloads — 256 partitions are sufficient.
+The fixed count is a deliberate tradeoff between horizontal scaling and synchronization overhead. Every heartbeat carries a 256-bit bitmap of partition assignments. Raft consensus tracks a fixed-size partition map. Rebalancing moves whole partitions between nodes. All of this is O(256) — constant, regardless of data size. Dynamic partition splitting (as in CockroachDB's ranges or DynamoDB's automatic splitting) would let MQDB scale beyond 256 nodes, but the partition map, heartbeat protocol, and rebalancing logic would all grow with the data, not just the cluster size. For the target deployment — 3 to 16 node clusters — 256 fixed partitions provide fine-grained distribution with bounded control plane overhead.
 
 ### No Cross-Partition Transactions
 
