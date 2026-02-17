@@ -1129,13 +1129,17 @@ impl DbRequestHandler {
         event: ChangeEvent,
     ) {
         let topic = event.event_topic(0);
-        let sanitized = event.into_notification();
-        match serde_json::to_vec(&sanitized) {
+        let user_properties: Vec<(String, String)> = event
+            .client_id
+            .as_ref()
+            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
+            .unwrap_or_default();
+        match serde_json::to_vec(&event) {
             Ok(payload) => {
                 tracing::debug!(topic, "publishing change event");
                 controller
                     .transport()
-                    .queue_local_publish(topic, payload, 1)
+                    .queue_local_publish_with_properties(topic, payload, 1, user_properties)
                     .await;
             }
             Err(e) => {
