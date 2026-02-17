@@ -3,9 +3,10 @@
 
 use super::{
     ClusterMessage, ClusterTransport, Epoch, JsonDbOp, JsonDbRequest, JsonDbResponse,
-    MAX_LIST_RESULTS, NodeController, NodeId, PartitionId, PendingUniqueWork, ReplicationWrite,
+    NodeController, NodeId, PartitionId, PendingUniqueWork, ReplicationWrite,
     UniqueCheckContinuation, UniqueReservationParams, entity,
 };
+use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
 
 fn unique_field_diffs(

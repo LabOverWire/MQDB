@@ -5,7 +5,9 @@ use super::Database;
 use crate::entity::Entity;
 use crate::error::{Error, Result};
 use crate::keys;
-use crate::types::{Filter, FilterOp, Pagination, SortDirection, SortOrder};
+use crate::types::{
+    Filter, FilterOp, MAX_FILTERS, MAX_SORT_FIELDS, Pagination, SortDirection, SortOrder,
+};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
@@ -65,9 +67,6 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
-        const MAX_FILTERS: usize = 16;
-        const MAX_SORT_FIELDS: usize = 4;
-
         if filters.len() > MAX_FILTERS {
             return Err(Error::Validation(format!(
                 "too many filters: {} exceeds maximum of {MAX_FILTERS}",
@@ -176,8 +175,12 @@ impl Database {
         ids: &[String],
         filters: &[Filter],
     ) -> Result<Vec<Value>> {
+        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
         let mut results = Vec::new();
         for id in ids {
+            if results.len() >= max_results {
+                break;
+            }
             match self
                 .read(entity_name.to_string(), id.clone(), vec![], None)
                 .await
@@ -230,7 +233,7 @@ impl Database {
     }
 
     fn scan_all_entities(&self, entity_name: &str) -> Result<Vec<Value>> {
-        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
+        let max_results = self.config.max_sort_buffer;
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
         let mut results = Vec::new();

@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+pub const MAX_LIST_RESULTS: usize = 10_000;
+pub const MAX_FILTERS: usize = 16;
+pub const MAX_SORT_FIELDS: usize = 4;
+
 #[derive(Debug, Clone, Default)]
 pub struct ScopeConfig {
     scope_entity: String,

@@ -37,7 +37,7 @@ use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, Transpo
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::storage::StorageBackend;
-use crate::types::OwnershipConfig;
+use crate::types::{MAX_LIST_RESULTS, OwnershipConfig};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -56,9 +56,6 @@ static WRITE_REQUEST_SENT: AtomicU64 = AtomicU64::new(0);
 static WRITE_RECEIVED: AtomicU64 = AtomicU64::new(0);
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
-pub(crate) const MAX_LIST_RESULTS: usize = 10_000;
-pub(crate) const MAX_FILTERS: usize = 16;
-pub(crate) const MAX_SORT_FIELDS: usize = 4;
 
 #[derive(Default)]
 pub struct TickOutput {

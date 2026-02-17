@@ -4,14 +4,12 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
-use super::super::node_controller::{
-    MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, NodeController, PendingUniqueWork,
-    UniqueCheckContinuation,
-};
+use super::super::node_controller::{NodeController, PendingUniqueWork, UniqueCheckContinuation};
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use crate::events::ChangeEvent;
+use crate::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS};
 use serde_json::{Value, json};
 
 pub(super) enum JsonOpResult {
@@ -868,6 +866,7 @@ impl DbRequestHandler {
                     &scatter_payload,
                     response_topic.to_string(),
                     filters.clone(),
+                    sorts,
                 )
                 .await;
 

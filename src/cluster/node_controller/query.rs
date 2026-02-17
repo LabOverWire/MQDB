@@ -7,9 +7,9 @@ use super::protocol::{
 };
 use super::query_coordinator::QueryCoordinator;
 use super::{
-    ClusterMessage, ClusterTransport, MAX_LIST_RESULTS, NodeController, NodeId, PartitionId,
-    PendingScatterRequest,
+    ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingScatterRequest,
 };
+use crate::types::MAX_LIST_RESULTS;
 
 impl<T: ClusterTransport> NodeController<T> {
     pub fn query_coordinator(&self) -> &QueryCoordinator {
@@ -72,6 +72,7 @@ impl<T: ClusterTransport> NodeController<T> {
         payload: &[u8],
         client_response_topic: String,
         filters: Vec<crate::Filter>,
+        sorts: Vec<crate::SortOrder>,
     ) -> bool {
         let alive_nodes = self.heartbeat.alive_nodes();
         let remote_nodes: Vec<NodeId> = alive_nodes
@@ -82,16 +83,6 @@ impl<T: ClusterTransport> NodeController<T> {
         if remote_nodes.is_empty() {
             return false;
         }
-
-        let sorts: Vec<crate::SortOrder> = if payload.is_empty() {
-            Vec::new()
-        } else if let Ok(data) = serde_json::from_slice::<serde_json::Value>(payload) {
-            data.get("sort")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
 
         #[allow(clippy::cast_possible_truncation)]
         let request_id = std::time::SystemTime::now()
