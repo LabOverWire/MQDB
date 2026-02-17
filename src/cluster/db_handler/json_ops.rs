@@ -247,10 +247,15 @@ impl DbRequestHandler {
         sender: Option<&str>,
         client_id: Option<&str>,
     ) -> JsonOpResult {
-        let data: Value = match serde_json::from_slice(payload) {
+        let mut data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
+
+        if let Value::Object(ref mut obj) = data {
+            obj.remove("_version");
+            obj.insert("_version".to_string(), Value::Number(1.into()));
+        }
 
         if let Some(err) = Self::validate_against_schema(controller, entity, &data) {
             return JsonOpResult::Response(err);
@@ -735,6 +740,17 @@ impl DbRequestHandler {
             for (key, value) in update_obj {
                 existing_obj.insert(key, value);
             }
+        }
+
+        let existing_version = old_data
+            .get("_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if let Value::Object(ref mut obj) = merged {
+            obj.insert(
+                "_version".to_string(),
+                Value::Number((existing_version + 1).into()),
+            );
         }
 
         Ok((old_data, merged))
