@@ -131,6 +131,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - DISTRIBUTED_DESIGN.md can be outdated — always verify claims against actual code call sites, not just method definitions
 - Dead code in store_manager (`subscribe_topic_replicated`, `schema_register_replicated`) was removed — these created 256-write fan-outs but were superseded by lightweight broadcast messages
 - When a method exists but is never called, check git blame/log to find when the calling code changed
+- Avoid tautologies — don't restate a definition as a use case (e.g., "suits scenarios where MQTT is unnecessary" for the no-MQTT mode). Use concrete examples instead.
 
 ### Memories for Future Sessions
 
