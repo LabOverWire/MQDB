@@ -73,6 +73,18 @@ pub fn verify_jwt_ignore_expiry(token: &str, config: &JwtSigningConfig) -> Optio
         return None;
     }
 
+    let iss = payload.get("iss").and_then(Value::as_str)?;
+    if iss != config.issuer {
+        return None;
+    }
+
+    if let Some(ref expected_aud) = config.audience {
+        let aud = payload.get("aud").and_then(Value::as_str)?;
+        if aud != expected_aud {
+            return None;
+        }
+    }
+
     Some(payload)
 }
 
@@ -100,6 +112,7 @@ mod tests {
         let old_iat = now - (31 * 24 * 3600);
         let claims = serde_json::json!({
             "sub": "alice",
+            "iss": "test",
             "iat": old_iat,
             "exp": old_iat + 3600
         });
@@ -116,6 +129,7 @@ mod tests {
             .as_secs();
         let claims = serde_json::json!({
             "sub": "alice",
+            "iss": "test",
             "iat": now - 3600,
             "exp": now - 1
         });
@@ -128,9 +142,98 @@ mod tests {
         let config = test_config();
         let claims = serde_json::json!({
             "sub": "alice",
+            "iss": "test",
             "exp": 9_999_999_999_u64
         });
         let token = sign_jwt(&claims, &config);
         assert!(verify_jwt_ignore_expiry(&token, &config).is_none());
+    }
+
+    #[test]
+    fn verify_rejects_wrong_issuer() {
+        let config = test_config();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "iss": "wrong-issuer",
+            "iat": now - 60,
+            "exp": now + 3600
+        });
+        let token = sign_jwt(&claims, &config);
+        assert!(verify_jwt_ignore_expiry(&token, &config).is_none());
+    }
+
+    #[test]
+    fn verify_rejects_missing_issuer() {
+        let config = test_config();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "iat": now - 60,
+            "exp": now + 3600
+        });
+        let token = sign_jwt(&claims, &config);
+        assert!(verify_jwt_ignore_expiry(&token, &config).is_none());
+    }
+
+    #[test]
+    fn verify_rejects_wrong_audience() {
+        let mut config = test_config();
+        config.audience = Some("expected-aud".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "iss": "test",
+            "aud": "wrong-aud",
+            "iat": now - 60,
+            "exp": now + 3600
+        });
+        let token = sign_jwt(&claims, &config);
+        assert!(verify_jwt_ignore_expiry(&token, &config).is_none());
+    }
+
+    #[test]
+    fn verify_accepts_matching_audience() {
+        let mut config = test_config();
+        config.audience = Some("my-app".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "iss": "test",
+            "aud": "my-app",
+            "iat": now - 60,
+            "exp": now + 3600
+        });
+        let token = sign_jwt(&claims, &config);
+        assert!(verify_jwt_ignore_expiry(&token, &config).is_some());
+    }
+
+    #[test]
+    fn verify_skips_audience_when_not_configured() {
+        let config = test_config();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "sub": "alice",
+            "iss": "test",
+            "iat": now - 60,
+            "exp": now + 3600
+        });
+        let token = sign_jwt(&claims, &config);
+        assert!(verify_jwt_ignore_expiry(&token, &config).is_some());
     }
 }
