@@ -7,7 +7,8 @@ use super::protocol::{
 };
 use super::query_coordinator::QueryCoordinator;
 use super::{
-    ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingScatterRequest,
+    ClusterMessage, ClusterTransport, MAX_LIST_RESULTS, NodeController, NodeId, PartitionId,
+    PendingScatterRequest,
 };
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -156,14 +157,18 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn handle_scatter_list_response(
         &mut self,
         request_id: u64,
-        items: Vec<serde_json::Value>,
+        mut items: Vec<serde_json::Value>,
     ) {
         let Some(pending) = self.pending_scatter_requests.get_mut(&request_id) else {
             tracing::debug!(request_id, "scatter response for unknown request");
             return;
         };
 
-        pending.received.extend(items);
+        items.truncate(MAX_LIST_RESULTS);
+        let remaining_capacity = MAX_LIST_RESULTS.saturating_sub(pending.received.len());
+        pending
+            .received
+            .extend(items.into_iter().take(remaining_capacity));
         pending.expected_count = pending.expected_count.saturating_sub(1);
 
         if pending.expected_count == 0
@@ -194,6 +199,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .collect();
 
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
+            filtered.truncate(MAX_LIST_RESULTS);
 
             let result = serde_json::json!({
                 "status": "ok",

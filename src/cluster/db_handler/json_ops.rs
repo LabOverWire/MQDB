@@ -4,7 +4,10 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
-use super::super::node_controller::{NodeController, PendingUniqueWork, UniqueCheckContinuation};
+use super::super::node_controller::{
+    MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, NodeController, PendingUniqueWork,
+    UniqueCheckContinuation,
+};
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
@@ -787,15 +790,43 @@ impl DbRequestHandler {
         response_topic: &str,
         sender: Option<&str>,
     ) -> Option<Vec<u8>> {
-        let mut filters: Vec<crate::Filter> = if payload.is_empty() {
-            Vec::new()
-        } else if let Ok(data) = serde_json::from_slice::<Value>(payload) {
-            data.get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default()
+        let parsed_data: Option<Value> = if payload.is_empty() {
+            None
         } else {
-            Vec::new()
+            serde_json::from_slice::<Value>(payload).ok()
         };
+
+        let mut filters: Vec<crate::Filter> = parsed_data
+            .as_ref()
+            .and_then(|d| d.get("filters"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if filters.len() > MAX_FILTERS {
+            return Some(Self::json_error(
+                400,
+                &format!(
+                    "too many filters: {} exceeds maximum of {MAX_FILTERS}",
+                    filters.len()
+                ),
+            ));
+        }
+
+        let sorts: Vec<crate::SortOrder> = parsed_data
+            .as_ref()
+            .and_then(|d| d.get("sort"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        if sorts.len() > MAX_SORT_FIELDS {
+            return Some(Self::json_error(
+                400,
+                &format!(
+                    "too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
+                    sorts.len()
+                ),
+            ));
+        }
 
         if !filters.is_empty()
             && let Some(err) = Self::validate_filter_fields(controller, entity, &filters)
@@ -846,7 +877,7 @@ impl DbRequestHandler {
         }
 
         let entities = controller.db_list(entity);
-        let items: Vec<Value> = entities
+        let mut items: Vec<Value> = entities
             .iter()
             .filter_map(|e| {
                 let data: Value = serde_json::from_slice(&e.data).ok()?;
@@ -859,6 +890,7 @@ impl DbRequestHandler {
                 }))
             })
             .collect();
+        items.truncate(MAX_LIST_RESULTS);
 
         let result = json!({
             "status": "ok",

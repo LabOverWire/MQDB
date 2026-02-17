@@ -22,6 +22,22 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
+        const MAX_FILTERS: usize = 16;
+        const MAX_SORT_FIELDS: usize = 4;
+
+        if filters.len() > MAX_FILTERS {
+            return Err(Error::Validation(format!(
+                "too many filters: {} exceeds maximum of {MAX_FILTERS}",
+                filters.len()
+            )));
+        }
+        if sort.len() > MAX_SORT_FIELDS {
+            return Err(Error::Validation(format!(
+                "too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
+                sort.len()
+            )));
+        }
+
         self.validate_list_fields(&entity_name, &filters, &sort, projection.as_deref())
             .await?;
 
@@ -214,10 +230,14 @@ impl Database {
     }
 
     fn scan_all_entities(&self, entity_name: &str) -> Result<Vec<Value>> {
+        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
         let mut results = Vec::new();
         for (key, value) in items {
+            if results.len() >= max_results {
+                break;
+            }
             let (_, id) = keys::decode_data_key(&key)?;
             let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
             results.push(entity.to_json());
@@ -226,10 +246,14 @@ impl Database {
     }
 
     fn scan_filtered_entities(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
         let mut results = Vec::new();
         for (key, value) in items {
+            if results.len() >= max_results {
+                break;
+            }
             let (_, id) = keys::decode_data_key(&key)?;
             let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
             let entity_data = entity.to_json();
