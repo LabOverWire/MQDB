@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::next_test_port;
+use common::{next_test_port, wait_for_port};
 use mqdb::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
@@ -99,7 +99,7 @@ async fn wait_for_ready(client: &MqttClient, max_attempts: u32) -> bool {
     false
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_health_endpoint_agent_mode() {
     let port = next_test_port();
     let (_tmp, agent) = start_agent(port).await;
@@ -108,7 +108,7 @@ async fn test_health_endpoint_agent_mode() {
         let _ = agent.run().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let client = MqttClient::new("test-health-agent");
     client
@@ -139,7 +139,7 @@ async fn test_health_endpoint_agent_mode() {
     agent_handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_admin_schema_set_and_get() {
     let port = next_test_port();
     let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
@@ -148,7 +148,7 @@ async fn test_admin_schema_set_and_get() {
         let _ = agent.run().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let client = MqttClient::new("test-schema-ops");
     let options = ConnectOptions::new("test-schema-ops").with_credentials("admin", "");
@@ -193,7 +193,7 @@ async fn test_admin_schema_set_and_get() {
     agent_handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_admin_constraint_add_and_list() {
     let port = next_test_port();
     let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
@@ -202,7 +202,7 @@ async fn test_admin_constraint_add_and_list() {
         let _ = agent.run().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let client = MqttClient::new("test-constraint-ops");
     let options = ConnectOptions::new("test-constraint-ops").with_credentials("admin", "");
@@ -242,7 +242,7 @@ async fn test_admin_constraint_add_and_list() {
     agent_handle.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_crud_via_mqtt() {
     let port = next_test_port();
     let (_tmp, agent) = start_agent(port).await;
@@ -251,7 +251,7 @@ async fn test_crud_via_mqtt() {
         let _ = agent.run().await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let client = MqttClient::new("test-crud-mqtt");
     client

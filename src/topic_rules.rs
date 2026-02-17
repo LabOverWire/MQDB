@@ -42,6 +42,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::BlockAll,
     },
     TopicRule {
+        pattern: "$DB/+/events/#",
+        tier: ProtectionTier::ReadOnly,
+    },
+    TopicRule {
         pattern: "$SYS/#",
         tier: ProtectionTier::ReadOnly,
     },
@@ -320,6 +324,26 @@ mod tests {
         assert_eq!(
             check_topic_access("$DB/_oauth_tokens/abc123", true, true),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn check_access_event_topics_read_only() {
+        assert_eq!(
+            check_topic_access("$DB/users/events/created", false, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/users/events/p3/abc123", false, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/orders/events/updated", true, false),
+            Err(BlockReason::ReadOnlyTopic)
+        );
+        assert_eq!(
+            check_topic_access("$DB/users/events/created", true, true),
+            Err(BlockReason::ReadOnlyTopic)
         );
     }
 

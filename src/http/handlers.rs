@@ -306,7 +306,10 @@ async fn exchange_and_verify_callback(
         Ok(payload) => payload,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
-            return Err(json_response(401, &json!({"error": "authentication failed"})));
+            return Err(json_response(
+                401,
+                &json!({"error": "authentication failed"}),
+            ));
         }
     };
 

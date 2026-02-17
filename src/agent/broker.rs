@@ -5,7 +5,9 @@ use super::MqdbAgent;
 use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
-use mqtt5::broker::config::{ChangeOnlyDeliveryConfig, QuicConfig, WebSocketConfig};
+use mqtt5::broker::config::{
+    ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig, WebSocketConfig,
+};
 use mqtt5::broker::{AclManager, BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use std::collections::HashSet;
@@ -25,6 +27,7 @@ impl MqdbAgent {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        let mqtt_storage_dir = self.db.path().join("mqtt_storage");
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
@@ -44,6 +47,9 @@ impl MqdbAgent {
                     "$DB/+/+/+/events/#".to_string(),
                 ],
             },
+            storage_config: StorageConfig::new()
+                .with_backend(StorageBackend::File)
+                .with_base_dir(mqtt_storage_dir),
             ..Default::default()
         };
 

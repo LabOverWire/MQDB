@@ -296,6 +296,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_client_can_subscribe_to_events() {
+        let provider = create_test_provider(HashSet::new());
+
+        let result = provider
+            .authorize_subscribe("client-1", Some("alice"), "$DB/users/events/#")
+            .await;
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn external_client_cannot_publish_to_events() {
+        let provider = create_test_provider(HashSet::new());
+
+        let result = provider
+            .authorize_publish("client-1", Some("alice"), "$DB/users/events/created")
+            .await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn internal_service_can_publish_to_events() {
+        let provider = create_test_provider_with_internal("mqdb-internal-abc123");
+
+        let result = provider
+            .authorize_publish(
+                "mqdb-event-publisher",
+                Some("mqdb-internal-abc123"),
+                "$DB/users/events/created",
+            )
+            .await;
+        assert!(result);
+    }
+
+    #[tokio::test]
     async fn regular_topics_allowed() {
         let provider = create_test_provider(HashSet::new());
 
