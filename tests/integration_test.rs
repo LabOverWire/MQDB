@@ -1,7 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use mqdb::{Database, Filter, FilterOp, ScopeConfig, SortDirection, SortOrder};
+use mqdb::{Database, DatabaseConfig, Filter, FilterOp, ScopeConfig, SortDirection, SortOrder};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -927,4 +927,129 @@ async fn test_restore_fails_if_source_not_found() {
     let result = db.restore_logical(&missing_backup).await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[tokio::test]
+async fn test_list_rejects_too_many_filters() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let filters: Vec<Filter> = (0..17)
+        .map(|i| Filter::new(format!("field{i}"), FilterOp::Eq, json!("x")))
+        .collect();
+
+    let result = db
+        .list("users".into(), filters, vec![], None, vec![], None)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("too many filters"),
+        "expected 'too many filters' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_list_rejects_too_many_sort_fields() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let sorts: Vec<SortOrder> = (0..5)
+        .map(|i| SortOrder::new(format!("field{i}"), SortDirection::Asc))
+        .collect();
+
+    let result = db
+        .list("users".into(), vec![], sorts, None, vec![], None)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("too many sort fields"),
+        "expected 'too many sort fields' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_list_accepts_max_filters_and_sorts() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let filters: Vec<Filter> = (0..16)
+        .map(|i| Filter::new(format!("field{i}"), FilterOp::Eq, json!("x")))
+        .collect();
+    let result = db
+        .list("users".into(), filters, vec![], None, vec![], None)
+        .await;
+    assert!(result.is_ok(), "16 filters should be accepted");
+
+    let sorts: Vec<SortOrder> = (0..4)
+        .map(|i| SortOrder::new(format!("field{i}"), SortDirection::Asc))
+        .collect();
+    let result = db
+        .list("users".into(), vec![], sorts, None, vec![], None)
+        .await;
+    assert!(result.is_ok(), "4 sort fields should be accepted");
+}
+
+#[tokio::test]
+async fn test_list_truncates_at_max_list_results() {
+    let tmp = TempDir::new().unwrap();
+    let config = DatabaseConfig::new(tmp.path())
+        .without_background_tasks()
+        .with_max_list_results(Some(50));
+    let db = Database::open_with_config(config).await.unwrap();
+
+    for i in 0..100 {
+        db.create(
+            "items".into(),
+            json!({"name": format!("item-{i}"), "idx": i}),
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let all = db
+        .list("items".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 50, "list should truncate to max_list_results");
+
+    let sorted = db
+        .list(
+            "items".into(),
+            vec![],
+            vec![SortOrder::new("idx".into(), SortDirection::Desc)],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted.len(), 50, "sorted list should also truncate");
+
+    let filtered = db
+        .list(
+            "items".into(),
+            vec![Filter::new("idx".into(), FilterOp::Gte, json!(0))],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        filtered.len() <= 50,
+        "filtered list should respect max_list_results, got {}",
+        filtered.len()
+    );
 }

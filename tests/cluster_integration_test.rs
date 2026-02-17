@@ -2832,9 +2832,6 @@ async fn db_list_returns_entities_by_type() {
 async fn schema_broadcast_to_all_nodes() {
     let mut cluster = TestCluster::new(3);
 
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
-
     for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
         cluster.nodes[0]
@@ -2860,27 +2857,14 @@ async fn schema_broadcast_to_all_nodes() {
     }
 
     let schema_data = br#"{"fields": ["id", "name", "email"]}"#;
-    let (schema, writes) = cluster.nodes[0]
+    let schema = cluster.nodes[0]
         .controller
-        .stores()
-        .schema_register_replicated("users", schema_data)
+        .schema_register("users", schema_data)
+        .await
         .expect("schema register should succeed");
 
     assert_eq!(schema.entity_str(), "users");
     assert_eq!(schema.schema_version, 1);
-    assert_eq!(
-        writes.len(),
-        NUM_PARTITIONS as usize,
-        "Should broadcast to all partitions"
-    );
-
-    for write in writes {
-        cluster.nodes[0]
-            .controller
-            .replicate_write(write, &[n2, n3], 2)
-            .await
-            .expect("schema replication should succeed");
-    }
 
     cluster.advance_ms(50);
     for node in &mut cluster.nodes {
@@ -2932,8 +2916,6 @@ async fn schema_broadcast_to_all_nodes() {
 #[tokio::test]
 async fn schema_update_increments_version() {
     let mut cluster = TestCluster::new(3);
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
 
     for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
@@ -2959,40 +2941,24 @@ async fn schema_update_increments_version() {
         node.controller.process_messages().await;
     }
 
-    let (schema_v1, writes_v1) = cluster.nodes[0]
+    let schema_v1 = cluster.nodes[0]
         .controller
-        .stores()
-        .schema_register_replicated("products", b"v1 schema")
+        .schema_register("products", b"v1 schema")
+        .await
         .expect("register should succeed");
     assert_eq!(schema_v1.schema_version, 1);
-
-    for write in writes_v1 {
-        cluster.nodes[0]
-            .controller
-            .replicate_write(write, &[n2, n3], 2)
-            .await
-            .ok();
-    }
 
     cluster.advance_ms(20);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
     }
 
-    let (schema_v2, writes_v2) = cluster.nodes[0]
+    let schema_v2 = cluster.nodes[0]
         .controller
-        .stores()
-        .schema_update_replicated("products", b"v2 schema with new fields")
+        .schema_update("products", b"v2 schema with new fields")
+        .await
         .expect("update should succeed");
     assert_eq!(schema_v2.schema_version, 2);
-
-    for write in writes_v2 {
-        cluster.nodes[0]
-            .controller
-            .replicate_write(write, &[n2, n3], 2)
-            .await
-            .ok();
-    }
 
     cluster.advance_ms(20);
     for node in &mut cluster.nodes {

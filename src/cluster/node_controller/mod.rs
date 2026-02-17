@@ -37,7 +37,7 @@ use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, Transpo
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::storage::StorageBackend;
-use crate::types::OwnershipConfig;
+use crate::types::{MAX_LIST_RESULTS, OwnershipConfig};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -484,7 +484,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     })
                     .collect();
 
-                let filtered: Vec<serde_json::Value> = deduped
+                let mut filtered: Vec<serde_json::Value> = deduped
                     .into_iter()
                     .filter(|item| {
                         if let Some(data) = item.get("data") {
@@ -494,6 +494,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         }
                     })
                     .collect();
+                filtered.truncate(MAX_LIST_RESULTS);
 
                 let result = serde_json::json!({
                     "status": "ok",

@@ -6,6 +6,7 @@ use super::{
     NodeController, NodeId, PartitionId, PendingUniqueWork, ReplicationWrite,
     UniqueCheckContinuation, UniqueReservationParams, entity,
 };
+use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
 
 fn unique_field_diffs(
@@ -805,7 +806,7 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         let entities = self.db_list(entity);
-        let items: Vec<serde_json::Value> = entities
+        let mut items: Vec<serde_json::Value> = entities
             .iter()
             .filter_map(|e| {
                 let data: serde_json::Value = serde_json::from_slice(&e.data).ok()?;
@@ -819,6 +820,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
             })
             .collect();
+        items.truncate(MAX_LIST_RESULTS);
 
         let result = serde_json::json!({
             "status": "ok",
