@@ -22,22 +22,6 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
-        const MAX_FILTERS: usize = 16;
-        const MAX_SORT_FIELDS: usize = 4;
-
-        if filters.len() > MAX_FILTERS {
-            return Err(Error::Validation(format!(
-                "too many filters: {} exceeds maximum of {MAX_FILTERS}",
-                filters.len()
-            )));
-        }
-        if sort.len() > MAX_SORT_FIELDS {
-            return Err(Error::Validation(format!(
-                "too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
-                sort.len()
-            )));
-        }
-
         self.validate_list_fields(&entity_name, &filters, &sort, projection.as_deref())
             .await?;
 
@@ -81,6 +65,22 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
+        const MAX_FILTERS: usize = 16;
+        const MAX_SORT_FIELDS: usize = 4;
+
+        if filters.len() > MAX_FILTERS {
+            return Err(Error::Validation(format!(
+                "too many filters: {} exceeds maximum of {MAX_FILTERS}",
+                filters.len()
+            )));
+        }
+        if sort.len() > MAX_SORT_FIELDS {
+            return Err(Error::Validation(format!(
+                "too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
+                sort.len()
+            )));
+        }
+
         let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
             (
                 self.list_with_early_pagination(&entity_name, pagination.as_ref())?,

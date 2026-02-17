@@ -928,3 +928,71 @@ async fn test_restore_fails_if_source_not_found() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
+
+#[tokio::test]
+async fn test_list_rejects_too_many_filters() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let filters: Vec<Filter> = (0..17)
+        .map(|i| Filter::new(format!("field{i}"), FilterOp::Eq, json!("x")))
+        .collect();
+
+    let result = db
+        .list("users".into(), filters, vec![], None, vec![], None)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("too many filters"),
+        "expected 'too many filters' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_list_rejects_too_many_sort_fields() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let sorts: Vec<SortOrder> = (0..5)
+        .map(|i| SortOrder::new(format!("field{i}"), SortDirection::Asc))
+        .collect();
+
+    let result = db
+        .list("users".into(), vec![], sorts, None, vec![], None)
+        .await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("too many sort fields"),
+        "expected 'too many sort fields' error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_list_accepts_max_filters_and_sorts() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let filters: Vec<Filter> = (0..16)
+        .map(|i| Filter::new(format!("field{i}"), FilterOp::Eq, json!("x")))
+        .collect();
+    let result = db
+        .list("users".into(), filters, vec![], None, vec![], None)
+        .await;
+    assert!(result.is_ok(), "16 filters should be accepted");
+
+    let sorts: Vec<SortOrder> = (0..4)
+        .map(|i| SortOrder::new(format!("field{i}"), SortDirection::Asc))
+        .collect();
+    let result = db
+        .list("users".into(), vec![], sorts, None, vec![], None)
+        .await;
+    assert!(result.is_ok(), "4 sort fields should be accepted");
+}

@@ -318,3 +318,115 @@ async fn test_crud_via_mqtt() {
     client.disconnect().await.unwrap();
     agent_handle.abort();
 }
+
+#[tokio::test]
+async fn test_list_query_complexity_limits_via_mqtt() {
+    let port = next_test_port();
+    let (_tmp, agent) = start_agent(port).await;
+
+    let agent_handle = tokio::spawn(async move {
+        let _ = agent.run().await;
+    });
+
+    wait_for_port(port).await;
+
+    let client = MqttClient::new("test-query-limits");
+    client
+        .connect(&format!("mqtt://127.0.0.1:{port}"))
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_ready(&client, 10).await,
+        "agent should become ready"
+    );
+
+    let too_many_filters: Vec<Value> = (0..17)
+        .map(|i| json!({"field": format!("f{i}"), "op": "eq", "value": "x"}))
+        .collect();
+    let payload = json!({"filters": too_many_filters});
+    let resp = mqtt_request_response(
+        &client,
+        "$DB/items/list",
+        payload.to_string().as_bytes(),
+        2000,
+    )
+    .await
+    .expect("should receive response for too many filters");
+    assert_eq!(
+        resp.get("status").and_then(Value::as_str),
+        Some("error"),
+        "too many filters should be rejected: {resp}"
+    );
+    assert!(
+        resp.get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("too many filters"),
+        "error should mention 'too many filters': {resp}"
+    );
+
+    let too_many_sorts: Vec<Value> = (0..5)
+        .map(|i| json!({"field": format!("s{i}"), "direction": "asc"}))
+        .collect();
+    let payload = json!({"sort": too_many_sorts});
+    let resp = mqtt_request_response(
+        &client,
+        "$DB/items/list",
+        payload.to_string().as_bytes(),
+        2000,
+    )
+    .await
+    .expect("should receive response for too many sorts");
+    assert_eq!(
+        resp.get("status").and_then(Value::as_str),
+        Some("error"),
+        "too many sort fields should be rejected: {resp}"
+    );
+    assert!(
+        resp.get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("too many sort fields"),
+        "error should mention 'too many sort fields': {resp}"
+    );
+
+    let valid_filters: Vec<Value> = (0..16)
+        .map(|i| json!({"field": format!("f{i}"), "op": "eq", "value": "x"}))
+        .collect();
+    let payload = json!({"filters": valid_filters});
+    let resp = mqtt_request_response(
+        &client,
+        "$DB/items/list",
+        payload.to_string().as_bytes(),
+        2000,
+    )
+    .await
+    .expect("should receive response for 16 filters");
+    assert_eq!(
+        resp.get("status").and_then(Value::as_str),
+        Some("ok"),
+        "16 filters should be accepted: {resp}"
+    );
+
+    let valid_sorts: Vec<Value> = (0..4)
+        .map(|i| json!({"field": format!("s{i}"), "direction": "asc"}))
+        .collect();
+    let payload = json!({"sort": valid_sorts});
+    let resp = mqtt_request_response(
+        &client,
+        "$DB/items/list",
+        payload.to_string().as_bytes(),
+        2000,
+    )
+    .await
+    .expect("should receive response for 4 sorts");
+    assert_eq!(
+        resp.get("status").and_then(Value::as_str),
+        Some("ok"),
+        "4 sort fields should be accepted: {resp}"
+    );
+
+    client.disconnect().await.unwrap();
+    agent_handle.abort();
+}
