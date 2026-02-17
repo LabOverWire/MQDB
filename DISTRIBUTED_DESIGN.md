@@ -54,9 +54,10 @@ The entity type string (e.g., `_sessions`, `_db_data`, `_topic_index`) determine
 
 Broadcast entities exist because publish routing requires local lookups. When a message arrives on Node A, it must immediately determine which clients (potentially on Node B) subscribe to that topic—without cross-node queries.
 
-There are two distinct mechanisms for handling broadcast entities:
-1.  **Fan-out to all partitions**: Used for `_topic_index`, `_wildcards`, and `_db_schema`. This involves creating 256 `ReplicationWrite`s, one for each partition.
-2.  **Gossip-style broadcast to all nodes**: Used for `_client_loc` and `_db_constraint`. This involves creating a single `ReplicationWrite` (often for Partition 0) and then having the `write_or_forward` logic send it to all other alive nodes.
+There are three distinct mechanisms for handling broadcast entities:
+1.  **Cluster broadcast message**: Used for `_topic_index` (via `TopicSubscriptionBroadcast`, type 61). The originating node updates its local store, then sends a single cluster message to all other nodes. No `ReplicationWrite` fan-out.
+2.  **Local persistence + cluster broadcast**: Used for `_wildcards` (via `WildcardBroadcast`). The originating node persists 256 entries locally via `persist_broadcast_batch()` for restart recovery, then sends a single cluster message to all other nodes.
+3.  **Single write via `write_or_forward`**: Used for `_client_loc`, `_db_constraint`, and `_db_schema`. A single `ReplicationWrite` (typically for Partition 0) is routed through `write_or_forward`, which sends it to all alive nodes.
 
 ---
 
@@ -106,9 +107,9 @@ The high-level JSON API (`db_topic.rs:174-218`) automatically selects a local pa
 
 ### A2.4 Write Amplification: Subscription Example
 
-A single MQTT subscription demonstrates how broadcast entities create write amplification. When a client subscribes to a topic, the system generates **65 to 129 ReplicationWrites** depending on whether the pattern contains wildcards.
+A single MQTT subscription demonstrates how broadcast entities propagate state across the cluster. The cost varies significantly between exact and wildcard subscriptions.
 
-**Step 1: Subscription Record** (`event_handler.rs:293-297`)
+**Step 1: Subscription Record** (`broker_events.rs:255-258`)
 
 The subscription itself is stored in `_mqtt_subs`, partitioned by client_id:
 ```
@@ -116,30 +117,34 @@ add_subscription_replicated(client_id, topic, qos)
 → 1 ReplicationWrite to partition hash(client_id) % 256
 ```
 
-**Step 2: TopicIndex Broadcast** (`event_handler.rs:334-342`)
+**Step 2a: Exact Topic — Cluster Broadcast Message** (`routing.rs:115-143`)
 
-Every node needs the complete topic→subscriber mapping for publish routing. The TopicIndex is a broadcast entity, so it writes to all 256 partitions:
-```
-subscribe_topic_replicated(topic, client_id, partition, qos)
-→ 256 ReplicationWrites, one per partition (store_manager.rs:868-880)
-```
+For exact topics, the TopicIndex is updated locally via `topics.subscribe()` (in-memory, no `ReplicationWrite`), then a single `TopicSubscriptionBroadcast` message (type 61) is sent to all other nodes via `transport.broadcast()`. Each receiving node applies the subscription to its own local TopicIndex.
 
-**Step 3: Wildcard Broadcast** (`event_handler.rs:299-317`, only if pattern contains `+` or `#`)
-
-Wildcard patterns also need cluster-wide visibility:
 ```
-subscribe_wildcard_replicated() + WildcardBroadcast
-→ 256 ReplicationWrites to _wildcards entity
+topics.subscribe(topic, client_id, partition, qos)        → local only
+TopicSubscriptionBroadcast::subscribe(...)                 → 1 cluster message to all nodes
 ```
 
-**Total writes per subscription:**
+**Step 2b: Wildcard — Local Persistence + Cluster Broadcast** (`routing.rs:84-113`)
 
-| Pattern Type | Writes Generated | Breakdown |
-|--------------|------------------|-----------|
-| Exact topic (e.g., `sensor/temp`) | 257 | 1 subscription + 256 topic index |
-| Wildcard topic (e.g., `sensor/+/temp`) | 257 | 1 subscription + 256 wildcards (TopicIndex is NOT updated for wildcards) |
+Wildcard patterns require cluster-wide visibility. The WildcardStore is updated via `subscribe_wildcard_replicated()` which writes to all 256 partitions locally via `persist_broadcast_batch()` (local storage only, not Raft-replicated). Then a `WildcardBroadcast` message is sent to all other nodes.
 
-This amplification is fundamental to the design—without broadcast entities, publish routing would require cross-node queries for every message, destroying throughput.
+```
+subscribe_wildcard_replicated(pattern, client_id, partition, qos)
+→ 256 local persistence writes to _wildcards entity (mqtt_state.rs:280-294)
+WildcardBroadcast::subscribe(...)
+→ 1 cluster message to all nodes
+```
+
+**Total per subscription:**
+
+| Pattern Type | ReplicationWrites | Local Persist Writes | Cluster Messages | Total Network |
+|---|---|---|---|---|
+| Exact topic (e.g., `sensor/temp`) | 1 | 0 | 1 `TopicSubscriptionBroadcast` | 1 write + 1 broadcast |
+| Wildcard (e.g., `sensor/+/temp`) | 1 | 256 | 1 `WildcardBroadcast` | 1 write + 1 broadcast |
+
+The key distinction: exact topic subscriptions are lightweight (1 replicated write + 1 broadcast message), while wildcard subscriptions persist 256 entries locally to rebuild the trie on restart. In both cases, cluster propagation uses a single broadcast message rather than 256 individual `ReplicationWrite` operations through Raft. This design keeps the Raft log compact while ensuring every node has complete subscriber maps for publish routing.
 
 ---
 

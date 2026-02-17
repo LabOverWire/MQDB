@@ -9,7 +9,7 @@ use crate::cluster::qos2_store::{Qos2Phase, Qos2State, Qos2StoreError};
 use crate::cluster::retained_store::RetainedMessage;
 use crate::cluster::session::session_partition;
 use crate::cluster::subscription_cache::{MqttSubscriptionSnapshot, SubscriptionCacheError};
-use crate::cluster::topic_index::{TopicIndexEntry, TopicIndexError, topic_partition};
+use crate::cluster::topic_index::topic_partition;
 use crate::cluster::wildcard_store::{WildcardEntry, WildcardStoreError};
 use crate::cluster::{Epoch, PartitionId, SubscriptionType, entity};
 
@@ -201,63 +201,6 @@ impl StoreManager {
             data,
         );
         (msg, write)
-    }
-
-    #[must_use]
-    pub fn subscribe_topic_replicated(
-        &self,
-        topic: &str,
-        client_id: &str,
-        client_partition: PartitionId,
-        qos: u8,
-    ) -> (TopicIndexEntry, Vec<ReplicationWrite>) {
-        let (entry, data) =
-            self.topics
-                .subscribe_with_data(topic, client_id, client_partition, qos);
-        let writes: Vec<ReplicationWrite> = PartitionId::all()
-            .map(|partition| {
-                ReplicationWrite::new(
-                    partition,
-                    Operation::Update,
-                    Epoch::ZERO,
-                    0,
-                    entity::TOPIC_INDEX.to_string(),
-                    topic.to_string(),
-                    data.clone(),
-                )
-            })
-            .collect();
-
-        self.persist_broadcast_batch(&writes, "topic_subscribe");
-
-        (entry, writes)
-    }
-
-    /// # Errors
-    /// Returns `TopicIndexError` if the client is not subscribed to the given topic.
-    pub fn unsubscribe_topic_replicated(
-        &self,
-        topic: &str,
-        client_id: &str,
-    ) -> Result<(TopicIndexEntry, Vec<ReplicationWrite>), TopicIndexError> {
-        let (entry, data) = self.topics.unsubscribe_with_data(topic, client_id)?;
-        let writes: Vec<ReplicationWrite> = PartitionId::all()
-            .map(|partition| {
-                ReplicationWrite::new(
-                    partition,
-                    Operation::Update,
-                    Epoch::ZERO,
-                    0,
-                    entity::TOPIC_INDEX.to_string(),
-                    topic.to_string(),
-                    data.clone(),
-                )
-            })
-            .collect();
-
-        self.persist_broadcast_batch(&writes, "topic_unsubscribe");
-
-        Ok((entry, writes))
     }
 
     /// # Errors
