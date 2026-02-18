@@ -16,11 +16,10 @@ Nine prefixes create the full namespace:
 | `sub/` | Subscriptions | `sub/sub-001` |
 | `_outbox/` | Pending change events | `_outbox/op-uuid` |
 | `dedup/` | Deduplication markers | `dedup/corr-id` |
-| `fkref/` | Foreign key reverse index | `fkref/users/42/posts/17` |
 | `_dead_letter/` | Failed outbox entries | `_dead_letter/op-uuid` |
 | `_crypto/` | Encryption metadata | `_crypto/salt`, `_crypto/check` |
 
-The first six are visible to application logic. The last three are infrastructure: `fkref/` accelerates cascade delete lookups, `_dead_letter/` holds outbox entries that exhausted their retries, and `_crypto/` stores the encryption salt and verification marker for the encrypted backend.
+The first six are visible to application logic. The last two are infrastructure: `_dead_letter/` holds outbox entries that exhausted their retries, and `_crypto/` stores the encryption salt and verification marker for the encrypted backend.
 
 Why a flat keyspace instead of separate column families or tables? Because the atomicity boundary is a single batch commit across all prefixes. When a create operation writes a data key, its index entries, and its outbox event, all three land in one batch. If the database used separate stores, cross-store atomicity would require a distributed transaction protocol — exactly the complexity that Chapter 1 argued against.
 
@@ -372,7 +371,7 @@ The guarantee is the same as the traditional outbox: data and event share one tr
 
 The outbox design contains a subtle coupling that only became apparent during cluster mode development. In agent mode with `Immediate` durability, every `batch.commit()` forces an fsync. The outbox entry hits disk before the process continues. If the process crashes after commit but before dispatch, the entry survives.
 
-In cluster mode with `PeriodicMs(10)`, fsync happens every 10 milliseconds. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled.
+In cluster mode with `PeriodicMs(10)`, fsync happens every 10 milliseconds. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
 
 The lesson: the outbox guarantee is not just "data and event are in the same batch." It is "data and event have the same durability fate." If one can survive a crash that the other cannot, the guarantee is broken regardless of batch atomicity.
 
