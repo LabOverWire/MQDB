@@ -3,7 +3,7 @@
 
 mod broadcast;
 mod catchup;
-mod db_ops;
+pub(crate) mod db_ops;
 pub(crate) mod fk;
 pub(crate) mod pending;
 mod query;

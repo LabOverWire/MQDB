@@ -57,6 +57,28 @@ impl PartitionStorage {
         batch.commit()
     }
 
+    #[allow(clippy::missing_errors_doc)]
+    pub fn write_with_outbox_entries(
+        &self,
+        write: &ReplicationWrite,
+        outbox_entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let key = Self::make_key(write.partition, &write.entity, &write.id);
+        let mut batch = self.backend.batch();
+        match write.operation {
+            Operation::Insert | Operation::Update => {
+                batch.insert(key, write.data.clone());
+            }
+            Operation::Delete => {
+                batch.remove(key);
+            }
+        }
+        for (outbox_key, outbox_value) in outbox_entries {
+            batch.insert(outbox_key.clone(), outbox_value.clone());
+        }
+        batch.commit()
+    }
+
     /// Persists multiple replication writes atomically as a batch.
     ///
     /// # Errors

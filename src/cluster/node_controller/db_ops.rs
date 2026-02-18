@@ -7,8 +7,45 @@ use super::{
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
     UniqueReservationParams, entity,
 };
+use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
+use crate::events::ChangeEvent;
 use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
+
+pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
+    let topic = event.event_topic(0);
+    let user_properties: Vec<(String, String)> = event
+        .client_id
+        .as_ref()
+        .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
+        .unwrap_or_default();
+    let payload = serde_json::to_vec(event).unwrap_or_default();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    OutboxPayload::new(operation_id, &topic, &payload, &user_properties)
+}
+
+pub(crate) enum CascadeSideEffect {
+    LocalDelete {
+        entity: String,
+        id: String,
+    },
+    LocalSetNull {
+        entity: String,
+        id: String,
+        updated_data: Vec<u8>,
+    },
+    RemoteDelete {
+        partition: PartitionId,
+        entity: String,
+        id: String,
+    },
+    RemoteSetNull {
+        partition: PartitionId,
+        entity: String,
+        id: String,
+        field: String,
+    },
+}
 
 fn unique_field_diffs(
     unique_fields: &[String],
@@ -139,6 +176,20 @@ impl<T: ClusterTransport> NodeController<T> {
         outbox: super::super::store_manager::outbox::OutboxPayload,
     ) {
         self.write_or_forward_with_outbox(write, outbox).await;
+    }
+
+    pub(crate) async fn db_commit_with_cascade(
+        &mut self,
+        write: ReplicationWrite,
+        outbox: OutboxPayload,
+        cascade: &CascadeOutboxPayload,
+    ) {
+        self.write_or_forward_with_outbox_entries(
+            write,
+            outbox,
+            &[(cascade.key.clone(), cascade.value.clone())],
+        )
+        .await;
     }
 
     #[must_use]
@@ -628,13 +679,37 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(results) => results,
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
-        self.apply_fk_side_effects(&all_results).await;
-        (self.execute_json_delete(entity, id).await, None)
+        let effects = self.prepare_fk_side_effects(&all_results);
+        let cascade = self.execute_fk_side_effects(&effects).await;
+        (
+            self.execute_json_delete(entity, id, cascade.as_ref()).await,
+            None,
+        )
     }
 
-    async fn execute_json_delete(&mut self, entity: &str, id: &str) -> Vec<u8> {
-        match self.db_delete(entity, id).await {
-            Ok(_) => {
+    async fn execute_json_delete(
+        &mut self,
+        entity: &str,
+        id: &str,
+        cascade: Option<&CascadeOutboxPayload>,
+    ) -> Vec<u8> {
+        match self.db_delete_prepare(entity, id) {
+            Ok((_db_entity, write)) => {
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string());
+                let outbox = Self::build_change_event_outbox(&event);
+                if let Some(cas) = cascade {
+                    self.db_commit_with_cascade(write, outbox.clone(), cas)
+                        .await;
+                } else {
+                    self.db_commit(write, outbox.clone()).await;
+                }
+                self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                    .await;
+                if let Some(cas) = cascade
+                    && let Some(ob) = self.stores.cluster_outbox()
+                {
+                    let _ = ob.mark_cascade_delivered(&cas.operation_id);
+                }
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": id,
@@ -650,12 +725,12 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(crate) async fn apply_fk_side_effects(
-        &mut self,
+    pub(crate) fn prepare_fk_side_effects(
+        &self,
         results: &[super::fk::FkReverseLookupResult],
-    ) {
+    ) -> Vec<CascadeSideEffect> {
         use crate::cluster::db::{OnDeleteAction, data_partition};
-        let now_ms = Self::current_time_ms();
+        let mut effects = Vec::new();
         for r in results {
             match r.on_delete {
                 OnDeleteAction::Restrict => {}
@@ -663,16 +738,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     for child_id in &r.referencing_ids {
                         let partition = data_partition(&r.source_entity, child_id);
                         if self.is_primary_for_partition(partition) {
-                            let _ = self.db_delete(&r.source_entity, child_id).await;
+                            effects.push(CascadeSideEffect::LocalDelete {
+                                entity: r.source_entity.clone(),
+                                id: child_id.clone(),
+                            });
                         } else {
-                            self.fire_and_forget_json_request(
+                            effects.push(CascadeSideEffect::RemoteDelete {
                                 partition,
-                                JsonDbOp::Delete,
-                                &r.source_entity,
-                                child_id,
-                                &[],
-                            )
-                            .await;
+                                entity: r.source_entity.clone(),
+                                id: child_id.clone(),
+                            });
                         }
                     }
                 }
@@ -680,37 +755,155 @@ impl<T: ClusterTransport> NodeController<T> {
                     for child_id in &r.referencing_ids {
                         let partition = data_partition(&r.source_entity, child_id);
                         if self.is_primary_for_partition(partition) {
-                            let Some(entity) = self.db_get(&r.source_entity, child_id) else {
+                            let Some(existing) = self.db_get(&r.source_entity, child_id) else {
                                 continue;
                             };
                             let Ok(mut data) =
-                                serde_json::from_slice::<serde_json::Value>(&entity.data)
+                                serde_json::from_slice::<serde_json::Value>(&existing.data)
                             else {
                                 continue;
                             };
                             if let Some(obj) = data.as_object_mut() {
                                 obj.insert(r.source_field.clone(), serde_json::Value::Null);
                             }
-                            let bytes = serde_json::to_vec(&data).unwrap_or_default();
-                            let _ = self
-                                .db_update(&r.source_entity, child_id, &bytes, now_ms)
-                                .await;
+                            let updated_data = serde_json::to_vec(&data).unwrap_or_default();
+                            effects.push(CascadeSideEffect::LocalSetNull {
+                                entity: r.source_entity.clone(),
+                                id: child_id.clone(),
+                                updated_data,
+                            });
                         } else {
-                            self.fire_and_forget_set_null(
+                            effects.push(CascadeSideEffect::RemoteSetNull {
                                 partition,
-                                &r.source_entity,
-                                child_id,
-                                &r.source_field,
-                            )
-                            .await;
+                                entity: r.source_entity.clone(),
+                                id: child_id.clone(),
+                                field: r.source_field.clone(),
+                            });
                         }
                     }
                 }
             }
         }
+        effects
     }
 
-    async fn fire_and_forget_json_request(
+    pub(crate) async fn execute_fk_side_effects(
+        &mut self,
+        effects: &[CascadeSideEffect],
+    ) -> Option<CascadeOutboxPayload> {
+        let now_ms = Self::current_time_ms();
+        let mut remote_ops = Vec::new();
+
+        for effect in effects {
+            match effect {
+                CascadeSideEffect::LocalDelete { entity, id } => {
+                    if let Ok((_, write)) = self.db_delete_prepare(entity, id) {
+                        let event = ChangeEvent::delete(entity.clone(), id.clone());
+                        let outbox = Self::build_change_event_outbox(&event);
+                        self.db_commit(write, outbox.clone()).await;
+                        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                            .await;
+                    }
+                }
+                CascadeSideEffect::LocalSetNull {
+                    entity,
+                    id,
+                    updated_data,
+                } => {
+                    if let Ok((_, write)) = self.db_update_prepare(entity, id, updated_data, now_ms)
+                    {
+                        let data_json: serde_json::Value =
+                            serde_json::from_slice(updated_data).unwrap_or(Value::Null);
+                        let event = ChangeEvent::update(entity.clone(), id.clone(), data_json);
+                        let outbox = Self::build_change_event_outbox(&event);
+                        self.db_commit(write, outbox.clone()).await;
+                        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                            .await;
+                    }
+                }
+                CascadeSideEffect::RemoteDelete { entity, id, .. } => {
+                    remote_ops.push(CascadeRemoteOp::Delete {
+                        entity: entity.clone(),
+                        id: id.clone(),
+                    });
+                }
+                CascadeSideEffect::RemoteSetNull {
+                    entity, id, field, ..
+                } => {
+                    remote_ops.push(CascadeRemoteOp::SetNull {
+                        entity: entity.clone(),
+                        id: id.clone(),
+                        field: field.clone(),
+                    });
+                }
+            }
+        }
+
+        if remote_ops.is_empty() {
+            return None;
+        }
+
+        let cascade_outbox =
+            CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &remote_ops);
+
+        for effect in effects {
+            match effect {
+                CascadeSideEffect::RemoteDelete {
+                    partition,
+                    entity,
+                    id,
+                } => {
+                    self.fire_and_forget_json_request(
+                        *partition,
+                        JsonDbOp::Delete,
+                        entity,
+                        id,
+                        &[],
+                    )
+                    .await;
+                }
+                CascadeSideEffect::RemoteSetNull {
+                    partition,
+                    entity,
+                    id,
+                    field,
+                } => {
+                    self.fire_and_forget_set_null(*partition, entity, id, field)
+                        .await;
+                }
+                CascadeSideEffect::LocalDelete { .. } | CascadeSideEffect::LocalSetNull { .. } => {}
+            }
+        }
+
+        Some(cascade_outbox)
+    }
+
+    pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
+        build_change_event_outbox(event)
+    }
+
+    pub(crate) async fn publish_and_deliver_change_event(
+        &self,
+        event: ChangeEvent,
+        operation_id: &str,
+    ) {
+        let topic = event.event_topic(0);
+        let user_properties: Vec<(String, String)> = event
+            .client_id
+            .as_ref()
+            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
+            .unwrap_or_default();
+        if let Ok(payload) = serde_json::to_vec(&event) {
+            self.transport
+                .queue_local_publish_with_properties(topic, payload, 1, user_properties)
+                .await;
+        }
+        if let Some(outbox) = self.stores.cluster_outbox() {
+            let _ = outbox.mark_delivered(operation_id);
+        }
+    }
+
+    pub(crate) async fn fire_and_forget_json_request(
         &self,
         partition: PartitionId,
         op: JsonDbOp,
@@ -743,7 +936,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    async fn fire_and_forget_set_null(
+    pub(crate) async fn fire_and_forget_set_null(
         &self,
         partition: PartitionId,
         entity: &str,
@@ -1317,8 +1510,11 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
 
-        self.apply_fk_side_effects(&side_effects).await;
-        let response_payload = self.execute_json_delete(&entity, &id).await;
+        let effects = self.prepare_fk_side_effects(&side_effects);
+        let cascade = self.execute_fk_side_effects(&effects).await;
+        let response_payload = self
+            .execute_json_delete(&entity, &id, cascade.as_ref())
+            .await;
         if !response_topic.is_empty() {
             let response =
                 JsonDbResponse::new(0, response_payload, response_topic, correlation_data);

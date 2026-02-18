@@ -54,6 +54,21 @@ impl StoreManager {
         self.apply_to_memory(write)
     }
 
+    #[allow(clippy::missing_errors_doc)]
+    pub fn apply_write_with_outbox_entries(
+        &self,
+        write: &ReplicationWrite,
+        outbox_entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .write_with_outbox_entries(write, outbox_entries)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+
+        self.apply_to_memory(write)
+    }
+
     pub(super) fn apply_to_memory(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         match write.entity.as_str() {
             entity::SESSIONS => self.apply_session(write),

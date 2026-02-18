@@ -862,13 +862,15 @@ impl DbRequestHandler {
             Ok(results) => results,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
-        controller.apply_fk_side_effects(&all_results).await;
+        let effects = controller.prepare_fk_side_effects(&all_results);
+        let cascade = controller.execute_fk_side_effects(&effects).await;
         JsonOpResult::Response(
-            self.execute_delete(controller, entity, id, sender, client_id)
+            self.execute_delete(controller, entity, id, sender, client_id, cascade.as_ref())
                 .await,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_delete<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -876,6 +878,7 @@ impl DbRequestHandler {
         id: &str,
         sender: Option<&str>,
         client_id: Option<&str>,
+        cascade: Option<&crate::cluster::store_manager::outbox::CascadeOutboxPayload>,
     ) -> Vec<u8> {
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
@@ -893,9 +896,20 @@ impl DbRequestHandler {
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
                 let outbox = Self::build_outbox(&event);
-                controller.db_commit(write, outbox.clone()).await;
+                if let Some(cas) = cascade {
+                    controller
+                        .db_commit_with_cascade(write, outbox.clone(), cas)
+                        .await;
+                } else {
+                    controller.db_commit(write, outbox.clone()).await;
+                }
                 self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                     .await;
+                if let Some(cas) = cascade
+                    && let Some(ob) = controller.stores().cluster_outbox()
+                {
+                    let _ = ob.mark_cascade_delivered(&cas.operation_id);
+                }
                 let result = json!({
                     "status": "ok",
                     "id": id,
@@ -1294,7 +1308,8 @@ impl DbRequestHandler {
                 response_topic,
                 correlation_data,
             } => {
-                controller.apply_fk_side_effects(&side_effects).await;
+                let effects = controller.prepare_fk_side_effects(&side_effects);
+                let cascade = controller.execute_fk_side_effects(&effects).await;
                 let payload = self
                     .execute_delete(
                         controller,
@@ -1302,6 +1317,7 @@ impl DbRequestHandler {
                         &id,
                         sender.as_deref(),
                         client_id.as_deref(),
+                        cascade.as_ref(),
                     )
                     .await;
                 Some(super::DbPublishResponse {
@@ -1432,20 +1448,7 @@ impl DbRequestHandler {
     }
 
     fn build_outbox(event: &ChangeEvent) -> crate::cluster::store_manager::outbox::OutboxPayload {
-        let topic = event.event_topic(0);
-        let user_properties: Vec<(String, String)> = event
-            .client_id
-            .as_ref()
-            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
-            .unwrap_or_default();
-        let payload = serde_json::to_vec(event).unwrap_or_default();
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        crate::cluster::store_manager::outbox::OutboxPayload::new(
-            operation_id,
-            &topic,
-            &payload,
-            &user_properties,
-        )
+        crate::cluster::node_controller::db_ops::build_change_event_outbox(event)
     }
 
     async fn publish_change_event_and_deliver<T: ClusterTransport>(
@@ -1454,26 +1457,8 @@ impl DbRequestHandler {
         event: ChangeEvent,
         operation_id: &str,
     ) {
-        let topic = event.event_topic(0);
-        let user_properties: Vec<(String, String)> = event
-            .client_id
-            .as_ref()
-            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
-            .unwrap_or_default();
-        match serde_json::to_vec(&event) {
-            Ok(payload) => {
-                tracing::debug!(topic, "publishing change event");
-                controller
-                    .transport()
-                    .queue_local_publish_with_properties(topic, payload, 1, user_properties)
-                    .await;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialize change event");
-            }
-        }
-        if let Some(outbox) = controller.stores().cluster_outbox() {
-            let _ = outbox.mark_delivered(operation_id);
-        }
+        controller
+            .publish_and_deliver_change_event(event, operation_id)
+            .await;
     }
 }

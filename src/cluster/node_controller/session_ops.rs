@@ -124,6 +124,20 @@ impl<T: ClusterTransport> NodeController<T> {
         replicas: &[NodeId],
         outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
     ) -> Result<u64, ReplicationError> {
+        self.replicate_write_async_with_extra(write, replicas, outbox, &[])
+            .await
+    }
+
+    /// # Errors
+    /// Returns an error if this node is not the primary for the partition.
+    #[allow(clippy::too_many_lines)]
+    pub async fn replicate_write_async_with_extra(
+        &mut self,
+        write: ReplicationWrite,
+        replicas: &[NodeId],
+        outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<u64, ReplicationError> {
         let start = std::time::Instant::now();
         let partition = write.partition;
 
@@ -153,12 +167,18 @@ impl<T: ClusterTransport> NodeController<T> {
             .append(partition, sequence, write_msg.clone());
         let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
+        let mut all_outbox_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         if let Some(ob) = outbox {
+            all_outbox_entries.push((ob.key, ob.value));
+        }
+        all_outbox_entries.extend_from_slice(extra_outbox);
+
+        if all_outbox_entries.is_empty() {
+            let _ = self.stores.apply_write(&write_msg);
+        } else {
             let _ = self
                 .stores
-                .apply_write_with_outbox(&write_msg, ob.key, ob.value);
-        } else {
-            let _ = self.stores.apply_write(&write_msg);
+                .apply_write_with_outbox_entries(&write_msg, &all_outbox_entries);
         }
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 

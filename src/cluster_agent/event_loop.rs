@@ -580,20 +580,57 @@ impl ClusteredAgent {
                 return;
             }
         };
-        if entries.is_empty() {
+        if !entries.is_empty() {
+            info!(count = entries.len(), "replaying pending outbox entries");
+            for entry in &entries {
+                ctrl.transport()
+                    .queue_local_publish_with_properties(
+                        entry.topic.clone(),
+                        entry.payload.clone(),
+                        1,
+                        entry.user_properties.clone(),
+                    )
+                    .await;
+                let _ = outbox.mark_delivered(&entry.operation_id);
+            }
+        }
+
+        let cascade_entries = match outbox.pending_cascade_ops() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "failed to scan cascade outbox for pending ops");
+                return;
+            }
+        };
+        if cascade_entries.is_empty() {
             return;
         }
-        info!(count = entries.len(), "replaying pending outbox entries");
-        for entry in &entries {
-            ctrl.transport()
-                .queue_local_publish_with_properties(
-                    entry.topic.clone(),
-                    entry.payload.clone(),
-                    1,
-                    entry.user_properties.clone(),
-                )
-                .await;
-            let _ = outbox.mark_delivered(&entry.operation_id);
+        info!(
+            count = cascade_entries.len(),
+            "replaying pending cascade operations"
+        );
+        for cascade in &cascade_entries {
+            for op in &cascade.operations {
+                match op {
+                    crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                        let partition = crate::cluster::data_partition(entity, id);
+                        ctrl.fire_and_forget_json_request(
+                            partition,
+                            crate::cluster::JsonDbOp::Delete,
+                            entity,
+                            id,
+                            &[],
+                        )
+                        .await;
+                    }
+                    crate::cluster::CascadeRemoteOp::SetNull { entity, id, field } => {
+                        let partition = crate::cluster::data_partition(entity, id);
+                        ctrl.fire_and_forget_set_null(partition, entity, id, field)
+                            .await;
+                    }
+                }
+            }
+            let _ = outbox.mark_cascade_delivered(&cascade.operation_id);
         }
     }
 
