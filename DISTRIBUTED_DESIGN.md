@@ -1283,7 +1283,7 @@ pub fn write_or_forward(&mut self, write: ReplicationWrite) {
     }
 
     // Route to partition owner
-    if self.is_local_partition(partition) {
+    if self.is_primary_for_partition(partition) {
         // We're primary - replicate to replicas
         let replicas = self.partition_map.replicas(partition).to_vec();
         self.replicate_write_async(write, &replicas);

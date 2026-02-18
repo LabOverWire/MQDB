@@ -6,7 +6,7 @@ These two systems have evolved independently for decades. Relational databases p
 
 But the seam between them is where the hardest problems live.
 
-This book is about what happens when you refuse to accept that seam — when you build a system that treats storage and messaging as a single concern. It follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively. Every design decision, every bug, every tradeoff is drawn from a real system running real workloads. The distributed systems principles, however, are universal.
+This book is about what happens when ask yourself, what would happen if data and broker were unified — when you build a system that treats storage and messaging as a single concern. It follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively. Every design decision, every bug, every tradeoff is drawn from a real system running real workloads. The distributed systems principles, however, are universal.
 
 ## 1.1 The Two-System Problem
 
@@ -15,7 +15,7 @@ Consider a straightforward scenario. In order for an e-commerce service to proce
 1. Write the order to the database.
 2. Publish an "order created" event so that the inventory service, the billing service, and the notification service can react.
 
-Simple enough. Trying to make these operations atomic becomes a huge cooperative challenge.
+Simple enough, but trying to make these operations atomic becomes a huge cooperative challenge.
 
 ### Dual Writes
 
@@ -30,7 +30,7 @@ commit();
 
 Since the database and the broker are separate systems with separate failure modes, this fails. If the database write succeeds but the broker publish fails, the order exists without anyone knowing about it. If the broker publish succeeds but the database write rolls back, downstream services react to an order that never existed.
 
-You cannot wrap two independent systems in a single atomic transaction without a distributed transaction protocol like XA — adding coordinator overhead, lock contention across systems, and partial-failure recovery complexity.
+You cannot wrap these two independent systems in a single atomic transaction without a distributed transaction protocol, which adds coordinator overhead, lock contention across systems, and partial-failure recovery complexity.
 
 ### Change Data Capture
 
@@ -275,7 +275,7 @@ The fixed count is a deliberate tradeoff between horizontal scaling and synchron
 
 MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch. In neither mode is there a multi-entity transaction, a multi-partition transaction protocol, two-phase commit, or distributed MVCC.
 
-Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap discussed in Chapter 15.
+Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap discussed in Chapter 15.
 
 This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB currently prioritizes throughput over cross-partition consistency. But the constraint enforcement infrastructure — two-phase reservation for unique constraints, scatter-gather for foreign key checks — already demonstrates cross-partition coordination with well-defined consistency windows. A formal distributed transaction protocol is a possible future addition, built on the same inter-partition messaging primitives.
 
