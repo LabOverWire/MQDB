@@ -229,4 +229,18 @@ mod tests {
         let (decoded, _) = FkReverseLookupResponse::try_from_be_bytes(&bytes).unwrap();
         assert!(decoded.referencing_ids().is_empty());
     }
+
+    #[test]
+    fn ids_data_len_is_byte_length_not_id_count() {
+        let ids = vec!["ab".to_string(), "cdef".to_string()];
+        let resp = FkReverseLookupResponse::create(1, &ids);
+        let expected_byte_len: u32 = (2 + 2 + 2 + 4) as u32;
+        assert_eq!(resp.ids_data_len, expected_byte_len);
+        assert_eq!(resp.referencing_ids().len(), 2);
+
+        let bytes = resp.to_be_bytes();
+        let (decoded, _) = FkReverseLookupResponse::try_from_be_bytes(&bytes).unwrap();
+        assert_eq!(decoded.ids_data_len, expected_byte_len);
+        assert_eq!(decoded.referencing_ids(), ids);
+    }
 }

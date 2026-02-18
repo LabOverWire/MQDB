@@ -754,4 +754,59 @@ mod tests {
         assert!(!store.exists("products", "unique_sku"));
         assert_eq!(store.count(), 0);
     }
+
+    #[test]
+    fn deserialize_dispatches_by_version_byte() {
+        let v2 = ClusterConstraint::foreign_key(
+            "posts",
+            "posts_author_fk",
+            "author_id",
+            "users",
+            "id",
+            OnDeleteAction::Cascade,
+        );
+        let v2_bytes = ConstraintStore::serialize(&v2);
+        assert_eq!(v2_bytes[0], 2);
+
+        let parsed = ConstraintStore::deserialize(&v2_bytes).unwrap();
+        assert_eq!(parsed.target_entity_str(), "users");
+        assert_eq!(parsed.on_delete_action(), OnDeleteAction::Cascade);
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_version() {
+        let mut bytes = ConstraintStore::serialize(&ClusterConstraint::unique("x", "y", "z"));
+        bytes[0] = 99;
+        assert!(ConstraintStore::deserialize(&bytes).is_none());
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_input() {
+        assert!(ConstraintStore::deserialize(&[]).is_none());
+    }
+
+    #[test]
+    fn v1_payload_not_parsed_as_v2() {
+        let v1_unique = ClusterConstraint::unique("users", "unique_email", "email");
+        let mut v1_bytes = Vec::new();
+        v1_bytes.push(1);
+        let entity = b"users";
+        v1_bytes.extend_from_slice(&5_u16.to_be_bytes());
+        v1_bytes.extend_from_slice(entity);
+        let name = b"unique_email";
+        v1_bytes.extend_from_slice(&12_u16.to_be_bytes());
+        v1_bytes.extend_from_slice(name);
+        v1_bytes.push(v1_unique.constraint_type);
+        let field = b"email";
+        v1_bytes.extend_from_slice(&5_u16.to_be_bytes());
+        v1_bytes.extend_from_slice(field);
+
+        let parsed = ConstraintStore::deserialize(&v1_bytes).unwrap();
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.entity_str(), "users");
+        assert_eq!(parsed.name_str(), "unique_email");
+        assert_eq!(parsed.field_str(), "email");
+        assert!(parsed.target_entity_str().is_empty());
+        assert!(parsed.target_field_str().is_empty());
+    }
 }
