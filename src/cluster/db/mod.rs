@@ -10,7 +10,8 @@ mod schema_store;
 mod unique_store;
 
 pub use constraint_store::{
-    ClusterConstraint, ConstraintStore, ConstraintStoreError, ConstraintType, constraint_key,
+    ClusterConstraint, ConstraintStore, ConstraintStoreError, ConstraintType, OnDeleteAction,
+    constraint_key,
 };
 pub use data_store::{DbDataStore, DbDataStoreError, DbEntity, db_data_key};
 pub use fk_store::{

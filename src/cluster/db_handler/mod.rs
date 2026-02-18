@@ -9,7 +9,9 @@ mod tests;
 
 use super::NodeId;
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};
-use super::node_controller::{NodeController, PendingUniqueWork};
+use super::node_controller::{
+    NodeController, PendingFkDeleteWork, PendingFkWork, PendingUniqueWork,
+};
 use super::transport::ClusterTransport;
 use crate::types::{OwnershipConfig, ScopeConfig};
 use std::sync::Arc;
@@ -24,6 +26,8 @@ pub enum DbPublishResult {
     Response(DbPublishResponse),
     NoResponse,
     PendingUniqueCheck(Box<PendingUniqueWork>),
+    PendingFkCheck(Box<PendingFkWork>),
+    PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
 impl DbPublishResult {
@@ -43,6 +47,8 @@ impl DbPublishResult {
             Self::Response(r) => r,
             Self::NoResponse => panic!("called unwrap on NoResponse"),
             Self::PendingUniqueCheck(_) => panic!("called unwrap on PendingUniqueCheck"),
+            Self::PendingFkCheck(_) => panic!("called unwrap on PendingFkCheck"),
+            Self::PendingFkDelete(_) => panic!("called unwrap on PendingFkDelete"),
         }
     }
 }
@@ -124,6 +130,12 @@ impl DbRequestHandler {
                     json_ops::JsonOpResult::NoResponse => return DbPublishResult::NoResponse,
                     json_ops::JsonOpResult::PendingUniqueCheck(pending) => {
                         return DbPublishResult::PendingUniqueCheck(pending);
+                    }
+                    json_ops::JsonOpResult::PendingFkCheck(pending) => {
+                        return DbPublishResult::PendingFkCheck(pending);
+                    }
+                    json_ops::JsonOpResult::PendingFkDelete(pending) => {
+                        return DbPublishResult::PendingFkDelete(pending);
                     }
                 }
             }

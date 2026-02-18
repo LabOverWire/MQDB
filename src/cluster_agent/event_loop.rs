@@ -256,13 +256,13 @@ impl ClusteredAgent {
         let mut ctrl = self.controller.write().await;
         if let Some(pending) = ctrl.handle_filtered_message(msg).await {
             drop(ctrl);
-            Self::spawn_unique_completion(self.controller.clone(), pending);
+            Self::spawn_constraint_completion(self.controller.clone(), pending);
             let mut ctrl = self.controller.write().await;
             let mut count = 1u32;
             while let Ok(msg) = rx_main_queue.try_recv() {
                 if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                     drop(ctrl);
-                    Self::spawn_unique_completion(self.controller.clone(), pending);
+                    Self::spawn_constraint_completion(self.controller.clone(), pending);
                     ctrl = self.controller.write().await;
                 }
                 count += 1;
@@ -276,12 +276,31 @@ impl ClusteredAgent {
         while let Ok(msg) = rx_main_queue.try_recv() {
             if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                 drop(ctrl);
-                Self::spawn_unique_completion(self.controller.clone(), pending);
+                Self::spawn_constraint_completion(self.controller.clone(), pending);
                 ctrl = self.controller.write().await;
             }
             count += 1;
             if count.is_multiple_of(BATCH_SIZE) {
                 tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    fn spawn_constraint_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingConstraintWork,
+    ) {
+        use crate::cluster::node_controller::PendingConstraintWork;
+
+        match pending {
+            PendingConstraintWork::Unique(unique_work) => {
+                Self::spawn_unique_completion(controller, unique_work);
+            }
+            PendingConstraintWork::Fk(fk_work) => {
+                Self::spawn_fk_completion(controller, fk_work);
+            }
+            PendingConstraintWork::FkDelete(fk_delete_work) => {
+                Self::spawn_fk_delete_completion(controller, fk_delete_work);
             }
         }
     }
@@ -299,6 +318,93 @@ impl ClusteredAgent {
             let remote_results = await_unique_reserves(pending_remote).await;
             let mut ctrl = controller.write().await;
             ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
+                .await;
+        });
+    }
+
+    fn spawn_fk_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingFkWork,
+    ) {
+        use crate::cluster::node_controller::fk::await_fk_checks;
+
+        let pending_checks = pending.pending_checks;
+        let continuation = pending.continuation;
+        tokio::spawn(async move {
+            let fk_result = await_fk_checks(pending_checks).await;
+            let mut ctrl = controller.write().await;
+            let (fk_ok, fk_error) = match fk_result {
+                Ok(()) => (true, None),
+                Err(msg) => (false, Some(msg)),
+            };
+            ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
+                .await;
+        });
+    }
+
+    fn spawn_fk_delete_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingFkDeleteWork,
+    ) {
+        use crate::cluster::db::OnDeleteAction;
+        use crate::cluster::node_controller::fk::await_fk_reverse_lookups;
+
+        let local_results = pending.local_results;
+        let pending_lookups = pending.pending_lookups;
+        let continuation = pending.continuation;
+        tokio::spawn(async move {
+            for r in &local_results {
+                if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+                    let restrict_error = format!(
+                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                        r.constraint_name,
+                        r.referencing_ids.len(),
+                        r.source_entity
+                    );
+                    let mut ctrl = controller.write().await;
+                    ctrl.complete_pending_fk_delete_work(
+                        Some(restrict_error),
+                        Vec::new(),
+                        continuation,
+                    )
+                    .await;
+                    return;
+                }
+            }
+
+            let remote_results = match await_fk_reverse_lookups(pending_lookups).await {
+                Ok(results) => results,
+                Err(msg) => {
+                    let mut ctrl = controller.write().await;
+                    ctrl.complete_pending_fk_delete_work(Some(msg), Vec::new(), continuation)
+                        .await;
+                    return;
+                }
+            };
+
+            for r in &remote_results {
+                if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+                    let restrict_error = format!(
+                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                        r.constraint_name,
+                        r.referencing_ids.len(),
+                        r.source_entity
+                    );
+                    let mut ctrl = controller.write().await;
+                    ctrl.complete_pending_fk_delete_work(
+                        Some(restrict_error),
+                        Vec::new(),
+                        continuation,
+                    )
+                    .await;
+                    return;
+                }
+            }
+
+            let mut combined = local_results;
+            combined.extend(remote_results);
+            let mut ctrl = controller.write().await;
+            ctrl.complete_pending_fk_delete_work(None, combined, continuation)
                 .await;
         });
     }

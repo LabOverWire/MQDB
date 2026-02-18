@@ -31,7 +31,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 12 | Session Management | Not started | | | |
 | 13 | The Message Processor Pipeline | Not started | | | |
 | 14 | The Wire Protocol | Not started | | | |
-| 15 | Unique Constraints in a Distributed System | Not started | | | |
+| 15 | Constraints in a Distributed System | Not started | | | |
 | 16 | Consumer Groups and Event Routing | Not started | | | |
 | 17 | Performance Analysis and Benchmarking | Not started | | | |
 | 18 | Security Architecture | Not started | | | |
@@ -83,6 +83,23 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 - Did NOT include commit history narrative — Ch 1 sets up the thesis, not the journey
 - The "how we got there" narrative starts in earnest from Chapter 4 onward
 
+### Session 3 — 2026-02-17
+
+**Work done (code, not prose):**
+- Implemented foreign key constraint enforcement across the cluster (Steps 1-8 of FK plan)
+- New files: `src/cluster/node_controller/fk.rs`, `src/cluster/protocol/fk.rs`
+- FK existence checks on create/update, reverse lookups on delete
+- Cascade (delete children), SetNull (null FK field), Restrict (block delete) — all wired through both DB paths
+- Lock-drop/reacquire pattern for async FK checks (same as unique constraints)
+- 8 integration tests covering all FK operations
+- Renamed Chapter 15 from "Unique Constraints" to "Constraints in a Distributed System" to cover both unique and FK
+- Updated source material mapping for Ch 15 with FK source files
+
+**Implications for book:**
+- Chapter 15 now covers two constraint protocols: unique (2-phase reserve/commit) and FK (1-phase existence check + scatter-gather reverse lookup)
+- FK consistency model is eventual — TLA+ proved phantom reads possible during lock-drop gap
+- This is a rich "What Went Wrong" section: the tradeoff between correctness and deadlock-freedom
+
 ---
 
 ## Writing Process Notes
@@ -113,7 +130,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 12 | src/cluster/session.rs, src/cluster/inflight_store.rs, src/cluster/qos2_store.rs, DISTRIBUTED_DESIGN.md (M8-M10) |
 | 13 | src/cluster/message_processor.rs, src/cluster/dedicated_executor.rs, DISTRIBUTED_DESIGN.md (A6.6, A6.7) |
 | 14 | src/cluster/protocol/, DISTRIBUTED_DESIGN.md (Part 2) |
-| 15 | src/cluster/node_controller/unique.rs, src/constraint.rs, DISTRIBUTED_DESIGN.md |
+| 15 | src/cluster/node_controller/unique.rs, src/cluster/node_controller/fk.rs, src/cluster/db/constraint_store.rs, src/cluster/protocol/fk.rs, DISTRIBUTED_DESIGN.md |
 | 16 | src/consumer_group.rs, src/dispatcher.rs |
 | 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, DISTRIBUTED_DESIGN.md (A6.4, A6.5 benchmarks) |
 | 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, README.md (auth sections) |

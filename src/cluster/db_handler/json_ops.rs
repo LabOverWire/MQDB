@@ -4,7 +4,10 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
-use super::super::node_controller::{NodeController, PendingUniqueWork, UniqueCheckContinuation};
+use super::super::node_controller::{
+    FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
+    PendingUniqueWork, UniqueCheckContinuation,
+};
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
@@ -16,6 +19,8 @@ pub(super) enum JsonOpResult {
     Response(Vec<u8>),
     NoResponse,
     PendingUniqueCheck(Box<PendingUniqueWork>),
+    PendingFkCheck(Box<PendingFkWork>),
+    PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
 #[allow(clippy::unused_self, clippy::too_many_arguments)]
@@ -186,13 +191,16 @@ impl DbRequestHandler {
                         ))
                     };
                 }
-                match self
-                    .handle_json_delete(controller, entity, id, sender, client_id)
-                    .await
-                {
-                    Some(payload) => JsonOpResult::Response(payload),
-                    None => JsonOpResult::NoResponse,
-                }
+                self.handle_json_delete(
+                    controller,
+                    entity,
+                    id,
+                    sender,
+                    client_id,
+                    response_topic,
+                    correlation_data,
+                )
+                .await
             }
             DbTopicOperation::JsonList { entity } => {
                 match self
@@ -349,6 +357,31 @@ impl DbRequestHandler {
     ) -> JsonOpResult {
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
+
+        let fk_result = match controller.start_fk_existence_check(entity, data).await {
+            Ok(r) => r,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+
+        if !fk_result.pending_remote.is_empty() {
+            let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+            return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
+                pending_checks: fk_result.pending_remote,
+                continuation: FkCheckContinuation::CreateFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    data: data.clone(),
+                    data_bytes,
+                    partition,
+                    request_id,
+                    now_ms,
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
 
         let phase1 = match controller
             .start_unique_constraint_check(entity, id, data, partition, &request_id, now_ms)
@@ -559,7 +592,7 @@ impl DbRequestHandler {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -584,6 +617,38 @@ impl DbRequestHandler {
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let partition = data_partition(entity, id);
+
+        let fk_result = match controller
+            .start_fk_existence_check(entity, &merged_data)
+            .await
+        {
+            Ok(r) => r,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+
+        if !fk_result.pending_remote.is_empty() {
+            let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
+            let (new_diff, old_diff) =
+                controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
+            return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
+                pending_checks: fk_result.pending_remote,
+                continuation: FkCheckContinuation::UpdateFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    merged_data,
+                    data_bytes,
+                    partition,
+                    request_id,
+                    now_ms,
+                    new_diff,
+                    old_diff,
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
 
         let (new_diff, old_diff) =
             controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
@@ -763,7 +828,45 @@ impl DbRequestHandler {
         id: &str,
         sender: Option<&str>,
         client_id: Option<&str>,
-    ) -> Option<Vec<u8>> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> JsonOpResult {
+        let (local_results, pending_remote) =
+            match controller.start_fk_reverse_lookup(entity, id).await {
+                Ok(pair) => pair,
+                Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+            };
+
+        if !pending_remote.is_empty() {
+            return JsonOpResult::PendingFkDelete(Box::new(PendingFkDeleteWork {
+                local_results,
+                pending_lookups: pending_remote,
+                continuation: FkDeleteContinuation::DeleteFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
+
+        controller.apply_fk_side_effects(&local_results).await;
+        JsonOpResult::Response(
+            self.execute_delete(controller, entity, id, sender, client_id)
+                .await,
+        )
+    }
+
+    async fn execute_delete<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        sender: Option<&str>,
+        client_id: Option<&str>,
+    ) -> Vec<u8> {
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
         } else {
@@ -786,13 +889,12 @@ impl DbRequestHandler {
                     "entity": entity,
                     "deleted": true
                 });
-                Some(serde_json::to_vec(&result).unwrap_or_default())
+                serde_json::to_vec(&result).unwrap_or_default()
             }
-            Err(db::DbDataStoreError::NotFound) => Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            )),
-            Err(_) => Some(Self::json_error(500, "internal error")),
+            Err(db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
         }
     }
 
@@ -1134,6 +1236,175 @@ impl DbRequestHandler {
                     payload: response_payload,
                     correlation_data,
                 })
+            }
+            _ => None,
+        }
+    }
+
+    pub async fn complete_pending_fk_delete<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        restrict_error: Option<String>,
+        side_effects: Vec<crate::cluster::node_controller::fk::FkReverseLookupResult>,
+        continuation: FkDeleteContinuation,
+    ) -> Option<super::super::db_handler::DbPublishResponse> {
+        if let Some(msg) = restrict_error {
+            let payload = Self::json_error(409, &msg);
+            return match continuation {
+                FkDeleteContinuation::DeleteFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                } => Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                }),
+                FkDeleteContinuation::DeleteFromNodeController { .. } => None,
+            };
+        }
+
+        match continuation {
+            FkDeleteContinuation::DeleteFromDbHandler {
+                entity,
+                id,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+            } => {
+                controller.apply_fk_side_effects(&side_effects).await;
+                let payload = self
+                    .execute_delete(
+                        controller,
+                        &entity,
+                        &id,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                    )
+                    .await;
+                Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                })
+            }
+            FkDeleteContinuation::DeleteFromNodeController { .. } => None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn complete_pending_fk_check<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        fk_ok: bool,
+        fk_error: Option<String>,
+        continuation: FkCheckContinuation,
+    ) -> Option<super::super::db_handler::DbPublishResponse> {
+        if !fk_ok {
+            let msg = fk_error.unwrap_or_else(|| "FK constraint violation".to_string());
+            let payload = Self::json_error(409, &msg);
+            return match continuation {
+                FkCheckContinuation::CreateFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                }
+                | FkCheckContinuation::UpdateFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                } => Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                }),
+                _ => None,
+            };
+        }
+
+        match continuation {
+            FkCheckContinuation::CreateFromDbHandler {
+                entity,
+                id,
+                data,
+                partition,
+                request_id,
+                now_ms,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let result = self
+                    .complete_create(
+                        controller,
+                        &entity,
+                        &id,
+                        &data,
+                        partition,
+                        &request_id,
+                        now_ms,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => Some(super::DbPublishResponse {
+                        topic: response_topic,
+                        payload,
+                        correlation_data,
+                    }),
+                    JsonOpResult::PendingUniqueCheck(_)
+                    | JsonOpResult::PendingFkCheck(_)
+                    | JsonOpResult::PendingFkDelete(_)
+                    | JsonOpResult::NoResponse => None,
+                }
+            }
+            FkCheckContinuation::UpdateFromDbHandler {
+                entity,
+                id,
+                merged_data,
+                partition,
+                request_id,
+                now_ms,
+                new_diff,
+                old_diff,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
+                let result = self
+                    .complete_update(
+                        controller,
+                        &entity,
+                        &id,
+                        &merged_data,
+                        partition,
+                        &request_id,
+                        now_ms,
+                        has_unique_changes,
+                        &new_diff,
+                        &old_diff,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => Some(super::DbPublishResponse {
+                        topic: response_topic,
+                        payload,
+                        correlation_data,
+                    }),
+                    JsonOpResult::PendingUniqueCheck(_)
+                    | JsonOpResult::PendingFkCheck(_)
+                    | JsonOpResult::PendingFkDelete(_)
+                    | JsonOpResult::NoResponse => None,
+                }
             }
             _ => None,
         }

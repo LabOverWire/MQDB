@@ -142,8 +142,10 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
         use super::super::db_handler::DbPublishResult;
+        use super::super::node_controller::fk::await_fk_checks;
         use super::super::node_controller::unique::await_unique_reserves;
 
         debug!(topic = %event.topic, "handling $DB/ request");
@@ -204,7 +206,98 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                         .await;
                 }
             }
+            DbPublishResult::PendingFkCheck(pending) => {
+                let pending_checks = pending.pending_checks;
+                let continuation = pending.continuation;
+                drop(ctrl);
+                let fk_result = await_fk_checks(pending_checks).await;
+                let mut ctrl = self.controller.write().await;
+                let (fk_ok, fk_error) = match fk_result {
+                    Ok(()) => (true, None),
+                    Err(msg) => (false, Some(msg)),
+                };
+                if let Some(response) = self
+                    .db_handler
+                    .complete_pending_fk_check(&mut ctrl, fk_ok, fk_error, continuation)
+                    .await
+                {
+                    ctrl.transport()
+                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                        .await;
+                }
+            }
+            DbPublishResult::PendingFkDelete(pending) => {
+                let local_results = pending.local_results;
+                let pending_lookups = pending.pending_lookups;
+                let continuation = pending.continuation;
+                drop(ctrl);
+                let (restrict_error, side_effects) =
+                    Self::resolve_fk_delete_lookups(local_results, pending_lookups).await;
+                let mut ctrl = self.controller.write().await;
+                if let Some(response) = self
+                    .db_handler
+                    .complete_pending_fk_delete(
+                        &mut ctrl,
+                        restrict_error,
+                        side_effects,
+                        continuation,
+                    )
+                    .await
+                {
+                    ctrl.transport()
+                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                        .await;
+                }
+            }
         }
+    }
+
+    async fn resolve_fk_delete_lookups(
+        local_results: Vec<super::super::node_controller::fk::FkReverseLookupResult>,
+        pending_lookups: Vec<super::super::node_controller::PendingFkReverseLookup>,
+    ) -> (
+        Option<String>,
+        Vec<super::super::node_controller::fk::FkReverseLookupResult>,
+    ) {
+        use super::super::db::OnDeleteAction;
+        use super::super::node_controller::fk::await_fk_reverse_lookups;
+
+        for r in &local_results {
+            if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+                return (
+                    Some(format!(
+                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                        r.constraint_name,
+                        r.referencing_ids.len(),
+                        r.source_entity
+                    )),
+                    Vec::new(),
+                );
+            }
+        }
+
+        let remote_results = match await_fk_reverse_lookups(pending_lookups).await {
+            Ok(results) => results,
+            Err(msg) => return (Some(msg), Vec::new()),
+        };
+
+        for r in &remote_results {
+            if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+                return (
+                    Some(format!(
+                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                        r.constraint_name,
+                        r.referencing_ids.len(),
+                        r.source_entity
+                    )),
+                    Vec::new(),
+                );
+            }
+        }
+
+        let mut combined = local_results;
+        combined.extend(remote_results);
+        (None, combined)
     }
 
     pub(super) async fn route_and_forward_publish(

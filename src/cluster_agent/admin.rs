@@ -257,6 +257,45 @@ impl ClusteredAgent {
                     Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
                 }
             }
+            "fk" | "foreign_key" => {
+                let target_entity = constraint_def
+                    .get("target_entity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let target_field = constraint_def
+                    .get("target_field")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let on_delete_str = constraint_def
+                    .get("on_delete")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("restrict");
+
+                if target_entity.is_empty() || target_field.is_empty() {
+                    return Response::error(
+                        ErrorCode::BadRequest,
+                        "FK constraint requires 'target_entity' and 'target_field' parameters",
+                    );
+                }
+
+                let on_delete = crate::cluster::db::OnDeleteAction::parse(on_delete_str);
+                let constraint = crate::cluster::db::ClusterConstraint::foreign_key(
+                    entity,
+                    name,
+                    field,
+                    target_entity,
+                    target_field,
+                    on_delete,
+                );
+                let mut ctrl = self.controller.write().await;
+                match ctrl.constraint_add(&constraint).await {
+                    Ok(()) => Response::ok(json!({"message": "FK constraint added"})),
+                    Err(crate::cluster::db::ConstraintStoreError::AlreadyExists) => {
+                        Response::error(ErrorCode::Conflict, "constraint already exists")
+                    }
+                    Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+                }
+            }
             _ => Response::error(
                 ErrorCode::BadRequest,
                 format!("unsupported constraint type: {constraint_type}"),
@@ -293,11 +332,22 @@ impl ClusteredAgent {
         let data: Vec<serde_json::Value> = constraints
             .iter()
             .map(|c| {
-                json!({
-                    "name": c.name_str(),
-                    "type": "unique",
-                    "field": c.field_str()
-                })
+                if c.is_foreign_key() {
+                    json!({
+                        "name": c.name_str(),
+                        "type": "fk",
+                        "field": c.field_str(),
+                        "target_entity": c.target_entity_str(),
+                        "target_field": c.target_field_str(),
+                        "on_delete": c.on_delete_action().as_str()
+                    })
+                } else {
+                    json!({
+                        "name": c.name_str(),
+                        "type": "unique",
+                        "field": c.field_str()
+                    })
+                }
             })
             .collect();
         Response::ok(json!(data))

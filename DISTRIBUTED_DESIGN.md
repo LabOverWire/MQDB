@@ -1000,6 +1000,10 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 | 83 | `UniqueCommitResponse` | Unique commit response |
 | 84 | `UniqueReleaseRequest` | Release reserved unique value |
 | 85 | `UniqueReleaseResponse` | Unique release response |
+| 90 | `FkCheckRequest` | FK existence check (create/update) |
+| 91 | `FkCheckResponse` | FK existence check response |
+| 92 | `FkReverseLookupRequest` | FK reverse lookup (delete) |
+| 93 | `FkReverseLookupResponse` | FK reverse lookup response |
 
 ### 2.3 Heartbeat Message (75 bytes)
 
@@ -2238,6 +2242,8 @@ The following sections may need documentation:
 
 | File | Purpose |
 |------|---------|
+| `src/cluster/node_controller/fk.rs` | Foreign key constraint protocol |
+| `src/cluster/node_controller/unique.rs` | Unique constraint 2-phase protocol |
 | `src/cluster/node_controller.rs` | Main cluster controller, message handling |
 | `src/cluster/heartbeat.rs` | Heartbeat management, node status |
 | `src/cluster/partition_map.rs` | Partition assignments |

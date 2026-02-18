@@ -197,15 +197,17 @@ Binary protocol design for distributed system communication.
 
 ## Part IV: Advanced Patterns (Chapters 15-18, ~80 pages)
 
-### Chapter 15: Unique Constraints in a Distributed System
+### Chapter 15: Constraints in a Distributed System
 
-Enforcing uniqueness across partitions requires coordination. This chapter covers the two-phase reservation protocol.
+Enforcing uniqueness and referential integrity across partitions requires coordination. This chapter covers the two-phase reservation protocol for unique constraints and the scatter-gather protocol for foreign keys.
 
 - **15.1 The Problem** — Two clients on different nodes simultaneously create records with the same unique field value. Without coordination, both succeed, violating the constraint.
-- **15.2 Two-Phase Protocol** — Phase 1: Reserve the unique value on the partition that owns it (hash of field value). Phase 2: If reservation succeeds, commit the write; otherwise, release and fail.
+- **15.2 Two-Phase Unique Protocol** — Phase 1: Reserve the unique value on the partition that owns it (hash of field value). Phase 2: If reservation succeeds, commit the write; otherwise, release and fail.
 - **15.3 Lock Drop/Reacquire Pattern** — When holding `Arc<RwLock>` and needing to await a remote response that arrives via the same event loop: send request while locked, drop lock, await response, reacquire lock, complete operation. Why this pattern appears repeatedly in async distributed code.
 - **15.4 Composite Unique Constraints** — Multiple fields concatenated into a single reservation key. How composite keys interact with the partition function.
-- **15.5 Foreign Key Validation** — Cross-partition FK checks follow the same pattern: forward validation request to the partition owning the referenced entity, await response.
+- **15.5 Foreign Key Existence Checks** — On create/update, verify the referenced entity exists on its partition primary. One-phase, read-only — simpler than unique constraints because no reservation is needed.
+- **15.6 FK Reverse Lookups on Delete** — Scatter-gather across all partitions to find referencing records. Three actions: Restrict (block delete), Cascade (delete children), SetNull (null FK field). Short-circuit on first Restrict hit.
+- **15.7 Consistency Tradeoffs** — TLA+ model proved phantom reads possible during the lock-drop gap. Concurrent create + delete of an FK target can produce orphan references. Why this is acceptable: catches the vast majority of violations, and the alternative (holding locks across network round-trips) causes deadlocks.
 
 ### Chapter 16: Consumer Groups and Event Routing
 

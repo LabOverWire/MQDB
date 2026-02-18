@@ -74,4 +74,21 @@ impl StoreManager {
     pub fn constraint_get_unique_fields(&self, entity_type: &str) -> Vec<String> {
         self.db_constraints.get_unique_fields(entity_type)
     }
+
+    #[must_use]
+    pub fn constraint_get_fk_constraints(
+        &self,
+        entity_type: &str,
+    ) -> Vec<super::super::db::ClusterConstraint> {
+        self.db_constraints.get_fk_constraints(entity_type)
+    }
+
+    #[must_use]
+    pub fn constraint_find_referencing(
+        &self,
+        target_entity: &str,
+    ) -> Vec<super::super::db::ClusterConstraint> {
+        self.db_constraints
+            .find_referencing_constraints(target_entity)
+    }
 }

@@ -4,6 +4,7 @@
 mod broadcast;
 mod catchup;
 mod db_ops;
+pub(crate) mod fk;
 mod query;
 mod replication_ops;
 mod retained;
@@ -98,6 +99,112 @@ pub struct UniqueCheckPhase1Result {
 pub struct PendingUniqueWork {
     pub phase1: UniqueCheckPhase1Result,
     pub continuation: UniqueCheckContinuation,
+}
+
+pub struct PendingFkCheck {
+    pub target_entity: String,
+    pub target_id: String,
+    pub receiver: oneshot::Receiver<bool>,
+}
+
+pub struct PendingFkReverseLookup {
+    pub constraint_name: String,
+    pub source_entity: String,
+    pub source_field: String,
+    pub on_delete: super::db::OnDeleteAction,
+    pub receiver: oneshot::Receiver<Vec<String>>,
+}
+
+pub struct PendingFkWork {
+    pub pending_checks: Vec<PendingFkCheck>,
+    pub continuation: FkCheckContinuation,
+}
+
+pub struct PendingFkDeleteWork {
+    pub local_results: Vec<super::node_controller::fk::FkReverseLookupResult>,
+    pub pending_lookups: Vec<PendingFkReverseLookup>,
+    pub continuation: FkDeleteContinuation,
+}
+
+pub enum FkDeleteContinuation {
+    DeleteFromDbHandler {
+        entity: String,
+        id: String,
+        sender: Option<String>,
+        client_id: Option<String>,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    DeleteFromNodeController {
+        from: NodeId,
+        entity: String,
+        id: String,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+}
+
+pub enum PendingConstraintWork {
+    Unique(PendingUniqueWork),
+    Fk(PendingFkWork),
+    FkDelete(PendingFkDeleteWork),
+}
+
+pub enum FkCheckContinuation {
+    CreateFromDbHandler {
+        entity: String,
+        id: String,
+        data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        sender: Option<String>,
+        client_id: Option<String>,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    UpdateFromDbHandler {
+        entity: String,
+        id: String,
+        merged_data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        new_diff: serde_json::Value,
+        old_diff: serde_json::Value,
+        sender: Option<String>,
+        client_id: Option<String>,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    CreateFromNodeController {
+        from: NodeId,
+        entity: String,
+        id: String,
+        data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
+    UpdateFromNodeController {
+        from: NodeId,
+        entity: String,
+        id: String,
+        merged_data: serde_json::Value,
+        data_bytes: Vec<u8>,
+        partition: PartitionId,
+        request_id: String,
+        now_ms: u64,
+        new_diff: serde_json::Value,
+        old_diff: serde_json::Value,
+        response_topic: String,
+        correlation_data: Option<Vec<u8>>,
+    },
 }
 
 pub enum UniqueCheckContinuation {
@@ -203,6 +310,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pub(super) pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
     pub(super) next_unique_request_id: u64,
+    pub(super) pending_fk_checks: HashMap<u64, oneshot::Sender<bool>>,
+    pub(super) pending_fk_lookups: HashMap<u64, oneshot::Sender<Vec<String>>>,
+    pub(super) next_fk_request_id: u64,
     pub(super) ownership: Arc<OwnershipConfig>,
 }
 
@@ -269,6 +379,9 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_scatter_requests: HashMap::new(),
             pending_unique_requests: HashMap::new(),
             next_unique_request_id: 1,
+            pending_fk_checks: HashMap::new(),
+            pending_fk_lookups: HashMap::new(),
+            next_fk_request_id: 1,
             ownership: Arc::new(OwnershipConfig::default()),
         }
     }
@@ -696,7 +809,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn handle_filtered_message(
         &mut self,
         msg: InboundMessage,
-    ) -> Option<PendingUniqueWork> {
+    ) -> Option<PendingConstraintWork> {
         match msg.message {
             ClusterMessage::Heartbeat(_)
             | ClusterMessage::RequestVote(_)
@@ -930,7 +1043,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         from: NodeId,
         message: &ClusterMessage,
-    ) -> Option<PendingUniqueWork> {
+    ) -> Option<PendingConstraintWork> {
         match message {
             ClusterMessage::SnapshotRequest(req) => {
                 self.handle_snapshot_request(from, req).await;
@@ -977,6 +1090,18 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
+            }
+            ClusterMessage::FkCheckRequest(req) => {
+                self.handle_fk_check_request(from, req).await;
+            }
+            ClusterMessage::FkCheckResponse(resp) => {
+                self.handle_fk_check_response(resp);
+            }
+            ClusterMessage::FkReverseLookupRequest(req) => {
+                self.handle_fk_reverse_lookup_request(from, req).await;
+            }
+            ClusterMessage::FkReverseLookupResponse(resp) => {
+                self.handle_fk_reverse_lookup_response(resp);
             }
             _ => {}
         }
