@@ -588,8 +588,14 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-        let result = match self.db_update(entity, id, &data_bytes, now_ms).await {
-            Ok(db_entity) => {
+        let result = match self.db_update_prepare(entity, id, &data_bytes, now_ms) {
+            Ok((db_entity, write)) => {
+                let event =
+                    ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone());
+                let outbox = Self::build_change_event_outbox(&event);
+                self.db_commit(write, outbox.clone()).await;
+                self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                    .await;
                 if has_unique_changes {
                     self.commit_unique_constraints(
                         entity,
@@ -765,6 +771,14 @@ impl<T: ClusterTransport> NodeController<T> {
                             };
                             if let Some(obj) = data.as_object_mut() {
                                 obj.insert(r.source_field.clone(), serde_json::Value::Null);
+                                let v = obj
+                                    .get("_version")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
+                                obj.insert(
+                                    "_version".to_string(),
+                                    serde_json::Value::Number((v + 1).into()),
+                                );
                             }
                             let updated_data = serde_json::to_vec(&data).unwrap_or_default();
                             effects.push(CascadeSideEffect::LocalSetNull {
@@ -1428,37 +1442,46 @@ impl<T: ClusterTransport> NodeController<T> {
                 let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-                let response_payload = match self.db_update(&entity, &id, &data_bytes, now_ms).await
-                {
-                    Ok(db_entity) => {
-                        if has_unique_changes {
-                            self.commit_unique_constraints(
-                                &entity,
-                                &id,
-                                &new_diff,
-                                partition,
-                                &request_id,
-                                now_ms,
-                            )
-                            .await;
-                            self.release_unique_constraints(
-                                &entity, &id, &old_diff, partition, &id, now_ms,
-                            )
-                            .await;
+                let response_payload =
+                    match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
+                        Ok((db_entity, write)) => {
+                            let event = ChangeEvent::update(
+                                entity.clone(),
+                                id.clone(),
+                                merged_data.clone(),
+                            );
+                            let outbox = Self::build_change_event_outbox(&event);
+                            self.db_commit(write, outbox.clone()).await;
+                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                                .await;
+                            if has_unique_changes {
+                                self.commit_unique_constraints(
+                                    &entity,
+                                    &id,
+                                    &new_diff,
+                                    partition,
+                                    &request_id,
+                                    now_ms,
+                                )
+                                .await;
+                                self.release_unique_constraints(
+                                    &entity, &id, &old_diff, partition, &id, now_ms,
+                                )
+                                .await;
+                            }
+                            let result = serde_json::json!({
+                                "status": "ok",
+                                "id": db_entity.id_str(),
+                                "entity": entity,
+                                "data": merged_data
+                            });
+                            serde_json::to_vec(&result).unwrap_or_default()
                         }
-                        let result = serde_json::json!({
-                            "status": "ok",
-                            "id": db_entity.id_str(),
-                            "entity": entity,
-                            "data": merged_data
-                        });
-                        serde_json::to_vec(&result).unwrap_or_default()
-                    }
-                    Err(super::db::DbDataStoreError::NotFound) => {
-                        Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                    }
-                    Err(_) => Self::json_error(500, "internal error"),
-                };
+                        Err(super::db::DbDataStoreError::NotFound) => {
+                            Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                        }
+                        Err(_) => Self::json_error(500, "internal error"),
+                    };
 
                 let response =
                     JsonDbResponse::new(0, response_payload, response_topic, correlation_data);

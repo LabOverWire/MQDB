@@ -1,7 +1,10 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use mqdb::{Database, Error, FieldDefinition, FieldType, OnDeleteAction, Schema, ScopeConfig};
+use mqdb::{
+    ChangeEvent, Database, Error, FieldDefinition, FieldType, OnDeleteAction, Operation, Schema,
+    ScopeConfig,
+};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -821,4 +824,134 @@ async fn test_combined_schema_and_constraints() {
         .create("users".into(), user3, None, None, &ScopeConfig::default())
         .await;
     assert!(matches!(result, Err(Error::SchemaViolation { .. })));
+}
+
+#[tokio::test]
+async fn test_cascade_delete_emits_change_events() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+    let mut rx = db.event_receiver();
+
+    let user = json!({"name": "Alice"});
+    let created_user = db
+        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let user_id = created_user["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
+    let created_post = db
+        .create("posts".into(), post1, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let post_id = created_post["id"].as_str().unwrap().to_string();
+
+    while rx.try_recv().is_ok() {}
+
+    db.delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+
+    let mut events: Vec<ChangeEvent> = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    let parent_delete = events
+        .iter()
+        .find(|e| e.entity == "users" && e.operation == Operation::Delete);
+    assert!(parent_delete.is_some(), "parent delete event expected");
+
+    let child_delete = events
+        .iter()
+        .find(|e| e.entity == "posts" && e.id == post_id && e.operation == Operation::Delete);
+    assert!(
+        child_delete.is_some(),
+        "cascade child delete event expected"
+    );
+}
+
+#[tokio::test]
+async fn test_set_null_emits_update_change_events() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+    let mut rx = db.event_receiver();
+
+    let user = json!({"name": "Alice"});
+    let created_user = db
+        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let user_id = created_user["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        OnDeleteAction::SetNull,
+    )
+    .await
+    .unwrap();
+
+    let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
+    let post2 = json!({"title": "Post 2", "author_id": user_id.clone()});
+    let created_p1 = db
+        .create("posts".into(), post1, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let created_p2 = db
+        .create("posts".into(), post2, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let p1_id = created_p1["id"].as_str().unwrap().to_string();
+    let p2_id = created_p2["id"].as_str().unwrap().to_string();
+
+    while rx.try_recv().is_ok() {}
+
+    db.delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+
+    let mut events: Vec<ChangeEvent> = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    let parent_delete = events
+        .iter()
+        .find(|e| e.entity == "users" && e.operation == Operation::Delete);
+    assert!(parent_delete.is_some(), "parent delete event expected");
+
+    let update_events: Vec<&ChangeEvent> = events
+        .iter()
+        .filter(|e| e.entity == "posts" && e.operation == Operation::Update)
+        .collect();
+    assert_eq!(
+        update_events.len(),
+        2,
+        "expected 2 set-null Update events for posts"
+    );
+
+    let mut updated_ids: Vec<&str> = update_events.iter().map(|e| e.id.as_str()).collect();
+    updated_ids.sort_unstable();
+    let mut expected_ids = vec![p1_id.as_str(), p2_id.as_str()];
+    expected_ids.sort_unstable();
+    assert_eq!(updated_ids, expected_ids);
+
+    for ev in &update_events {
+        let data = ev.data.as_ref().unwrap();
+        assert_eq!(data["author_id"], json!(null));
+        assert_eq!(data["_version"], json!(2));
+    }
 }

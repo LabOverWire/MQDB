@@ -205,6 +205,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found or constraint validation fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn delete(
         &self,
         entity_name: String,
@@ -237,6 +238,7 @@ impl Database {
         drop(index_manager);
 
         let mut deleted_entities: Vec<(String, String, Value)> = Vec::new();
+        let mut set_null_entities: Vec<(String, String, Value)> = Vec::new();
 
         for operation in &delete_ops {
             match operation {
@@ -290,6 +292,12 @@ impl Database {
                         let index_manager = self.index_manager.read().await;
                         index_manager.update_indexes(&mut batch, &entity, Some(&old_entity));
                         drop(index_manager);
+
+                        set_null_entities.push((
+                            set_null_op.entity.clone(),
+                            set_null_op.id.clone(),
+                            entity.data,
+                        ));
                     }
                 }
             }
@@ -309,6 +317,15 @@ impl Database {
                     .with_sender(sender.map(String::from))
                     .with_client_id(client_id.map(String::from))
                     .with_scope(cascade_scope),
+            );
+        }
+        for (sn_entity, sn_id, sn_data) in set_null_entities {
+            let sn_scope = scope_config.resolve_scope(&sn_entity, &sn_data);
+            events.push(
+                ChangeEvent::update(sn_entity, sn_id, sn_data)
+                    .with_sender(sender.map(String::from))
+                    .with_client_id(client_id.map(String::from))
+                    .with_scope(sn_scope),
             );
         }
 
