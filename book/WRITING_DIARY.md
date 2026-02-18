@@ -100,6 +100,22 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 - FK consistency model is eventual — TLA+ proved phantom reads possible during lock-drop gap
 - This is a rich "What Went Wrong" section: the tradeoff between correctness and deadlock-freedom
 
+### Session 4 — 2026-02-17
+
+**Work done (code, not prose):**
+- Fixed two bugs found during live cluster FK testing:
+  1. **Constraint key format mismatch** — `apply_replicated` stored constraints with key `_db_constraint/{entity}/{name}` but `exists()`/`remove()`/`get()` looked up using `{entity}:{name}`. Constraint removal was broken in cluster mode. Fixed by normalizing keys in `apply_replicated` to match the in-memory format.
+  2. **Cross-partition cascade/set-null routing** — `apply_fk_side_effects` called `db_delete()` which only works for local partitions. Entities on remote partitions silently failed (NotFound ignored). Added `fire_and_forget_json_request()` and `fire_and_forget_set_null()` that route via `ClusterMessage::JsonDbRequest` to the correct partition primary.
+- Added `replication_id_to_key()` conversion function for backward-compatible key parsing
+- Added response_topic guards to skip sending responses for fire-and-forget cascade operations
+- Added `apply_replicated_uses_normalized_key` unit test
+- Full live cluster FK test suite passing across 3 nodes: RESTRICT, CASCADE, SET NULL, multilevel cascade (users→posts→comments), cross-node operations
+
+**Implications for book:**
+- Chapter 15 gains a strong "What Went Wrong" anecdote: the gap between unit tests passing (local partitions only) and cluster reality (entities spread across partitions). The cascade delete appeared to work in unit tests because all entities were local, but failed in production when the hash ring distributed entities across nodes.
+- The fire-and-forget pattern for cascade side effects is architecturally interesting — the coordinating node doesn't wait for cascade confirmation, trading consistency for simplicity. Each individual delete is atomic; the chain is best-effort.
+- The constraint key mismatch bug illustrates why having two key derivation functions for the same data is a code smell — the fix was to make `apply_replicated` derive keys from the constraint data itself rather than trusting the replication write id format.
+
 ---
 
 ## Writing Process Notes
