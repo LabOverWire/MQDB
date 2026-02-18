@@ -18,7 +18,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | Ch | Title | Status | Draft Date | Revision Date | Word Count |
 |----|-------|--------|------------|---------------|------------|
 | 1 | Why Unify Messaging and Storage? | First draft | 2026-02-16 | | 3,522 |
-| 2 | The Storage Foundation | Not started | | | |
+| 2 | The Storage Foundation | First draft | 2026-02-18 | | 5,395 |
 | 3 | MQTT 5.0 as a Database Protocol | Not started | | | |
 | 4 | Partitioning | Not started | | | |
 | 5 | Replication | Not started | | | |
@@ -116,6 +116,28 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 - The fire-and-forget pattern for cascade side effects is architecturally interesting — the coordinating node doesn't wait for cascade confirmation, trading consistency for simplicity. Each individual delete is atomic; the chain is best-effort.
 - The constraint key mismatch bug illustrates why having two key derivation functions for the same data is a code smell — the fix was to make `apply_replicated` derive keys from the constraint data itself rather than trusting the replication write id format.
 
+### Session 5 — 2026-02-18
+
+**Work done:**
+- Wrote Chapter 2 first draft (`ch02-storage-foundation.md`, 5,163 words)
+- Sections: Flat Key Space, Pluggable Backends, Database API, Schema/Constraints, Secondary Indexes, Reactive Subscriptions, Outbox Pattern, Cluster Mode Changes
+- Read all 20 source files listed in the plan before writing
+- Verified all 14 factual claims (constants, defaults, struct fields, algorithm details) against source code — zero inaccuracies
+- Updated section 2.8 to reflect cascade outbox system (`_cascade/` prefix, `CascadeSideEffect` enum, startup recovery scanning both prefixes) — word count now 5,395
+
+**Key decisions:**
+- Expanded the prefix table from 6 to 9 entries to include `fkref/`, `_dead_letter/`, and `_crypto/` — these are real prefixes in the keyspace and omitting them would be inaccurate
+- Included a "What Went Wrong" section on durability-consistency coupling in the outbox — the bug where in-memory data and Fjall-backed outbox entries had different durability fates
+- Did NOT include code from `query.rs` (list/filter/sort/pagination) — these are query-layer concerns better covered in Chapter 9 (Query Coordination)
+- Kept the cascade delete description focused on the agent-mode single-batch model, with a forward reference to Chapter 15 for the cluster-mode cross-partition version
+
+**Notes on Chapter 2:**
+- 5,395 words, within range of the 5,000-6,000 target
+- All code snippets drawn from actual source files with exact function signatures
+- The chapter follows the plan's section structure closely (2.1-2.8)
+- Forward references to Chapters 5, 8, 9, and 15 are planted for continuity
+- The "What Went Wrong" on outbox durability coupling is a real lesson from development — the coupling between batch atomicity and durability mode is non-obvious
+
 ---
 
 ## Writing Process Notes
@@ -165,6 +187,9 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Dead code in store_manager (`subscribe_topic_replicated`, `schema_register_replicated`) was removed — these created 256-write fan-outs but were superseded by lightweight broadcast messages
 - When a method exists but is never called, check git blame/log to find when the calling code changed
 - Avoid tautologies — don't restate a definition as a use case (e.g., "suits scenarios where MQTT is unnecessary" for the no-MQTT mode). Use concrete examples instead.
+- When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `fkref/`, `_dead_letter/`, `_crypto/` are real parts of the keyspace
+- Run a systematic verification pass after writing: list every factual claim (constant values, defaults, struct fields) and check each against source. This caught zero errors in Ch2 but the discipline prevents drift as the code evolves
+- The "What Went Wrong" sections are most powerful when they describe a real bug from development — the outbox durability coupling bug came from the cluster mode transition, not from agent mode itself
 
 ### Memories for Future Sessions
 
