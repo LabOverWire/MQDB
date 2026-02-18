@@ -927,6 +927,24 @@ fn find_two_ids_on_different_partitions(
     panic!("could not find two IDs on different partitions");
 }
 
+fn make_all_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
+    let mut map = PartitionMap::new();
+    for partition_id in 0..NUM_PARTITIONS {
+        if let Some(p) = PartitionId::new(partition_id) {
+            ctrl.become_primary(p, Epoch::new(1));
+            map.set(
+                p,
+                crate::cluster::PartitionAssignment {
+                    primary: Some(node),
+                    replicas: vec![],
+                    epoch: Epoch::new(1),
+                },
+            );
+        }
+    }
+    ctrl.update_partition_map(map);
+}
+
 fn setup_all_primary_except(
     ctrl: &mut NodeController<MockTransport>,
     node: NodeId,
@@ -1141,4 +1159,119 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
         ),
         Ok(_) => panic!("RESTRICT should block when primary data has referencing records"),
     }
+}
+
+#[tokio::test]
+async fn circular_fk_cascade_terminates() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+
+    let fk_a_to_b = ClusterConstraint::foreign_key(
+        "alpha",
+        "alpha_beta_fk",
+        "beta_id",
+        "beta",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_b_to_a = ClusterConstraint::foreign_key(
+        "beta",
+        "beta_alpha_fk",
+        "alpha_id",
+        "alpha",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_a_to_b).await.unwrap();
+    ctrl.constraint_add(&fk_b_to_a).await.unwrap();
+
+    let a_data = serde_json::to_vec(&serde_json::json!({"beta_id": "b1"})).unwrap();
+    let b_data = serde_json::to_vec(&serde_json::json!({"alpha_id": "a1"})).unwrap();
+    ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
+    ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
+
+    let (local, _pending) = ctrl.start_fk_reverse_lookup("alpha", "a1").await.unwrap();
+
+    let result = ctrl.collect_local_cascade("alpha", "a1", local);
+    assert!(
+        result.is_ok(),
+        "circular cascade should terminate via visited set"
+    );
+
+    let results = result.unwrap();
+    let cascade_ids: Vec<_> = results.iter().flat_map(|r| &r.referencing_ids).collect();
+    assert!(
+        cascade_ids.contains(&&"b1".to_string()),
+        "should find the referencing beta record"
+    );
+    assert!(
+        cascade_ids.len() <= 2,
+        "visited set should prevent infinite expansion: got {cascade_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn three_way_circular_fk_cascade_terminates() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+
+    let fk_a_b = ClusterConstraint::foreign_key(
+        "aaa",
+        "aaa_bbb_fk",
+        "bbb_id",
+        "bbb",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_b_c = ClusterConstraint::foreign_key(
+        "bbb",
+        "bbb_ccc_fk",
+        "ccc_id",
+        "ccc",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_c_a = ClusterConstraint::foreign_key(
+        "ccc",
+        "ccc_aaa_fk",
+        "aaa_id",
+        "aaa",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_a_b).await.unwrap();
+    ctrl.constraint_add(&fk_b_c).await.unwrap();
+    ctrl.constraint_add(&fk_c_a).await.unwrap();
+
+    let a_data = serde_json::to_vec(&serde_json::json!({"bbb_id": "b1"})).unwrap();
+    let b_data = serde_json::to_vec(&serde_json::json!({"ccc_id": "c1"})).unwrap();
+    let c_data = serde_json::to_vec(&serde_json::json!({"aaa_id": "a1"})).unwrap();
+    ctrl.db_create("aaa", "a1", &a_data, 1000).await.unwrap();
+    ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
+    ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
+
+    let (local, _pending) = ctrl.start_fk_reverse_lookup("aaa", "a1").await.unwrap();
+    let result = ctrl.collect_local_cascade("aaa", "a1", local);
+    assert!(
+        result.is_ok(),
+        "3-way circular cascade should terminate: {result:?}"
+    );
+
+    let results = result.unwrap();
+    let all_ids: Vec<_> = results
+        .iter()
+        .map(|r| (&r.source_entity, &r.referencing_ids))
+        .collect();
+    assert!(
+        !all_ids.is_empty(),
+        "should find referencing records in the cycle"
+    );
 }

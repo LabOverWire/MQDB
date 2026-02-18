@@ -12,11 +12,13 @@ use crate::cluster::protocol::{
 use tokio::sync::oneshot;
 
 const FK_CHECK_TIMEOUT_SECS: u64 = 5;
+pub(crate) const MAX_CASCADE_DEPTH: usize = 16;
 
 pub struct FkExistenceResult {
     pub pending_remote: Vec<PendingFkCheck>,
 }
 
+#[derive(Debug)]
 pub struct FkReverseLookupResult {
     pub constraint_name: String,
     pub source_entity: String,
@@ -200,7 +202,18 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
     let (filtered, mut queue) = filter_and_extract_cascade(level_results, &mut visited);
     let mut all_results = filtered;
 
+    let mut depth = 0;
     while !queue.is_empty() {
+        depth += 1;
+        if depth > MAX_CASCADE_DEPTH {
+            return (
+                Some(format!(
+                    "cascade depth limit exceeded ({MAX_CASCADE_DEPTH} levels)"
+                )),
+                Vec::new(),
+            );
+        }
+
         let mut next_local = Vec::new();
         let mut next_pending = Vec::new();
 
@@ -416,6 +429,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut visited = std::collections::HashSet::new();
         visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
         let mut queue: Vec<(String, String)> = Vec::new();
+        let max_cascade_work = MAX_CASCADE_DEPTH * 256;
 
         for r in &initial {
             if r.on_delete == OnDeleteAction::Cascade {
@@ -428,6 +442,11 @@ impl<T: ClusterTransport> NodeController<T> {
         all_results.extend(initial);
 
         while let Some((entity, id)) = queue.pop() {
+            if visited.len() > max_cascade_work {
+                return Err(format!(
+                    "cascade depth limit exceeded ({MAX_CASCADE_DEPTH} levels)"
+                ));
+            }
             let referencing = self.stores.constraint_find_referencing(&entity);
             for constraint in &referencing {
                 let source_entity = constraint.entity_str();
