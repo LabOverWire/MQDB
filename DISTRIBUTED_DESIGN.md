@@ -2212,6 +2212,47 @@ When Raft leader and partitions not initialized:
 
 ---
 
+## Part 19: Foreign Key Constraints
+
+### FK Existence Checks
+
+On create/update, the writing node sends `FkCheckRequest` messages to the primary
+of each referenced target partition. The target node checks if the record exists
+and replies with `FkCheckResponse`. The write only proceeds if all FK references
+are confirmed.
+
+### Cascade and Set-Null on Delete
+
+When a record is deleted, the node performs a reverse FK lookup to find all records
+that reference it. Depending on the constraint's `on_delete` action:
+
+- **Restrict**: The delete is rejected if any references exist.
+- **Cascade**: Referencing records are deleted recursively.
+- **SetNull**: The FK field on referencing records is set to null.
+
+Cascade and set-null operations on remote partitions are tracked in a persistent
+`_cascade/` outbox, acknowledged via request/response, and retried periodically
+until delivered.
+
+### Known Limitation: TOCTOU in FK Checks
+
+FK existence checks are subject to a time-of-check-to-time-of-use (TOCTOU) race:
+between the FK existence check and the write commit, the referenced target could be
+concurrently deleted by another node.
+
+Distributed two-phase locking across partitions would serialize all FK-related writes
+and severely degrade throughput. Instead, the system uses an optimistic approach:
+
+1. **Check**: Verify the target exists (best-effort).
+2. **Write**: Commit the record with the FK reference.
+3. **Converge**: If the target is subsequently deleted, cascade/set-null actions on
+   that delete will clean up the dangling reference.
+
+This means a brief window exists where a record may reference a deleted target.
+The window closes when the target's delete cascade executes. For the vast majority
+of workloads this is invisible, since the delete cascade runs immediately after the
+delete itself.
+
 ## DOCUMENTED ELSEWHERE
 
 The following are implemented but documented in other files:

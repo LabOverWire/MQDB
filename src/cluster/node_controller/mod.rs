@@ -113,6 +113,7 @@ pub struct PendingFkReverseLookup {
     pub source_entity: String,
     pub source_field: String,
     pub on_delete: super::db::OnDeleteAction,
+    pub target_id: String,
     pub receiver: oneshot::Receiver<Vec<String>>,
 }
 

@@ -5,8 +5,8 @@ use super::partition::data_partition;
 use crate::cluster::protocol::Operation;
 use crate::cluster::{NodeId, PartitionId};
 use bebytes::BeBytes;
-use std::collections::HashMap;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct DbEntity {
@@ -483,6 +483,109 @@ impl std::fmt::Debug for DbDataStore {
             .field("node_id", &self.node_id)
             .field("entity_count", &self.count())
             .finish_non_exhaustive()
+    }
+}
+
+type FkIndexKey = (String, String, String, String);
+
+pub struct FkReverseIndex {
+    index: Mutex<HashMap<FkIndexKey, HashSet<String>>>,
+}
+
+impl Default for FkReverseIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FkReverseIndex {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            index: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn insert(
+        &self,
+        target_entity: &str,
+        target_id: &str,
+        source_entity: &str,
+        source_field: &str,
+        source_id: &str,
+    ) {
+        let key = (
+            target_entity.to_string(),
+            target_id.to_string(),
+            source_entity.to_string(),
+            source_field.to_string(),
+        );
+        self.index
+            .lock()
+            .expect("fk reverse index lock poisoned")
+            .entry(key)
+            .or_default()
+            .insert(source_id.to_string());
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn remove(
+        &self,
+        target_entity: &str,
+        target_id: &str,
+        source_entity: &str,
+        source_field: &str,
+        source_id: &str,
+    ) {
+        let key = (
+            target_entity.to_string(),
+            target_id.to_string(),
+            source_entity.to_string(),
+            source_field.to_string(),
+        );
+        let mut map = self.index.lock().expect("fk reverse index lock poisoned");
+        if let Some(set) = map.get_mut(&key) {
+            set.remove(source_id);
+            if set.is_empty() {
+                map.remove(&key);
+            }
+        }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn lookup(
+        &self,
+        target_entity: &str,
+        target_id: &str,
+        source_entity: &str,
+        source_field: &str,
+    ) -> Vec<String> {
+        let key = (
+            target_entity.to_string(),
+            target_id.to_string(),
+            source_entity.to_string(),
+            source_field.to_string(),
+        );
+        self.index
+            .lock()
+            .expect("fk reverse index lock poisoned")
+            .get(&key)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for FkReverseIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.index.lock().map(|m| m.len()).unwrap_or(0);
+        f.debug_struct("FkReverseIndex")
+            .field("entries", &count)
+            .finish()
     }
 }
 

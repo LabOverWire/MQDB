@@ -863,10 +863,18 @@ impl DbRequestHandler {
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
         let effects = controller.prepare_fk_side_effects(&all_results);
-        let cascade = controller.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
         JsonOpResult::Response(
-            self.execute_delete(controller, entity, id, sender, client_id, cascade.as_ref())
-                .await,
+            self.execute_delete(
+                controller,
+                entity,
+                id,
+                sender,
+                client_id,
+                cascade.as_ref(),
+                ack_receivers,
+            )
+            .await,
         )
     }
 
@@ -879,6 +887,7 @@ impl DbRequestHandler {
         sender: Option<&str>,
         client_id: Option<&str>,
         cascade: Option<&crate::cluster::store_manager::outbox::CascadeOutboxPayload>,
+        ack_receivers: Vec<tokio::sync::oneshot::Receiver<bool>>,
     ) -> Vec<u8> {
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
@@ -905,10 +914,12 @@ impl DbRequestHandler {
                 }
                 self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                     .await;
-                if let Some(cas) = cascade
-                    && let Some(ob) = controller.stores().cluster_outbox()
-                {
-                    let _ = ob.mark_cascade_delivered(&cas.operation_id);
+                if let Some(cas) = cascade {
+                    crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
+                        controller.stores().cluster_outbox().cloned(),
+                        cas.operation_id.clone(),
+                        ack_receivers,
+                    );
                 }
                 let result = json!({
                     "status": "ok",
@@ -1272,7 +1283,12 @@ impl DbRequestHandler {
                     correlation_data,
                 })
             }
-            _ => None,
+            _ => {
+                tracing::error!(
+                    "complete_pending_unique_check received misrouted continuation (expected *FromDbHandler)"
+                );
+                None
+            }
         }
     }
 
@@ -1309,7 +1325,7 @@ impl DbRequestHandler {
                 correlation_data,
             } => {
                 let effects = controller.prepare_fk_side_effects(&side_effects);
-                let cascade = controller.execute_fk_side_effects(&effects).await;
+                let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
                 let payload = self
                     .execute_delete(
                         controller,
@@ -1318,6 +1334,7 @@ impl DbRequestHandler {
                         sender.as_deref(),
                         client_id.as_deref(),
                         cascade.as_ref(),
+                        ack_receivers,
                     )
                     .await;
                 Some(super::DbPublishResponse {
@@ -1443,7 +1460,12 @@ impl DbRequestHandler {
                     | JsonOpResult::NoResponse => None,
                 }
             }
-            _ => None,
+            _ => {
+                tracing::error!(
+                    "complete_pending_fk_check received misrouted continuation (expected *FromDbHandler)"
+                );
+                None
+            }
         }
     }
 

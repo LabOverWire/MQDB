@@ -18,6 +18,7 @@ struct StoredEntry {
     created_at: u64,
 }
 
+#[derive(Clone)]
 pub struct ClusterOutbox {
     backend: Arc<dyn StorageBackend>,
 }
@@ -95,6 +96,7 @@ pub enum CascadeRemoteOp {
         entity: String,
         id: String,
         field: String,
+        expected_value: String,
     },
 }
 
@@ -276,6 +278,7 @@ mod tests {
                 entity: "invoices".to_string(),
                 id: "inv-2".to_string(),
                 field: "order_id".to_string(),
+                expected_value: "o-1".to_string(),
             },
         ];
 

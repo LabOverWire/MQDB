@@ -80,10 +80,13 @@ pub struct FkReverseLookupRequest {
     pub target_id_len: u16,
     #[FromField(target_id_len)]
     pub target_id: Vec<u8>,
+    pub target_entity_len: u16,
+    #[FromField(target_entity_len)]
+    pub target_entity: Vec<u8>,
 }
 
 impl FkReverseLookupRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -92,6 +95,7 @@ impl FkReverseLookupRequest {
         source_entity: &str,
         source_field: &str,
         target_id: &str,
+        target_entity: &str,
     ) -> Self {
         Self {
             version: Self::VERSION,
@@ -102,6 +106,8 @@ impl FkReverseLookupRequest {
             source_field: source_field.as_bytes().to_vec(),
             target_id_len: target_id.len() as u16,
             target_id: target_id.as_bytes().to_vec(),
+            target_entity_len: target_entity.len() as u16,
+            target_entity: target_entity.as_bytes().to_vec(),
         }
     }
 
@@ -118,6 +124,11 @@ impl FkReverseLookupRequest {
     #[must_use]
     pub fn target_id_str(&self) -> &str {
         std::str::from_utf8(&self.target_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn target_entity_str(&self) -> &str {
+        std::str::from_utf8(&self.target_entity).unwrap_or("")
     }
 }
 
@@ -199,13 +210,14 @@ mod tests {
 
     #[test]
     fn fk_reverse_lookup_request_roundtrip() {
-        let req = FkReverseLookupRequest::create(99, "posts", "author_id", "user-456");
+        let req = FkReverseLookupRequest::create(99, "posts", "author_id", "user-456", "users");
         let bytes = req.clone().to_be_bytes();
         let (decoded, _) = FkReverseLookupRequest::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 99);
         assert_eq!(decoded.source_entity_str(), "posts");
         assert_eq!(decoded.source_field_str(), "author_id");
         assert_eq!(decoded.target_id_str(), "user-456");
+        assert_eq!(decoded.target_entity_str(), "users");
     }
 
     #[test]

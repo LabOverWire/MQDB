@@ -25,9 +25,10 @@ pub struct FkReverseLookupResult {
     pub source_field: String,
     pub on_delete: OnDeleteAction,
     pub referencing_ids: Vec<String>,
+    pub target_id: String,
 }
 
-fn extract_fk_string_value(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_fk_string_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
@@ -41,23 +42,6 @@ fn extract_fk_string_value(value: &serde_json::Value) -> Option<String> {
             }
         }
     }
-}
-
-fn scan_referencing_ids(
-    entities: &[crate::cluster::db::DbEntity],
-    source_field: &str,
-    target_id: &str,
-) -> Vec<String> {
-    let mut refs = Vec::new();
-    for entity_data in entities {
-        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&entity_data.data) {
-            let fk_val = parsed.get(source_field).and_then(extract_fk_string_value);
-            if fk_val.as_deref() == Some(target_id) {
-                refs.push(entity_data.id_str().to_string());
-            }
-        }
-    }
-    refs
 }
 
 pub async fn await_fk_checks(pending: Vec<PendingFkCheck>) -> Result<(), String> {
@@ -101,6 +85,7 @@ pub async fn await_fk_reverse_lookups(
                     source_field: lookup.source_field,
                     on_delete: lookup.on_delete,
                     referencing_ids: ids,
+                    target_id: lookup.target_id,
                 });
             }
             Ok(Ok(_)) => {}
@@ -250,6 +235,18 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
 
 impl<T: ClusterTransport> NodeController<T> {
     #[allow(clippy::missing_errors_doc)]
+    /// Checks that all FK references in `data` point to existing target records.
+    ///
+    /// # TOCTOU Trade-off
+    ///
+    /// FK existence checks are best-effort: between this check and the subsequent
+    /// write commit, the referenced target could be concurrently deleted by another
+    /// node. This is a deliberate trade-off — distributed two-phase locking across
+    /// partitions would serialize all FK-related writes and severely impact throughput.
+    ///
+    /// The system converges to a consistent state because any subsequent delete of
+    /// the target will trigger cascade/set-null actions on all referencing records.
+    /// Stale FK references are therefore short-lived.
     pub async fn start_fk_existence_check(
         &mut self,
         entity: &str,
@@ -321,8 +318,18 @@ impl<T: ClusterTransport> NodeController<T> {
             let source_field = constraint.field_str();
             let on_delete = constraint.on_delete_action();
 
-            let local_refs =
-                scan_referencing_ids(&self.db_list_primary_only(source_entity), source_field, id);
+            let all_refs = self
+                .stores
+                .fk_reverse_lookup(entity, id, source_entity, source_field);
+            let local_refs: Vec<String> = all_refs
+                .into_iter()
+                .filter(|ref_id| {
+                    self.is_primary_for_partition(super::super::db::data_partition(
+                        source_entity,
+                        ref_id,
+                    ))
+                })
+                .collect();
 
             if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                 return Err(format!(
@@ -339,6 +346,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     source_field: source_field.to_string(),
                     on_delete,
                     referencing_ids: local_refs,
+                    target_id: id.to_string(),
                 });
             }
 
@@ -349,6 +357,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 source_field,
                 on_delete,
                 id,
+                entity,
             )
             .await;
         }
@@ -356,6 +365,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok((local_results, pending_remote))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn scatter_reverse_lookup_to_remote_nodes(
         &mut self,
         pending_remote: &mut Vec<PendingFkReverseLookup>,
@@ -364,6 +374,7 @@ impl<T: ClusterTransport> NodeController<T> {
         source_field: &str,
         on_delete: OnDeleteAction,
         target_id: &str,
+        target_entity: &str,
     ) {
         let alive_nodes = self.heartbeat.alive_nodes();
         for &node in &alive_nodes {
@@ -374,8 +385,13 @@ impl<T: ClusterTransport> NodeController<T> {
             let (tx, rx) = oneshot::channel();
             self.pending_constraints.insert_fk_lookup(request_id, tx);
 
-            let req =
-                FkReverseLookupRequest::create(request_id, source_entity, source_field, target_id);
+            let req = FkReverseLookupRequest::create(
+                request_id,
+                source_entity,
+                source_field,
+                target_id,
+                target_entity,
+            );
             let _ = self
                 .transport
                 .send(node, ClusterMessage::FkReverseLookupRequest(req))
@@ -386,6 +402,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 source_entity: source_entity.to_string(),
                 source_field: source_field.to_string(),
                 on_delete,
+                target_id: target_id.to_string(),
                 receiver: rx,
             });
         }
@@ -405,11 +422,21 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         req: &FkReverseLookupRequest,
     ) {
-        let referencing_ids = scan_referencing_ids(
-            &self.db_list_primary_only(req.source_entity_str()),
-            req.source_field_str(),
+        let all_refs = self.stores.fk_reverse_lookup(
+            req.target_entity_str(),
             req.target_id_str(),
+            req.source_entity_str(),
+            req.source_field_str(),
         );
+        let referencing_ids: Vec<String> = all_refs
+            .into_iter()
+            .filter(|ref_id| {
+                self.is_primary_for_partition(super::super::db::data_partition(
+                    req.source_entity_str(),
+                    ref_id,
+                ))
+            })
+            .collect();
 
         let response = FkReverseLookupResponse::create(req.request_id, &referencing_ids);
         let _ = self
@@ -453,11 +480,18 @@ impl<T: ClusterTransport> NodeController<T> {
                 let source_field = constraint.field_str();
                 let on_delete = constraint.on_delete_action();
 
-                let local_refs = scan_referencing_ids(
-                    &self.db_list_primary_only(source_entity),
-                    source_field,
-                    &id,
-                );
+                let all_refs =
+                    self.stores
+                        .fk_reverse_lookup(&entity, &id, source_entity, source_field);
+                let local_refs: Vec<String> = all_refs
+                    .into_iter()
+                    .filter(|ref_id| {
+                        self.is_primary_for_partition(super::super::db::data_partition(
+                            source_entity,
+                            ref_id,
+                        ))
+                    })
+                    .collect();
 
                 if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                     return Err(format!(
@@ -497,6 +531,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     source_field: source_field.to_string(),
                     on_delete,
                     referencing_ids: filtered_refs,
+                    target_id: id.clone(),
                 });
             }
         }

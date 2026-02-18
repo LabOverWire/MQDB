@@ -80,6 +80,7 @@ impl ClusteredAgent {
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut retained_sync_cleanup_interval =
             interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
+        let mut cascade_retry_interval = interval(Duration::from_secs(30));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -128,6 +129,9 @@ impl ClusteredAgent {
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
                     Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
+                }
+                _ = cascade_retry_interval.tick() => {
+                    self.retry_pending_cascades().await;
                 }
                 Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
@@ -610,27 +614,116 @@ impl ClusteredAgent {
             "replaying pending cascade operations"
         );
         for cascade in &cascade_entries {
+            let mut ack_receivers = Vec::new();
             for op in &cascade.operations {
                 match op {
                     crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
                         let partition = crate::cluster::data_partition(entity, id);
-                        ctrl.fire_and_forget_json_request(
-                            partition,
-                            crate::cluster::JsonDbOp::Delete,
-                            entity,
-                            id,
-                            &[],
-                        )
-                        .await;
+                        if let Some(rx) = ctrl
+                            .send_cascade_request(
+                                partition,
+                                crate::cluster::JsonDbOp::Delete,
+                                entity,
+                                id,
+                                &[],
+                            )
+                            .await
+                        {
+                            ack_receivers.push(rx);
+                        }
                     }
-                    crate::cluster::CascadeRemoteOp::SetNull { entity, id, field } => {
+                    crate::cluster::CascadeRemoteOp::SetNull {
+                        entity,
+                        id,
+                        field,
+                        expected_value,
+                    } => {
                         let partition = crate::cluster::data_partition(entity, id);
-                        ctrl.fire_and_forget_set_null(partition, entity, id, field)
-                            .await;
+                        if let Some(rx) = ctrl
+                            .send_cascade_set_null_request(
+                                partition,
+                                entity,
+                                id,
+                                field,
+                                expected_value,
+                            )
+                            .await
+                        {
+                            ack_receivers.push(rx);
+                        }
                     }
                 }
             }
-            let _ = outbox.mark_cascade_delivered(&cascade.operation_id);
+            crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
+                Some(outbox.clone()),
+                cascade.operation_id.clone(),
+                ack_receivers,
+            );
+        }
+    }
+
+    async fn retry_pending_cascades(&self) {
+        let ctrl = self.controller.read().await;
+        let Some(outbox) = ctrl.stores().cluster_outbox() else {
+            return;
+        };
+        let Ok(cascade_entries) = outbox.pending_cascade_ops() else {
+            return;
+        };
+        if cascade_entries.is_empty() {
+            return;
+        }
+        let outbox = outbox.clone();
+        tracing::debug!(
+            count = cascade_entries.len(),
+            "retrying pending cascade operations"
+        );
+        for cascade in &cascade_entries {
+            let mut ack_receivers = Vec::new();
+            for op in &cascade.operations {
+                match op {
+                    crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                        let partition = crate::cluster::data_partition(entity, id);
+                        if let Some(rx) = ctrl
+                            .send_cascade_request(
+                                partition,
+                                crate::cluster::JsonDbOp::Delete,
+                                entity,
+                                id,
+                                &[],
+                            )
+                            .await
+                        {
+                            ack_receivers.push(rx);
+                        }
+                    }
+                    crate::cluster::CascadeRemoteOp::SetNull {
+                        entity,
+                        id,
+                        field,
+                        expected_value,
+                    } => {
+                        let partition = crate::cluster::data_partition(entity, id);
+                        if let Some(rx) = ctrl
+                            .send_cascade_set_null_request(
+                                partition,
+                                entity,
+                                id,
+                                field,
+                                expected_value,
+                            )
+                            .await
+                        {
+                            ack_receivers.push(rx);
+                        }
+                    }
+                }
+            }
+            crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
+                Some(outbox.clone()),
+                cascade.operation_id.clone(),
+                ack_receivers,
+            );
         }
     }
 

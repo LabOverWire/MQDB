@@ -21,7 +21,8 @@ mod unique_ops;
 use super::NodeId;
 use super::client_location::ClientLocationStore;
 use super::db::{
-    ConstraintStore, DbDataStore, FkValidationStore, IndexStore, SchemaStore, UniqueStore,
+    ConstraintStore, DbDataStore, FkReverseIndex, FkValidationStore, IndexStore, SchemaStore,
+    UniqueStore,
 };
 use super::idempotency_store::IdempotencyStore;
 use super::inflight_store::InflightStore;
@@ -175,6 +176,7 @@ pub struct StoreManager {
     pub db_fk: FkValidationStore,
     pub db_constraints: ConstraintStore,
     pub client_locations: ClientLocationStore,
+    pub fk_reverse_index: FkReverseIndex,
 }
 
 impl StoreManager {
@@ -207,6 +209,7 @@ impl StoreManager {
             db_fk: FkValidationStore::new(node_id),
             db_constraints: ConstraintStore::new(node_id),
             client_locations: ClientLocationStore::new(),
+            fk_reverse_index: FkReverseIndex::new(),
         }
     }
 
@@ -242,6 +245,7 @@ impl std::fmt::Debug for StoreManager {
             .field("db_fk", &self.db_fk.count())
             .field("db_constraints", &self.db_constraints.count())
             .field("client_locations", &self.client_locations.count())
+            .field("fk_reverse_index", &self.fk_reverse_index)
             .field("cluster_outbox", &self.cluster_outbox.is_some())
             .finish()
     }

@@ -13,7 +13,7 @@ pub use constraint_store::{
     ClusterConstraint, ConstraintStore, ConstraintStoreError, ConstraintType, OnDeleteAction,
     constraint_key,
 };
-pub use data_store::{DbDataStore, DbDataStoreError, DbEntity, db_data_key};
+pub use data_store::{DbDataStore, DbDataStoreError, DbEntity, FkReverseIndex, db_data_key};
 pub use fk_store::{
     FkStoreError, FkValidationRequest, FkValidationResponse, FkValidationResult, FkValidationStore,
 };

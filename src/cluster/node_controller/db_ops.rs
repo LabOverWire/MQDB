@@ -11,6 +11,39 @@ use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteO
 use crate::events::ChangeEvent;
 use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
+use tokio::sync::oneshot;
+
+const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
+
+pub(crate) fn spawn_cascade_ack_waiter(
+    outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,
+    operation_id: String,
+    receivers: Vec<oneshot::Receiver<bool>>,
+) {
+    if receivers.is_empty() {
+        if let Some(ob) = outbox {
+            let _ = ob.mark_cascade_delivered(&operation_id);
+        }
+        return;
+    }
+    tokio::spawn(async move {
+        let timeout = tokio::time::Duration::from_secs(CASCADE_ACK_TIMEOUT_SECS);
+        let mut all_ok = true;
+        for rx in receivers {
+            if !matches!(tokio::time::timeout(timeout, rx).await, Ok(Ok(true))) {
+                all_ok = false;
+                break;
+            }
+        }
+        if all_ok {
+            if let Some(ob) = outbox {
+                let _ = ob.mark_cascade_delivered(&operation_id);
+            }
+        } else {
+            tracing::warn!(operation_id, "cascade ack timeout, leaving entry for retry");
+        }
+    });
+}
 
 pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
     let topic = event.event_topic(0);
@@ -44,6 +77,7 @@ pub(crate) enum CascadeSideEffect {
         entity: String,
         id: String,
         field: String,
+        expected_value: String,
     },
 }
 
@@ -387,6 +421,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(crate) async fn handle_json_db_response(&mut self, response: &JsonDbResponse) {
         let scatter_prefix = format!("_mqdb/scatter/{}/", self.node_id.get());
+        let cascade_prefix = format!("_mqdb/cascade_ack/{}/", self.node_id.get());
 
         tracing::debug!(
             response_topic = %response.response_topic,
@@ -405,6 +440,14 @@ impl<T: ClusterTransport> NodeController<T> {
                     .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned())
                     .unwrap_or_default();
             self.handle_scatter_list_response(request_id, items).await;
+            return;
+        }
+
+        if let Some(request_id_str) = response.response_topic.strip_prefix(&cascade_prefix)
+            && let Ok(request_id) = request_id_str.parse::<u64>()
+        {
+            tracing::debug!(request_id, "matched cascade ack response");
+            self.pending_constraints.resolve_cascade_ack(request_id);
             return;
         }
 
@@ -463,14 +506,45 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let data: Value = match serde_json::from_slice(payload) {
+        let mut data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
         };
 
+        let fk_expected = data
+            .as_object_mut()
+            .and_then(|obj| obj.remove("_fk_expected"))
+            .and_then(|v| v.as_str().map(String::from));
+
         let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
             let existing_data: Value = serde_json::from_slice(&existing.data)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            if let Some(ref expected) = fk_expected
+                && let Some((field, value)) = expected.split_once('=')
+            {
+                let current_fk = existing_data
+                    .get(field)
+                    .and_then(super::fk::extract_fk_string_value);
+                if current_fk.as_deref() != Some(value) {
+                    tracing::debug!(
+                        entity,
+                        id,
+                        field,
+                        expected = value,
+                        actual = ?current_fk,
+                        "skipping set-null: FK field was updated since cascade"
+                    );
+                    let result = serde_json::json!({
+                        "status": "ok",
+                        "id": id,
+                        "entity": entity,
+                        "data": existing_data
+                    });
+                    return (serde_json::to_vec(&result).unwrap_or_default(), None);
+                }
+            }
+
             let old_data = existing_data.clone();
             let mut merged = existing_data;
 
@@ -686,9 +760,10 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
         let effects = self.prepare_fk_side_effects(&all_results);
-        let cascade = self.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects).await;
         (
-            self.execute_json_delete(entity, id, cascade.as_ref()).await,
+            self.execute_json_delete(entity, id, cascade.as_ref(), ack_receivers)
+                .await,
             None,
         )
     }
@@ -698,6 +773,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         id: &str,
         cascade: Option<&CascadeOutboxPayload>,
+        ack_receivers: Vec<oneshot::Receiver<bool>>,
     ) -> Vec<u8> {
         match self.db_delete_prepare(entity, id) {
             Ok((_db_entity, write)) => {
@@ -711,10 +787,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
-                if let Some(cas) = cascade
-                    && let Some(ob) = self.stores.cluster_outbox()
-                {
-                    let _ = ob.mark_cascade_delivered(&cas.operation_id);
+                if let Some(cas) = cascade {
+                    spawn_cascade_ack_waiter(
+                        self.stores.cluster_outbox().cloned(),
+                        cas.operation_id.clone(),
+                        ack_receivers,
+                    );
                 }
                 let result = serde_json::json!({
                     "status": "ok",
@@ -792,6 +870,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                 entity: r.source_entity.clone(),
                                 id: child_id.clone(),
                                 field: r.source_field.clone(),
+                                expected_value: r.target_id.clone(),
                             });
                         }
                     }
@@ -804,7 +883,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn execute_fk_side_effects(
         &mut self,
         effects: &[CascadeSideEffect],
-    ) -> Option<CascadeOutboxPayload> {
+    ) -> (Option<CascadeOutboxPayload>, Vec<oneshot::Receiver<bool>>) {
         let now_ms = Self::current_time_ms();
         let mut remote_ops = Vec::new();
 
@@ -842,23 +921,30 @@ impl<T: ClusterTransport> NodeController<T> {
                     });
                 }
                 CascadeSideEffect::RemoteSetNull {
-                    entity, id, field, ..
+                    entity,
+                    id,
+                    field,
+                    expected_value,
+                    ..
                 } => {
                     remote_ops.push(CascadeRemoteOp::SetNull {
                         entity: entity.clone(),
                         id: id.clone(),
                         field: field.clone(),
+                        expected_value: expected_value.clone(),
                     });
                 }
             }
         }
 
         if remote_ops.is_empty() {
-            return None;
+            return (None, Vec::new());
         }
 
         let cascade_outbox =
             CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &remote_ops);
+
+        let mut ack_receivers = Vec::new();
 
         for effect in effects {
             match effect {
@@ -867,29 +953,117 @@ impl<T: ClusterTransport> NodeController<T> {
                     entity,
                     id,
                 } => {
-                    self.fire_and_forget_json_request(
-                        *partition,
-                        JsonDbOp::Delete,
-                        entity,
-                        id,
-                        &[],
-                    )
-                    .await;
+                    if let Some(rx) = self
+                        .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[])
+                        .await
+                    {
+                        ack_receivers.push(rx);
+                    }
                 }
                 CascadeSideEffect::RemoteSetNull {
                     partition,
                     entity,
                     id,
                     field,
+                    expected_value,
                 } => {
-                    self.fire_and_forget_set_null(*partition, entity, id, field)
-                        .await;
+                    if let Some(rx) = self
+                        .send_cascade_set_null_request(
+                            *partition,
+                            entity,
+                            id,
+                            field,
+                            expected_value,
+                        )
+                        .await
+                    {
+                        ack_receivers.push(rx);
+                    }
                 }
                 CascadeSideEffect::LocalDelete { .. } | CascadeSideEffect::LocalSetNull { .. } => {}
             }
         }
 
-        Some(cascade_outbox)
+        (Some(cascade_outbox), ack_receivers)
+    }
+
+    pub(crate) async fn send_cascade_request(
+        &self,
+        partition: PartitionId,
+        op: JsonDbOp,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+    ) -> Option<oneshot::Receiver<bool>> {
+        let primary = self.partition_map.primary(partition)?;
+        if primary == self.node_id {
+            return None;
+        }
+        let request_id = self.pending_constraints.allocate_cascade_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_constraints.insert_cascade_ack(request_id, tx);
+
+        let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
+        let request = JsonDbRequest::new(
+            request_id,
+            op,
+            entity.to_string(),
+            Some(id.to_string()),
+            payload.to_vec(),
+            response_topic,
+            None,
+            None,
+        );
+        let _ = self
+            .transport
+            .send(
+                primary,
+                ClusterMessage::JsonDbRequest { partition, request },
+            )
+            .await;
+        Some(rx)
+    }
+
+    pub(crate) async fn send_cascade_set_null_request(
+        &self,
+        partition: PartitionId,
+        entity: &str,
+        id: &str,
+        field: &str,
+        expected_value: &str,
+    ) -> Option<oneshot::Receiver<bool>> {
+        let primary = self.partition_map.primary(partition)?;
+        if primary == self.node_id {
+            return None;
+        }
+        let request_id = self.pending_constraints.allocate_cascade_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending_constraints.insert_cascade_ack(request_id, tx);
+
+        let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
+        let payload = serde_json::json!({
+            field: serde_json::Value::Null,
+            "_fk_expected": format!("{field}={expected_value}"),
+        });
+        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        let request = JsonDbRequest::new(
+            request_id,
+            JsonDbOp::Update,
+            entity.to_string(),
+            Some(id.to_string()),
+            bytes,
+            response_topic,
+            None,
+            None,
+        );
+        let _ = self
+            .transport
+            .send(
+                primary,
+                ClusterMessage::JsonDbRequest { partition, request },
+            )
+            .await;
+        Some(rx)
     }
 
     pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
@@ -915,73 +1089,6 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(outbox) = self.stores.cluster_outbox() {
             let _ = outbox.mark_delivered(operation_id);
         }
-    }
-
-    pub(crate) async fn fire_and_forget_json_request(
-        &self,
-        partition: PartitionId,
-        op: JsonDbOp,
-        entity: &str,
-        id: &str,
-        payload: &[u8],
-    ) {
-        let Some(primary) = self.partition_map.primary(partition) else {
-            return;
-        };
-        if primary == self.node_id {
-            return;
-        }
-        let request = JsonDbRequest::new(
-            0,
-            op,
-            entity.to_string(),
-            Some(id.to_string()),
-            payload.to_vec(),
-            String::new(),
-            None,
-            None,
-        );
-        let _ = self
-            .transport
-            .send(
-                primary,
-                ClusterMessage::JsonDbRequest { partition, request },
-            )
-            .await;
-    }
-
-    pub(crate) async fn fire_and_forget_set_null(
-        &self,
-        partition: PartitionId,
-        entity: &str,
-        id: &str,
-        field: &str,
-    ) {
-        let Some(primary) = self.partition_map.primary(partition) else {
-            return;
-        };
-        if primary == self.node_id {
-            return;
-        }
-        let payload = serde_json::json!({ field: serde_json::Value::Null });
-        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-        let request = JsonDbRequest::new(
-            0,
-            JsonDbOp::Update,
-            entity.to_string(),
-            Some(id.to_string()),
-            bytes,
-            String::new(),
-            None,
-            None,
-        );
-        let _ = self
-            .transport
-            .send(
-                primary,
-                ClusterMessage::JsonDbRequest { partition, request },
-            )
-            .await;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1491,7 +1598,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
             }
             FkCheckContinuation::CreateFromDbHandler { .. }
-            | FkCheckContinuation::UpdateFromDbHandler { .. } => {}
+            | FkCheckContinuation::UpdateFromDbHandler { .. } => {
+                tracing::error!(
+                    "complete_pending_fk_work received misrouted continuation (expected *FromNodeController)"
+                );
+            }
         }
     }
 
@@ -1534,9 +1645,9 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         let effects = self.prepare_fk_side_effects(&side_effects);
-        let cascade = self.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects).await;
         let response_payload = self
-            .execute_json_delete(&entity, &id, cascade.as_ref())
+            .execute_json_delete(&entity, &id, cascade.as_ref(), ack_receivers)
             .await;
         if !response_topic.is_empty() {
             let response =

@@ -14,8 +14,10 @@ pub struct PendingConstraintState {
     unique_requests: Mutex<HashMap<u64, oneshot::Sender<UniqueReserveStatus>>>,
     fk_checks: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
     fk_lookups: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
+    cascade_acks: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
     next_unique_id: AtomicU64,
     next_fk_id: AtomicU64,
+    next_cascade_id: AtomicU64,
 }
 
 impl PendingConstraintState {
@@ -24,8 +26,10 @@ impl PendingConstraintState {
             unique_requests: Mutex::new(HashMap::new()),
             fk_checks: Mutex::new(HashMap::new()),
             fk_lookups: Mutex::new(HashMap::new()),
+            cascade_acks: Mutex::new(HashMap::new()),
             next_unique_id: AtomicU64::new(1),
             next_fk_id: AtomicU64::new(1),
+            next_cascade_id: AtomicU64::new(1),
         }
     }
 
@@ -69,6 +73,20 @@ impl PendingConstraintState {
     pub fn resolve_fk_lookup(&self, resp: &FkReverseLookupResponse) {
         if let Some(tx) = self.fk_lookups.lock().unwrap().remove(&resp.request_id) {
             let _ = tx.send(resp.referencing_ids());
+        }
+    }
+
+    pub fn allocate_cascade_id(&self) -> u64 {
+        self.next_cascade_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn insert_cascade_ack(&self, id: u64, tx: oneshot::Sender<bool>) {
+        self.cascade_acks.lock().unwrap().insert(id, tx);
+    }
+
+    pub fn resolve_cascade_ack(&self, request_id: u64) {
+        if let Some(tx) = self.cascade_acks.lock().unwrap().remove(&request_id) {
+            let _ = tx.send(true);
         }
     }
 }
