@@ -393,17 +393,25 @@ impl ConstraintStore {
             Operation::Insert | Operation::Update => {
                 let constraint =
                     Self::deserialize(data).ok_or(ConstraintStoreError::SerializationError)?;
-                self.constraints
-                    .write()
-                    .unwrap()
-                    .insert(id.to_string(), constraint);
+                let key = Self::constraint_key(constraint.entity_str(), constraint.name_str());
+                self.constraints.write().unwrap().insert(key, constraint);
                 Ok(())
             }
             Operation::Delete => {
-                self.constraints.write().unwrap().remove(id);
+                let key = Self::replication_id_to_key(id);
+                self.constraints.write().unwrap().remove(&key);
                 Ok(())
             }
         }
+    }
+
+    fn replication_id_to_key(id: &str) -> String {
+        if let Some(rest) = id.strip_prefix("_db_constraint/") {
+            if let Some((entity, name)) = rest.split_once('/') {
+                return Self::constraint_key(entity, name);
+            }
+        }
+        id.to_string()
     }
 }
 
@@ -699,5 +707,27 @@ mod tests {
         assert_eq!(OnDeleteAction::Restrict.as_str(), "restrict");
         assert_eq!(OnDeleteAction::Cascade.as_str(), "cascade");
         assert_eq!(OnDeleteAction::SetNull.as_str(), "set_null");
+    }
+
+    #[test]
+    fn apply_replicated_uses_normalized_key() {
+        let store = ConstraintStore::new(node(1));
+        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku");
+        let data = ConstraintStore::serialize(&constraint);
+
+        let replication_id = "_db_constraint/products/unique_sku";
+        store
+            .apply_replicated(Operation::Insert, replication_id, &data)
+            .unwrap();
+
+        assert!(store.exists("products", "unique_sku"));
+        assert!(store.get("products", "unique_sku").is_some());
+
+        store
+            .apply_replicated(Operation::Delete, replication_id, &[])
+            .unwrap();
+
+        assert!(!store.exists("products", "unique_sku"));
+        assert_eq!(store.count(), 0);
     }
 }

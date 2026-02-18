@@ -278,17 +278,18 @@ impl<T: ClusterTransport> NodeController<T> {
             return Some(pending);
         }
 
-        let response = JsonDbResponse::new(
-            request.request_id,
-            response_payload,
-            request.response_topic.clone(),
-            request.correlation_data.clone(),
-        );
-
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        if !request.response_topic.is_empty() {
+            let response = JsonDbResponse::new(
+                request.request_id,
+                response_payload,
+                request.response_topic.clone(),
+                request.correlation_data.clone(),
+            );
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::JsonDbResponse(response))
+                .await;
+        }
 
         None
     }
@@ -613,37 +614,127 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         results: &[super::fk::FkReverseLookupResult],
     ) {
-        use crate::cluster::db::OnDeleteAction;
+        use crate::cluster::db::{OnDeleteAction, data_partition};
         let now_ms = Self::current_time_ms();
         for r in results {
             match r.on_delete {
                 OnDeleteAction::Restrict => {}
                 OnDeleteAction::Cascade => {
                     for child_id in &r.referencing_ids {
-                        let _ = self.db_delete(&r.source_entity, child_id).await;
+                        let partition = data_partition(&r.source_entity, child_id);
+                        if self.is_local_partition(partition) {
+                            let _ = self.db_delete(&r.source_entity, child_id).await;
+                        } else {
+                            self.fire_and_forget_json_request(
+                                partition,
+                                JsonDbOp::Delete,
+                                &r.source_entity,
+                                child_id,
+                                &[],
+                            )
+                            .await;
+                        }
                     }
                 }
                 OnDeleteAction::SetNull => {
                     for child_id in &r.referencing_ids {
-                        let Some(entity) = self.db_get(&r.source_entity, child_id) else {
-                            continue;
-                        };
-                        let Ok(mut data) =
-                            serde_json::from_slice::<serde_json::Value>(&entity.data)
-                        else {
-                            continue;
-                        };
-                        if let Some(obj) = data.as_object_mut() {
-                            obj.insert(r.source_field.clone(), serde_json::Value::Null);
-                        }
-                        let bytes = serde_json::to_vec(&data).unwrap_or_default();
-                        let _ = self
-                            .db_update(&r.source_entity, child_id, &bytes, now_ms)
+                        let partition = data_partition(&r.source_entity, child_id);
+                        if self.is_local_partition(partition) {
+                            let Some(entity) = self.db_get(&r.source_entity, child_id) else {
+                                continue;
+                            };
+                            let Ok(mut data) =
+                                serde_json::from_slice::<serde_json::Value>(&entity.data)
+                            else {
+                                continue;
+                            };
+                            if let Some(obj) = data.as_object_mut() {
+                                obj.insert(r.source_field.clone(), serde_json::Value::Null);
+                            }
+                            let bytes = serde_json::to_vec(&data).unwrap_or_default();
+                            let _ = self
+                                .db_update(&r.source_entity, child_id, &bytes, now_ms)
+                                .await;
+                        } else {
+                            self.fire_and_forget_set_null(
+                                partition,
+                                &r.source_entity,
+                                child_id,
+                                &r.source_field,
+                            )
                             .await;
+                        }
                     }
                 }
             }
         }
+    }
+
+    async fn fire_and_forget_json_request(
+        &self,
+        partition: PartitionId,
+        op: JsonDbOp,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+    ) {
+        let Some(primary) = self.partition_map.primary(partition) else {
+            return;
+        };
+        if primary == self.node_id {
+            return;
+        }
+        let request = JsonDbRequest::new(
+            0,
+            op,
+            entity.to_string(),
+            Some(id.to_string()),
+            payload.to_vec(),
+            String::new(),
+            None,
+            None,
+        );
+        let _ = self
+            .transport
+            .send(
+                primary,
+                ClusterMessage::JsonDbRequest { partition, request },
+            )
+            .await;
+    }
+
+    async fn fire_and_forget_set_null(
+        &self,
+        partition: PartitionId,
+        entity: &str,
+        id: &str,
+        field: &str,
+    ) {
+        let Some(primary) = self.partition_map.primary(partition) else {
+            return;
+        };
+        if primary == self.node_id {
+            return;
+        }
+        let payload = serde_json::json!({ field: serde_json::Value::Null });
+        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        let request = JsonDbRequest::new(
+            0,
+            JsonDbOp::Update,
+            entity.to_string(),
+            Some(id.to_string()),
+            bytes,
+            String::new(),
+            None,
+            None,
+        );
+        let _ = self
+            .transport
+            .send(
+                primary,
+                ClusterMessage::JsonDbRequest { partition, request },
+            )
+            .await;
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1165,11 +1256,13 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return;
             };
-            let response = JsonDbResponse::new(0, payload, response_topic, correlation_data);
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
+            if !response_topic.is_empty() {
+                let response = JsonDbResponse::new(0, payload, response_topic, correlation_data);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::JsonDbResponse(response))
+                    .await;
+            }
             return;
         }
 
@@ -1186,11 +1279,14 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.apply_fk_side_effects(&side_effects).await;
         let response_payload = self.execute_json_delete(&entity, &id).await;
-        let response = JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        if !response_topic.is_empty() {
+            let response =
+                JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::JsonDbResponse(response))
+                .await;
+        }
     }
 
     pub(crate) fn handle_json_list_local(&self, entity: &str, payload: &[u8]) -> Vec<u8> {
