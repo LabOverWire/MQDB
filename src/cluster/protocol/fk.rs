@@ -125,8 +125,8 @@ impl FkReverseLookupRequest {
 pub struct FkReverseLookupResponse {
     pub version: u8,
     pub request_id: u64,
-    pub count: u32,
-    #[FromField(count)]
+    pub ids_data_len: u32,
+    #[FromField(ids_data_len)]
     pub ids_data: Vec<u8>,
 }
 
@@ -145,7 +145,7 @@ impl FkReverseLookupResponse {
         Self {
             version: Self::VERSION,
             request_id,
-            count: ids_data.len() as u32,
+            ids_data_len: ids_data.len() as u32,
             ids_data,
         }
     }

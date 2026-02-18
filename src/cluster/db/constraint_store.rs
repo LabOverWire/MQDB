@@ -42,11 +42,12 @@ impl OnDeleteAction {
     }
 
     #[must_use]
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "cascade" => Self::Cascade,
-            "set_null" | "setnull" => Self::SetNull,
-            _ => Self::Restrict,
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "cascade" => Some(Self::Cascade),
+            "set_null" | "setnull" => Some(Self::SetNull),
+            "restrict" => Some(Self::Restrict),
+            _ => None,
         }
     }
 
@@ -343,10 +344,16 @@ impl ConstraintStore {
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<ClusterConstraint> {
-        if let Ok((c, _)) = ClusterConstraint::try_from_be_bytes(bytes) {
-            return Some(c);
+        if bytes.is_empty() {
+            return None;
         }
-        Self::deserialize_v1(bytes)
+        match bytes[0] {
+            1 => Self::deserialize_v1(bytes),
+            2 => ClusterConstraint::try_from_be_bytes(bytes)
+                .ok()
+                .map(|(c, _)| c),
+            _ => None,
+        }
     }
 
     fn deserialize_v1(bytes: &[u8]) -> Option<ClusterConstraint> {
@@ -699,10 +706,27 @@ mod tests {
         assert_eq!(OnDeleteAction::from_u8(2), OnDeleteAction::SetNull);
         assert_eq!(OnDeleteAction::from_u8(255), OnDeleteAction::Restrict);
 
-        assert_eq!(OnDeleteAction::parse("cascade"), OnDeleteAction::Cascade);
-        assert_eq!(OnDeleteAction::parse("set_null"), OnDeleteAction::SetNull);
-        assert_eq!(OnDeleteAction::parse("restrict"), OnDeleteAction::Restrict);
-        assert_eq!(OnDeleteAction::parse("unknown"), OnDeleteAction::Restrict);
+        assert_eq!(
+            OnDeleteAction::parse("cascade"),
+            Some(OnDeleteAction::Cascade)
+        );
+        assert_eq!(
+            OnDeleteAction::parse("set_null"),
+            Some(OnDeleteAction::SetNull)
+        );
+        assert_eq!(
+            OnDeleteAction::parse("restrict"),
+            Some(OnDeleteAction::Restrict)
+        );
+        assert_eq!(
+            OnDeleteAction::parse("CASCADE"),
+            Some(OnDeleteAction::Cascade)
+        );
+        assert_eq!(
+            OnDeleteAction::parse("Restrict"),
+            Some(OnDeleteAction::Restrict)
+        );
+        assert!(OnDeleteAction::parse("unknown").is_none());
 
         assert_eq!(OnDeleteAction::Restrict.as_str(), "restrict");
         assert_eq!(OnDeleteAction::Cascade.as_str(), "cascade");

@@ -54,8 +54,7 @@ impl PartitionStorage {
             }
         }
         batch.insert(outbox_key, outbox_value);
-        batch.commit()?;
-        self.backend.flush()
+        batch.commit()
     }
 
     /// Persists multiple replication writes atomically as a batch.

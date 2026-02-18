@@ -278,7 +278,13 @@ impl ClusteredAgent {
                     );
                 }
 
-                let on_delete = crate::cluster::db::OnDeleteAction::parse(on_delete_str);
+                let Some(on_delete) = crate::cluster::db::OnDeleteAction::parse(on_delete_str)
+                else {
+                    return Response::error(
+                        ErrorCode::BadRequest,
+                        format!("invalid on_delete value: {on_delete_str}"),
+                    );
+                };
                 let constraint = crate::cluster::db::ClusterConstraint::foreign_key(
                     entity,
                     name,
