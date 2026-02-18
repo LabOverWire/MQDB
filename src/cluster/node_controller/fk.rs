@@ -266,7 +266,7 @@ impl<T: ClusterTransport> NodeController<T> {
             } else if let Some(target_node) = primary {
                 let request_id = self.allocate_fk_request_id();
                 let (tx, rx) = oneshot::channel();
-                self.pending_fk_checks.insert(request_id, tx);
+                self.pending_constraints.insert_fk_check(request_id, tx);
 
                 let req = FkCheckRequest::create(request_id, target_entity, &fk_value);
                 let _ = self
@@ -309,7 +309,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let on_delete = constraint.on_delete_action();
 
             let local_refs =
-                scan_referencing_ids(&self.stores.db_list(source_entity), source_field, id);
+                scan_referencing_ids(&self.db_list_primary_only(source_entity), source_field, id);
 
             if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                 return Err(format!(
@@ -359,7 +359,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             let request_id = self.allocate_fk_request_id();
             let (tx, rx) = oneshot::channel();
-            self.pending_fk_lookups.insert(request_id, tx);
+            self.pending_constraints.insert_fk_lookup(request_id, tx);
 
             let req =
                 FkReverseLookupRequest::create(request_id, source_entity, source_field, target_id);
@@ -387,19 +387,13 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    pub(crate) fn handle_fk_check_response(&mut self, resp: &FkCheckResponse) {
-        if let Some(tx) = self.pending_fk_checks.remove(&resp.request_id) {
-            let _ = tx.send(resp.exists());
-        }
-    }
-
     pub(crate) async fn handle_fk_reverse_lookup_request(
         &mut self,
         from: NodeId,
         req: &FkReverseLookupRequest,
     ) {
         let referencing_ids = scan_referencing_ids(
-            &self.stores.db_list(req.source_entity_str()),
+            &self.db_list_primary_only(req.source_entity_str()),
             req.source_field_str(),
             req.target_id_str(),
         );
@@ -409,12 +403,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .transport
             .send(from, ClusterMessage::FkReverseLookupResponse(response))
             .await;
-    }
-
-    pub(crate) fn handle_fk_reverse_lookup_response(&mut self, resp: &FkReverseLookupResponse) {
-        if let Some(tx) = self.pending_fk_lookups.remove(&resp.request_id) {
-            let _ = tx.send(resp.referencing_ids());
-        }
     }
 
     #[allow(clippy::missing_errors_doc)]
@@ -446,8 +434,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 let source_field = constraint.field_str();
                 let on_delete = constraint.on_delete_action();
 
-                let local_refs =
-                    scan_referencing_ids(&self.stores.db_list(source_entity), source_field, &id);
+                let local_refs = scan_referencing_ids(
+                    &self.db_list_primary_only(source_entity),
+                    source_field,
+                    &id,
+                );
 
                 if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                     return Err(format!(
@@ -494,9 +485,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(all_results)
     }
 
-    fn allocate_fk_request_id(&mut self) -> u64 {
-        let id = self.next_fk_request_id;
-        self.next_fk_request_id += 1;
-        id
+    fn allocate_fk_request_id(&self) -> u64 {
+        self.pending_constraints.allocate_fk_id()
     }
 }

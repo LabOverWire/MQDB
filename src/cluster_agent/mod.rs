@@ -123,6 +123,7 @@ pub struct ClusteredAgent {
     node_id: NodeId,
     node_name: String,
     controller: Arc<RwLock<NodeController<ClusterTransportKind>>>,
+    pending_constraints: Arc<crate::cluster::node_controller::pending::PendingConstraintState>,
     raft: Option<RaftCoordinator<ClusterTransportKind>>,
     rx_raft_messages: Option<flume::Receiver<crate::cluster::RaftMessage>>,
     rx_raft_events: Option<flume::Receiver<RaftEvent>>,

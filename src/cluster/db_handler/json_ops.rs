@@ -125,7 +125,7 @@ impl DbRequestHandler {
                     payload
                 };
                 let partition = data_partition(entity, id);
-                if !controller.is_local_partition(partition) {
+                if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
@@ -169,7 +169,7 @@ impl DbRequestHandler {
                     return JsonOpResult::Response(err);
                 }
                 let partition = data_partition(entity, id);
-                if !controller.is_local_partition(partition) {
+                if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
@@ -276,7 +276,7 @@ impl DbRequestHandler {
             (p, self.generate_id_for_partition(entity, p, payload))
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return match self
                 .try_forward_create(
                     controller,
@@ -446,11 +446,8 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_create(entity, id, &data_bytes, now_ms).await {
-                Ok(db_entity) => {
-                    controller
-                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
-                        .await;
+            match controller.db_create_prepare(entity, id, &data_bytes, now_ms) {
+                Ok((db_entity, write)) => {
                     let scope = self.scope_config.resolve_scope(entity, data);
                     let event = ChangeEvent::create(
                         entity.to_string(),
@@ -460,7 +457,13 @@ impl DbRequestHandler {
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(scope);
-                    self.publish_change_event(controller, event).await;
+                    let outbox = Self::build_outbox(&event);
+                    controller.db_commit(write, outbox.clone()).await;
+                    controller
+                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
+                        .await;
+                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                        .await;
                     Self::json_success(entity, db_entity.id_str(), data)
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
@@ -734,8 +737,19 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_update(entity, id, &data_bytes, now_ms).await {
-                Ok(db_entity) => {
+            match controller.db_update_prepare(entity, id, &data_bytes, now_ms) {
+                Ok((db_entity, write)) => {
+                    let scope = self.scope_config.resolve_scope(entity, merged_data);
+                    let event = ChangeEvent::update(
+                        entity.to_string(),
+                        db_entity.id_str().to_string(),
+                        merged_data.clone(),
+                    )
+                    .with_sender(sender.map(str::to_string))
+                    .with_client_id(client_id.map(str::to_string))
+                    .with_scope(scope);
+                    let outbox = Self::build_outbox(&event);
+                    controller.db_commit(write, outbox.clone()).await;
                     if has_unique_changes {
                         controller
                             .commit_unique_constraints(
@@ -746,16 +760,8 @@ impl DbRequestHandler {
                             .release_unique_constraints(entity, id, old_diff, partition, id, now_ms)
                             .await;
                     }
-                    let scope = self.scope_config.resolve_scope(entity, merged_data);
-                    let event = ChangeEvent::update(
-                        entity.to_string(),
-                        db_entity.id_str().to_string(),
-                        merged_data.clone(),
-                    )
-                    .with_sender(sender.map(str::to_string))
-                    .with_client_id(client_id.map(str::to_string))
-                    .with_scope(scope);
-                    self.publish_change_event(controller, event).await;
+                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                        .await;
                     Self::json_success(entity, db_entity.id_str(), merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
@@ -880,13 +886,16 @@ impl DbRequestHandler {
                 .and_then(|data| self.scope_config.resolve_scope(entity, &data))
         };
 
-        match controller.db_delete(entity, id).await {
-            Ok(_) => {
+        match controller.db_delete_prepare(entity, id) {
+            Ok((_db_entity, write)) => {
                 let event = ChangeEvent::delete(entity.to_string(), id.to_string())
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
-                self.publish_change_event(controller, event).await;
+                let outbox = Self::build_outbox(&event);
+                controller.db_commit(write, outbox.clone()).await;
+                self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                    .await;
                 let result = json!({
                     "status": "ok",
                     "id": id,
@@ -1074,11 +1083,19 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                        match controller
-                            .db_create(&entity, &id, &data_bytes, now_ms)
-                            .await
-                        {
-                            Ok(db_entity) => {
+                        match controller.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let scope = self.scope_config.resolve_scope(&entity, &data);
+                                let event = ChangeEvent::create(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_client_id(client_id)
+                                .with_scope(scope);
+                                let outbox = Self::build_outbox(&event);
+                                controller.db_commit(write, outbox.clone()).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1089,16 +1106,12 @@ impl DbRequestHandler {
                                         now_ms,
                                     )
                                     .await;
-                                let scope = self.scope_config.resolve_scope(&entity, &data);
-                                let event = ChangeEvent::create(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    data.clone(),
+                                self.publish_change_event_and_deliver(
+                                    controller,
+                                    event,
+                                    &outbox.operation_id,
                                 )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
-                                self.publish_change_event(controller, event).await;
+                                .await;
                                 Self::json_success(&entity, db_entity.id_str(), &data)
                             }
                             Err(db::DbDataStoreError::AlreadyExists) => {
@@ -1175,11 +1188,19 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-                        match controller
-                            .db_update(&entity, &id, &data_bytes, now_ms)
-                            .await
-                        {
-                            Ok(db_entity) => {
+                        match controller.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
+                                let event = ChangeEvent::update(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    merged_data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_client_id(client_id)
+                                .with_scope(scope);
+                                let outbox = Self::build_outbox(&event);
+                                controller.db_commit(write, outbox.clone()).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1195,16 +1216,12 @@ impl DbRequestHandler {
                                         &entity, &id, &old_diff, partition, &id, now_ms,
                                     )
                                     .await;
-                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
-                                let event = ChangeEvent::update(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    merged_data.clone(),
+                                self.publish_change_event_and_deliver(
+                                    controller,
+                                    event,
+                                    &outbox.operation_id,
                                 )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
-                                self.publish_change_event(controller, event).await;
+                                .await;
                                 Self::json_success(&entity, db_entity.id_str(), &merged_data)
                             }
                             Err(db::DbDataStoreError::NotFound) => {
@@ -1414,10 +1431,28 @@ impl DbRequestHandler {
         }
     }
 
-    async fn publish_change_event<T: ClusterTransport>(
+    fn build_outbox(event: &ChangeEvent) -> crate::cluster::store_manager::outbox::OutboxPayload {
+        let topic = event.event_topic(0);
+        let user_properties: Vec<(String, String)> = event
+            .client_id
+            .as_ref()
+            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
+            .unwrap_or_default();
+        let payload = serde_json::to_vec(event).unwrap_or_default();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        crate::cluster::store_manager::outbox::OutboxPayload::new(
+            operation_id,
+            &topic,
+            &payload,
+            &user_properties,
+        )
+    }
+
+    async fn publish_change_event_and_deliver<T: ClusterTransport>(
         &self,
         controller: &NodeController<T>,
         event: ChangeEvent,
+        operation_id: &str,
     ) {
         let topic = event.event_topic(0);
         let user_properties: Vec<(String, String)> = event
@@ -1436,6 +1471,9 @@ impl DbRequestHandler {
             Err(e) => {
                 tracing::error!(error = %e, "failed to serialize change event");
             }
+        }
+        if let Some(outbox) = controller.stores().cluster_outbox() {
+            let _ = outbox.mark_delivered(operation_id);
         }
     }
 }

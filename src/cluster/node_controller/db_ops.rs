@@ -45,6 +45,19 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
+    pub fn db_create_prepare(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.stores
+            .db_create_replicated(entity_type, id, data, timestamp_ms)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -52,20 +65,22 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let start = std::time::Instant::now();
-        let (db_entity, write) =
-            self.stores
-                .db_create_replicated(entity_type, id, data, timestamp_ms)?;
-        let t_store = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let (db_entity, write) = self.db_create_prepare(entity_type, id, data, timestamp_ms)?;
         self.write_or_forward(write).await;
-        let t_forward = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        tracing::info!(
-            node = self.node_id.get(),
-            t_store,
-            t_forward,
-            "db_create_timing"
-        );
         Ok(db_entity)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_update_prepare(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.stores
+            .db_update_replicated(entity_type, id, data, timestamp_ms)
     }
 
     /// # Errors
@@ -77,9 +92,7 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) =
-            self.stores
-                .db_update_replicated(entity_type, id, data, timestamp_ms)?;
+        let (db_entity, write) = self.db_update_prepare(entity_type, id, data, timestamp_ms)?;
         self.write_or_forward(write).await;
         Ok(db_entity)
     }
@@ -100,14 +113,32 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    pub fn db_delete_prepare(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+    ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.stores.db_delete_replicated(entity_type, id)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
     pub async fn db_delete(
         &mut self,
         entity_type: &str,
         id: &str,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) = self.stores.db_delete_replicated(entity_type, id)?;
+        let (db_entity, write) = self.db_delete_prepare(entity_type, id)?;
         self.write_or_forward(write).await;
         Ok(db_entity)
+    }
+
+    pub async fn db_commit(
+        &mut self,
+        write: ReplicationWrite,
+        outbox: super::super::store_manager::outbox::OutboxPayload,
+    ) {
+        self.write_or_forward_with_outbox(write, outbox).await;
     }
 
     #[must_use]
@@ -118,6 +149,15 @@ impl<T: ClusterTransport> NodeController<T> {
     #[must_use]
     pub fn db_list(&self, entity_type: &str) -> Vec<super::db::DbEntity> {
         self.stores.db_list(entity_type)
+    }
+
+    #[must_use]
+    pub fn db_list_primary_only(&self, entity_type: &str) -> Vec<super::db::DbEntity> {
+        self.stores
+            .db_list(entity_type)
+            .into_iter()
+            .filter(|e| self.is_primary_for_partition(e.partition()))
+            .collect()
     }
 
     /// # Errors
@@ -622,7 +662,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 OnDeleteAction::Cascade => {
                     for child_id in &r.referencing_ids {
                         let partition = data_partition(&r.source_entity, child_id);
-                        if self.is_local_partition(partition) {
+                        if self.is_primary_for_partition(partition) {
                             let _ = self.db_delete(&r.source_entity, child_id).await;
                         } else {
                             self.fire_and_forget_json_request(
@@ -639,7 +679,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 OnDeleteAction::SetNull => {
                     for child_id in &r.referencing_ids {
                         let partition = data_partition(&r.source_entity, child_id);
-                        if self.is_local_partition(partition) {
+                        if self.is_primary_for_partition(partition) {
                             let Some(entity) = self.db_get(&r.source_entity, child_id) else {
                                 continue;
                             };

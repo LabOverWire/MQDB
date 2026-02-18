@@ -1,6 +1,6 @@
 # Chapter 1: Why Unify Messaging and Storage?
 
-Every distributed application needs two things: a place to store state and a way to propagate changes. In practice, this means a database and a message broker. The database holds truth. The broker moves it.
+Every distributed application needs two things: a place to store state and a way to propagate changes. In practice, this means a database and a message broker. The database holds truth. The broker moves it around.
 
 These two systems have evolved independently for decades. Relational databases perfected transactions and consistency. Message brokers — from IBM MQ to RabbitMQ to Apache Kafka — perfected asynchronous delivery and decoupling. The division of labor seems natural: one system stores, the other streams.
 
@@ -10,12 +10,12 @@ This book is about what happens when you refuse to accept that seam — when you
 
 ## 1.1 The Two-System Problem
 
-Consider a straightforward scenario. An e-commerce service processes an order. It must do two things:
+Consider a straightforward scenario. In order for an e-commerce service to process an order, it needs to do the following:
 
 1. Write the order to the database.
 2. Publish an "order created" event so that the inventory service, the billing service, and the notification service can react.
 
-Simple enough. But the moment you try to make both operations atomic, the problems begin.
+Simple enough. Trying to make these operations atomic becomes a huge cooperative challenge.
 
 ### Dual Writes
 
@@ -28,13 +28,13 @@ begin_transaction();
 commit();
 ```
 
-This fails. The database and the broker are separate systems with separate failure modes. If the database write succeeds but the broker publish fails, the order exists without anyone knowing about it. If the broker publish succeeds but the database write rolls back, downstream services react to an order that never existed.
+Since the database and the broker are separate systems with separate failure modes, this fails. If the database write succeeds but the broker publish fails, the order exists without anyone knowing about it. If the broker publish succeeds but the database write rolls back, downstream services react to an order that never existed.
 
-You cannot wrap two independent systems in a single atomic transaction without a distributed transaction protocol — which, as anyone who has operated XA transactions at scale will tell you, trades one set of problems for another.
+You cannot wrap two independent systems in a single atomic transaction without a distributed transaction protocol like XA — adding coordinator overhead, lock contention across systems, and partial-failure recovery complexity.
 
 ### Change Data Capture
 
-One popular mitigation is Change Data Capture (CDC). Let the application write to the database only. A separate process — Debezium tailing the PostgreSQL WAL, or Maxwell reading the MySQL binlog — picks up committed changes and publishes them to the broker.
+One popular mitigation is Change Data Capture (CDC). It works by letting the application write to the database only. A separate process — Debezium tailing the PostgreSQL WAL, or Maxwell reading the MySQL binlog — picks up committed changes and publishes them to the broker.
 
 CDC eliminates dual writes. The database is the single source of truth, and events are derived from committed state. But CDC introduces its own challenges:
 
@@ -251,15 +251,17 @@ The core engine was built without a query language because the primary workloads
 
 But the architecture does not preclude SQL. The storage layer already supports secondary indexes, and the filter system already performs predicate evaluation over JSON documents. A SQL glue layer — parsing SQL into the existing filter and index primitives — is a natural next step. The unified storage model that merges messaging and database operations can just as well serve a query language on top.
 
-### Async Replication
+### Eventual Consistency
 
-MQDB replicates data asynchronously. When a client writes to the primary, the primary applies the write, sends it to replicas, and acknowledges the client — without waiting for replicas to confirm. This means a primary failure can lose writes that were acknowledged but not yet replicated.
+MQDB replicates data asynchronously with sequence-based ordering and gap detection. When a client writes to the primary, the primary applies the write locally, sends it to replicas, and acknowledges the client — without waiting for replicas to confirm. Replicas apply writes in sequence order and request catchup for any gaps. This is textbook eventual consistency.
 
-The alternative — synchronous replication with quorum writes — would add a network round trip to every write. For an MQTT broker processing sensor telemetry at thousands of messages per second, this latency is unacceptable.
+For MQDB, eventual consistency is not a compromise — it is the natural fit for a reactive data model. Clients do not query and poll for results. They subscribe to `$DB/{entity}/events/#` and receive change events as they propagate. The data arrives when it arrives. There is no "read-after-write" consistency problem because the interaction model is subscriptions, not reads. MQTT's QoS guarantees (at-least-once for QoS 1, exactly-once for QoS 2) handle delivery reliability at the protocol level, and events arrive in sequence order within each partition.
 
-MQDB's position is that most writes to a message broker are ephemeral (sensor readings, heartbeats, status updates) and losing a few during a node failure is preferable to halving throughput for all writes at all times. The infrastructure for synchronous replication exists in the codebase (a `QuorumTracker` that returns a oneshot receiver for quorum confirmation), but it is not yet exposed as a configurable option.
+The write model is per-entity atomicity on the primary: each single-entity operation is serialized, with data and its outbox entry persisted in the same storage batch. In agent mode, the default is `Immediate` fsync — writes are durable before the client is acknowledged. In cluster mode, the default is `PeriodicMs(10)` — the storage engine flushes every 10ms, trading a small durability window on hard crash for higher write throughput. The outbox guarantees that data and change events share the same durability fate: if a crash loses the last 10ms of unfsynced writes, the corresponding outbox entries are also lost, so there are no orphaned events. A primary failure can also lose writes that were acknowledged but not yet replicated, which is an acceptable tradeoff for a system where the dominant workloads are sensor telemetry, reactive dashboards, and event-driven microservices.
 
-Chapter 5 covers the replication pipeline and durability tradeoffs in detail.
+For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a `QuorumTracker` that returns a oneshot receiver for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
+
+Chapter 5 covers the replication pipeline, sequence ordering, and gap catchup in detail.
 
 ### Fixed Partition Count
 
@@ -271,11 +273,11 @@ The fixed count is a deliberate tradeoff between horizontal scaling and synchron
 
 ### No Cross-Partition Transactions
 
-MQDB provides ACID guarantees within a single partition. Writes within one partition are atomic and consistent. But there is no multi-partition transaction protocol — no two-phase commit, no distributed MVCC.
+MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch. In neither mode is there a multi-entity transaction, a multi-partition transaction protocol, two-phase commit, or distributed MVCC.
 
-In practice, this means that a foreign key constraint between two entities that hash to different partitions requires cross-partition coordination (a two-phase reservation protocol, covered in Chapter 15) but does not provide the isolation guarantees of a distributed transaction.
+Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap discussed in Chapter 15.
 
-This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB prioritizes throughput over cross-partition isolation.
+This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB currently prioritizes throughput over cross-partition consistency. But the constraint enforcement infrastructure — two-phase reservation for unique constraints, scatter-gather for foreign key checks — already demonstrates cross-partition coordination with well-defined consistency windows. A formal distributed transaction protocol is a possible future addition, built on the same inter-partition messaging primitives.
 
 ### Write Amplification for Broadcast Entities
 

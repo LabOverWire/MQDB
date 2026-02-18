@@ -37,6 +37,23 @@ impl StoreManager {
         self.apply_to_memory(write)
     }
 
+    /// # Errors
+    /// Returns `StoreApplyError` if persistence fails or the entity type is unknown.
+    pub fn apply_write_with_outbox(
+        &self,
+        write: &ReplicationWrite,
+        outbox_key: Vec<u8>,
+        outbox_value: Vec<u8>,
+    ) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .write_with_outbox(write, outbox_key, outbox_value)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+
+        self.apply_to_memory(write)
+    }
+
     pub(super) fn apply_to_memory(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         match write.entity.as_str() {
             entity::SESSIONS => self.apply_session(write),

@@ -406,10 +406,10 @@ impl ConstraintStore {
     }
 
     fn replication_id_to_key(id: &str) -> String {
-        if let Some(rest) = id.strip_prefix("_db_constraint/") {
-            if let Some((entity, name)) = rest.split_once('/') {
-                return Self::constraint_key(entity, name);
-            }
+        if let Some(rest) = id.strip_prefix("_db_constraint/")
+            && let Some((entity, name)) = rest.split_once('/')
+        {
+            return Self::constraint_key(entity, name);
         }
         id.to_string()
     }

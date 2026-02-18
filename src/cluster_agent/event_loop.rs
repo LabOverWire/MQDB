@@ -99,6 +99,7 @@ impl ClusteredAgent {
         let _http_task = self.spawn_http_task(service_username, service_password);
 
         self.recover_pending_lwts().await;
+        self.recover_pending_outbox().await;
 
         loop {
             tokio::select! {
@@ -247,12 +248,49 @@ impl ClusteredAgent {
         }
     }
 
+    fn try_resolve_constraint_response(&self, msg: &crate::cluster::InboundMessage) -> bool {
+        match &msg.message {
+            ClusterMessage::UniqueReserveResponse(resp) => {
+                self.pending_constraints.resolve_unique(resp);
+                true
+            }
+            ClusterMessage::FkCheckResponse(resp) => {
+                self.pending_constraints.resolve_fk_check(resp);
+                true
+            }
+            ClusterMessage::FkReverseLookupResponse(resp) => {
+                self.pending_constraints.resolve_fk_lookup(resp);
+                true
+            }
+            _ => false,
+        }
+    }
+
     async fn handle_main_queue_message(
         &self,
         msg: crate::cluster::InboundMessage,
         rx_main_queue: &flume::Receiver<crate::cluster::InboundMessage>,
     ) {
         const BATCH_SIZE: u32 = 8;
+
+        if self.try_resolve_constraint_response(&msg) {
+            let mut count = 1u32;
+            while let Ok(msg) = rx_main_queue.try_recv() {
+                if !self.try_resolve_constraint_response(&msg) {
+                    let mut ctrl = self.controller.write().await;
+                    if let Some(pending) = ctrl.handle_filtered_message(msg).await {
+                        drop(ctrl);
+                        Self::spawn_constraint_completion(self.controller.clone(), pending);
+                    }
+                }
+                count += 1;
+                if count.is_multiple_of(BATCH_SIZE) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            return;
+        }
+
         let mut ctrl = self.controller.write().await;
         if let Some(pending) = ctrl.handle_filtered_message(msg).await {
             drop(ctrl);
@@ -260,6 +298,9 @@ impl ClusteredAgent {
             let mut ctrl = self.controller.write().await;
             let mut count = 1u32;
             while let Ok(msg) = rx_main_queue.try_recv() {
+                if self.try_resolve_constraint_response(&msg) {
+                    continue;
+                }
                 if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                     drop(ctrl);
                     Self::spawn_constraint_completion(self.controller.clone(), pending);
@@ -274,6 +315,9 @@ impl ClusteredAgent {
         }
         let mut count = 1u32;
         while let Ok(msg) = rx_main_queue.try_recv() {
+            if self.try_resolve_constraint_response(&msg) {
+                continue;
+            }
             if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                 drop(ctrl);
                 Self::spawn_constraint_completion(self.controller.clone(), pending);
@@ -521,6 +565,35 @@ impl ClusteredAgent {
                     tokio::task::yield_now().await;
                 }
             }
+        }
+    }
+
+    async fn recover_pending_outbox(&self) {
+        let ctrl = self.controller.read().await;
+        let Some(outbox) = ctrl.stores().cluster_outbox() else {
+            return;
+        };
+        let entries = match outbox.pending_events() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "failed to scan outbox for pending events");
+                return;
+            }
+        };
+        if entries.is_empty() {
+            return;
+        }
+        info!(count = entries.len(), "replaying pending outbox entries");
+        for entry in &entries {
+            ctrl.transport()
+                .queue_local_publish_with_properties(
+                    entry.topic.clone(),
+                    entry.payload.clone(),
+                    1,
+                    entry.user_properties.clone(),
+                )
+                .await;
+            let _ = outbox.mark_delivered(&entry.operation_id);
         }
     }
 

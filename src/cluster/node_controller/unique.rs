@@ -319,12 +319,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    pub(crate) fn handle_unique_reserve_response(&mut self, resp: &UniqueReserveResponse) {
-        if let Some(tx) = self.pending_unique_requests.remove(&resp.request_id) {
-            let _ = tx.send(resp.status());
-        }
-    }
-
     pub(crate) async fn handle_unique_commit_request(
         &mut self,
         from: NodeId,
@@ -365,10 +359,8 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    fn allocate_unique_request_id(&mut self) -> u64 {
-        let id = self.next_unique_request_id;
-        self.next_unique_request_id += 1;
-        id
+    fn allocate_unique_request_id(&self) -> u64 {
+        self.pending_constraints.allocate_unique_id()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -387,7 +379,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let request_id = self.allocate_unique_request_id();
         let (tx, rx) = oneshot::channel();
 
-        self.pending_unique_requests.insert(request_id, tx);
+        self.pending_constraints.insert_unique(request_id, tx);
 
         let request = UniqueReserveRequest::create(
             request_id,

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 #[tokio::test]
-async fn test_update_race_condition_within_transaction() {
+async fn test_concurrent_updates_last_write_wins() {
     let tmp = TempDir::new().unwrap();
     let db = Arc::new(Database::open(tmp.path()).await.unwrap());
 
@@ -53,7 +53,7 @@ async fn test_update_race_condition_within_transaction() {
 }
 
 #[tokio::test]
-async fn test_dirty_read_prevented() {
+async fn test_no_torn_writes() {
     let tmp = TempDir::new().unwrap();
     let db = Arc::new(Database::open(tmp.path()).await.unwrap());
 
@@ -99,7 +99,7 @@ async fn test_dirty_read_prevented() {
 }
 
 #[tokio::test]
-async fn test_atomicity_all_or_nothing() {
+async fn test_create_updates_data_and_index() {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
 

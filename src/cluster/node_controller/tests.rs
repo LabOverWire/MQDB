@@ -253,7 +253,7 @@ async fn replicate_write_async_sends_without_tracking() {
     );
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2, node3])
+        .replicate_write_async(write, &[node2, node3], None)
         .await
         .unwrap();
     assert_eq!(seq, 1);
@@ -429,7 +429,10 @@ async fn primary_has_local_data_after_replicate_write_async() {
         session_data.to_be_bytes(),
     );
 
-    let seq = ctrl.replicate_write_async(write, &[node2]).await.unwrap();
+    let seq = ctrl
+        .replicate_write_async(write, &[node2], None)
+        .await
+        .unwrap();
     assert_eq!(seq, 1);
 
     let session = ctrl.stores().sessions.get("async-client");
@@ -907,4 +910,235 @@ async fn db_update_releases_old_unique_value() {
         check_result.is_ok(),
         "old unique value should be available after update changed it"
     );
+}
+
+fn find_two_ids_on_different_partitions(
+    entity: &str,
+) -> (String, PartitionId, String, PartitionId) {
+    let first_id = format!("{entity}-0");
+    let first_part = crate::cluster::db::data_partition(entity, &first_id);
+    for i in 1..256u32 {
+        let id = format!("{entity}-{i}");
+        let p = crate::cluster::db::data_partition(entity, &id);
+        if p != first_part {
+            return (first_id, first_part, id, p);
+        }
+    }
+    panic!("could not find two IDs on different partitions");
+}
+
+fn setup_all_primary_except(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+    excluded: PartitionId,
+    excluded_primary: NodeId,
+) {
+    let mut map = PartitionMap::new();
+    for partition_id in 0..NUM_PARTITIONS {
+        if let Some(p) = PartitionId::new(partition_id) {
+            if p == excluded {
+                map.set(
+                    p,
+                    crate::cluster::PartitionAssignment {
+                        primary: Some(excluded_primary),
+                        replicas: vec![node],
+                        epoch: Epoch::new(1),
+                    },
+                );
+            } else {
+                ctrl.become_primary(p, Epoch::new(1));
+                map.set(
+                    p,
+                    crate::cluster::PartitionAssignment {
+                        primary: Some(node),
+                        replicas: vec![],
+                        epoch: Epoch::new(1),
+                    },
+                );
+            }
+        }
+    }
+    ctrl.update_partition_map(map);
+}
+
+#[tokio::test]
+async fn db_list_primary_only_excludes_replica_data() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_id, _primary_part, replica_id, replica_part) =
+        find_two_ids_on_different_partitions("items");
+
+    ctrl.stores
+        .db_data
+        .upsert("items", &primary_id, b"{}", 1000);
+    ctrl.stores
+        .db_data
+        .upsert("items", &replica_id, b"{}", 1000);
+
+    assert_eq!(ctrl.db_list("items").len(), 2);
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let primary_only = ctrl.db_list_primary_only("items");
+    assert_eq!(primary_only.len(), 1);
+    assert_eq!(primary_only[0].id_str(), primary_id);
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_ignores_stale_replica_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (_, _, replica_post_id, replica_part) = find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Restrict,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_data = serde_json::json!({
+        "title": "Stale Replica Post",
+        "author_id": "u1",
+        "id": replica_post_id
+    });
+    let post_bytes = serde_json::to_vec(&post_data).unwrap();
+    ctrl.stores
+        .db_data
+        .upsert("posts", &replica_post_id, &post_bytes, 1000);
+
+    assert_eq!(ctrl.db_list("posts").len(), 1);
+
+    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    assert!(
+        local_results.is_empty(),
+        "stale replica data should not appear in FK reverse lookup"
+    );
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_finds_primary_partition_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_post_id, _, _, replica_part) = find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_data = serde_json::json!({
+        "title": "Primary Post",
+        "author_id": "u1",
+        "id": primary_post_id
+    });
+    let post_bytes = serde_json::to_vec(&post_data).unwrap();
+    ctrl.db_create("posts", &primary_post_id, &post_bytes, 1000)
+        .await
+        .unwrap();
+
+    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    assert_eq!(local_results.len(), 1);
+    assert_eq!(local_results[0].referencing_ids.len(), 1);
+    assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_post_id, _, replica_post_id, replica_part) =
+        find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Restrict,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_bytes = |id: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "title": "Post",
+            "author_id": "u1",
+            "id": id
+        }))
+        .unwrap()
+    };
+
+    ctrl.db_create(
+        "posts",
+        &primary_post_id,
+        &post_bytes(&primary_post_id),
+        1000,
+    )
+    .await
+    .unwrap();
+    ctrl.stores.db_data.upsert(
+        "posts",
+        &replica_post_id,
+        &post_bytes(&replica_post_id),
+        1000,
+    );
+
+    assert_eq!(ctrl.db_list("posts").len(), 2);
+
+    let result = ctrl.start_fk_reverse_lookup("users", "u1").await;
+    match result {
+        Err(ref msg) => assert!(
+            msg.contains("prevents deletion"),
+            "error should mention delete prevention: {msg}"
+        ),
+        Ok(_) => panic!("RESTRICT should block when primary data has referencing records"),
+    }
 }

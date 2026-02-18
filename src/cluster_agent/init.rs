@@ -196,9 +196,12 @@ impl ClusteredAgent {
             processor_channels,
         );
 
+        let pending_constraints = Arc::clone(controller.pending_constraints());
+
         Ok(Self {
             node_id,
             node_name: config.node_name,
+            pending_constraints,
             controller: Arc::new(RwLock::new(controller)),
             raft: Some(raft),
             rx_raft_messages: Some(rx_raft_messages),

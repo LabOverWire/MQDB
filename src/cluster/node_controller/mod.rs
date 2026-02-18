@@ -5,6 +5,7 @@ mod broadcast;
 mod catchup;
 mod db_ops;
 pub(crate) mod fk;
+pub(crate) mod pending;
 mod query;
 mod replication_ops;
 mod retained;
@@ -317,11 +318,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashMap<String, Instant>>>>,
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
-    pub(super) pending_unique_requests: HashMap<u64, oneshot::Sender<UniqueReserveStatus>>,
-    pub(super) next_unique_request_id: u64,
-    pub(super) pending_fk_checks: HashMap<u64, oneshot::Sender<bool>>,
-    pub(super) pending_fk_lookups: HashMap<u64, oneshot::Sender<Vec<String>>>,
-    pub(super) next_fk_request_id: u64,
+    pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
 }
 
@@ -386,11 +383,7 @@ impl<T: ClusterTransport> NodeController<T> {
             synced_retained_topics: None,
             pending_retained_queries: HashMap::new(),
             pending_scatter_requests: HashMap::new(),
-            pending_unique_requests: HashMap::new(),
-            next_unique_request_id: 1,
-            pending_fk_checks: HashMap::new(),
-            pending_fk_lookups: HashMap::new(),
-            next_fk_request_id: 1,
+            pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
         }
     }
@@ -404,6 +397,11 @@ impl<T: ClusterTransport> NodeController<T> {
         topics: Arc<tokio::sync::RwLock<HashMap<String, Instant>>>,
     ) {
         self.synced_retained_topics = Some(topics);
+    }
+
+    #[must_use]
+    pub fn pending_constraints(&self) -> &Arc<pending::PendingConstraintState> {
+        &self.pending_constraints
     }
 
     #[must_use]
@@ -427,7 +425,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[must_use]
-    pub fn is_local_partition(&self, partition: PartitionId) -> bool {
+    pub fn is_primary_for_partition(&self, partition: PartitionId) -> bool {
         if self.partition_map.primary(partition) == Some(self.node_id) {
             return true;
         }
@@ -438,7 +436,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     #[must_use]
     pub fn can_serve_reads(&self, partition: PartitionId) -> bool {
-        if self.is_local_partition(partition) {
+        if self.is_primary_for_partition(partition) {
             return true;
         }
         self.partition_map
@@ -458,7 +456,7 @@ impl<T: ClusterTransport> NodeController<T> {
         for _ in 0..super::NUM_PARTITIONS {
             let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % super::NUM_PARTITIONS;
             if let Some(partition) = PartitionId::new(idx)
-                && self.is_local_partition(partition)
+                && self.is_primary_for_partition(partition)
             {
                 return partition;
             }
@@ -1092,7 +1090,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_unique_reserve_request(from, req).await;
             }
             ClusterMessage::UniqueReserveResponse(resp) => {
-                self.handle_unique_reserve_response(resp);
+                self.pending_constraints.resolve_unique(resp);
             }
             ClusterMessage::UniqueCommitRequest(req) => {
                 self.handle_unique_commit_request(from, req).await;
@@ -1104,13 +1102,13 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_fk_check_request(from, req).await;
             }
             ClusterMessage::FkCheckResponse(resp) => {
-                self.handle_fk_check_response(resp);
+                self.pending_constraints.resolve_fk_check(resp);
             }
             ClusterMessage::FkReverseLookupRequest(req) => {
                 self.handle_fk_reverse_lookup_request(from, req).await;
             }
             ClusterMessage::FkReverseLookupResponse(resp) => {
-                self.handle_fk_reverse_lookup_response(resp);
+                self.pending_constraints.resolve_fk_lookup(resp);
             }
             _ => {}
         }

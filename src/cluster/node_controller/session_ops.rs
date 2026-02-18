@@ -122,6 +122,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
+        outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
     ) -> Result<u64, ReplicationError> {
         let start = std::time::Instant::now();
         let partition = write.partition;
@@ -152,7 +153,13 @@ impl<T: ClusterTransport> NodeController<T> {
             .append(partition, sequence, write_msg.clone());
         let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
-        let _ = self.stores.apply_write(&write_msg);
+        if let Some(ob) = outbox {
+            let _ = self
+                .stores
+                .apply_write_with_outbox(&write_msg, ob.key, ob.value);
+        } else {
+            let _ = self.stores.apply_write(&write_msg);
+        }
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         for &replica in replicas {
