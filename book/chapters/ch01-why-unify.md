@@ -323,7 +323,7 @@ Chapter 5 covers the replication pipeline, sequence ordering, and gap catchup in
 
 ### Fixed Partition Count
 
-MQDB uses 256 fixed partitions. This number never changes. There is no online repartitioning, no partition splitting, no dynamic scaling of the partition count.
+MQDB uses 256 fixed partitions. This number never changes. There is no partition splitting, and no dynamic scaling of the partition count.
 
 256 was chosen as a balance between granularity and overhead. With 3 nodes, each node handles ~85 primary partitions — enough for balanced distribution. With 16 nodes, each handles 16. With a replication factor of 2, each partition requires two distinct nodes (one primary, one replica), yielding 512 total role assignments. Beyond ~256 nodes, some nodes would have no primary partitions; beyond ~512, some nodes would have no role at all.
 
@@ -331,9 +331,9 @@ The fixed count is a deliberate tradeoff between horizontal scaling and synchron
 
 ### No Cross-Partition Transactions
 
-MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch. In neither mode is there a multi-entity transaction, a multi-partition transaction protocol, two-phase commit, or distributed MVCC.
+MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch.
 
-Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap discussed in Chapter 15.
+Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap is discussed in Chapter 15.
 
 This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB currently prioritizes throughput over cross-partition consistency. But the constraint enforcement infrastructure — two-phase reservation for unique constraints, scatter-gather for foreign key checks — already demonstrates cross-partition coordination with well-defined consistency windows. A formal distributed transaction protocol is a possible future addition, built on the same inter-partition messaging primitives.
 
@@ -341,7 +341,7 @@ This is the same tradeoff made by many distributed databases. Google Spanner pro
 
 Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
 
-For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning wildcard subscriptions, the local persistence writes can become a bottleneck.
+For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning wildcard subscriptions, the local persistence writes can become a bottleneck. But that's not good practice overall.
 
 ## What Comes Next
 
