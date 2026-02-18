@@ -1314,3 +1314,124 @@ async fn fk_delete_restrict_allows_when_no_references() {
     assert_eq!(json["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }
+
+#[tokio::test]
+async fn fk_delete_cascade_multilevel() {
+    use super::super::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post = serde_json::to_vec(&serde_json::json!({
+        "title": "Post 1",
+        "author_id": "u1"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "p1", &post, 1000).await.unwrap();
+
+    let comment = serde_json::to_vec(&serde_json::json!({
+        "body": "Great post",
+        "post_id": "p1"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "c1", &comment, 1000)
+        .await
+        .unwrap();
+
+    let fk_posts = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_posts).await.unwrap();
+
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/users/u1/delete",
+            &[],
+            Some("resp/t"),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert!(ctrl.db_get("users", "u1").is_none());
+    assert!(ctrl.db_get("posts", "p1").is_none());
+    assert!(ctrl.db_get("comments", "c1").is_none());
+}
+
+#[tokio::test]
+async fn fk_delete_cascade_circular_no_infinite_loop() {
+    use super::super::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let a1 = serde_json::to_vec(&serde_json::json!({"ref_b": "b1"})).unwrap();
+    let b1 = serde_json::to_vec(&serde_json::json!({"ref_a": "a1"})).unwrap();
+    ctrl.db_create("entity_a", "a1", &a1, 1000).await.unwrap();
+    ctrl.db_create("entity_b", "b1", &b1, 1000).await.unwrap();
+
+    let fk_a_to_b = ClusterConstraint::foreign_key(
+        "entity_a",
+        "a_refs_b",
+        "ref_b",
+        "entity_b",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_a_to_b).await.unwrap();
+
+    let fk_b_to_a = ClusterConstraint::foreign_key(
+        "entity_b",
+        "b_refs_a",
+        "ref_a",
+        "entity_a",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_b_to_a).await.unwrap();
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/entity_a/a1/delete",
+            &[],
+            Some("resp/t"),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "ok");
+    assert!(ctrl.db_get("entity_a", "a1").is_none());
+    assert!(ctrl.db_get("entity_b", "b1").is_none());
+}

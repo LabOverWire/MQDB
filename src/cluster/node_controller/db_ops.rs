@@ -583,7 +583,11 @@ impl<T: ClusterTransport> NodeController<T> {
             );
         }
 
-        self.apply_fk_side_effects(&local_results).await;
+        let all_results = match self.collect_local_cascade(entity, id, local_results) {
+            Ok(results) => results,
+            Err(msg) => return (Self::json_error(409, &msg), None),
+        };
+        self.apply_fk_side_effects(&all_results).await;
         (self.execute_json_delete(entity, id).await, None)
     }
 

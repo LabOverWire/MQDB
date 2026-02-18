@@ -144,6 +144,15 @@ pub enum FkDeleteContinuation {
     },
 }
 
+impl FkDeleteContinuation {
+    pub fn entity_id(&self) -> (&str, &str) {
+        match self {
+            Self::DeleteFromDbHandler { entity, id, .. }
+            | Self::DeleteFromNodeController { entity, id, .. } => (entity, id),
+        }
+    }
+}
+
 pub enum PendingConstraintWork {
     Unique(PendingUniqueWork),
     Fk(PendingFkWork),

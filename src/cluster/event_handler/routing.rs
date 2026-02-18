@@ -230,9 +230,18 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 let local_results = pending.local_results;
                 let pending_lookups = pending.pending_lookups;
                 let continuation = pending.continuation;
+                let (del_entity, del_id) = continuation.entity_id();
+                let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
                 drop(ctrl);
                 let (restrict_error, side_effects) =
-                    Self::resolve_fk_delete_lookups(local_results, pending_lookups).await;
+                    super::super::node_controller::fk::collect_recursive_cascade(
+                        &self.controller,
+                        &del_entity,
+                        &del_id,
+                        local_results,
+                        pending_lookups,
+                    )
+                    .await;
                 let mut ctrl = self.controller.write().await;
                 if let Some(response) = self
                     .db_handler
@@ -250,54 +259,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 }
             }
         }
-    }
-
-    async fn resolve_fk_delete_lookups(
-        local_results: Vec<super::super::node_controller::fk::FkReverseLookupResult>,
-        pending_lookups: Vec<super::super::node_controller::PendingFkReverseLookup>,
-    ) -> (
-        Option<String>,
-        Vec<super::super::node_controller::fk::FkReverseLookupResult>,
-    ) {
-        use super::super::db::OnDeleteAction;
-        use super::super::node_controller::fk::await_fk_reverse_lookups;
-
-        for r in &local_results {
-            if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
-                return (
-                    Some(format!(
-                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
-                        r.constraint_name,
-                        r.referencing_ids.len(),
-                        r.source_entity
-                    )),
-                    Vec::new(),
-                );
-            }
-        }
-
-        let remote_results = match await_fk_reverse_lookups(pending_lookups).await {
-            Ok(results) => results,
-            Err(msg) => return (Some(msg), Vec::new()),
-        };
-
-        for r in &remote_results {
-            if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
-                return (
-                    Some(format!(
-                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
-                        r.constraint_name,
-                        r.referencing_ids.len(),
-                        r.source_entity
-                    )),
-                    Vec::new(),
-                );
-            }
-        }
-
-        let mut combined = local_results;
-        combined.extend(remote_results);
-        (None, combined)
     }
 
     pub(super) async fn route_and_forward_publish(

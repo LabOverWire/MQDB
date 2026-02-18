@@ -346,65 +346,24 @@ impl ClusteredAgent {
         controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
         pending: crate::cluster::node_controller::PendingFkDeleteWork,
     ) {
-        use crate::cluster::db::OnDeleteAction;
-        use crate::cluster::node_controller::fk::await_fk_reverse_lookups;
+        use crate::cluster::node_controller::fk::collect_recursive_cascade;
 
         let local_results = pending.local_results;
         let pending_lookups = pending.pending_lookups;
         let continuation = pending.continuation;
+        let (del_entity, del_id) = continuation.entity_id();
+        let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
         tokio::spawn(async move {
-            for r in &local_results {
-                if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
-                    let restrict_error = format!(
-                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
-                        r.constraint_name,
-                        r.referencing_ids.len(),
-                        r.source_entity
-                    );
-                    let mut ctrl = controller.write().await;
-                    ctrl.complete_pending_fk_delete_work(
-                        Some(restrict_error),
-                        Vec::new(),
-                        continuation,
-                    )
-                    .await;
-                    return;
-                }
-            }
-
-            let remote_results = match await_fk_reverse_lookups(pending_lookups).await {
-                Ok(results) => results,
-                Err(msg) => {
-                    let mut ctrl = controller.write().await;
-                    ctrl.complete_pending_fk_delete_work(Some(msg), Vec::new(), continuation)
-                        .await;
-                    return;
-                }
-            };
-
-            for r in &remote_results {
-                if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
-                    let restrict_error = format!(
-                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
-                        r.constraint_name,
-                        r.referencing_ids.len(),
-                        r.source_entity
-                    );
-                    let mut ctrl = controller.write().await;
-                    ctrl.complete_pending_fk_delete_work(
-                        Some(restrict_error),
-                        Vec::new(),
-                        continuation,
-                    )
-                    .await;
-                    return;
-                }
-            }
-
-            let mut combined = local_results;
-            combined.extend(remote_results);
+            let (restrict_error, side_effects) = collect_recursive_cascade(
+                &controller,
+                &del_entity,
+                &del_id,
+                local_results,
+                pending_lookups,
+            )
+            .await;
             let mut ctrl = controller.write().await;
-            ctrl.complete_pending_fk_delete_work(None, combined, continuation)
+            ctrl.complete_pending_fk_delete_work(restrict_error, side_effects, continuation)
                 .await;
         });
     }

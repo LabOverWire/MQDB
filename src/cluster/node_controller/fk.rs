@@ -114,6 +114,127 @@ pub async fn await_fk_reverse_lookups(
     Ok(results)
 }
 
+async fn resolve_single_level(
+    local_results: Vec<FkReverseLookupResult>,
+    pending_lookups: Vec<PendingFkReverseLookup>,
+) -> (Option<String>, Vec<FkReverseLookupResult>) {
+    for r in &local_results {
+        if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+            return (
+                Some(format!(
+                    "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                    r.constraint_name,
+                    r.referencing_ids.len(),
+                    r.source_entity
+                )),
+                Vec::new(),
+            );
+        }
+    }
+
+    let remote_results = match await_fk_reverse_lookups(pending_lookups).await {
+        Ok(results) => results,
+        Err(msg) => return (Some(msg), Vec::new()),
+    };
+
+    for r in &remote_results {
+        if r.on_delete == OnDeleteAction::Restrict && !r.referencing_ids.is_empty() {
+            return (
+                Some(format!(
+                    "FK constraint '{}' prevents deletion: {} referencing record(s) in '{}'",
+                    r.constraint_name,
+                    r.referencing_ids.len(),
+                    r.source_entity
+                )),
+                Vec::new(),
+            );
+        }
+    }
+
+    let mut combined = local_results;
+    combined.extend(remote_results);
+    (None, combined)
+}
+
+fn filter_and_extract_cascade(
+    results: Vec<FkReverseLookupResult>,
+    visited: &mut std::collections::HashSet<(String, String)>,
+) -> (Vec<FkReverseLookupResult>, Vec<(String, String)>) {
+    let mut filtered = Vec::new();
+    let mut queue = Vec::new();
+    for mut r in results {
+        if r.on_delete == OnDeleteAction::Cascade {
+            r.referencing_ids.retain(|child_id| {
+                if visited.insert((r.source_entity.clone(), child_id.clone())) {
+                    queue.push((r.source_entity.clone(), child_id.clone()));
+                    true
+                } else {
+                    false
+                }
+            });
+            if r.referencing_ids.is_empty() {
+                continue;
+            }
+        }
+        filtered.push(r);
+    }
+    (filtered, queue)
+}
+
+#[allow(clippy::missing_errors_doc)]
+pub async fn collect_recursive_cascade<T: ClusterTransport>(
+    controller: &tokio::sync::RwLock<NodeController<T>>,
+    deleted_entity: &str,
+    deleted_id: &str,
+    initial_local: Vec<FkReverseLookupResult>,
+    initial_pending: Vec<PendingFkReverseLookup>,
+) -> (Option<String>, Vec<FkReverseLookupResult>) {
+    let (restrict_error, level_results) =
+        resolve_single_level(initial_local, initial_pending).await;
+    if restrict_error.is_some() {
+        return (restrict_error, Vec::new());
+    }
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
+    let (filtered, mut queue) = filter_and_extract_cascade(level_results, &mut visited);
+    let mut all_results = filtered;
+
+    while !queue.is_empty() {
+        let mut next_local = Vec::new();
+        let mut next_pending = Vec::new();
+
+        {
+            let mut ctrl = controller.write().await;
+            let batch = std::mem::take(&mut queue);
+            for (entity, id) in &batch {
+                match ctrl.start_fk_reverse_lookup(entity, id).await {
+                    Ok((local, pending)) => {
+                        next_local.extend(local);
+                        next_pending.extend(pending);
+                    }
+                    Err(msg) => return (Some(msg), Vec::new()),
+                }
+            }
+        }
+
+        if next_local.is_empty() && next_pending.is_empty() {
+            break;
+        }
+
+        let (restrict_error, level_results) = resolve_single_level(next_local, next_pending).await;
+        if restrict_error.is_some() {
+            return (restrict_error, Vec::new());
+        }
+
+        let (filtered, next_queue) = filter_and_extract_cascade(level_results, &mut visited);
+        queue = next_queue;
+        all_results.extend(filtered);
+    }
+
+    (None, all_results)
+}
+
 impl<T: ClusterTransport> NodeController<T> {
     #[allow(clippy::missing_errors_doc)]
     pub async fn start_fk_existence_check(
@@ -294,6 +415,83 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(tx) = self.pending_fk_lookups.remove(&resp.request_id) {
             let _ = tx.send(resp.referencing_ids());
         }
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub(crate) fn collect_local_cascade(
+        &self,
+        deleted_entity: &str,
+        deleted_id: &str,
+        initial: Vec<FkReverseLookupResult>,
+    ) -> Result<Vec<FkReverseLookupResult>, String> {
+        let mut all_results = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
+        let mut queue: Vec<(String, String)> = Vec::new();
+
+        for r in &initial {
+            if r.on_delete == OnDeleteAction::Cascade {
+                for child_id in &r.referencing_ids {
+                    visited.insert((r.source_entity.clone(), child_id.clone()));
+                    queue.push((r.source_entity.clone(), child_id.clone()));
+                }
+            }
+        }
+        all_results.extend(initial);
+
+        while let Some((entity, id)) = queue.pop() {
+            let referencing = self.stores.constraint_find_referencing(&entity);
+            for constraint in &referencing {
+                let source_entity = constraint.entity_str();
+                let source_field = constraint.field_str();
+                let on_delete = constraint.on_delete_action();
+
+                let local_refs =
+                    scan_referencing_ids(&self.stores.db_list(source_entity), source_field, &id);
+
+                if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
+                    return Err(format!(
+                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{source_entity}'",
+                        constraint.name_str(),
+                        local_refs.len()
+                    ));
+                }
+
+                if local_refs.is_empty() {
+                    continue;
+                }
+
+                let filtered_refs: Vec<String> = if on_delete == OnDeleteAction::Cascade {
+                    local_refs
+                        .into_iter()
+                        .filter(|child_id| {
+                            if visited.insert((source_entity.to_string(), child_id.clone())) {
+                                queue.push((source_entity.to_string(), child_id.clone()));
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .collect()
+                } else {
+                    local_refs
+                };
+
+                if filtered_refs.is_empty() {
+                    continue;
+                }
+
+                all_results.push(FkReverseLookupResult {
+                    constraint_name: constraint.name_str().to_string(),
+                    source_entity: source_entity.to_string(),
+                    source_field: source_field.to_string(),
+                    on_delete,
+                    referencing_ids: filtered_refs,
+                });
+            }
+        }
+
+        Ok(all_results)
     }
 
     fn allocate_fk_request_id(&mut self) -> u64 {

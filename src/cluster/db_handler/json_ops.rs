@@ -852,7 +852,11 @@ impl DbRequestHandler {
             }));
         }
 
-        controller.apply_fk_side_effects(&local_results).await;
+        let all_results = match controller.collect_local_cascade(entity, id, local_results) {
+            Ok(results) => results,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+        controller.apply_fk_side_effects(&all_results).await;
         JsonOpResult::Response(
             self.execute_delete(controller, entity, id, sender, client_id)
                 .await,
