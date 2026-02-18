@@ -100,6 +100,12 @@ pub async fn configure_broker_auth(
         auth_config.allow_anonymous = false;
     } else {
         auth_config.allow_anonymous = config.allow_anonymous;
+        if config.allow_anonymous {
+            let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
+            let svc_pass = uuid::Uuid::new_v4().to_string();
+            service_username = Some(svc_user);
+            service_password = Some(svc_pass);
+        }
     }
 
     if let Some(ref path) = config.acl_file {

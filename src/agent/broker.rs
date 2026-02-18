@@ -100,6 +100,7 @@ impl MqdbAgent {
     }
 
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply_auth_providers(
         mut broker: MqttBroker,
         needs_composite: bool,
@@ -108,6 +109,7 @@ impl MqdbAgent {
         password_file: Option<&std::path::Path>,
         acl_file: Option<&std::path::Path>,
         admin_users: &HashSet<String>,
+        allow_anonymous: bool,
     ) -> Result<
         (MqttBroker, Option<Arc<ComprehensiveAuthProvider>>),
         Box<dyn std::error::Error + Send + Sync>,
@@ -155,7 +157,8 @@ impl MqdbAgent {
         let current_provider = broker.auth_provider();
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
-                .with_internal_service_username(service_username.cloned());
+                .with_internal_service_username(service_username.cloned())
+                .with_all_users_admin(allow_anonymous && admin_users.is_empty());
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");

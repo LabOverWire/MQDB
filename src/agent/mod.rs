@@ -193,6 +193,7 @@ impl MqdbAgent {
             self.auth_setup.password_file.as_deref(),
             self.auth_setup.acl_file.as_deref(),
             &admin_users,
+            self.auth_setup.allow_anonymous,
         )
         .await?;
 
