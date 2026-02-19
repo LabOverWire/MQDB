@@ -377,7 +377,7 @@ The lesson: the outbox guarantee is not just "data and event are in the same bat
 
 ## 2.8 What Cluster Mode Changes
 
-Every component in this chapter has a cluster-mode counterpart. The single-node design is not thrown away — it is the foundation that cluster mode extends.
+In a network distributed system, things change slightly. Every component in this chapter has a cluster-mode counterpart. The single-node design is not thrown away — it is the foundation that cluster mode extends.
 
 **Storage** moves from Fjall on disk to in-memory `HashMap` per partition, with Fjall backing for crash recovery. Each partition maintains its own data store, index store, and constraint store. The `StorageBackend` trait is not used directly in cluster mode — instead, the `StoreManager` holds `HashMap`-based stores that provide the same operations (get, insert, remove, prefix scan) but scoped to a single partition.
 
