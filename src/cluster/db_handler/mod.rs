@@ -53,6 +53,11 @@ impl DbPublishResult {
     }
 }
 
+pub enum FkCheckCompletion {
+    Done(Option<DbPublishResponse>),
+    NeedUniqueCheck(Box<PendingUniqueWork>),
+}
+
 pub struct DbRequestHandler {
     node_id: NodeId,
     ownership: Arc<OwnershipConfig>,

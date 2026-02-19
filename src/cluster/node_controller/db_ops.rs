@@ -674,7 +674,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok((db_entity, write)) => {
                 let event =
                     ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone());
-                let outbox = Self::build_change_event_outbox(&event);
+                let outbox = build_change_event_outbox(&event);
                 self.db_commit(write, outbox.clone()).await;
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
@@ -786,7 +786,7 @@ impl<T: ClusterTransport> NodeController<T> {
         match self.db_delete_prepare(entity, id) {
             Ok((_db_entity, write)) => {
                 let event = ChangeEvent::delete(entity.to_string(), id.to_string());
-                let outbox = Self::build_change_event_outbox(&event);
+                let outbox = build_change_event_outbox(&event);
                 if let Some(cas) = cascade {
                     self.db_commit_with_cascade(write, outbox.clone(), cas)
                         .await;
@@ -889,6 +889,7 @@ impl<T: ClusterTransport> NodeController<T> {
         effects
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn execute_fk_side_effects(
         &mut self,
         effects: &[CascadeSideEffect],
@@ -901,7 +902,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 CascadeSideEffect::LocalDelete { entity, id } => {
                     if let Ok((_, write)) = self.db_delete_prepare(entity, id) {
                         let event = ChangeEvent::delete(entity.clone(), id.clone());
-                        let outbox = Self::build_change_event_outbox(&event);
+                        let outbox = build_change_event_outbox(&event);
                         self.db_commit(write, outbox.clone()).await;
                         self.publish_and_deliver_change_event(event, &outbox.operation_id)
                             .await;
@@ -917,7 +918,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         let data_json: serde_json::Value =
                             serde_json::from_slice(updated_data).unwrap_or(Value::Null);
                         let event = ChangeEvent::update(entity.clone(), id.clone(), data_json);
-                        let outbox = Self::build_change_event_outbox(&event);
+                        let outbox = build_change_event_outbox(&event);
                         self.db_commit(write, outbox.clone()).await;
                         self.publish_and_deliver_change_event(event, &outbox.operation_id)
                             .await;
@@ -962,7 +963,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     entity,
                     id,
                 } => {
-                    if let Some(rx) = self
+                    if self.is_primary_for_partition(*partition) {
+                        if let Ok((_, write)) = self.db_delete_prepare(entity, id) {
+                            let event = ChangeEvent::delete(entity.clone(), id.clone());
+                            let outbox = build_change_event_outbox(&event);
+                            self.db_commit(write, outbox.clone()).await;
+                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                                .await;
+                        }
+                    } else if let Some(rx) = self
                         .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[])
                         .await
                     {
@@ -976,7 +985,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     field,
                     expected_value,
                 } => {
-                    if let Some(rx) = self
+                    if self.is_primary_for_partition(*partition) {
+                        self.execute_local_cascade_set_null(
+                            entity,
+                            id,
+                            field,
+                            expected_value,
+                            now_ms,
+                        )
+                        .await;
+                    } else if let Some(rx) = self
                         .send_cascade_set_null_request(
                             *partition,
                             entity,
@@ -1103,10 +1121,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Some(rx)
     }
 
-    pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
-        build_change_event_outbox(event)
-    }
-
     pub(crate) async fn publish_and_deliver_change_event(
         &self,
         event: ChangeEvent,
@@ -1125,6 +1139,44 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if let Some(outbox) = self.stores.cluster_outbox() {
             let _ = outbox.mark_delivered(operation_id);
+        }
+    }
+
+    pub(crate) async fn execute_local_cascade_set_null(
+        &mut self,
+        entity: &str,
+        id: &str,
+        field: &str,
+        expected_value: &str,
+        now_ms: u64,
+    ) {
+        let Some(existing) = self.stores.db_get(entity, id) else {
+            return;
+        };
+        let Ok(mut record) = serde_json::from_slice::<Value>(&existing.data) else {
+            return;
+        };
+        let Some(obj) = record.as_object_mut() else {
+            return;
+        };
+        let current = obj.get(field).and_then(|v| {
+            if v.is_string() {
+                v.as_str().map(String::from)
+            } else {
+                Some(v.to_string())
+            }
+        });
+        if current.as_deref() != Some(expected_value) {
+            return;
+        }
+        obj.insert(field.to_string(), Value::Null);
+        let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
+        if let Ok((_, write)) = self.db_update_prepare(entity, id, &updated_bytes, now_ms) {
+            let event = ChangeEvent::update(entity.to_string(), id.to_string(), record);
+            let outbox = build_change_event_outbox(&event);
+            self.db_commit(write, outbox.clone()).await;
+            self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                .await;
         }
     }
 
@@ -1299,7 +1351,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 )
                 .await;
                 let event = ChangeEvent::create(entity.to_string(), id.clone(), data.clone());
-                let outbox = Self::build_change_event_outbox(&event);
+                let outbox = build_change_event_outbox(&event);
                 self.db_commit(write, outbox.clone()).await;
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
@@ -1468,11 +1520,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 data,
                 partition,
                 request_id,
-                now_ms,
                 response_topic,
                 correlation_data,
                 ..
             } => {
+                let now_ms = Self::current_time_ms();
                 let unique_fields = self.stores.constraint_get_unique_fields(&entity);
                 let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
@@ -1573,7 +1625,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             .await;
                             let event =
                                 ChangeEvent::create(entity.clone(), id.clone(), data.clone());
-                            let outbox = Self::build_change_event_outbox(&event);
+                            let outbox = build_change_event_outbox(&event);
                             self.db_commit(write, outbox.clone()).await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)
                                 .await;
@@ -1621,43 +1673,131 @@ impl<T: ClusterTransport> NodeController<T> {
                 merged_data,
                 partition,
                 request_id,
-                now_ms,
                 new_diff,
                 old_diff,
                 response_topic,
                 correlation_data,
                 ..
             } => {
+                let now_ms = Self::current_time_ms();
                 let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
-                let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
+                let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
+                let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+
+                if has_unique_changes {
+                    let unique_fields = self.stores.constraint_get_unique_fields(&entity);
+                    for field in &unique_fields {
+                        let value = match new_diff.get(field) {
+                            Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                            None => continue,
+                        };
+
+                        let params = UniqueReservationParams {
+                            entity: &entity,
+                            field,
+                            value: &value,
+                            id: &id,
+                            request_id: &request_id,
+                            partition,
+                            now_ms,
+                        };
+
+                        let unique_part =
+                            super::db::unique_partition(params.entity, params.field, params.value);
+                        let primary = self.partition_map.primary(unique_part);
+
+                        let is_conflict = if primary == Some(self.node_id) {
+                            self.reserve_unique_local(&params, &mut local_reserved)
+                                .await
+                        } else if let Some(target_node) = primary {
+                            match self
+                                .send_unique_reserve_request_async(
+                                    target_node,
+                                    params.entity,
+                                    params.field,
+                                    params.value,
+                                    params.id,
+                                    params.request_id,
+                                    params.partition,
+                                    30_000,
+                                )
+                                .await
+                            {
+                                Ok(rx) => {
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_secs(5),
+                                        rx,
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(
+                                            UniqueReserveStatus::Reserved
+                                            | UniqueReserveStatus::AlreadyReserved,
+                                        )) => {
+                                            remote_reserved.push((
+                                                field.clone(),
+                                                value.clone(),
+                                                target_node,
+                                            ));
+                                            false
+                                        }
+                                        _ => true,
+                                    }
+                                }
+                                Err(_) => true,
+                            }
+                        } else {
+                            true
+                        };
+
+                        if is_conflict {
+                            self.release_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            let payload = Self::json_error(
+                                409,
+                                &format!("unique constraint violation on field '{field}'"),
+                            );
+                            let response =
+                                JsonDbResponse::new(0, payload, response_topic, correlation_data);
+                            let _ = self
+                                .transport
+                                .send(from, ClusterMessage::JsonDbResponse(response))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+
+                let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                 let response_payload =
                     match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
                         Ok((db_entity, write)) => {
+                            self.commit_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            self.release_unique_constraints(
+                                &entity, &id, &old_diff, partition, &id, now_ms,
+                            )
+                            .await;
                             let event = ChangeEvent::update(
                                 entity.clone(),
                                 id.clone(),
                                 merged_data.clone(),
                             );
-                            let outbox = Self::build_change_event_outbox(&event);
+                            let outbox = build_change_event_outbox(&event);
                             self.db_commit(write, outbox.clone()).await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)
                                 .await;
-                            if has_unique_changes {
-                                self.commit_unique_constraints(
-                                    &entity,
-                                    &id,
-                                    &new_diff,
-                                    partition,
-                                    &request_id,
-                                    now_ms,
-                                )
-                                .await;
-                                self.release_unique_constraints(
-                                    &entity, &id, &old_diff, partition, &id, now_ms,
-                                )
-                                .await;
-                            }
                             let result = serde_json::json!({
                                 "status": "ok",
                                 "id": db_entity.id_str(),
@@ -1667,9 +1807,25 @@ impl<T: ClusterTransport> NodeController<T> {
                             serde_json::to_vec(&result).unwrap_or_default()
                         }
                         Err(super::db::DbDataStoreError::NotFound) => {
+                            self.release_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
                             Self::json_error(404, &format!("entity not found: {entity} id={id}"))
                         }
-                        Err(_) => Self::json_error(500, "internal error"),
+                        Err(_) => {
+                            self.release_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            Self::json_error(500, "internal error")
+                        }
                     };
 
                 let response =

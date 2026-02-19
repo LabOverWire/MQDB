@@ -21,10 +21,10 @@ impl FkCheckRequest {
     #[must_use]
     pub fn create(request_id: u64, entity: &str, id: &str) -> Self {
         assert!(
-            entity.len() <= u16::MAX as usize,
+            u16::try_from(entity.len()).is_ok(),
             "entity name exceeds u16::MAX bytes"
         );
-        assert!(id.len() <= u16::MAX as usize, "id exceeds u16::MAX bytes");
+        assert!(u16::try_from(id.len()).is_ok(), "id exceeds u16::MAX bytes");
         #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
@@ -38,12 +38,22 @@ impl FkCheckRequest {
 
     #[must_use]
     pub fn entity_str(&self) -> &str {
-        std::str::from_utf8(&self.entity).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.entity) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkCheckRequest entity field");
+            ""
+        }
     }
 
     #[must_use]
     pub fn id_str(&self) -> &str {
-        std::str::from_utf8(&self.id).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.id) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkCheckRequest id field");
+            ""
+        }
     }
 }
 
@@ -91,7 +101,7 @@ pub struct FkReverseLookupRequest {
 }
 
 impl FkReverseLookupRequest {
-    pub const VERSION: u8 = 2;
+    pub const VERSION: u8 = 1;
 
     #[must_use]
     pub fn create(
@@ -102,19 +112,19 @@ impl FkReverseLookupRequest {
         target_entity: &str,
     ) -> Self {
         assert!(
-            source_entity.len() <= u16::MAX as usize,
+            u16::try_from(source_entity.len()).is_ok(),
             "source_entity exceeds u16::MAX bytes"
         );
         assert!(
-            source_field.len() <= u16::MAX as usize,
+            u16::try_from(source_field.len()).is_ok(),
             "source_field exceeds u16::MAX bytes"
         );
         assert!(
-            target_id.len() <= u16::MAX as usize,
+            u16::try_from(target_id.len()).is_ok(),
             "target_id exceeds u16::MAX bytes"
         );
         assert!(
-            target_entity.len() <= u16::MAX as usize,
+            u16::try_from(target_entity.len()).is_ok(),
             "target_entity exceeds u16::MAX bytes"
         );
         #[allow(clippy::cast_possible_truncation)]
@@ -134,22 +144,42 @@ impl FkReverseLookupRequest {
 
     #[must_use]
     pub fn source_entity_str(&self) -> &str {
-        std::str::from_utf8(&self.source_entity).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.source_entity) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkReverseLookupRequest source_entity field");
+            ""
+        }
     }
 
     #[must_use]
     pub fn source_field_str(&self) -> &str {
-        std::str::from_utf8(&self.source_field).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.source_field) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkReverseLookupRequest source_field field");
+            ""
+        }
     }
 
     #[must_use]
     pub fn target_id_str(&self) -> &str {
-        std::str::from_utf8(&self.target_id).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.target_id) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkReverseLookupRequest target_id field");
+            ""
+        }
     }
 
     #[must_use]
     pub fn target_entity_str(&self) -> &str {
-        std::str::from_utf8(&self.target_entity).unwrap_or("")
+        if let Ok(s) = std::str::from_utf8(&self.target_entity) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkReverseLookupRequest target_entity field");
+            ""
+        }
     }
 }
 
@@ -171,7 +201,7 @@ impl FkReverseLookupResponse {
         for id in ids {
             let bytes = id.as_bytes();
             assert!(
-                bytes.len() <= u16::MAX as usize,
+                u16::try_from(bytes.len()).is_ok(),
                 "individual id exceeds u16::MAX bytes"
             );
             #[allow(clippy::cast_possible_truncation)]
@@ -179,7 +209,7 @@ impl FkReverseLookupResponse {
             ids_data.extend_from_slice(bytes);
         }
         assert!(
-            ids_data.len() <= u32::MAX as usize,
+            u32::try_from(ids_data.len()).is_ok(),
             "ids_data exceeds u32::MAX bytes"
         );
         #[allow(clippy::cast_possible_truncation)]
@@ -201,13 +231,14 @@ impl FkReverseLookupResponse {
             if pos + len > self.ids_data.len() {
                 break;
             }
-            match std::str::from_utf8(&self.ids_data[pos..pos + len]) {
-                Ok(s) => result.push(s.to_string()),
-                Err(_) => tracing::warn!(
+            if let Ok(s) = std::str::from_utf8(&self.ids_data[pos..pos + len]) {
+                result.push(s.to_string());
+            } else {
+                tracing::warn!(
                     byte_offset = pos,
                     len,
                     "non-UTF-8 ID in FK reverse lookup response, skipping"
-                ),
+                );
             }
             pos += len;
         }

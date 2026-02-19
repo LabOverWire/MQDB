@@ -136,12 +136,7 @@ impl StoreManager {
         new_data: Option<&[u8]>,
         old_data: Option<&[u8]>,
     ) {
-        let fk_constraints: Vec<_> = self
-            .db_constraints
-            .get_fk_constraints(source_entity)
-            .into_iter()
-            .filter(|c| c.constraint_type() == ConstraintType::ForeignKey)
-            .collect();
+        let fk_constraints = self.db_constraints.get_fk_constraints(source_entity);
 
         if fk_constraints.is_empty() {
             return;

@@ -31,7 +31,6 @@ pub struct FkReverseLookupResult {
 
 pub(crate) fn extract_fk_string_value(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
@@ -179,6 +178,15 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
     let mut visited = std::collections::HashSet::new();
     visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
     let (filtered, mut queue) = filter_and_extract_cascade(level_results, &mut visited);
+    let mut total_work: usize = filtered.iter().map(|r| r.referencing_ids.len()).sum();
+    if total_work > MAX_CASCADE_WORK_ITEMS {
+        return (
+            Some(format!(
+                "cascade work limit exceeded ({MAX_CASCADE_WORK_ITEMS} items)"
+            )),
+            Vec::new(),
+        );
+    }
     let mut all_results = filtered;
 
     let mut depth = 0;
@@ -220,6 +228,18 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
         }
 
         let (filtered, next_queue) = filter_and_extract_cascade(level_results, &mut visited);
+        total_work += filtered
+            .iter()
+            .map(|r| r.referencing_ids.len())
+            .sum::<usize>();
+        if total_work > MAX_CASCADE_WORK_ITEMS {
+            return (
+                Some(format!(
+                    "cascade work limit exceeded ({MAX_CASCADE_WORK_ITEMS} items)"
+                )),
+                Vec::new(),
+            );
+        }
         queue = next_queue;
         all_results.extend(filtered);
     }
@@ -476,7 +496,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     "cascade depth limit exceeded ({MAX_CASCADE_DEPTH} levels)"
                 ));
             }
-            let current_level: Vec<_> = queue.drain(..).collect();
+            let current_level = std::mem::take(&mut queue);
             for (entity, id) in current_level {
                 if visited.len() > MAX_CASCADE_WORK_ITEMS {
                     return Err("cascade work limit exceeded".to_string());

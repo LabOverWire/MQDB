@@ -207,6 +207,8 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 }
             }
             DbPublishResult::PendingFkCheck(pending) => {
+                use super::super::db_handler::FkCheckCompletion;
+
                 let pending_checks = pending.pending_checks;
                 let continuation = pending.continuation;
                 drop(ctrl);
@@ -216,14 +218,47 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                     Ok(()) => (true, None),
                     Err(msg) => (false, Some(msg)),
                 };
-                if let Some(response) = self
+                match self
                     .db_handler
                     .complete_pending_fk_check(&mut ctrl, fk_ok, fk_error, continuation)
                     .await
                 {
-                    ctrl.transport()
-                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
-                        .await;
+                    FkCheckCompletion::Done(Some(response)) => {
+                        ctrl.transport()
+                            .queue_local_publish(
+                                response.topic,
+                                response.payload,
+                                qos_to_u8(event.qos),
+                            )
+                            .await;
+                    }
+                    FkCheckCompletion::NeedUniqueCheck(pending) => {
+                        let local_reserved = pending.phase1.local_reserved;
+                        let pending_remote = pending.phase1.pending_remote;
+                        let continuation = pending.continuation;
+                        drop(ctrl);
+                        let remote_results = await_unique_reserves(pending_remote).await;
+                        let mut ctrl = self.controller.write().await;
+                        if let Some(response) = self
+                            .db_handler
+                            .complete_pending_unique_check(
+                                &mut ctrl,
+                                local_reserved,
+                                remote_results,
+                                continuation,
+                            )
+                            .await
+                        {
+                            ctrl.transport()
+                                .queue_local_publish(
+                                    response.topic,
+                                    response.payload,
+                                    qos_to_u8(event.qos),
+                                )
+                                .await;
+                        }
+                    }
+                    FkCheckCompletion::Done(None) => {}
                 }
             }
             DbPublishResult::PendingFkDelete(pending) => {

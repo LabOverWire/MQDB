@@ -355,23 +355,25 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
+        let mut data = data.clone();
+        if let Some(obj) = data.as_object_mut() {
+            obj.remove("__mqdb_fk_expected");
+        }
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        let fk_result = match controller.start_fk_existence_check(entity, data).await {
+        let fk_result = match controller.start_fk_existence_check(entity, &data).await {
             Ok(r) => r,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
 
         if !fk_result.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(data).unwrap_or_default();
             return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
                 pending_checks: fk_result.pending_remote,
                 continuation: FkCheckContinuation::CreateFromDbHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
                     data: data.clone(),
-                    data_bytes,
                     partition,
                     request_id,
                     now_ms,
@@ -384,7 +386,7 @@ impl DbRequestHandler {
         }
 
         let phase1 = match controller
-            .start_unique_constraint_check(entity, id, data, partition, &request_id, now_ms)
+            .start_unique_constraint_check(entity, id, &data, partition, &request_id, now_ms)
             .await
         {
             Ok(p) => p,
@@ -397,7 +399,7 @@ impl DbRequestHandler {
         };
 
         if !phase1.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+            let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                 phase1,
                 continuation: UniqueCheckContinuation::CreateFromDbHandler {
@@ -420,7 +422,7 @@ impl DbRequestHandler {
             controller,
             entity,
             id,
-            data,
+            &data,
             partition,
             &request_id,
             now_ms,
@@ -601,12 +603,15 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-        updates: Value,
+        mut updates: Value,
         sender: Option<&str>,
         client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
+        if let Some(obj) = updates.as_object_mut() {
+            obj.remove("__mqdb_fk_expected");
+        }
         let (old_data, merged_data) =
             match self.merge_with_existing(controller, entity, id, updates) {
                 Ok(pair) => pair,
@@ -630,7 +635,6 @@ impl DbRequestHandler {
         };
 
         if !fk_result.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
             let (new_diff, old_diff) =
                 controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
             return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
@@ -639,7 +643,6 @@ impl DbRequestHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
                     merged_data,
-                    data_bytes,
                     partition,
                     request_id,
                     now_ms,
@@ -1355,7 +1358,9 @@ impl DbRequestHandler {
         fk_ok: bool,
         fk_error: Option<String>,
         continuation: FkCheckContinuation,
-    ) -> Option<super::super::db_handler::DbPublishResponse> {
+    ) -> super::FkCheckCompletion {
+        use super::FkCheckCompletion;
+
         if !fk_ok {
             let msg = fk_error.unwrap_or_else(|| "FK constraint violation".to_string());
             let payload = Self::json_error(409, &msg);
@@ -1369,12 +1374,12 @@ impl DbRequestHandler {
                     response_topic,
                     correlation_data,
                     ..
-                } => Some(super::DbPublishResponse {
+                } => FkCheckCompletion::Done(Some(super::DbPublishResponse {
                     topic: response_topic,
                     payload,
                     correlation_data,
-                }),
-                _ => None,
+                })),
+                _ => FkCheckCompletion::Done(None),
             };
         }
 
@@ -1385,13 +1390,13 @@ impl DbRequestHandler {
                 data,
                 partition,
                 request_id,
-                now_ms,
                 sender,
                 client_id,
                 response_topic,
                 correlation_data,
                 ..
             } => {
+                let now_ms = Self::current_time_ms();
                 let result = self
                     .complete_create(
                         controller,
@@ -1406,15 +1411,19 @@ impl DbRequestHandler {
                     )
                     .await;
                 match result {
-                    JsonOpResult::Response(payload) => Some(super::DbPublishResponse {
-                        topic: response_topic,
-                        payload,
-                        correlation_data,
-                    }),
-                    JsonOpResult::PendingUniqueCheck(_)
-                    | JsonOpResult::PendingFkCheck(_)
+                    JsonOpResult::Response(payload) => {
+                        FkCheckCompletion::Done(Some(super::DbPublishResponse {
+                            topic: response_topic,
+                            payload,
+                            correlation_data,
+                        }))
+                    }
+                    JsonOpResult::PendingUniqueCheck(pending) => {
+                        FkCheckCompletion::NeedUniqueCheck(pending)
+                    }
+                    JsonOpResult::PendingFkCheck(_)
                     | JsonOpResult::PendingFkDelete(_)
-                    | JsonOpResult::NoResponse => None,
+                    | JsonOpResult::NoResponse => FkCheckCompletion::Done(None),
                 }
             }
             FkCheckContinuation::UpdateFromDbHandler {
@@ -1423,7 +1432,6 @@ impl DbRequestHandler {
                 merged_data,
                 partition,
                 request_id,
-                now_ms,
                 new_diff,
                 old_diff,
                 sender,
@@ -1432,6 +1440,7 @@ impl DbRequestHandler {
                 correlation_data,
                 ..
             } => {
+                let now_ms = Self::current_time_ms();
                 let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
                 let result = self
                     .complete_update(
@@ -1450,22 +1459,26 @@ impl DbRequestHandler {
                     )
                     .await;
                 match result {
-                    JsonOpResult::Response(payload) => Some(super::DbPublishResponse {
-                        topic: response_topic,
-                        payload,
-                        correlation_data,
-                    }),
-                    JsonOpResult::PendingUniqueCheck(_)
-                    | JsonOpResult::PendingFkCheck(_)
+                    JsonOpResult::Response(payload) => {
+                        FkCheckCompletion::Done(Some(super::DbPublishResponse {
+                            topic: response_topic,
+                            payload,
+                            correlation_data,
+                        }))
+                    }
+                    JsonOpResult::PendingUniqueCheck(pending) => {
+                        FkCheckCompletion::NeedUniqueCheck(pending)
+                    }
+                    JsonOpResult::PendingFkCheck(_)
                     | JsonOpResult::PendingFkDelete(_)
-                    | JsonOpResult::NoResponse => None,
+                    | JsonOpResult::NoResponse => FkCheckCompletion::Done(None),
                 }
             }
             _ => {
                 tracing::error!(
                     "complete_pending_fk_check received misrouted continuation (expected *FromDbHandler)"
                 );
-                None
+                FkCheckCompletion::Done(None)
             }
         }
     }
