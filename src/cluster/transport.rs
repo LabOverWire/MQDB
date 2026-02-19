@@ -298,18 +298,50 @@ impl ClusterMessage {
             }
             90 => {
                 let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;
+                if req.version != FkCheckRequest::VERSION {
+                    tracing::warn!(
+                        expected = FkCheckRequest::VERSION,
+                        got = req.version,
+                        "FK check request version mismatch"
+                    );
+                    return None;
+                }
                 Some(Self::FkCheckRequest(req))
             }
             91 => {
                 let (resp, _) = FkCheckResponse::try_from_be_bytes(data).ok()?;
+                if resp.version != FkCheckResponse::VERSION {
+                    tracing::warn!(
+                        expected = FkCheckResponse::VERSION,
+                        got = resp.version,
+                        "FK check response version mismatch"
+                    );
+                    return None;
+                }
                 Some(Self::FkCheckResponse(resp))
             }
             92 => {
                 let (req, _) = FkReverseLookupRequest::try_from_be_bytes(data).ok()?;
+                if req.version != FkReverseLookupRequest::VERSION {
+                    tracing::warn!(
+                        expected = FkReverseLookupRequest::VERSION,
+                        got = req.version,
+                        "FK reverse lookup request version mismatch"
+                    );
+                    return None;
+                }
                 Some(Self::FkReverseLookupRequest(req))
             }
             93 => {
                 let (resp, _) = FkReverseLookupResponse::try_from_be_bytes(data).ok()?;
+                if resp.version != FkReverseLookupResponse::VERSION {
+                    tracing::warn!(
+                        expected = FkReverseLookupResponse::VERSION,
+                        got = resp.version,
+                        "FK reverse lookup response version mismatch"
+                    );
+                    return None;
+                }
                 Some(Self::FkReverseLookupResponse(resp))
             }
             _ => None,

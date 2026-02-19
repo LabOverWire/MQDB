@@ -19,10 +19,18 @@ pub(crate) fn spawn_cascade_ack_waiter(
     outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,
     operation_id: String,
     receivers: Vec<oneshot::Receiver<bool>>,
+    mark_on_empty: bool,
 ) {
     if receivers.is_empty() {
-        if let Some(ob) = outbox {
-            let _ = ob.mark_cascade_delivered(&operation_id);
+        if mark_on_empty {
+            if let Some(ob) = outbox {
+                let _ = ob.mark_cascade_delivered(&operation_id);
+            }
+        } else {
+            tracing::debug!(
+                operation_id,
+                "cascade has no ack receivers, leaving for retry"
+            );
         }
         return;
     }
@@ -792,6 +800,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         self.stores.cluster_outbox().cloned(),
                         cas.operation_id.clone(),
                         ack_receivers,
+                        true,
                     );
                 }
                 let result = serde_json::json!({
@@ -995,8 +1004,22 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         payload: &[u8],
     ) -> Option<oneshot::Receiver<bool>> {
-        let primary = self.partition_map.primary(partition)?;
+        let Some(primary) = self.partition_map.primary(partition) else {
+            tracing::debug!(
+                partition = partition.get(),
+                entity,
+                id,
+                "cascade request skipped: no primary for partition"
+            );
+            return None;
+        };
         if primary == self.node_id {
+            tracing::debug!(
+                partition = partition.get(),
+                entity,
+                id,
+                "cascade request skipped: primary is self"
+            );
             return None;
         }
         let request_id = self.pending_constraints.allocate_cascade_id();
@@ -1032,8 +1055,22 @@ impl<T: ClusterTransport> NodeController<T> {
         field: &str,
         expected_value: &str,
     ) -> Option<oneshot::Receiver<bool>> {
-        let primary = self.partition_map.primary(partition)?;
+        let Some(primary) = self.partition_map.primary(partition) else {
+            tracing::debug!(
+                partition = partition.get(),
+                entity,
+                id,
+                "cascade set-null skipped: no primary for partition"
+            );
+            return None;
+        };
         if primary == self.node_id {
+            tracing::debug!(
+                partition = partition.get(),
+                entity,
+                id,
+                "cascade set-null skipped: primary is self"
+            );
             return None;
         }
         let request_id = self.pending_constraints.allocate_cascade_id();
@@ -1485,45 +1522,51 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
 
                 let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                let response_payload = match self.db_create(&entity, &id, &data_bytes, now_ms).await
-                {
-                    Ok(db_entity) => {
-                        self.commit_all_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &remote_reserved,
-                        )
-                        .await;
-                        let result = serde_json::json!({
-                            "status": "ok",
-                            "id": db_entity.id_str(),
-                            "entity": entity,
-                            "data": data
-                        });
-                        serde_json::to_vec(&result).unwrap_or_default()
-                    }
-                    Err(super::db::DbDataStoreError::AlreadyExists) => {
-                        self.release_all_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &remote_reserved,
-                        )
-                        .await;
-                        Self::json_error(409, "entity already exists")
-                    }
-                    Err(_) => {
-                        self.release_all_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &remote_reserved,
-                        )
-                        .await;
-                        Self::json_error(500, "internal error")
-                    }
-                };
+                let response_payload =
+                    match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
+                        Ok((db_entity, write)) => {
+                            self.commit_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            let event =
+                                ChangeEvent::create(entity.clone(), id.clone(), data.clone());
+                            let outbox = Self::build_change_event_outbox(&event);
+                            self.db_commit(write, outbox.clone()).await;
+                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                                .await;
+                            let result = serde_json::json!({
+                                "status": "ok",
+                                "id": db_entity.id_str(),
+                                "entity": entity,
+                                "data": data
+                            });
+                            serde_json::to_vec(&result).unwrap_or_default()
+                        }
+                        Err(super::db::DbDataStoreError::AlreadyExists) => {
+                            self.release_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            Self::json_error(409, "entity already exists")
+                        }
+                        Err(_) => {
+                            self.release_all_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &remote_reserved,
+                            )
+                            .await;
+                            Self::json_error(500, "internal error")
+                        }
+                    };
 
                 let response =
                     JsonDbResponse::new(0, response_payload, response_topic, correlation_data);

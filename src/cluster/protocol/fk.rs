@@ -19,8 +19,13 @@ impl FkCheckRequest {
     pub const VERSION: u8 = 1;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn create(request_id: u64, entity: &str, id: &str) -> Self {
+        assert!(
+            entity.len() <= u16::MAX as usize,
+            "entity name exceeds u16::MAX bytes"
+        );
+        assert!(id.len() <= u16::MAX as usize, "id exceeds u16::MAX bytes");
+        #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
             request_id,
@@ -89,7 +94,6 @@ impl FkReverseLookupRequest {
     pub const VERSION: u8 = 2;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn create(
         request_id: u64,
         source_entity: &str,
@@ -97,6 +101,23 @@ impl FkReverseLookupRequest {
         target_id: &str,
         target_entity: &str,
     ) -> Self {
+        assert!(
+            source_entity.len() <= u16::MAX as usize,
+            "source_entity exceeds u16::MAX bytes"
+        );
+        assert!(
+            source_field.len() <= u16::MAX as usize,
+            "source_field exceeds u16::MAX bytes"
+        );
+        assert!(
+            target_id.len() <= u16::MAX as usize,
+            "target_id exceeds u16::MAX bytes"
+        );
+        assert!(
+            target_entity.len() <= u16::MAX as usize,
+            "target_entity exceeds u16::MAX bytes"
+        );
+        #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
             request_id,
@@ -145,14 +166,23 @@ impl FkReverseLookupResponse {
     pub const VERSION: u8 = 1;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn create(request_id: u64, ids: &[String]) -> Self {
         let mut ids_data = Vec::new();
         for id in ids {
             let bytes = id.as_bytes();
+            assert!(
+                bytes.len() <= u16::MAX as usize,
+                "individual id exceeds u16::MAX bytes"
+            );
+            #[allow(clippy::cast_possible_truncation)]
             ids_data.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
             ids_data.extend_from_slice(bytes);
         }
+        assert!(
+            ids_data.len() <= u32::MAX as usize,
+            "ids_data exceeds u32::MAX bytes"
+        );
+        #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
             request_id,
@@ -171,8 +201,13 @@ impl FkReverseLookupResponse {
             if pos + len > self.ids_data.len() {
                 break;
             }
-            if let Ok(s) = std::str::from_utf8(&self.ids_data[pos..pos + len]) {
-                result.push(s.to_string());
+            match std::str::from_utf8(&self.ids_data[pos..pos + len]) {
+                Ok(s) => result.push(s.to_string()),
+                Err(_) => tracing::warn!(
+                    byte_offset = pos,
+                    len,
+                    "non-UTF-8 ID in FK reverse lookup response, skipping"
+                ),
             }
             pos += len;
         }
@@ -254,5 +289,16 @@ mod tests {
         let (decoded, _) = FkReverseLookupResponse::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(decoded.ids_data_len, expected_byte_len);
         assert_eq!(decoded.referencing_ids(), ids);
+    }
+
+    #[test]
+    fn fk_check_request_version_mismatch_rejected() {
+        use crate::cluster::transport::ClusterMessage;
+
+        let mut req = FkCheckRequest::create(42, "users", "u1");
+        req.version = 99;
+        let bytes = req.to_be_bytes();
+        let result = ClusterMessage::decode_from_wire(90, &bytes);
+        assert!(result.is_none());
     }
 }

@@ -486,16 +486,26 @@ impl std::fmt::Debug for DbDataStore {
     }
 }
 
-type FkIndexKey = (String, String, String, String);
-
 pub struct FkReverseIndex {
-    index: Mutex<HashMap<FkIndexKey, HashSet<String>>>,
+    index: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Default for FkReverseIndex {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn fk_index_key(te: &str, ti: &str, se: &str, sf: &str) -> String {
+    let mut key = String::with_capacity(te.len() + ti.len() + se.len() + sf.len() + 3);
+    key.push_str(te);
+    key.push('\0');
+    key.push_str(ti);
+    key.push('\0');
+    key.push_str(se);
+    key.push('\0');
+    key.push_str(sf);
+    key
 }
 
 impl FkReverseIndex {
@@ -516,12 +526,7 @@ impl FkReverseIndex {
         source_field: &str,
         source_id: &str,
     ) {
-        let key = (
-            target_entity.to_string(),
-            target_id.to_string(),
-            source_entity.to_string(),
-            source_field.to_string(),
-        );
+        let key = fk_index_key(target_entity, target_id, source_entity, source_field);
         self.index
             .lock()
             .expect("fk reverse index lock poisoned")
@@ -540,12 +545,7 @@ impl FkReverseIndex {
         source_field: &str,
         source_id: &str,
     ) {
-        let key = (
-            target_entity.to_string(),
-            target_id.to_string(),
-            source_entity.to_string(),
-            source_field.to_string(),
-        );
+        let key = fk_index_key(target_entity, target_id, source_entity, source_field);
         let mut map = self.index.lock().expect("fk reverse index lock poisoned");
         if let Some(set) = map.get_mut(&key) {
             set.remove(source_id);
@@ -565,12 +565,7 @@ impl FkReverseIndex {
         source_entity: &str,
         source_field: &str,
     ) -> Vec<String> {
-        let key = (
-            target_entity.to_string(),
-            target_id.to_string(),
-            source_entity.to_string(),
-            source_field.to_string(),
-        );
+        let key = fk_index_key(target_entity, target_id, source_entity, source_field);
         self.index
             .lock()
             .expect("fk reverse index lock poisoned")

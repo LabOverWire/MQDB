@@ -456,7 +456,6 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut visited = std::collections::HashSet::new();
         visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
         let mut queue: Vec<(String, String)> = Vec::new();
-        let max_cascade_work = MAX_CASCADE_DEPTH * 256;
 
         for r in &initial {
             if r.on_delete == OnDeleteAction::Cascade {
@@ -468,71 +467,79 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         all_results.extend(initial);
 
-        while let Some((entity, id)) = queue.pop() {
-            if visited.len() > max_cascade_work {
+        let mut depth = 0;
+        while !queue.is_empty() {
+            depth += 1;
+            if depth > MAX_CASCADE_DEPTH {
                 return Err(format!(
                     "cascade depth limit exceeded ({MAX_CASCADE_DEPTH} levels)"
                 ));
             }
-            let referencing = self.stores.constraint_find_referencing(&entity);
-            for constraint in &referencing {
-                let source_entity = constraint.entity_str();
-                let source_field = constraint.field_str();
-                let on_delete = constraint.on_delete_action();
-
-                let all_refs =
-                    self.stores
-                        .fk_reverse_lookup(&entity, &id, source_entity, source_field);
-                let local_refs: Vec<String> = all_refs
-                    .into_iter()
-                    .filter(|ref_id| {
-                        self.is_primary_for_partition(super::super::db::data_partition(
-                            source_entity,
-                            ref_id,
-                        ))
-                    })
-                    .collect();
-
-                if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
-                    return Err(format!(
-                        "FK constraint '{}' prevents deletion: {} referencing record(s) in '{source_entity}'",
-                        constraint.name_str(),
-                        local_refs.len()
-                    ));
+            let current_level: Vec<_> = queue.drain(..).collect();
+            for (entity, id) in current_level {
+                if visited.len() > MAX_CASCADE_DEPTH * 1000 {
+                    return Err("cascade work limit exceeded".to_string());
                 }
+                let referencing = self.stores.constraint_find_referencing(&entity);
+                for constraint in &referencing {
+                    let source_entity = constraint.entity_str();
+                    let source_field = constraint.field_str();
+                    let on_delete = constraint.on_delete_action();
 
-                if local_refs.is_empty() {
-                    continue;
-                }
-
-                let filtered_refs: Vec<String> = if on_delete == OnDeleteAction::Cascade {
-                    local_refs
+                    let all_refs =
+                        self.stores
+                            .fk_reverse_lookup(&entity, &id, source_entity, source_field);
+                    let local_refs: Vec<String> = all_refs
                         .into_iter()
-                        .filter(|child_id| {
-                            if visited.insert((source_entity.to_string(), child_id.clone())) {
-                                queue.push((source_entity.to_string(), child_id.clone()));
-                                true
-                            } else {
-                                false
-                            }
+                        .filter(|ref_id| {
+                            self.is_primary_for_partition(super::super::db::data_partition(
+                                source_entity,
+                                ref_id,
+                            ))
                         })
-                        .collect()
-                } else {
-                    local_refs
-                };
+                        .collect();
 
-                if filtered_refs.is_empty() {
-                    continue;
+                    if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
+                        return Err(format!(
+                            "FK constraint '{}' prevents deletion: {} referencing record(s) in '{source_entity}'",
+                            constraint.name_str(),
+                            local_refs.len()
+                        ));
+                    }
+
+                    if local_refs.is_empty() {
+                        continue;
+                    }
+
+                    let filtered_refs: Vec<String> = if on_delete == OnDeleteAction::Cascade {
+                        local_refs
+                            .into_iter()
+                            .filter(|child_id| {
+                                if visited.insert((source_entity.to_string(), child_id.clone())) {
+                                    queue.push((source_entity.to_string(), child_id.clone()));
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .collect()
+                    } else {
+                        local_refs
+                    };
+
+                    if filtered_refs.is_empty() {
+                        continue;
+                    }
+
+                    all_results.push(FkReverseLookupResult {
+                        constraint_name: constraint.name_str().to_string(),
+                        source_entity: source_entity.to_string(),
+                        source_field: source_field.to_string(),
+                        on_delete,
+                        referencing_ids: filtered_refs,
+                        target_id: id.clone(),
+                    });
                 }
-
-                all_results.push(FkReverseLookupResult {
-                    constraint_name: constraint.name_str().to_string(),
-                    source_entity: source_entity.to_string(),
-                    source_field: source_field.to_string(),
-                    on_delete,
-                    referencing_ids: filtered_refs,
-                    target_id: id.clone(),
-                });
             }
         }
 

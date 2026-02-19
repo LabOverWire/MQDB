@@ -919,6 +919,7 @@ impl DbRequestHandler {
                         controller.stores().cluster_outbox().cloned(),
                         cas.operation_id.clone(),
                         ack_receivers,
+                        true,
                     );
                 }
                 let result = json!({
