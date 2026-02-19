@@ -162,7 +162,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 6 | src/cluster/raft/, DISTRIBUTED_DESIGN.md (Part 8, Issues 11.2, 11.5) |
 | 7 | src/cluster/quic_transport.rs, src/cluster/mqtt_transport.rs, src/cluster/transport.rs, DISTRIBUTED_DESIGN.md (A6) |
 | 8 | src/cluster/topic_index.rs, src/cluster/topic_trie.rs, src/cluster/publish_router.rs, src/cluster/client_location.rs, DISTRIBUTED_DESIGN.md (Part 7) |
-| 9 | src/cluster/query_coordinator.rs, src/cursor.rs, DISTRIBUTED_DESIGN.md (A5) |
+| 9 | src/cluster/query_coordinator.rs, src/cursor.rs, src/cluster/node_controller/retained.rs, src/cluster/retained_store.rs, src/cluster/event_handler/broker_events.rs (deliver_retained_messages), DISTRIBUTED_DESIGN.md (A5) |
 | 10 | src/cluster/heartbeat.rs, src/cluster/snapshot.rs, DISTRIBUTED_DESIGN.md (Part 3, Part 9) |
 | 11 | src/cluster/rebalancer.rs, src/cluster/migration.rs, DISTRIBUTED_DESIGN.md (Part 4, Issues 11.10, 11.17) |
 | 12 | src/cluster/session.rs, src/cluster/inflight_store.rs, src/cluster/qos2_store.rs, DISTRIBUTED_DESIGN.md (M8-M10) |
