@@ -63,8 +63,8 @@ A deep dive into MQTT 5.0 features and how they map to database operations. This
 - **3.1 MQTT 5.0 Essentials** — Publish/subscribe, QoS levels (0/1/2), retained messages, clean start, session expiry. Just enough protocol for the book's needs.
 - **3.2 Request/Response Pattern** — How MQTT 5.0's response topics enable synchronous-style database queries over an asynchronous protocol. The `$DB/{entity}/create` → response topic flow.
 - **3.3 Topic-Based API Design** — Client API topics (`$DB/{entity}/{op}`) vs. internal partitioned topics (`$DB/p{partition}/{entity}/{op}`). How the high-level API auto-routes to the correct partition.
-- **3.4 Authentication Stack** — Password files (Argon2), SCRAM-SHA-256 challenge-response, JWT (HS256/RS256/ES256), federated JWT with multiple issuers. Layered security without external dependencies.
-- **3.5 Topic Protection and ACL** — Hardcoded protection tiers (BlockAll, ReadOnly, AdminRequired), RBAC with roles and permissions, internal service bypass for cluster traffic.
+- **3.4 User Properties as Metadata** — How MQTT 5.0 user properties carry database metadata: `x-origin-client-id`, `x-mqtt-sender`, correlation data. The bridge between protocol headers and application semantics.
+- **3.5 QoS as a Durability Knob** — QoS 0 for fire-and-forget telemetry, QoS 1 for at-least-once database writes, QoS 2 for exactly-once operations. How QoS level maps to the database's consistency guarantees.
 
 ---
 
@@ -232,14 +232,18 @@ How to measure, understand, and improve distributed system performance.
 - **17.4 Reading Performance Data** — Agent mode: 6,222 insert / 9,362 get / 154,913 pubsub. Cluster with QUIC: uniform ~8,500 insert across all nodes. How to interpret the numbers and what they mean for capacity planning.
 - **17.5 The Bridge Overhead Discovery** — How benchmark data (not theory) revealed that MQTT bridges degraded performance 8-30x on follower nodes. The data that motivated QUIC transport. Lesson: measure first, optimize second.
 
-### Chapter 18: Security Architecture
+### Chapter 18: Access Control, Ownership, and Scopes
 
-Defense in depth for a distributed system.
+Who can do what with which data — from connection-time authentication through topic-level authorization to row-level ownership enforcement and event-scoped multi-tenancy.
 
-- **18.1 Authentication Layers** — Password file (Argon2 hashing), SCRAM-SHA-256 (challenge-response, no plaintext passwords on wire), JWT tokens (symmetric and asymmetric), federated JWT (multiple issuers).
-- **18.2 Authorization Model** — Topic protection tiers (system topics always blocked), RBAC with roles and permissions, per-topic pub/sub ACLs. How internal cluster traffic bypasses ACL (and why this is safe).
-- **18.3 Transport Security** — TLS for MQTT client connections, mTLS for cluster inter-node QUIC. Certificate requirements (dual EKU). Why cluster and client TLS should use separate CAs.
-- **18.4 Error Sanitization** — Internal error details never leak to clients. Sanitized error responses. Why this matters for security and debuggability.
+- **18.1 The Authentication Stack** — Five mechanisms, one connection. Password files (bcrypt hashing), SCRAM-SHA-256 (challenge-response, no plaintext on wire), JWT (HS256/RS256/ES256 with issuer/audience validation), federated JWT (multiple JWKS providers), and certificate-based auth (mTLS client identity). The `CompositeAuthProvider` pattern: enhanced-auth provider wrapping a password fallback for the internal service account. Rate limiting (5 attempts, 60s window, 300s lockout) as a layer, not a bolt-on.
+- **18.2 Topic Protection** — Three tiers: `BlockAll` (cluster-internal topics like `_mqdb/#`, `$DB/_unique/#`, `$DB/_fk/#`), `ReadOnly` (event streams `$DB/+/events/#`, system info `$SYS/#`), `AdminRequired` (`$DB/_admin/#`). The `TopicProtectionAuthProvider` decorator that wraps every other auth provider. Entity-level access: `_`-prefixed entities blocked for non-admin users. The `$DB/_health` carve-out.
+- **18.3 ACL and Role-Based Access** — The ACL file format: user rules, role definitions, user-role assignments. Four permission levels: read (subscribe), write (publish), readwrite, deny. The `AclManager` evaluation chain. Runtime management via MQTT admin API (`$DB/_admin/acl/...`, `$DB/_admin/user/...`). CLI tooling: `mqdb acl add`, `mqdb acl role-add`, `mqdb acl assign`, `mqdb acl check`.
+- **18.4 Per-Entity Ownership** — Row-level access control via `OwnershipConfig`. The `execute_with_sender` gate: read/update/delete check `record[owner_field] == sender`, list auto-injects `owner_field = sender` filter. Ownership transfer prevention (owner field stripped from update payloads). Admin bypass. The `x-mqtt-sender` user property as the identity bridge between MQTT and the database layer.
+- **18.5 Scopes and Event Routing** — `ScopeConfig` as an event namespace mechanism. How `--event-scope orders=tenantId` changes event topics from `$DB/orders/events/{id}` to `$DB/tenants/{tenantValue}/orders/events/created`. Hierarchical subscription: `$DB/tenants/acme/#` captures all entity events within a tenant. What scopes are NOT: not data isolation, not query filtering, not a security boundary — purely event routing topology.
+- **18.6 The Internal Service Account** — `mqdb-internal-{uuid}` with random password, auto-injected at startup. Bypasses topic protection entirely. Why cluster-internal traffic needs unrestricted access to `BlockAll` topics. The `is_internal_service` check and its security implications.
+- **18.7 What Went Wrong: Anonymous Mode and the Missing Service Account** — The bug where `--anonymous` mode without the `dev-insecure` feature didn't exist, and with it, topic protection blocked internal clients (no service account) and admin topics (no admin users). The fix: always create the service account, add `all_users_admin` flag. A case study in how security layers interact — each layer was correct in isolation, but their composition broke the system.
+- **18.8 Error Sanitization** — Internal error details never leak to clients. Sanitized MQTT reason strings. Why `"permission denied"` is the right error message even when the real cause is more specific.
 
 ---
 

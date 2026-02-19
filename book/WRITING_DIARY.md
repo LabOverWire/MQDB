@@ -34,7 +34,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 15 | Constraints in a Distributed System | Not started | | | |
 | 16 | Consumer Groups and Event Routing | Not started | | | |
 | 17 | Performance Analysis and Benchmarking | Not started | | | |
-| 18 | Security Architecture | Not started | | | |
+| 18 | Access Control, Ownership, and Scopes | Not started | | | |
 | 19 | Operating MQDB | Not started | | | |
 | 20 | The WASM Frontier | Not started | | | |
 | A | Wire Protocol Reference | Not started | | | |
@@ -156,7 +156,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 |---------|----------------|
 | 1 | README.md, DISTRIBUTED_DESIGN.md (A1) |
 | 2 | src/storage/, src/database/, src/schema.rs, src/index.rs, src/keys.rs, src/outbox.rs |
-| 3 | src/agent/, src/auth_config.rs, src/topic_protection.rs, README.md (auth sections) |
+| 3 | src/agent/, src/transport.rs, README.md (MQTT API sections) |
 | 4 | src/cluster/partition_map.rs, src/cluster/partition.rs, DISTRIBUTED_DESIGN.md (A1, Part 1, Part 5) |
 | 5 | src/cluster/replication.rs, src/cluster/store_manager/, DISTRIBUTED_DESIGN.md (A4) |
 | 6 | src/cluster/raft/, DISTRIBUTED_DESIGN.md (Part 8, Issues 11.2, 11.5) |
@@ -171,7 +171,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 15 | src/cluster/node_controller/unique.rs, src/cluster/node_controller/fk.rs, src/cluster/db/constraint_store.rs, src/cluster/protocol/fk.rs, DISTRIBUTED_DESIGN.md |
 | 16 | src/consumer_group.rs, src/dispatcher.rs |
 | 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, DISTRIBUTED_DESIGN.md (A6.4, A6.5 benchmarks) |
-| 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, README.md (auth sections) |
+| 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, src/types.rs (OwnershipConfig, ScopeConfig), src/transport.rs (execute_with_sender), src/agent/broker.rs, src/agent/handlers.rs, src/bin/mqdb/commands/auth.rs, src/bin/mqdb/commands/acl.rs, src/http/oauth.rs |
 | 19 | CLI_TESTING_GUIDE.md, src/bin/mqdb/ |
 | 20 | src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
 
