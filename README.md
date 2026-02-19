@@ -575,7 +575,8 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | Authentication | Full | Password, SCRAM, JWT, federated JWT, rate limiting |
 | Backups | Partial | Per-node only (no cluster-wide snapshot) |
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
-| FK / NOT NULL constraints | — | Not yet available in cluster mode |
+| Foreign key constraints | Full | Distributed existence checks, cascade/set-null with ack-wait, in-memory reverse index |
+| NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
 | Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
 ## CLI Tool

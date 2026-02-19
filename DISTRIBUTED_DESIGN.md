@@ -2221,18 +2221,32 @@ of each referenced target partition. The target node checks if the record exists
 and replies with `FkCheckResponse`. The write only proceeds if all FK references
 are confirmed.
 
+### In-Memory FK Reverse Index
+
+Each node maintains an `FkReverseIndex` — a `HashMap<(target_entity, target_id,
+source_entity, source_field), HashSet<source_id>>` — updated on every data write
+(create, update, delete, upsert) and on the replication path. When a new FK
+constraint is added after data exists, `rebuild_fk_index_for_constraint` backfills
+the index by scanning existing records. This replaces the earlier O(n) full-table
+scan with O(1) lookups per reverse query.
+
 ### Cascade and Set-Null on Delete
 
-When a record is deleted, the node performs a reverse FK lookup to find all records
-that reference it. Depending on the constraint's `on_delete` action:
+When a record is deleted, the node performs a reverse FK lookup via the in-memory
+index to find all records that reference it. Depending on the constraint's
+`on_delete` action:
 
 - **Restrict**: The delete is rejected if any references exist.
-- **Cascade**: Referencing records are deleted recursively.
-- **SetNull**: The FK field on referencing records is set to null.
+- **Cascade**: Referencing records are deleted recursively (depth limit: 16,
+  work-item limit: 16,000).
+- **SetNull**: The FK field on referencing records is set to null. A CAS guard
+  (`__mqdb_fk_expected`) ensures the field still holds the expected value at
+  write time, preventing overwrites of concurrent updates.
 
-Cascade and set-null operations on remote partitions are tracked in a persistent
-`_cascade/` outbox, acknowledged via request/response, and retried periodically
-until delivered.
+`CascadeSideEffect` partitions effects into local (same batch) and remote
+(transport request). Cascade and set-null operations on remote partitions are
+tracked in a persistent `_cascade/` outbox, acknowledged via request/response
+(`cascade_ack`), and retried on a 30-second interval until all acks arrive.
 
 ### Known Limitation: TOCTOU in FK Checks
 
@@ -2284,7 +2298,12 @@ The following sections may need documentation:
 | File | Purpose |
 |------|---------|
 | `src/cluster/node_controller/fk.rs` | Foreign key constraint protocol |
+| `src/cluster/node_controller/db_ops.rs` | CascadeSideEffect enum, cascade execution, CAS guard |
+| `src/cluster/node_controller/pending.rs` | Pending constraint state tracking, cascade ack bookkeeping |
 | `src/cluster/node_controller/unique.rs` | Unique constraint 2-phase protocol |
+| `src/cluster/store_manager/constraint_ops.rs` | FK reverse index integration, rebuild on constraint add |
+| `src/cluster/store_manager/outbox.rs` | CascadeOutboxPayload, CascadeRemoteOp, _cascade/ prefix |
+| `src/cluster/db/data_store.rs` | FkReverseIndex in-memory data structure |
 | `src/cluster/node_controller.rs` | Main cluster controller, message handling |
 | `src/cluster/heartbeat.rs` | Heartbeat management, node status |
 | `src/cluster/partition_map.rs` | Partition assignments |

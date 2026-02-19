@@ -168,7 +168,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 12 | src/cluster/session.rs, src/cluster/inflight_store.rs, src/cluster/qos2_store.rs, DISTRIBUTED_DESIGN.md (M8-M10) |
 | 13 | src/cluster/message_processor.rs, src/cluster/dedicated_executor.rs, DISTRIBUTED_DESIGN.md (A6.6, A6.7) |
 | 14 | src/cluster/protocol/, DISTRIBUTED_DESIGN.md (Part 2) |
-| 15 | src/cluster/node_controller/unique.rs, src/cluster/node_controller/fk.rs, src/cluster/db/constraint_store.rs, src/cluster/protocol/fk.rs, DISTRIBUTED_DESIGN.md |
+| 15 | src/cluster/node_controller/unique.rs, src/cluster/node_controller/fk.rs, src/cluster/node_controller/db_ops.rs (CascadeSideEffect), src/cluster/node_controller/pending.rs, src/cluster/db/constraint_store.rs, src/cluster/db/data_store.rs (FkReverseIndex), src/cluster/store_manager/constraint_ops.rs, src/cluster/store_manager/outbox.rs (CascadeOutboxPayload), src/cluster/protocol/fk.rs, DISTRIBUTED_DESIGN.md |
 | 16 | src/consumer_group.rs, src/dispatcher.rs |
 | 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, DISTRIBUTED_DESIGN.md (A6.4, A6.5 benchmarks) |
 | 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, src/types.rs (OwnershipConfig, ScopeConfig), src/transport.rs (execute_with_sender), src/agent/broker.rs, src/agent/handlers.rs, src/bin/mqdb/commands/auth.rs, src/bin/mqdb/commands/acl.rs, src/http/oauth.rs |
