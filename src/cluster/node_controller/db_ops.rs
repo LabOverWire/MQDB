@@ -5,7 +5,7 @@ use super::{
     ClusterMessage, ClusterTransport, Epoch, FkCheckContinuation, FkDeleteContinuation, JsonDbOp,
     JsonDbRequest, JsonDbResponse, NodeController, NodeId, PartitionId, PendingFkDeleteWork,
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
-    UniqueReservationParams, entity,
+    UniqueReservationParams, UniqueReserveStatus, entity,
 };
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
 use crate::events::ChangeEvent;
@@ -521,7 +521,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let fk_expected = data
             .as_object_mut()
-            .and_then(|obj| obj.remove("_fk_expected"))
+            .and_then(|obj| obj.remove("__mqdb_fk_expected"))
             .and_then(|v| v.as_str().map(String::from));
 
         let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
@@ -1080,7 +1080,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
         let payload = serde_json::json!({
             field: serde_json::Value::Null,
-            "_fk_expected": format!("{field}={expected_value}"),
+            "__mqdb_fk_expected": format!("{field}={expected_value}"),
         });
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
         let request = JsonDbRequest::new(
@@ -1289,8 +1289,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
-        let result = match self.db_create(entity, &id, &data_bytes, now_ms).await {
-            Ok(db_entity) => {
+        let result = match self.db_create_prepare(entity, &id, &data_bytes, now_ms) {
+            Ok((db_entity, write)) => {
                 self.commit_all_reservations(
                     entity,
                     &request_id,
@@ -1298,6 +1298,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
+                let event = ChangeEvent::create(entity.to_string(), id.clone(), data.clone());
+                let outbox = Self::build_change_event_outbox(&event);
+                self.db_commit(write, outbox.clone()).await;
+                self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                    .await;
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -1470,7 +1475,7 @@ impl<T: ClusterTransport> NodeController<T> {
             } => {
                 let unique_fields = self.stores.constraint_get_unique_fields(&entity);
                 let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
-                let remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+                let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
 
                 for field in &unique_fields {
                     let value = match data.get(field) {
@@ -1495,6 +1500,40 @@ impl<T: ClusterTransport> NodeController<T> {
                     let is_conflict = if primary == Some(self.node_id) {
                         self.reserve_unique_local(&params, &mut local_reserved)
                             .await
+                    } else if let Some(target_node) = primary {
+                        match self
+                            .send_unique_reserve_request_async(
+                                target_node,
+                                params.entity,
+                                params.field,
+                                params.value,
+                                params.id,
+                                params.request_id,
+                                params.partition,
+                                30_000,
+                            )
+                            .await
+                        {
+                            Ok(rx) => {
+                                match tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+                                    .await
+                                {
+                                    Ok(Ok(
+                                        UniqueReserveStatus::Reserved
+                                        | UniqueReserveStatus::AlreadyReserved,
+                                    )) => {
+                                        remote_reserved.push((
+                                            field.clone(),
+                                            value.clone(),
+                                            target_node,
+                                        ));
+                                        false
+                                    }
+                                    _ => true,
+                                }
+                            }
+                            Err(_) => true,
+                        }
                     } else {
                         true
                     };
@@ -1774,28 +1813,7 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         data: &[u8],
     ) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        entity.hash(&mut hasher);
-        data.hash(&mut hasher);
-        self.node_id.get().hash(&mut hasher);
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos())
-            .hash(&mut hasher);
-
-        let base_id = hasher.finish();
-
-        for suffix in 0..1000_u16 {
-            let id = format!("{base_id:016x}-{suffix:04x}");
-            if super::db::data_partition(entity, &id) == partition {
-                return id;
-            }
-        }
-
-        format!("{base_id:016x}-p{}", partition.get())
+        super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
 
     #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]

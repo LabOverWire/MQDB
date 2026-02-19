@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 
 const FK_CHECK_TIMEOUT_SECS: u64 = 5;
 pub(crate) const MAX_CASCADE_DEPTH: usize = 16;
+const MAX_CASCADE_WORK_ITEMS: usize = MAX_CASCADE_DEPTH * 1000;
 
 pub struct FkExistenceResult {
     pub pending_remote: Vec<PendingFkCheck>,
@@ -32,15 +33,8 @@ pub(crate) fn extract_fk_string_value(value: &serde_json::Value) -> Option<Strin
     match value {
         serde_json::Value::Null => None,
         serde_json::Value::String(s) => Some(s.clone()),
-        other => {
-            let s = other.to_string();
-            let trimmed = s.trim_matches('"');
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
     }
 }
 
@@ -247,6 +241,10 @@ impl<T: ClusterTransport> NodeController<T> {
     /// The system converges to a consistent state because any subsequent delete of
     /// the target will trigger cascade/set-null actions on all referencing records.
     /// Stale FK references are therefore short-lived.
+    ///
+    /// Set-null cascades use a field=value CAS guard to prevent overwriting concurrent
+    /// updates. This check is not ABA-safe (a field changed A→B→A would match), but
+    /// the probability requires three concurrent operations in a precise interleaving.
     pub async fn start_fk_existence_check(
         &mut self,
         entity: &str,
@@ -381,6 +379,9 @@ impl<T: ClusterTransport> NodeController<T> {
             if node == self.node_id {
                 continue;
             }
+            if self.partition_map.primary_count(node) == 0 {
+                continue;
+            }
             let request_id = self.allocate_fk_request_id();
             let (tx, rx) = oneshot::channel();
             self.pending_constraints.insert_fk_lookup(request_id, tx);
@@ -477,7 +478,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             let current_level: Vec<_> = queue.drain(..).collect();
             for (entity, id) in current_level {
-                if visited.len() > MAX_CASCADE_DEPTH * 1000 {
+                if visited.len() > MAX_CASCADE_WORK_ITEMS {
                     return Err("cascade work limit exceeded".to_string());
                 }
                 let referencing = self.stores.constraint_find_referencing(&entity);

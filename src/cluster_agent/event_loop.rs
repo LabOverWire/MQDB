@@ -206,6 +206,7 @@ impl ClusteredAgent {
             }
         }
         ctrl.transport().log_queue_stats();
+        ctrl.pending_constraints().sweep_closed();
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {

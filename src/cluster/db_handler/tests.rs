@@ -1544,7 +1544,7 @@ async fn fk_set_null_skips_when_fk_field_changed() {
 
     let set_null_payload = serde_json::to_vec(&serde_json::json!({
         "author_id": null,
-        "_fk_expected": "author_id=a"
+        "__mqdb_fk_expected": "author_id=a"
     }))
     .unwrap();
     let set_null_resp = ctrl

@@ -89,4 +89,23 @@ impl PendingConstraintState {
             let _ = tx.send(true);
         }
     }
+
+    pub fn sweep_closed(&self) {
+        self.unique_requests
+            .lock()
+            .unwrap()
+            .retain(|_, tx| !tx.is_closed());
+        self.fk_checks
+            .lock()
+            .unwrap()
+            .retain(|_, tx| !tx.is_closed());
+        self.fk_lookups
+            .lock()
+            .unwrap()
+            .retain(|_, tx| !tx.is_closed());
+        self.cascade_acks
+            .lock()
+            .unwrap()
+            .retain(|_, tx| !tx.is_closed());
+    }
 }
