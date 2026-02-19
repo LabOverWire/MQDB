@@ -591,7 +591,6 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         if !fk_result.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
             let (new_diff, old_diff) =
                 self.compute_unique_field_diffs(entity, &old_data, &merged_data);
             return (
@@ -603,10 +602,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         entity: entity.to_string(),
                         id: id.to_string(),
                         merged_data,
-                        data_bytes,
                         partition,
                         request_id,
-                        now_ms,
                         new_diff,
                         old_diff,
                         response_topic: request.response_topic.clone(),
@@ -1198,6 +1195,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if let serde_json::Value::Object(ref mut obj) = data {
             obj.remove("_version");
+            obj.remove("__mqdb_fk_expected");
             obj.insert("_version".to_string(), serde_json::Value::Number(1.into()));
         }
 
@@ -1215,7 +1213,6 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         if !fk_result.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return (
                 Vec::new(),
                 Some(super::PendingConstraintWork::Fk(PendingFkWork {
@@ -1225,10 +1222,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         entity: entity.to_string(),
                         id,
                         data,
-                        data_bytes,
                         partition,
                         request_id,
-                        now_ms,
                         response_topic: request.response_topic.clone(),
                         correlation_data: request.correlation_data.clone(),
                     },
