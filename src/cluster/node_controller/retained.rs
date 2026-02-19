@@ -114,6 +114,54 @@ impl<T: ClusterTransport> NodeController<T> {
         Some(rx)
     }
 
+    pub async fn start_async_retained_wildcard_query(
+        &mut self,
+        pattern: &str,
+    ) -> Vec<oneshot::Receiver<Vec<RetainedMessage>>> {
+        let mut receivers = Vec::new();
+        let filter = format!("pattern={pattern}");
+        let mut queried_nodes = std::collections::HashSet::new();
+
+        for partition in PartitionId::all() {
+            let Some(primary) = self.partition_map.primary(partition) else {
+                continue;
+            };
+            if primary == self.node_id || !queried_nodes.insert(primary) {
+                continue;
+            }
+
+            self.current_time += 1;
+            let query_id = self.current_time;
+            let request = QueryRequest::new(
+                query_id,
+                5000,
+                entity::RETAINED.to_string(),
+                Some(filter.clone()),
+                10000,
+                None,
+            );
+
+            let (tx, rx) = oneshot::channel();
+            self.pending_retained_queries.insert(query_id, tx);
+
+            let msg = ClusterMessage::QueryRequest { partition, request };
+            if self.transport.send(primary, msg).await.is_err() {
+                self.pending_retained_queries.remove(&query_id);
+                continue;
+            }
+
+            receivers.push(rx);
+        }
+
+        tracing::debug!(
+            pattern,
+            remote_queries = receivers.len(),
+            "started async retained wildcard query"
+        );
+
+        receivers
+    }
+
     pub fn complete_retained_query(&mut self, query_id: u64, results: Vec<RetainedMessage>) {
         if let Some(sender) = self.pending_retained_queries.remove(&query_id) {
             let _ = sender.send(results);

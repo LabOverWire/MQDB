@@ -215,6 +215,9 @@ async fn deliver_retained_messages<T: ClusterTransport>(
     let mut synced = synced_topics.write().await;
     for msg in retained {
         let topic = msg.topic_str().to_string();
+        if synced.contains_key(&topic) {
+            continue;
+        }
         synced.insert(topic.clone(), Instant::now());
         debug!(
             topic,
