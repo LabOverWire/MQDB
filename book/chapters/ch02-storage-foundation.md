@@ -6,7 +6,7 @@ Before distributing anything, build the single-node database. The components int
 
 The entire database lives in a single sorted key-value store. Every piece of data — user records, index entries, schemas, subscriptions, pending events — shares one keyspace. The only structure comes from prefixes: byte-string conventions that partition the flat space into logical namespaces.
 
-Nine prefixes create the full namespace:
+Eight prefixes create the full namespace:
 
 | Prefix | Purpose | Example |
 |--------|---------|---------|
@@ -25,7 +25,7 @@ Why a flat keyspace instead of separate column families or tables? Because the a
 
 ### Lexicographic Ordering
 
-The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A range scan between `meta/constraint/fk/posts/` and `meta/constraint/fk/posts/\xff` returns all foreign key constraints on the `posts` entity. Every query the database supports reduces to either a point lookup or a prefix/range scan over sorted bytes.
+The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A prefix scan on `meta/constraint/` loads every constraint in the system at startup. Every query the database supports reduces to either a point lookup or a prefix scan over sorted bytes.
 
 This works because the key encoding function for data keys follows a rigid structure:
 
@@ -43,21 +43,45 @@ pub fn encode_data_key(entity: &str, id: &str) -> Vec<u8> {
 
 The separator is a single byte (`b'/'`), chosen because it never appears in entity names or IDs under the validation rules. This gives clean prefix boundaries: scanning `data/users/` will never accidentally pick up `data/users_archive/` because `_` sorts after `/` in ASCII.
 
-### The Numeric Encoding Trick
+### Encoding Numbers in Keys
 
-Secondary indexes must preserve sort order for range queries. Strings sort correctly by default in lexicographic order, but numbers do not: the string `"9"` sorts after `"42"` because `'9' > '4'` in ASCII. The encoding function solves this by zero-padding integers to 20 digits:
+The data keys shown above contain only strings — entity names and IDs — which sort correctly in byte order by default. But the prefix table listed another namespace: `idx/`, for secondary indexes. Section 2.5 covers indexes in full, but the key structure matters here because an index key embeds a field's *value* directly into the key:
+
+```
+idx/{entity}/{field}/{encoded_value}/{id}
+```
+
+A query like "find all users with age greater than 30" becomes a range scan starting at `idx/users/age/{encoded_30}/`. For this to work, the encoded value must sort in the same order as the original number. String values need no special treatment — `"alice"` sorts before `"bob"` in both human and byte order. Numbers are the problem.
+
+If the database stored the number 9 as the ASCII string `"9"` and 42 as `"42"`, then `"9"` would sort *after* `"42"` because `'9' > '4'` in ASCII. Negative numbers are worse — `-1` would sort after `-5` in text because `'1' > '5'` in the second character. Any range query over numeric fields would return garbage.
+
+The encoding solves both problems by working directly on the binary representation instead of text. For integers, it converts to big-endian bytes and flips the sign bit:
 
 ```rust
-serde_json::Value::Number(n) => {
-    if let Some(i) = n.as_i64() {
-        Ok(format!("{i:020}").into_bytes())  // 42 → "00000000000000000042"
-    } else if let Some(f) = n.as_f64() {
-        Ok(format!("{f:020.6}").into_bytes()) // 3.14 → "000000000003.140000"
-    }
+fn encode_i64_sortable(val: i64) -> [u8; 8] {
+    let mut out = val.to_be_bytes();
+    out[0] ^= 0x80;
+    out
 }
 ```
 
-Now `"00000000000000000009"` sorts before `"00000000000000000042"`, and a range scan over an age index returns records in numeric order. Twenty digits accommodates values up to `u64::MAX` (about 1.8 × 10¹⁹). Floats use 20 characters with 6 decimal places, which preserves order for non-negative values. The encoding does not handle negative numbers — a deliberate simplification for the JSON document model, where negative index values are uncommon.
+Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort *after* all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives move below zero, positives stay above. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
+
+Floats use the same sign-bit idea on IEEE 754 bits, but negative floats need all bits flipped because IEEE 754 reverses the magnitude ordering for negative values — a more negative float has a larger binary representation:
+
+```rust
+fn encode_f64_sortable(val: f64) -> [u8; 8] {
+    let mut out = val.to_bits().to_be_bytes();
+    if val.is_sign_negative() {
+        for b in &mut out { *b ^= 0xFF; }
+    } else {
+        out[0] ^= 0x80;
+    }
+    out
+}
+```
+
+The full range from `f64::NEG_INFINITY` through zero to `f64::INFINITY` sorts correctly in byte order. Both encodings produce exactly 8 bytes per number — fixed-width, compact, and comparison-friendly. A single `memcmp` determines ordering without parsing.
 
 ### CRC32 Integrity
 
