@@ -66,7 +66,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidRequest).to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
@@ -128,7 +128,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
@@ -156,7 +156,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
@@ -179,7 +179,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidRequest).to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
@@ -209,7 +209,7 @@ impl DbRequestHandler {
             return UniqueReserveResponse::create(UniqueReserveStatus::Error).to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return UniqueReserveResponse::create(UniqueReserveStatus::Error).to_be_bytes();
         }
 
@@ -247,7 +247,7 @@ impl DbRequestHandler {
             return UniqueReserveResponse::create(UniqueReserveStatus::Error).to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return UniqueReserveResponse::create(UniqueReserveStatus::Error).to_be_bytes();
         }
 
@@ -275,7 +275,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidRequest).to_be_bytes();
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 

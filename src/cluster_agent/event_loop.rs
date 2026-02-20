@@ -80,6 +80,10 @@ impl ClusteredAgent {
         let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
         let mut retained_sync_cleanup_interval =
             interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
+        let mut cascade_retry_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -99,6 +103,7 @@ impl ClusteredAgent {
         let _http_task = self.spawn_http_task(service_username, service_password);
 
         self.recover_pending_lwts().await;
+        self.recover_pending_outbox().await;
 
         loop {
             tokio::select! {
@@ -127,6 +132,9 @@ impl ClusteredAgent {
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
                     Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
+                }
+                _ = cascade_retry_interval.tick() => {
+                    self.retry_pending_cascades().await;
                 }
                 Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
@@ -201,6 +209,7 @@ impl ClusteredAgent {
             }
         }
         ctrl.transport().log_queue_stats();
+        ctrl.pending_constraints().sweep_closed();
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {
@@ -247,22 +256,62 @@ impl ClusteredAgent {
         }
     }
 
+    fn try_resolve_constraint_response(&self, msg: &crate::cluster::InboundMessage) -> bool {
+        match &msg.message {
+            ClusterMessage::UniqueReserveResponse(resp) => {
+                self.pending_constraints.resolve_unique(resp);
+                true
+            }
+            ClusterMessage::FkCheckResponse(resp) => {
+                self.pending_constraints.resolve_fk_check(resp);
+                true
+            }
+            ClusterMessage::FkReverseLookupResponse(resp) => {
+                self.pending_constraints.resolve_fk_lookup(resp);
+                true
+            }
+            _ => false,
+        }
+    }
+
     async fn handle_main_queue_message(
         &self,
         msg: crate::cluster::InboundMessage,
         rx_main_queue: &flume::Receiver<crate::cluster::InboundMessage>,
     ) {
         const BATCH_SIZE: u32 = 8;
+
+        if self.try_resolve_constraint_response(&msg) {
+            let mut count = 1u32;
+            while let Ok(msg) = rx_main_queue.try_recv() {
+                if !self.try_resolve_constraint_response(&msg) {
+                    let mut ctrl = self.controller.write().await;
+                    if let Some(pending) = ctrl.handle_filtered_message(msg).await {
+                        drop(ctrl);
+                        Self::spawn_constraint_completion(self.controller.clone(), pending);
+                    }
+                }
+                count += 1;
+                if count.is_multiple_of(BATCH_SIZE) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            return;
+        }
+
         let mut ctrl = self.controller.write().await;
         if let Some(pending) = ctrl.handle_filtered_message(msg).await {
             drop(ctrl);
-            Self::spawn_unique_completion(self.controller.clone(), pending);
+            Self::spawn_constraint_completion(self.controller.clone(), pending);
             let mut ctrl = self.controller.write().await;
             let mut count = 1u32;
             while let Ok(msg) = rx_main_queue.try_recv() {
+                if self.try_resolve_constraint_response(&msg) {
+                    continue;
+                }
                 if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                     drop(ctrl);
-                    Self::spawn_unique_completion(self.controller.clone(), pending);
+                    Self::spawn_constraint_completion(self.controller.clone(), pending);
                     ctrl = self.controller.write().await;
                 }
                 count += 1;
@@ -274,14 +323,36 @@ impl ClusteredAgent {
         }
         let mut count = 1u32;
         while let Ok(msg) = rx_main_queue.try_recv() {
+            if self.try_resolve_constraint_response(&msg) {
+                continue;
+            }
             if let Some(pending) = ctrl.handle_filtered_message(msg).await {
                 drop(ctrl);
-                Self::spawn_unique_completion(self.controller.clone(), pending);
+                Self::spawn_constraint_completion(self.controller.clone(), pending);
                 ctrl = self.controller.write().await;
             }
             count += 1;
             if count.is_multiple_of(BATCH_SIZE) {
                 tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    fn spawn_constraint_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingConstraintWork,
+    ) {
+        use crate::cluster::node_controller::PendingConstraintWork;
+
+        match pending {
+            PendingConstraintWork::Unique(unique_work) => {
+                Self::spawn_unique_completion(controller, unique_work);
+            }
+            PendingConstraintWork::Fk(fk_work) => {
+                Self::spawn_fk_completion(controller, fk_work);
+            }
+            PendingConstraintWork::FkDelete(fk_delete_work) => {
+                Self::spawn_fk_delete_completion(controller, fk_delete_work);
             }
         }
     }
@@ -299,6 +370,52 @@ impl ClusteredAgent {
             let remote_results = await_unique_reserves(pending_remote).await;
             let mut ctrl = controller.write().await;
             ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
+                .await;
+        });
+    }
+
+    fn spawn_fk_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingFkWork,
+    ) {
+        use crate::cluster::node_controller::fk::await_fk_checks;
+
+        let pending_checks = pending.pending_checks;
+        let continuation = pending.continuation;
+        tokio::spawn(async move {
+            let fk_result = await_fk_checks(pending_checks).await;
+            let mut ctrl = controller.write().await;
+            let (fk_ok, fk_error) = match fk_result {
+                Ok(()) => (true, None),
+                Err(msg) => (false, Some(msg)),
+            };
+            ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
+                .await;
+        });
+    }
+
+    fn spawn_fk_delete_completion(
+        controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+        pending: crate::cluster::node_controller::PendingFkDeleteWork,
+    ) {
+        use crate::cluster::node_controller::fk::collect_recursive_cascade;
+
+        let local_results = pending.local_results;
+        let pending_lookups = pending.pending_lookups;
+        let continuation = pending.continuation;
+        let (del_entity, del_id) = continuation.entity_id();
+        let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
+        tokio::spawn(async move {
+            let (restrict_error, side_effects) = collect_recursive_cascade(
+                &controller,
+                &del_entity,
+                &del_id,
+                local_results,
+                pending_lookups,
+            )
+            .await;
+            let mut ctrl = controller.write().await;
+            ctrl.complete_pending_fk_delete_work(restrict_error, side_effects, continuation)
                 .await;
         });
     }
@@ -459,6 +576,76 @@ impl ClusteredAgent {
         }
     }
 
+    async fn recover_pending_outbox(&self) {
+        let ctrl = self.controller.read().await;
+        let Some(outbox) = ctrl.stores().cluster_outbox() else {
+            return;
+        };
+        let entries = match outbox.pending_events() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "failed to scan outbox for pending events");
+                return;
+            }
+        };
+        if !entries.is_empty() {
+            info!(count = entries.len(), "replaying pending outbox entries");
+            for entry in &entries {
+                ctrl.transport()
+                    .queue_local_publish_with_properties(
+                        entry.topic.clone(),
+                        entry.payload.clone(),
+                        1,
+                        entry.user_properties.clone(),
+                    )
+                    .await;
+                let _ = outbox.mark_delivered(&entry.operation_id);
+            }
+        }
+
+        let cascade_entries = match outbox.pending_cascade_ops() {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "failed to scan cascade outbox for pending ops");
+                return;
+            }
+        };
+        if cascade_entries.is_empty() {
+            return;
+        }
+        info!(
+            count = cascade_entries.len(),
+            "replaying pending cascade operations"
+        );
+        let local_work = send_cascade_operations(&ctrl, outbox, &cascade_entries).await;
+        drop(ctrl);
+        if !local_work.is_empty() {
+            execute_local_cascade_work(&self.controller, local_work).await;
+        }
+    }
+
+    async fn retry_pending_cascades(&self) {
+        let ctrl = self.controller.read().await;
+        let Some(outbox) = ctrl.stores().cluster_outbox() else {
+            return;
+        };
+        let Ok(cascade_entries) = outbox.pending_cascade_ops() else {
+            return;
+        };
+        if cascade_entries.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            count = cascade_entries.len(),
+            "retrying pending cascade operations"
+        );
+        let local_work = send_cascade_operations(&ctrl, outbox, &cascade_entries).await;
+        drop(ctrl);
+        if !local_work.is_empty() {
+            execute_local_cascade_work(&self.controller, local_work).await;
+        }
+    }
+
     async fn recover_pending_lwts(&self) {
         use crate::cluster::{ForwardTarget, ForwardedPublish, LwtPublisher, PublishRouter};
 
@@ -529,6 +716,115 @@ impl ClusteredAgent {
             } else {
                 info!(client_id = %lwt.client_id, topic = %lwt.topic, "recovered and published pending LWT");
             }
+        }
+    }
+}
+
+struct LocalCascadeWork {
+    operation_id: String,
+    ops: Vec<crate::cluster::CascadeRemoteOp>,
+}
+
+async fn send_cascade_operations<T: ClusterTransport>(
+    ctrl: &NodeController<T>,
+    outbox: &crate::cluster::ClusterOutbox,
+    entries: &[crate::cluster::CascadePendingEntry],
+) -> Vec<LocalCascadeWork> {
+    let mut local_work = Vec::new();
+    for cascade in entries {
+        let mut ack_receivers = Vec::new();
+        let mut local_ops = Vec::new();
+        for op in &cascade.operations {
+            let partition = match op {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id }
+                | crate::cluster::CascadeRemoteOp::SetNull { entity, id, .. } => {
+                    crate::cluster::data_partition(entity, id)
+                }
+            };
+            if ctrl.is_primary_for_partition(partition) {
+                local_ops.push(op.clone());
+                continue;
+            }
+            match op {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                    if let Some(rx) = ctrl
+                        .send_cascade_request(
+                            partition,
+                            crate::cluster::JsonDbOp::Delete,
+                            entity,
+                            id,
+                            &[],
+                        )
+                        .await
+                    {
+                        ack_receivers.push(rx);
+                    }
+                }
+                crate::cluster::CascadeRemoteOp::SetNull {
+                    entity,
+                    id,
+                    field,
+                    expected_value,
+                } => {
+                    if let Some(rx) = ctrl
+                        .send_cascade_set_null_request(partition, entity, id, field, expected_value)
+                        .await
+                    {
+                        ack_receivers.push(rx);
+                    }
+                }
+            }
+        }
+        if !local_ops.is_empty() {
+            local_work.push(LocalCascadeWork {
+                operation_id: cascade.operation_id.clone(),
+                ops: local_ops,
+            });
+        }
+        crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
+            Some(outbox.clone()),
+            cascade.operation_id.clone(),
+            ack_receivers,
+            false,
+        );
+    }
+    local_work
+}
+
+async fn execute_local_cascade_work(
+    controller: &Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
+    work: Vec<LocalCascadeWork>,
+) {
+    let mut ctrl = controller.write().await;
+    let now_ms = current_time_ms();
+    for item in &work {
+        for op in &item.ops {
+            match op {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                    if let Ok((_, write)) = ctrl.db_delete_prepare(entity, id) {
+                        let event = crate::ChangeEvent::delete(entity.clone(), id.clone());
+                        let outbox =
+                            crate::cluster::node_controller::db_ops::build_change_event_outbox(
+                                &event,
+                            );
+                        ctrl.db_commit(write, outbox.clone()).await;
+                        ctrl.publish_and_deliver_change_event(event, &outbox.operation_id)
+                            .await;
+                    }
+                }
+                crate::cluster::CascadeRemoteOp::SetNull {
+                    entity,
+                    id,
+                    field,
+                    expected_value,
+                } => {
+                    ctrl.execute_local_cascade_set_null(entity, id, field, expected_value, now_ms)
+                        .await;
+                }
+            }
+        }
+        if let Some(outbox) = ctrl.stores().cluster_outbox() {
+            let _ = outbox.mark_cascade_delivered(&item.operation_id);
         }
     }
 }

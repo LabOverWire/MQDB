@@ -37,6 +37,38 @@ impl StoreManager {
         self.apply_to_memory(write)
     }
 
+    /// # Errors
+    /// Returns `StoreApplyError` if persistence fails or the entity type is unknown.
+    pub fn apply_write_with_outbox(
+        &self,
+        write: &ReplicationWrite,
+        outbox_key: Vec<u8>,
+        outbox_value: Vec<u8>,
+    ) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .write_with_outbox(write, outbox_key, outbox_value)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+
+        self.apply_to_memory(write)
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub fn apply_write_with_outbox_entries(
+        &self,
+        write: &ReplicationWrite,
+        outbox_entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .write_with_outbox_entries(write, outbox_entries)
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+
+        self.apply_to_memory(write)
+    }
+
     pub(super) fn apply_to_memory(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
         match write.entity.as_str() {
             entity::SESSIONS => self.apply_session(write),
@@ -120,9 +152,33 @@ impl StoreManager {
     }
 
     fn apply_db_data(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
-        self.db_data
-            .apply_replicated(write.operation, &write.id, &write.data)
-            .map_err(|_| StoreApplyError::DbDataError)
+        let parts: Vec<&str> = write.id.splitn(2, '/').collect();
+        if parts.len() == 2 {
+            let (entity_type, id) = (parts[0], parts[1]);
+            let old = self.db_data.get(entity_type, id);
+            self.db_data
+                .apply_replicated(write.operation, &write.id, &write.data)
+                .map_err(|_| StoreApplyError::DbDataError)?;
+
+            let new_data = if write.data.is_empty() {
+                None
+            } else {
+                crate::cluster::db::DbDataStore::deserialize(&write.data).map(|e| e.data)
+            };
+
+            self.update_fk_reverse_index(
+                write.operation,
+                entity_type,
+                id,
+                new_data.as_deref(),
+                old.as_ref().map(|e| e.data.as_slice()),
+            );
+            Ok(())
+        } else {
+            self.db_data
+                .apply_replicated(write.operation, &write.id, &write.data)
+                .map_err(|_| StoreApplyError::DbDataError)
+        }
     }
 
     fn apply_db_schema(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
@@ -150,6 +206,16 @@ impl StoreManager {
     }
 
     fn apply_db_constraint(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        if write.operation == crate::cluster::protocol::Operation::Insert {
+            if let Some(constraint) = crate::cluster::db::ConstraintStore::deserialize(&write.data)
+            {
+                self.db_constraints
+                    .apply_replicated(write.operation, &write.id, &write.data)
+                    .map_err(|_| StoreApplyError::DbConstraintError)?;
+                self.rebuild_fk_index_for_constraint(&constraint);
+                return Ok(());
+            }
+        }
         self.db_constraints
             .apply_replicated(write.operation, &write.id, &write.data)
             .map_err(|_| StoreApplyError::DbConstraintError)

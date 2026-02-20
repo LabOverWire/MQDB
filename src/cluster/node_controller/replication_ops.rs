@@ -96,7 +96,7 @@ impl<T: ClusterTransport> NodeController<T> {
             tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
         }
 
-        if !self.is_local_partition(partition) {
+        if !self.is_primary_for_partition(partition) {
             if !is_broadcast {
                 tracing::warn!(
                     ?partition,
@@ -121,7 +121,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.sync_retained_to_broker(&write).await;
 
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-        if let Err(e) = self.replicate_write_async(write, &replicas).await {
+        if let Err(e) = self.replicate_write_async(write, &replicas, None).await {
             tracing::warn!(?partition, ?e, "failed to replicate write request");
         }
     }
@@ -298,6 +298,34 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
+        self.write_or_forward_impl(write, None, &[]).await;
+    }
+
+    pub(crate) async fn write_or_forward_with_outbox(
+        &mut self,
+        write: ReplicationWrite,
+        outbox: super::super::store_manager::outbox::OutboxPayload,
+    ) {
+        self.write_or_forward_impl(write, Some(outbox), &[]).await;
+    }
+
+    pub(crate) async fn write_or_forward_with_outbox_entries(
+        &mut self,
+        write: ReplicationWrite,
+        outbox: super::super::store_manager::outbox::OutboxPayload,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        self.write_or_forward_impl(write, Some(outbox), extra_outbox)
+            .await;
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn write_or_forward_impl(
+        &mut self,
+        write: ReplicationWrite,
+        outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) {
         let write_count = WRITE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         if write_count.is_multiple_of(10000) {
             let wr_sent = WRITE_REQUEST_SENT.load(AtomicOrdering::Relaxed);
@@ -341,11 +369,13 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
-        if self.is_local_partition(partition) {
+        if self.is_primary_for_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
             WRITE_REQUEST_SENT.fetch_add(replicas.len() as u64, AtomicOrdering::Relaxed);
             let t_lookup = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-            let _ = self.replicate_write_async(write, &replicas).await;
+            let _ = self
+                .replicate_write_async_with_extra(write, &replicas, outbox, extra_outbox)
+                .await;
             let t_replicate = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             tracing::trace!(
                 node = self.node_id.get(),

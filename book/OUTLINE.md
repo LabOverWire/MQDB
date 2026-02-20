@@ -63,8 +63,8 @@ A deep dive into MQTT 5.0 features and how they map to database operations. This
 - **3.1 MQTT 5.0 Essentials** — Publish/subscribe, QoS levels (0/1/2), retained messages, clean start, session expiry. Just enough protocol for the book's needs.
 - **3.2 Request/Response Pattern** — How MQTT 5.0's response topics enable synchronous-style database queries over an asynchronous protocol. The `$DB/{entity}/create` → response topic flow.
 - **3.3 Topic-Based API Design** — Client API topics (`$DB/{entity}/{op}`) vs. internal partitioned topics (`$DB/p{partition}/{entity}/{op}`). How the high-level API auto-routes to the correct partition.
-- **3.4 Authentication Stack** — Password files (Argon2), SCRAM-SHA-256 challenge-response, JWT (HS256/RS256/ES256), federated JWT with multiple issuers. Layered security without external dependencies.
-- **3.5 Topic Protection and ACL** — Hardcoded protection tiers (BlockAll, ReadOnly, AdminRequired), RBAC with roles and permissions, internal service bypass for cluster traffic.
+- **3.4 User Properties as Metadata** — How MQTT 5.0 user properties carry database metadata: `x-origin-client-id`, `x-mqtt-sender`, correlation data. The bridge between protocol headers and application semantics.
+- **3.5 QoS as a Durability Knob** — QoS 0 for fire-and-forget telemetry, QoS 1 for at-least-once database writes, QoS 2 for exactly-once operations. How QoS level maps to the database's consistency guarantees.
 
 ---
 
@@ -137,7 +137,8 @@ Queries that span multiple partitions require coordination. This chapter covers 
 - **9.2 Partition Pruning** — Single-ID queries hash to one partition, skipping the scatter phase. Filter-based pruning when `id=VALUE` is present.
 - **9.3 Merge and Sort** — Deduplication by ID, filter application, cross-partition sorting. Why sorting must happen at the coordinator, not at each partition.
 - **9.4 Pagination with ScatterCursor** — `PartitionCursor` per partition (partition ID, sequence, last_key). `ScatterCursor` aggregates all partition cursors. Each partition maintains independent pagination state for efficient resumption.
-- **9.5 Retained Message Queries** — Exact topic hashes to one partition. Wildcard patterns query all 256 partitions and filter locally.
+- **9.5 Retained Message Queries** — Exact topic hashes to one partition — a point lookup. Wildcard patterns are the hard case: the broker must find all retained messages whose topics match the wildcard, but those messages are scattered across partitions by topic hash. The MQTT 5.0 spec says the server SHOULD deliver retained messages matching a subscription's topic filter, including wildcards. Most distributed MQTT implementations — including AWS IoT Core — simply don't. They skip wildcard retained delivery entirely because the distributed query is hard to get right.
+- **9.6 Three Layers of Retained Dedup** — MQDB implements wildcard retained delivery via scatter-gather, but the naive approach (one query per partition) produced 170x message duplication in a 3-node cluster. Three dedup layers were needed: (1) per-node queries instead of per-partition (a `HashSet<NodeId>` reduces 170 queries to 2 remote requests), (2) same-topic dedup (skip topics already delivered from an earlier response), (3) local-store filtering (exclude topics that exist in the local retained store, preventing double delivery from primary/replica overlap). A case study in how "query all partitions" is never as simple as it sounds — the naive fan-out works correctly for unique-per-partition data like DB records, but retained messages have replication overlap that requires explicit deduplication at every layer.
 
 ---
 
@@ -197,15 +198,19 @@ Binary protocol design for distributed system communication.
 
 ## Part IV: Advanced Patterns (Chapters 15-18, ~80 pages)
 
-### Chapter 15: Unique Constraints in a Distributed System
+### Chapter 15: Constraints in a Distributed System
 
-Enforcing uniqueness across partitions requires coordination. This chapter covers the two-phase reservation protocol.
+Enforcing uniqueness and referential integrity across partitions requires coordination. This chapter covers the two-phase reservation protocol for unique constraints and the scatter-gather protocol for foreign keys.
 
 - **15.1 The Problem** — Two clients on different nodes simultaneously create records with the same unique field value. Without coordination, both succeed, violating the constraint.
-- **15.2 Two-Phase Protocol** — Phase 1: Reserve the unique value on the partition that owns it (hash of field value). Phase 2: If reservation succeeds, commit the write; otherwise, release and fail.
+- **15.2 Two-Phase Unique Protocol** — Phase 1: Reserve the unique value on the partition that owns it (hash of field value). Phase 2: If reservation succeeds, commit the write; otherwise, release and fail.
 - **15.3 Lock Drop/Reacquire Pattern** — When holding `Arc<RwLock>` and needing to await a remote response that arrives via the same event loop: send request while locked, drop lock, await response, reacquire lock, complete operation. Why this pattern appears repeatedly in async distributed code.
 - **15.4 Composite Unique Constraints** — Multiple fields concatenated into a single reservation key. How composite keys interact with the partition function.
-- **15.5 Foreign Key Validation** — Cross-partition FK checks follow the same pattern: forward validation request to the partition owning the referenced entity, await response.
+- **15.5 Foreign Key Existence Checks** — On create/update, verify the referenced entity exists on its partition primary. One-phase, read-only — simpler than unique constraints because no reservation is needed. When a create requires both unique and FK checks, the FK check runs first and the unique reservation is chained after.
+- **15.6 The In-Memory FK Reverse Index** — `FkReverseIndex`: a `HashMap<(target_entity, target_id, source_entity, source_field), HashSet<source_id>>` maintained on every data write. Replaces O(n) full-table scans with O(1) lookups. Rebuilt on constraint creation from existing data. Why the index lives in-memory (partition data is already in-memory in cluster mode) and uses `Mutex` rather than `RwLock`.
+- **15.7 FK Reverse Lookups on Delete** — Scatter-gather across nodes (skipping nodes with zero primaries) to find referencing records via the reverse index. Three actions: Restrict (block delete), Cascade (delete children), SetNull (null FK field). Short-circuit on first Restrict hit. Depth limit (`MAX_CASCADE_DEPTH = 16`) and work-item limit (`MAX_CASCADE_WORK_ITEMS = 16,000`) prevent unbounded recursion.
+- **15.8 Cascade Execution and Acknowledgment** — `CascadeSideEffect` partitions effects into local (same batch) and remote (transport request). Remote cascades use request/response with `cascade_ack` — the coordinating node waits for acknowledgments before marking the `_cascade/` outbox entry delivered. The `__mqdb_fk_expected` CAS guard on set-null operations: field must still hold the expected value, preventing overwrites of concurrent updates. A 30-second retry loop replays unacknowledged remote operations.
+- **15.9 Consistency Tradeoffs** — TLA+ model proved phantom reads possible during the lock-drop gap (TOCTOU). Concurrent create + delete of an FK target can produce orphan references. The set-null CAS guard is not ABA-safe — a field changed A→B→A would match — but requires three concurrent operations in a precise interleaving. Why these tradeoffs are acceptable: catches the vast majority of violations, and the alternative (holding locks across network round-trips) causes deadlocks.
 
 ### Chapter 16: Consumer Groups and Event Routing
 
@@ -230,14 +235,18 @@ How to measure, understand, and improve distributed system performance.
 - **17.4 Reading Performance Data** — Agent mode: 6,222 insert / 9,362 get / 154,913 pubsub. Cluster with QUIC: uniform ~8,500 insert across all nodes. How to interpret the numbers and what they mean for capacity planning.
 - **17.5 The Bridge Overhead Discovery** — How benchmark data (not theory) revealed that MQTT bridges degraded performance 8-30x on follower nodes. The data that motivated QUIC transport. Lesson: measure first, optimize second.
 
-### Chapter 18: Security Architecture
+### Chapter 18: Access Control, Ownership, and Scopes
 
-Defense in depth for a distributed system.
+Who can do what with which data — from connection-time authentication through topic-level authorization to row-level ownership enforcement and event-scoped multi-tenancy.
 
-- **18.1 Authentication Layers** — Password file (Argon2 hashing), SCRAM-SHA-256 (challenge-response, no plaintext passwords on wire), JWT tokens (symmetric and asymmetric), federated JWT (multiple issuers).
-- **18.2 Authorization Model** — Topic protection tiers (system topics always blocked), RBAC with roles and permissions, per-topic pub/sub ACLs. How internal cluster traffic bypasses ACL (and why this is safe).
-- **18.3 Transport Security** — TLS for MQTT client connections, mTLS for cluster inter-node QUIC. Certificate requirements (dual EKU). Why cluster and client TLS should use separate CAs.
-- **18.4 Error Sanitization** — Internal error details never leak to clients. Sanitized error responses. Why this matters for security and debuggability.
+- **18.1 The Authentication Stack** — Five mechanisms, one connection. Password files (bcrypt hashing), SCRAM-SHA-256 (challenge-response, no plaintext on wire), JWT (HS256/RS256/ES256 with issuer/audience validation), federated JWT (multiple JWKS providers), and certificate-based auth (mTLS client identity). The `CompositeAuthProvider` pattern: enhanced-auth provider wrapping a password fallback for the internal service account. Rate limiting (5 attempts, 60s window, 300s lockout) as a layer, not a bolt-on.
+- **18.2 Topic Protection** — Three tiers: `BlockAll` (cluster-internal topics like `_mqdb/#`, `$DB/_unique/#`, `$DB/_fk/#`), `ReadOnly` (event streams `$DB/+/events/#`, system info `$SYS/#`), `AdminRequired` (`$DB/_admin/#`). The `TopicProtectionAuthProvider` decorator that wraps every other auth provider. Entity-level access: `_`-prefixed entities blocked for non-admin users. The `$DB/_health` carve-out.
+- **18.3 ACL and Role-Based Access** — The ACL file format: user rules, role definitions, user-role assignments. Four permission levels: read (subscribe), write (publish), readwrite, deny. The `AclManager` evaluation chain. Runtime management via MQTT admin API (`$DB/_admin/acl/...`, `$DB/_admin/user/...`). CLI tooling: `mqdb acl add`, `mqdb acl role-add`, `mqdb acl assign`, `mqdb acl check`.
+- **18.4 Per-Entity Ownership** — Row-level access control via `OwnershipConfig`. The `execute_with_sender` gate: read/update/delete check `record[owner_field] == sender`, list auto-injects `owner_field = sender` filter. Ownership transfer prevention (owner field stripped from update payloads). Admin bypass. The `x-mqtt-sender` user property as the identity bridge between MQTT and the database layer.
+- **18.5 Scopes and Event Routing** — `ScopeConfig` as an event namespace mechanism. How `--event-scope orders=tenantId` changes event topics from `$DB/orders/events/{id}` to `$DB/tenants/{tenantValue}/orders/events/created`. Hierarchical subscription: `$DB/tenants/acme/#` captures all entity events within a tenant. What scopes are NOT: not data isolation, not query filtering, not a security boundary — purely event routing topology.
+- **18.6 The Internal Service Account** — `mqdb-internal-{uuid}` with random password, auto-injected at startup. Bypasses topic protection entirely. Why cluster-internal traffic needs unrestricted access to `BlockAll` topics. The `is_internal_service` check and its security implications.
+- **18.7 What Went Wrong: Anonymous Mode and the Missing Service Account** — The bug where `--anonymous` mode without the `dev-insecure` feature didn't exist, and with it, topic protection blocked internal clients (no service account) and admin topics (no admin users). The fix: always create the service account, add `all_users_admin` flag. A case study in how security layers interact — each layer was correct in isolation, but their composition broke the system.
+- **18.8 Error Sanitization** — Internal error details never leak to clients. Sanitized MQTT reason strings. Why `"permission denied"` is the right error message even when the real cause is more specific.
 
 ---
 

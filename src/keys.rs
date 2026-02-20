@@ -137,21 +137,6 @@ pub fn encode_constraint_key(constraint_type: &str, entity: &str, name: &str) ->
     format!("meta/constraint/{constraint_type}/{entity}/{name}").into_bytes()
 }
 
-#[must_use]
-pub fn encode_fk_reverse_index_key(
-    target_entity: &str,
-    target_id: &str,
-    source_entity: &str,
-    source_id: &str,
-) -> Vec<u8> {
-    format!("fkref/{target_entity}/{target_id}/{source_entity}/{source_id}").into_bytes()
-}
-
-#[must_use]
-pub fn encode_fk_reverse_prefix(target_entity: &str, target_id: &str) -> Vec<u8> {
-    format!("fkref/{target_entity}/{target_id}/").into_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

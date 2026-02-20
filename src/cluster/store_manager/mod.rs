@@ -8,6 +8,7 @@ mod db_ops;
 mod fk_ops;
 mod index_ops;
 mod mqtt_state;
+pub(crate) mod outbox;
 mod partition_io;
 mod query;
 mod recovery;
@@ -20,7 +21,8 @@ mod unique_ops;
 use super::NodeId;
 use super::client_location::ClientLocationStore;
 use super::db::{
-    ConstraintStore, DbDataStore, FkValidationStore, IndexStore, SchemaStore, UniqueStore,
+    ConstraintStore, DbDataStore, FkReverseIndex, FkValidationStore, IndexStore, SchemaStore,
+    UniqueStore,
 };
 use super::idempotency_store::IdempotencyStore;
 use super::inflight_store::InflightStore;
@@ -156,6 +158,7 @@ impl std::error::Error for StoreApplyError {}
 
 pub struct StoreManager {
     storage: Option<PartitionStorage>,
+    cluster_outbox: Option<outbox::ClusterOutbox>,
     pub sessions: SessionStore,
     pub qos2: Qos2Store,
     pub subscriptions: SubscriptionCache,
@@ -173,6 +176,7 @@ pub struct StoreManager {
     pub db_fk: FkValidationStore,
     pub db_constraints: ConstraintStore,
     pub client_locations: ClientLocationStore,
+    pub fk_reverse_index: FkReverseIndex,
 }
 
 impl StoreManager {
@@ -184,6 +188,9 @@ impl StoreManager {
     #[must_use]
     pub fn new_with_storage(node_id: NodeId, backend: Option<Arc<dyn StorageBackend>>) -> Self {
         Self {
+            cluster_outbox: backend
+                .as_ref()
+                .map(|b| outbox::ClusterOutbox::new(Arc::clone(b))),
             storage: backend.map(PartitionStorage::new),
             sessions: SessionStore::new(node_id),
             qos2: Qos2Store::new(node_id),
@@ -202,12 +209,18 @@ impl StoreManager {
             db_fk: FkValidationStore::new(node_id),
             db_constraints: ConstraintStore::new(node_id),
             client_locations: ClientLocationStore::new(),
+            fk_reverse_index: FkReverseIndex::new(),
         }
     }
 
     #[must_use]
     pub fn has_persistence(&self) -> bool {
         self.storage.is_some()
+    }
+
+    #[must_use]
+    pub fn cluster_outbox(&self) -> Option<&outbox::ClusterOutbox> {
+        self.cluster_outbox.as_ref()
     }
 }
 
@@ -232,6 +245,8 @@ impl std::fmt::Debug for StoreManager {
             .field("db_fk", &self.db_fk.count())
             .field("db_constraints", &self.db_constraints.count())
             .field("client_locations", &self.client_locations.count())
+            .field("fk_reverse_index", &self.fk_reverse_index)
+            .field("cluster_outbox", &self.cluster_outbox.is_some())
             .finish()
     }
 }

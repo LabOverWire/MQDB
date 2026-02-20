@@ -253,7 +253,7 @@ async fn replicate_write_async_sends_without_tracking() {
     );
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2, node3])
+        .replicate_write_async(write, &[node2, node3], None)
         .await
         .unwrap();
     assert_eq!(seq, 1);
@@ -429,7 +429,10 @@ async fn primary_has_local_data_after_replicate_write_async() {
         session_data.to_be_bytes(),
     );
 
-    let seq = ctrl.replicate_write_async(write, &[node2]).await.unwrap();
+    let seq = ctrl
+        .replicate_write_async(write, &[node2], None)
+        .await
+        .unwrap();
     assert_eq!(seq, 1);
 
     let session = ctrl.stores().sessions.get("async-client");
@@ -906,5 +909,369 @@ async fn db_update_releases_old_unique_value() {
     assert!(
         check_result.is_ok(),
         "old unique value should be available after update changed it"
+    );
+}
+
+fn find_two_ids_on_different_partitions(
+    entity: &str,
+) -> (String, PartitionId, String, PartitionId) {
+    let first_id = format!("{entity}-0");
+    let first_part = crate::cluster::db::data_partition(entity, &first_id);
+    for i in 1..256u32 {
+        let id = format!("{entity}-{i}");
+        let p = crate::cluster::db::data_partition(entity, &id);
+        if p != first_part {
+            return (first_id, first_part, id, p);
+        }
+    }
+    panic!("could not find two IDs on different partitions");
+}
+
+fn make_all_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
+    let mut map = PartitionMap::new();
+    for partition_id in 0..NUM_PARTITIONS {
+        if let Some(p) = PartitionId::new(partition_id) {
+            ctrl.become_primary(p, Epoch::new(1));
+            map.set(
+                p,
+                crate::cluster::PartitionAssignment {
+                    primary: Some(node),
+                    replicas: vec![],
+                    epoch: Epoch::new(1),
+                },
+            );
+        }
+    }
+    ctrl.update_partition_map(map);
+}
+
+fn setup_all_primary_except(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+    excluded: PartitionId,
+    excluded_primary: NodeId,
+) {
+    let mut map = PartitionMap::new();
+    for partition_id in 0..NUM_PARTITIONS {
+        if let Some(p) = PartitionId::new(partition_id) {
+            if p == excluded {
+                map.set(
+                    p,
+                    crate::cluster::PartitionAssignment {
+                        primary: Some(excluded_primary),
+                        replicas: vec![node],
+                        epoch: Epoch::new(1),
+                    },
+                );
+            } else {
+                ctrl.become_primary(p, Epoch::new(1));
+                map.set(
+                    p,
+                    crate::cluster::PartitionAssignment {
+                        primary: Some(node),
+                        replicas: vec![],
+                        epoch: Epoch::new(1),
+                    },
+                );
+            }
+        }
+    }
+    ctrl.update_partition_map(map);
+}
+
+#[tokio::test]
+async fn db_list_primary_only_excludes_replica_data() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_id, _primary_part, replica_id, replica_part) =
+        find_two_ids_on_different_partitions("items");
+
+    ctrl.stores
+        .db_data
+        .upsert("items", &primary_id, b"{}", 1000);
+    ctrl.stores
+        .db_data
+        .upsert("items", &replica_id, b"{}", 1000);
+
+    assert_eq!(ctrl.db_list("items").len(), 2);
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let primary_only = ctrl.db_list_primary_only("items");
+    assert_eq!(primary_only.len(), 1);
+    assert_eq!(primary_only[0].id_str(), primary_id);
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_ignores_stale_replica_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (_, _, replica_post_id, replica_part) = find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Restrict,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_data = serde_json::json!({
+        "title": "Stale Replica Post",
+        "author_id": "u1",
+        "id": replica_post_id
+    });
+    let post_bytes = serde_json::to_vec(&post_data).unwrap();
+    ctrl.stores
+        .db_data
+        .upsert("posts", &replica_post_id, &post_bytes, 1000);
+
+    assert_eq!(ctrl.db_list("posts").len(), 1);
+
+    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    assert!(
+        local_results.is_empty(),
+        "stale replica data should not appear in FK reverse lookup"
+    );
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_finds_primary_partition_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_post_id, _, _, replica_part) = find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_data = serde_json::json!({
+        "title": "Primary Post",
+        "author_id": "u1",
+        "id": primary_post_id
+    });
+    let post_bytes = serde_json::to_vec(&post_data).unwrap();
+    ctrl.db_create("posts", &primary_post_id, &post_bytes, 1000)
+        .await
+        .unwrap();
+
+    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    assert_eq!(local_results.len(), 1);
+    assert_eq!(local_results[0].referencing_ids.len(), 1);
+    assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
+}
+
+#[tokio::test]
+async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let (primary_post_id, _, replica_post_id, replica_part) =
+        find_two_ids_on_different_partitions("posts");
+
+    setup_all_primary_except(&mut ctrl, node1, replica_part, node2);
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Restrict,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user_data, 1000)
+        .await
+        .unwrap();
+
+    let post_bytes = |id: &str| {
+        serde_json::to_vec(&serde_json::json!({
+            "title": "Post",
+            "author_id": "u1",
+            "id": id
+        }))
+        .unwrap()
+    };
+
+    ctrl.db_create(
+        "posts",
+        &primary_post_id,
+        &post_bytes(&primary_post_id),
+        1000,
+    )
+    .await
+    .unwrap();
+    ctrl.stores.db_data.upsert(
+        "posts",
+        &replica_post_id,
+        &post_bytes(&replica_post_id),
+        1000,
+    );
+
+    assert_eq!(ctrl.db_list("posts").len(), 2);
+
+    let result = ctrl.start_fk_reverse_lookup("users", "u1").await;
+    match result {
+        Err(ref msg) => assert!(
+            msg.contains("prevents deletion"),
+            "error should mention delete prevention: {msg}"
+        ),
+        Ok(_) => panic!("RESTRICT should block when primary data has referencing records"),
+    }
+}
+
+#[tokio::test]
+async fn circular_fk_cascade_terminates() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+
+    let fk_a_to_b = ClusterConstraint::foreign_key(
+        "alpha",
+        "alpha_beta_fk",
+        "beta_id",
+        "beta",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_b_to_a = ClusterConstraint::foreign_key(
+        "beta",
+        "beta_alpha_fk",
+        "alpha_id",
+        "alpha",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_a_to_b).await.unwrap();
+    ctrl.constraint_add(&fk_b_to_a).await.unwrap();
+
+    let a_data = serde_json::to_vec(&serde_json::json!({"beta_id": "b1"})).unwrap();
+    let b_data = serde_json::to_vec(&serde_json::json!({"alpha_id": "a1"})).unwrap();
+    ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
+    ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
+
+    let (local, _pending) = ctrl.start_fk_reverse_lookup("alpha", "a1").await.unwrap();
+
+    let result = ctrl.collect_local_cascade("alpha", "a1", local);
+    assert!(
+        result.is_ok(),
+        "circular cascade should terminate via visited set"
+    );
+
+    let results = result.unwrap();
+    let cascade_ids: Vec<_> = results.iter().flat_map(|r| &r.referencing_ids).collect();
+    assert!(
+        cascade_ids.contains(&&"b1".to_string()),
+        "should find the referencing beta record"
+    );
+    assert!(
+        cascade_ids.len() <= 2,
+        "visited set should prevent infinite expansion: got {cascade_ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn three_way_circular_fk_cascade_terminates() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+
+    let fk_a_b = ClusterConstraint::foreign_key(
+        "aaa",
+        "aaa_bbb_fk",
+        "bbb_id",
+        "bbb",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_b_c = ClusterConstraint::foreign_key(
+        "bbb",
+        "bbb_ccc_fk",
+        "ccc_id",
+        "ccc",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    let fk_c_a = ClusterConstraint::foreign_key(
+        "ccc",
+        "ccc_aaa_fk",
+        "aaa_id",
+        "aaa",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_a_b).await.unwrap();
+    ctrl.constraint_add(&fk_b_c).await.unwrap();
+    ctrl.constraint_add(&fk_c_a).await.unwrap();
+
+    let a_data = serde_json::to_vec(&serde_json::json!({"bbb_id": "b1"})).unwrap();
+    let b_data = serde_json::to_vec(&serde_json::json!({"ccc_id": "c1"})).unwrap();
+    let c_data = serde_json::to_vec(&serde_json::json!({"aaa_id": "a1"})).unwrap();
+    ctrl.db_create("aaa", "a1", &a_data, 1000).await.unwrap();
+    ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
+    ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
+
+    let (local, _pending) = ctrl.start_fk_reverse_lookup("aaa", "a1").await.unwrap();
+    let result = ctrl.collect_local_cascade("aaa", "a1", local);
+    assert!(
+        result.is_ok(),
+        "3-way circular cascade should terminate: {result:?}"
+    );
+
+    let results = result.unwrap();
+    let all_ids: Vec<_> = results
+        .iter()
+        .map(|r| (&r.source_entity, &r.referencing_ids))
+        .collect();
+    assert!(
+        !all_ids.is_empty(),
+        "should find referencing records in the cycle"
     );
 }

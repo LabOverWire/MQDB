@@ -4,7 +4,10 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
-use super::super::node_controller::{NodeController, PendingUniqueWork, UniqueCheckContinuation};
+use super::super::node_controller::{
+    FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
+    PendingUniqueWork, UniqueCheckContinuation,
+};
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
@@ -16,6 +19,8 @@ pub(super) enum JsonOpResult {
     Response(Vec<u8>),
     NoResponse,
     PendingUniqueCheck(Box<PendingUniqueWork>),
+    PendingFkCheck(Box<PendingFkWork>),
+    PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
 #[allow(clippy::unused_self, clippy::too_many_arguments)]
@@ -120,7 +125,7 @@ impl DbRequestHandler {
                     payload
                 };
                 let partition = data_partition(entity, id);
-                if !controller.is_local_partition(partition) {
+                if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
@@ -164,7 +169,7 @@ impl DbRequestHandler {
                     return JsonOpResult::Response(err);
                 }
                 let partition = data_partition(entity, id);
-                if !controller.is_local_partition(partition) {
+                if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
@@ -186,13 +191,16 @@ impl DbRequestHandler {
                         ))
                     };
                 }
-                match self
-                    .handle_json_delete(controller, entity, id, sender, client_id)
-                    .await
-                {
-                    Some(payload) => JsonOpResult::Response(payload),
-                    None => JsonOpResult::NoResponse,
-                }
+                self.handle_json_delete(
+                    controller,
+                    entity,
+                    id,
+                    sender,
+                    client_id,
+                    response_topic,
+                    correlation_data,
+                )
+                .await
             }
             DbTopicOperation::JsonList { entity } => {
                 match self
@@ -268,7 +276,7 @@ impl DbRequestHandler {
             (p, self.generate_id_for_partition(entity, p, payload))
         };
 
-        if !controller.is_local_partition(partition) {
+        if !controller.is_primary_for_partition(partition) {
             return match self
                 .try_forward_create(
                     controller,
@@ -347,11 +355,38 @@ impl DbRequestHandler {
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
+        let mut data = data.clone();
+        if let Some(obj) = data.as_object_mut() {
+            obj.remove("__mqdb_fk_expected");
+        }
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
 
+        let fk_result = match controller.start_fk_existence_check(entity, &data).await {
+            Ok(r) => r,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+
+        if !fk_result.pending_remote.is_empty() {
+            return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
+                pending_checks: fk_result.pending_remote,
+                continuation: FkCheckContinuation::CreateFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    data: data.clone(),
+                    partition,
+                    request_id,
+                    now_ms,
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
+
         let phase1 = match controller
-            .start_unique_constraint_check(entity, id, data, partition, &request_id, now_ms)
+            .start_unique_constraint_check(entity, id, &data, partition, &request_id, now_ms)
             .await
         {
             Ok(p) => p,
@@ -364,7 +399,7 @@ impl DbRequestHandler {
         };
 
         if !phase1.pending_remote.is_empty() {
-            let data_bytes = serde_json::to_vec(data).unwrap_or_default();
+            let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                 phase1,
                 continuation: UniqueCheckContinuation::CreateFromDbHandler {
@@ -387,7 +422,7 @@ impl DbRequestHandler {
             controller,
             entity,
             id,
-            data,
+            &data,
             partition,
             &request_id,
             now_ms,
@@ -413,11 +448,8 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_create(entity, id, &data_bytes, now_ms).await {
-                Ok(db_entity) => {
-                    controller
-                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
-                        .await;
+            match controller.db_create_prepare(entity, id, &data_bytes, now_ms) {
+                Ok((db_entity, write)) => {
                     let scope = self.scope_config.resolve_scope(entity, data);
                     let event = ChangeEvent::create(
                         entity.to_string(),
@@ -427,7 +459,13 @@ impl DbRequestHandler {
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(scope);
-                    self.publish_change_event(controller, event).await;
+                    let outbox = Self::build_outbox(&event);
+                    controller.db_commit(write, outbox.clone()).await;
+                    controller
+                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
+                        .await;
+                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                        .await;
                     Self::json_success(entity, db_entity.id_str(), data)
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
@@ -559,18 +597,21 @@ impl DbRequestHandler {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-        updates: Value,
+        mut updates: Value,
         sender: Option<&str>,
         client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
+        if let Some(obj) = updates.as_object_mut() {
+            obj.remove("__mqdb_fk_expected");
+        }
         let (old_data, merged_data) =
             match self.merge_with_existing(controller, entity, id, updates) {
                 Ok(pair) => pair,
@@ -584,6 +625,36 @@ impl DbRequestHandler {
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let partition = data_partition(entity, id);
+
+        let fk_result = match controller
+            .start_fk_existence_check(entity, &merged_data)
+            .await
+        {
+            Ok(r) => r,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+
+        if !fk_result.pending_remote.is_empty() {
+            let (new_diff, old_diff) =
+                controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
+            return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
+                pending_checks: fk_result.pending_remote,
+                continuation: FkCheckContinuation::UpdateFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    merged_data,
+                    partition,
+                    request_id,
+                    now_ms,
+                    new_diff,
+                    old_diff,
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
 
         let (new_diff, old_diff) =
             controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
@@ -669,8 +740,19 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_update(entity, id, &data_bytes, now_ms).await {
-                Ok(db_entity) => {
+            match controller.db_update_prepare(entity, id, &data_bytes, now_ms) {
+                Ok((db_entity, write)) => {
+                    let scope = self.scope_config.resolve_scope(entity, merged_data);
+                    let event = ChangeEvent::update(
+                        entity.to_string(),
+                        db_entity.id_str().to_string(),
+                        merged_data.clone(),
+                    )
+                    .with_sender(sender.map(str::to_string))
+                    .with_client_id(client_id.map(str::to_string))
+                    .with_scope(scope);
+                    let outbox = Self::build_outbox(&event);
+                    controller.db_commit(write, outbox.clone()).await;
                     if has_unique_changes {
                         controller
                             .commit_unique_constraints(
@@ -681,16 +763,8 @@ impl DbRequestHandler {
                             .release_unique_constraints(entity, id, old_diff, partition, id, now_ms)
                             .await;
                     }
-                    let scope = self.scope_config.resolve_scope(entity, merged_data);
-                    let event = ChangeEvent::update(
-                        entity.to_string(),
-                        db_entity.id_str().to_string(),
-                        merged_data.clone(),
-                    )
-                    .with_sender(sender.map(str::to_string))
-                    .with_client_id(client_id.map(str::to_string))
-                    .with_scope(scope);
-                    self.publish_change_event(controller, event).await;
+                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                        .await;
                     Self::json_success(entity, db_entity.id_str(), merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
@@ -763,7 +837,61 @@ impl DbRequestHandler {
         id: &str,
         sender: Option<&str>,
         client_id: Option<&str>,
-    ) -> Option<Vec<u8>> {
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+    ) -> JsonOpResult {
+        let (local_results, pending_remote) =
+            match controller.start_fk_reverse_lookup(entity, id).await {
+                Ok(pair) => pair,
+                Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+            };
+
+        if !pending_remote.is_empty() {
+            return JsonOpResult::PendingFkDelete(Box::new(PendingFkDeleteWork {
+                local_results,
+                pending_lookups: pending_remote,
+                continuation: FkDeleteContinuation::DeleteFromDbHandler {
+                    entity: entity.to_string(),
+                    id: id.to_string(),
+                    sender: sender.map(str::to_string),
+                    client_id: client_id.map(str::to_string),
+                    response_topic: response_topic.to_string(),
+                    correlation_data: correlation_data.map(<[u8]>::to_vec),
+                },
+            }));
+        }
+
+        let all_results = match controller.collect_local_cascade(entity, id, local_results) {
+            Ok(results) => results,
+            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        };
+        let effects = controller.prepare_fk_side_effects(&all_results);
+        let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+        JsonOpResult::Response(
+            self.execute_delete(
+                controller,
+                entity,
+                id,
+                sender,
+                client_id,
+                cascade.as_ref(),
+                ack_receivers,
+            )
+            .await,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_delete<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        sender: Option<&str>,
+        client_id: Option<&str>,
+        cascade: Option<&crate::cluster::store_manager::outbox::CascadeOutboxPayload>,
+        ack_receivers: Vec<tokio::sync::oneshot::Receiver<bool>>,
+    ) -> Vec<u8> {
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
         } else {
@@ -773,26 +901,42 @@ impl DbRequestHandler {
                 .and_then(|data| self.scope_config.resolve_scope(entity, &data))
         };
 
-        match controller.db_delete(entity, id).await {
-            Ok(_) => {
+        match controller.db_delete_prepare(entity, id) {
+            Ok((_db_entity, write)) => {
                 let event = ChangeEvent::delete(entity.to_string(), id.to_string())
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
-                self.publish_change_event(controller, event).await;
+                let outbox = Self::build_outbox(&event);
+                if let Some(cas) = cascade {
+                    controller
+                        .db_commit_with_cascade(write, outbox.clone(), cas)
+                        .await;
+                } else {
+                    controller.db_commit(write, outbox.clone()).await;
+                }
+                self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
+                    .await;
+                if let Some(cas) = cascade {
+                    crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
+                        controller.stores().cluster_outbox().cloned(),
+                        cas.operation_id.clone(),
+                        ack_receivers,
+                        true,
+                    );
+                }
                 let result = json!({
                     "status": "ok",
                     "id": id,
                     "entity": entity,
                     "deleted": true
                 });
-                Some(serde_json::to_vec(&result).unwrap_or_default())
+                serde_json::to_vec(&result).unwrap_or_default()
             }
-            Err(db::DbDataStoreError::NotFound) => Some(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            )),
-            Err(_) => Some(Self::json_error(500, "internal error")),
+            Err(db::DbDataStoreError::NotFound) => {
+                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+            }
+            Err(_) => Self::json_error(500, "internal error"),
         }
     }
 
@@ -968,11 +1112,19 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                        match controller
-                            .db_create(&entity, &id, &data_bytes, now_ms)
-                            .await
-                        {
-                            Ok(db_entity) => {
+                        match controller.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let scope = self.scope_config.resolve_scope(&entity, &data);
+                                let event = ChangeEvent::create(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_client_id(client_id)
+                                .with_scope(scope);
+                                let outbox = Self::build_outbox(&event);
+                                controller.db_commit(write, outbox.clone()).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -983,16 +1135,12 @@ impl DbRequestHandler {
                                         now_ms,
                                     )
                                     .await;
-                                let scope = self.scope_config.resolve_scope(&entity, &data);
-                                let event = ChangeEvent::create(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    data.clone(),
+                                self.publish_change_event_and_deliver(
+                                    controller,
+                                    event,
+                                    &outbox.operation_id,
                                 )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
-                                self.publish_change_event(controller, event).await;
+                                .await;
                                 Self::json_success(&entity, db_entity.id_str(), &data)
                             }
                             Err(db::DbDataStoreError::AlreadyExists) => {
@@ -1069,11 +1217,19 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-                        match controller
-                            .db_update(&entity, &id, &data_bytes, now_ms)
-                            .await
-                        {
-                            Ok(db_entity) => {
+                        match controller.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
+                                let event = ChangeEvent::update(
+                                    entity.clone(),
+                                    db_entity.id_str().to_string(),
+                                    merged_data.clone(),
+                                )
+                                .with_sender(sender)
+                                .with_client_id(client_id)
+                                .with_scope(scope);
+                                let outbox = Self::build_outbox(&event);
+                                controller.db_commit(write, outbox.clone()).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1089,16 +1245,12 @@ impl DbRequestHandler {
                                         &entity, &id, &old_diff, partition, &id, now_ms,
                                     )
                                     .await;
-                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
-                                let event = ChangeEvent::update(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    merged_data.clone(),
+                                self.publish_change_event_and_deliver(
+                                    controller,
+                                    event,
+                                    &outbox.operation_id,
                                 )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
-                                self.publish_change_event(controller, event).await;
+                                .await;
                                 Self::json_success(&entity, db_entity.id_str(), &merged_data)
                             }
                             Err(db::DbDataStoreError::NotFound) => {
@@ -1135,32 +1287,214 @@ impl DbRequestHandler {
                     correlation_data,
                 })
             }
-            _ => None,
+            _ => {
+                tracing::error!(
+                    "complete_pending_unique_check received misrouted continuation (expected *FromDbHandler)"
+                );
+                None
+            }
         }
     }
 
-    async fn publish_change_event<T: ClusterTransport>(
+    pub async fn complete_pending_fk_delete<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        restrict_error: Option<String>,
+        side_effects: Vec<crate::cluster::node_controller::fk::FkReverseLookupResult>,
+        continuation: FkDeleteContinuation,
+    ) -> Option<super::super::db_handler::DbPublishResponse> {
+        if let Some(msg) = restrict_error {
+            let payload = Self::json_error(409, &msg);
+            return match continuation {
+                FkDeleteContinuation::DeleteFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                } => Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                }),
+                FkDeleteContinuation::DeleteFromNodeController { .. } => None,
+            };
+        }
+
+        match continuation {
+            FkDeleteContinuation::DeleteFromDbHandler {
+                entity,
+                id,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+            } => {
+                let effects = controller.prepare_fk_side_effects(&side_effects);
+                let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+                let payload = self
+                    .execute_delete(
+                        controller,
+                        &entity,
+                        &id,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                        cascade.as_ref(),
+                        ack_receivers,
+                    )
+                    .await;
+                Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                })
+            }
+            FkDeleteContinuation::DeleteFromNodeController { .. } => None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub async fn complete_pending_fk_check<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        fk_ok: bool,
+        fk_error: Option<String>,
+        continuation: FkCheckContinuation,
+    ) -> super::FkCheckCompletion {
+        use super::FkCheckCompletion;
+
+        if !fk_ok {
+            let msg = fk_error.unwrap_or_else(|| "FK constraint violation".to_string());
+            let payload = Self::json_error(409, &msg);
+            return match continuation {
+                FkCheckContinuation::CreateFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                }
+                | FkCheckContinuation::UpdateFromDbHandler {
+                    response_topic,
+                    correlation_data,
+                    ..
+                } => FkCheckCompletion::Done(Some(super::DbPublishResponse {
+                    topic: response_topic,
+                    payload,
+                    correlation_data,
+                })),
+                _ => FkCheckCompletion::Done(None),
+            };
+        }
+
+        match continuation {
+            FkCheckContinuation::CreateFromDbHandler {
+                entity,
+                id,
+                data,
+                partition,
+                request_id,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let now_ms = Self::current_time_ms();
+                let result = self
+                    .complete_create(
+                        controller,
+                        &entity,
+                        &id,
+                        &data,
+                        partition,
+                        &request_id,
+                        now_ms,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => {
+                        FkCheckCompletion::Done(Some(super::DbPublishResponse {
+                            topic: response_topic,
+                            payload,
+                            correlation_data,
+                        }))
+                    }
+                    JsonOpResult::PendingUniqueCheck(pending) => {
+                        FkCheckCompletion::NeedUniqueCheck(pending)
+                    }
+                    JsonOpResult::PendingFkCheck(_)
+                    | JsonOpResult::PendingFkDelete(_)
+                    | JsonOpResult::NoResponse => FkCheckCompletion::Done(None),
+                }
+            }
+            FkCheckContinuation::UpdateFromDbHandler {
+                entity,
+                id,
+                merged_data,
+                partition,
+                request_id,
+                new_diff,
+                old_diff,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+                ..
+            } => {
+                let now_ms = Self::current_time_ms();
+                let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
+                let result = self
+                    .complete_update(
+                        controller,
+                        &entity,
+                        &id,
+                        &merged_data,
+                        partition,
+                        &request_id,
+                        now_ms,
+                        has_unique_changes,
+                        &new_diff,
+                        &old_diff,
+                        sender.as_deref(),
+                        client_id.as_deref(),
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => {
+                        FkCheckCompletion::Done(Some(super::DbPublishResponse {
+                            topic: response_topic,
+                            payload,
+                            correlation_data,
+                        }))
+                    }
+                    JsonOpResult::PendingUniqueCheck(pending) => {
+                        FkCheckCompletion::NeedUniqueCheck(pending)
+                    }
+                    JsonOpResult::PendingFkCheck(_)
+                    | JsonOpResult::PendingFkDelete(_)
+                    | JsonOpResult::NoResponse => FkCheckCompletion::Done(None),
+                }
+            }
+            _ => {
+                tracing::error!(
+                    "complete_pending_fk_check received misrouted continuation (expected *FromDbHandler)"
+                );
+                FkCheckCompletion::Done(None)
+            }
+        }
+    }
+
+    fn build_outbox(event: &ChangeEvent) -> crate::cluster::store_manager::outbox::OutboxPayload {
+        crate::cluster::node_controller::db_ops::build_change_event_outbox(event)
+    }
+
+    async fn publish_change_event_and_deliver<T: ClusterTransport>(
         &self,
         controller: &NodeController<T>,
         event: ChangeEvent,
+        operation_id: &str,
     ) {
-        let topic = event.event_topic(0);
-        let user_properties: Vec<(String, String)> = event
-            .client_id
-            .as_ref()
-            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
-            .unwrap_or_default();
-        match serde_json::to_vec(&event) {
-            Ok(payload) => {
-                tracing::debug!(topic, "publishing change event");
-                controller
-                    .transport()
-                    .queue_local_publish_with_properties(topic, payload, 1, user_properties)
-                    .await;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialize change event");
-            }
-        }
+        controller
+            .publish_and_deliver_change_event(event, operation_id)
+            .await;
     }
 }

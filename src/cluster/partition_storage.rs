@@ -36,6 +36,49 @@ impl PartitionStorage {
         Ok(())
     }
 
+    #[allow(clippy::missing_errors_doc)]
+    pub fn write_with_outbox(
+        &self,
+        write: &ReplicationWrite,
+        outbox_key: Vec<u8>,
+        outbox_value: Vec<u8>,
+    ) -> Result<()> {
+        let key = Self::make_key(write.partition, &write.entity, &write.id);
+        let mut batch = self.backend.batch();
+        match write.operation {
+            Operation::Insert | Operation::Update => {
+                batch.insert(key, write.data.clone());
+            }
+            Operation::Delete => {
+                batch.remove(key);
+            }
+        }
+        batch.insert(outbox_key, outbox_value);
+        batch.commit()
+    }
+
+    #[allow(clippy::missing_errors_doc)]
+    pub fn write_with_outbox_entries(
+        &self,
+        write: &ReplicationWrite,
+        outbox_entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<()> {
+        let key = Self::make_key(write.partition, &write.entity, &write.id);
+        let mut batch = self.backend.batch();
+        match write.operation {
+            Operation::Insert | Operation::Update => {
+                batch.insert(key, write.data.clone());
+            }
+            Operation::Delete => {
+                batch.remove(key);
+            }
+        }
+        for (outbox_key, outbox_value) in outbox_entries {
+            batch.insert(outbox_key.clone(), outbox_value.clone());
+        }
+        batch.commit()
+    }
+
     /// Persists multiple replication writes atomically as a batch.
     ///
     /// # Errors
@@ -329,5 +372,35 @@ mod tests {
     fn empty_batch_succeeds() {
         let storage = storage();
         storage.write_batch(&[]).unwrap();
+    }
+
+    #[test]
+    fn write_with_outbox_persists_both_atomically() {
+        let storage = storage();
+
+        let write = ReplicationWrite::new(
+            partition(0),
+            Operation::Insert,
+            Epoch::ZERO,
+            1,
+            "_db_data".to_string(),
+            "users/u1".to_string(),
+            vec![10, 20],
+        );
+
+        let outbox_key = b"_outbox/op-001".to_vec();
+        let outbox_value = b"change-event-payload".to_vec();
+
+        storage
+            .write_with_outbox(&write, outbox_key.clone(), outbox_value.clone())
+            .unwrap();
+
+        let entries = storage.scan_entity("_db_data").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].2, vec![10, 20]);
+
+        let outbox_entries = storage.backend.prefix_scan(b"_outbox/").unwrap();
+        assert_eq!(outbox_entries.len(), 1);
+        assert_eq!(outbox_entries[0].1, b"change-event-payload");
     }
 }

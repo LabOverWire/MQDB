@@ -479,6 +479,69 @@ mqdb list posts
 
 **Expected:** Posts with matching author_id are also deleted
 
+### Cascade Delete with ChangeEvents
+
+**Terminal 1 (subscriber):**
+```bash
+mqdb watch posts
+```
+
+**Terminal 2:**
+```bash
+mqdb create authors --data '{"name": "Alice"}'
+# Note the returned ID (e.g., 1)
+mqdb constraint add posts --fk "author_id:authors:id:cascade"
+mqdb create posts --data '{"title": "Post 1", "author_id": "1"}'
+mqdb create posts --data '{"title": "Post 2", "author_id": "1"}'
+
+mqdb delete authors 1
+```
+
+**Expected in Terminal 1:** Delete events for each cascaded post:
+```
+Delete posts/1
+Delete posts/2
+```
+
+### Set Null
+
+Setup:
+```bash
+mqdb create authors --data '{"name": "Alice"}'
+# Note the returned ID (e.g., 1)
+mqdb constraint add posts --fk "author_id:authors:id:set_null"
+mqdb create posts --data '{"title": "Post 1", "author_id": "1"}'
+mqdb create posts --data '{"title": "Post 2", "author_id": "1"}'
+```
+
+Test:
+```bash
+mqdb delete authors 1
+mqdb list posts
+```
+
+**Expected:** Posts still exist with `author_id: null` and `_version: 2`
+
+### Set Null with ChangeEvents
+
+**Terminal 1 (subscriber):**
+```bash
+mqdb watch posts
+```
+
+**Terminal 2:**
+```bash
+mqdb create authors --data '{"name": "Bob"}'
+# Note the returned ID (e.g., 1)
+mqdb constraint add posts --fk "author_id:authors:id:set_null"
+mqdb create posts --data '{"title": "Post 1", "author_id": "1"}'
+mqdb create posts --data '{"title": "Post 2", "author_id": "1"}'
+
+mqdb delete authors 1
+```
+
+**Expected in Terminal 1:** Update events for each set-null post showing `author_id: null`
+
 ---
 
 ## 6. Reactive Subscriptions
@@ -1785,13 +1848,13 @@ mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
 ```bash
 # 1. Create parent entity on Node 1
 mqdb create authors --data '{"name": "Jane"}' --broker 127.0.0.1:1883
-# Note the ID (e.g., author-123)
+# Note the ID (e.g., 1)
 
-# 2. Add FK constraint
+# 2. Add FK constraint (restrict)
 mqdb constraint add books --fk "author_id:authors:id:restrict" --broker 127.0.0.1:1883
 
 # 3. Create child with valid FK on Node 2
-mqdb create books --data '{"title": "Book 1", "author_id": "author-123"}' \
+mqdb create books --data '{"title": "Book 1", "author_id": "1"}' \
   --broker 127.0.0.1:1884
 
 # 4. Try invalid FK on Node 2 (should fail)
@@ -1800,6 +1863,53 @@ mqdb create books --data '{"title": "Book 2", "author_id": "nonexistent"}' \
 ```
 
 **Expected:** Valid FK succeeds, invalid FK fails with constraint violation.
+
+### Cascade Delete Across Nodes
+
+```bash
+# 1. Create parent on Node 1
+mqdb create authors --data '{"name": "Alice"}' --broker 127.0.0.1:1883
+# Note the ID (e.g., 1)
+
+# 2. Add cascade FK
+mqdb constraint add posts --fk "author_id:authors:id:cascade" --broker 127.0.0.1:1883
+
+# 3. Create children on different nodes (some may land on different partitions)
+mqdb create posts --data '{"title": "Post 1", "author_id": "1"}' --broker 127.0.0.1:1884
+mqdb create posts --data '{"title": "Post 2", "author_id": "1"}' --broker 127.0.0.1:1885
+mqdb create posts --data '{"title": "Post 3", "author_id": "1"}' --broker 127.0.0.1:1883
+
+# 4. Delete parent
+mqdb delete authors 1 --broker 127.0.0.1:1883
+
+# 5. Verify all posts deleted
+mqdb list posts --broker 127.0.0.1:1883
+```
+
+**Expected:** All posts are cascade deleted across all nodes.
+
+### Set Null Across Nodes
+
+```bash
+# 1. Create parent on Node 1
+mqdb create authors --data '{"name": "Bob"}' --broker 127.0.0.1:1883
+# Note the ID (e.g., 1)
+
+# 2. Add set_null FK
+mqdb constraint add posts --fk "author_id:authors:id:set_null" --broker 127.0.0.1:1883
+
+# 3. Create children
+mqdb create posts --data '{"title": "Post 1", "author_id": "1"}' --broker 127.0.0.1:1884
+mqdb create posts --data '{"title": "Post 2", "author_id": "1"}' --broker 127.0.0.1:1885
+
+# 4. Delete parent
+mqdb delete authors 1 --broker 127.0.0.1:1883
+
+# 5. Verify posts still exist with null FK
+mqdb list posts --broker 127.0.0.1:1883
+```
+
+**Expected:** Posts still exist with `author_id: null` and `_version: 2`.
 
 ---
 
@@ -1942,6 +2052,10 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Unique constraint enforced on updates (conflict returns 409)
 - [ ] Unique constraint allows non-unique field updates
 - [ ] Unique constraint old value released on update
+- [ ] Cascade delete removes children
+- [ ] Set-null nullifies FK field (children remain, version bumped)
+- [ ] Cascade delete emits Delete ChangeEvents for children
+- [ ] Set-null emits Update ChangeEvents for modified children
 - [ ] Watch/Subscribe
 - [ ] Consumer groups
 - [ ] Backup/Restore
@@ -1982,6 +2096,10 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Unique constraint enforced across nodes (update conflict returns 409)
 - [ ] Unique constraint old value released on update (value recycling)
 - [ ] Foreign key validated across nodes
+- [ ] Cascade delete removes children across nodes
+- [ ] Set-null nullifies FK field across nodes
+- [ ] Cascade delete emits ChangeEvents for deleted children
+- [ ] Set-null emits Update ChangeEvents for modified children
 
 ### Ownership Enforcement
 - [ ] List filters by authenticated sender

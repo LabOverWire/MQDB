@@ -16,6 +16,7 @@ pub struct TopicProtectionAuthProvider {
     inner: Arc<dyn AuthProvider>,
     admin_users: Arc<HashSet<String>>,
     internal_service_username: Option<String>,
+    all_users_admin: bool,
 }
 
 impl TopicProtectionAuthProvider {
@@ -25,12 +26,19 @@ impl TopicProtectionAuthProvider {
             inner,
             admin_users: Arc::new(admin_users),
             internal_service_username: None,
+            all_users_admin: false,
         }
     }
 
     #[must_use]
     pub fn with_internal_service_username(mut self, username: Option<String>) -> Self {
         self.internal_service_username = username;
+        self
+    }
+
+    #[must_use]
+    pub fn with_all_users_admin(mut self, enabled: bool) -> Self {
+        self.all_users_admin = enabled;
         self
     }
 
@@ -42,7 +50,7 @@ impl TopicProtectionAuthProvider {
     }
 
     fn is_admin_user(&self, user_id: Option<&str>) -> bool {
-        user_id.is_some_and(|u| self.admin_users.contains(u))
+        self.all_users_admin || user_id.is_some_and(|u| self.admin_users.contains(u))
     }
 }
 

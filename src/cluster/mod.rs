@@ -188,6 +188,8 @@ pub use snapshot::{
     SnapshotStatus,
 };
 #[cfg(feature = "agent")]
+pub use store_manager::outbox::{CascadePendingEntry, CascadeRemoteOp, ClusterOutbox};
+#[cfg(feature = "agent")]
 pub use store_manager::{RecoveryStats, StoreApplyError, StoreManager};
 #[cfg(feature = "agent")]
 pub use subscription_cache::{

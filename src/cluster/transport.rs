@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardedPublish,
-    Heartbeat, JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    WildcardBroadcast,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, FkCheckRequest,
+    FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse, ForwardedPublish, Heartbeat,
+    JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
+    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -60,6 +60,10 @@ pub enum ClusterMessage {
     UniqueCommitResponse(UniqueCommitResponse),
     UniqueReleaseRequest(UniqueReleaseRequest),
     UniqueReleaseResponse(UniqueReleaseResponse),
+    FkCheckRequest(FkCheckRequest),
+    FkCheckResponse(FkCheckResponse),
+    FkReverseLookupRequest(FkReverseLookupRequest),
+    FkReverseLookupResponse(FkReverseLookupResponse),
 }
 
 impl ClusterMessage {
@@ -97,6 +101,10 @@ impl ClusterMessage {
             Self::UniqueCommitResponse(_) => 83,
             Self::UniqueReleaseRequest(_) => 84,
             Self::UniqueReleaseResponse(_) => 85,
+            Self::FkCheckRequest(_) => 90,
+            Self::FkCheckResponse(_) => 91,
+            Self::FkReverseLookupRequest(_) => 92,
+            Self::FkReverseLookupResponse(_) => 93,
         }
     }
 
@@ -134,12 +142,64 @@ impl ClusterMessage {
             Self::UniqueCommitResponse(_) => "UniqueCommitResponse",
             Self::UniqueReleaseRequest(_) => "UniqueReleaseRequest",
             Self::UniqueReleaseResponse(_) => "UniqueReleaseResponse",
+            Self::FkCheckRequest(_) => "FkCheckRequest",
+            Self::FkCheckResponse(_) => "FkCheckResponse",
+            Self::FkReverseLookupRequest(_) => "FkReverseLookupRequest",
+            Self::FkReverseLookupResponse(_) => "FkReverseLookupResponse",
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn encode_payload(&self, buf: &mut Vec<u8>) {
+        match self {
+            Self::Heartbeat(hb) => buf.extend_from_slice(&hb.to_be_bytes()),
+            Self::Write(w) | Self::WriteRequest(w) => buf.extend_from_slice(&w.to_bytes()),
+            Self::Ack(ack) => buf.extend_from_slice(&ack.to_be_bytes()),
+            Self::DeathNotice { node_id } | Self::DrainNotification { node_id } => {
+                buf.extend_from_slice(&node_id.get().to_be_bytes());
+            }
+            Self::RequestVote(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::RequestVoteResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::AppendEntries(req) => buf.extend_from_slice(&req.to_bytes()),
+            Self::AppendEntriesResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::CatchupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::CatchupResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::ForwardedPublish(fwd) => buf.extend_from_slice(&fwd.to_bytes()),
+            Self::SnapshotRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::SnapshotChunk(chunk) => buf.extend_from_slice(&chunk.to_bytes()),
+            Self::SnapshotComplete(complete) => buf.extend_from_slice(&complete.to_be_bytes()),
+            Self::QueryRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            Self::QueryResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::BatchReadRequest(req) => buf.extend_from_slice(&req.to_bytes()),
+            Self::BatchReadResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::WildcardBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
+            Self::TopicSubscriptionBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
+            Self::PartitionUpdate(u) => buf.extend_from_slice(&u.to_be_bytes()),
+            Self::JsonDbRequest { partition, request } => {
+                buf.extend_from_slice(&partition.get().to_be_bytes());
+                buf.extend_from_slice(&request.to_bytes());
+            }
+            Self::JsonDbResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::UniqueReserveRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::UniqueReserveResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::UniqueCommitRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::UniqueCommitResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::UniqueReleaseRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::UniqueReleaseResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::FkCheckRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::FkReverseLookupResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
         }
     }
 }
 
 impl ClusterMessage {
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn decode_from_wire(msg_type: u8, data: &[u8]) -> Option<Self> {
         match msg_type {
             0 => {
@@ -235,6 +295,54 @@ impl ClusterMessage {
             85 => {
                 let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReleaseResponse(resp))
+            }
+            90 => {
+                let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;
+                if req.version != FkCheckRequest::VERSION {
+                    tracing::warn!(
+                        expected = FkCheckRequest::VERSION,
+                        got = req.version,
+                        "FK check request version mismatch"
+                    );
+                    return None;
+                }
+                Some(Self::FkCheckRequest(req))
+            }
+            91 => {
+                let (resp, _) = FkCheckResponse::try_from_be_bytes(data).ok()?;
+                if resp.version != FkCheckResponse::VERSION {
+                    tracing::warn!(
+                        expected = FkCheckResponse::VERSION,
+                        got = resp.version,
+                        "FK check response version mismatch"
+                    );
+                    return None;
+                }
+                Some(Self::FkCheckResponse(resp))
+            }
+            92 => {
+                let (req, _) = FkReverseLookupRequest::try_from_be_bytes(data).ok()?;
+                if req.version != FkReverseLookupRequest::VERSION {
+                    tracing::warn!(
+                        expected = FkReverseLookupRequest::VERSION,
+                        got = req.version,
+                        "FK reverse lookup request version mismatch"
+                    );
+                    return None;
+                }
+                Some(Self::FkReverseLookupRequest(req))
+            }
+            93 => {
+                let (resp, _) = FkReverseLookupResponse::try_from_be_bytes(data).ok()?;
+                if resp.version != FkReverseLookupResponse::VERSION {
+                    tracing::warn!(
+                        expected = FkReverseLookupResponse::VERSION,
+                        got = resp.version,
+                        "FK reverse lookup response version mismatch"
+                    );
+                    return None;
+                }
+                Some(Self::FkReverseLookupResponse(resp))
             }
             _ => None,
         }

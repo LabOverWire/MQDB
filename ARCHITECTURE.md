@@ -10,7 +10,7 @@ MQDB is a message-oriented reactive database built in Rust that combines:
 - **Point-to-point delivery** with consumer groups and partition-based routing
 - **Reactive subscriptions** with MQTT-style pub/sub patterns
 - **Schema-less JSON** entities with optional schema validation
-- **ACID transactions** with optimistic locking and outbox pattern
+- **Per-entity atomicity** with optimistic locking and outbox pattern
 - **Pluggable storage** with Fjall (native) and Memory (WASM) backends
 
 ### Core Principles
@@ -18,7 +18,7 @@ MQDB is a message-oriented reactive database built in Rust that combines:
 1. **Message-oriented**: Database operations exposed via MQTT topics, enabling seamless IoT integration
 2. **Reactive-first**: All mutations trigger subscription events with configurable delivery modes
 3. **Embedded efficiency**: Low-latency local access, runs in browsers via WASM
-4. **Data integrity**: ACID guarantees with comprehensive constraint system
+4. **Data integrity**: Per-entity atomicity with comprehensive constraint system
 5. **Reliability**: Outbox pattern ensures atomic event persistence with retry and dead letter queue
 
 ### Design Philosophy
@@ -312,11 +312,11 @@ let schema = Schema::new("users")
   - `RESTRICT`: Prevent deletion if references exist
   - `SET_NULL`: Set FK field to null when referenced entity deleted
 
-**Validation Timing:**
+**Validation Timing (Agent Mode):**
 
-All constraint validation happens **within the transaction**:
+In agent mode, all constraint validation happens within a single batch commit:
 ```
-Start Transaction
+Start BatchWriter
     ↓
 Apply Schema Defaults
     ↓
@@ -330,6 +330,8 @@ Update Indexes
     ↓
 Commit (atomic)
 ```
+
+In cluster mode, constraint enforcement is best-effort with cross-partition coordination. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check (create/update) and scatter-gather reverse lookup (delete). Both have a lock-drop/reacquire gap between check and write — see Section 5.
 
 **Cascade Delete Implementation:**
 
@@ -348,7 +350,7 @@ For each RESTRICT constraint:
 For each SET_NULL constraint:
     Update referencing entities (set author_id=null)
     ↓
-Execute all operations in single batch (atomic)
+Execute all operations in single batch (atomic in agent mode)
     ↓
 Dispatch delete events for all affected entities
 ```
@@ -357,7 +359,8 @@ Dispatch delete events for all affected entities
 - Uses depth-first search with visited tracking
 - Prevents infinite loops on circular references
 - Example: User → Posts → Comments (2 levels deep)
-- All deletions happen in single atomic transaction
+- Agent mode: all deletions happen in a single atomic batch commit
+- Cluster mode: cascade operations are per-entity with cross-partition scatter-gather; not atomic across entities
 
 ---
 
@@ -510,10 +513,16 @@ OutboxConfig {
 ```
 
 **Benefits:**
-- Events never lost (persisted before commit returns)
+- Events never lost for local writes (persisted before commit returns)
 - Automatic retry with backoff
 - Dead letter queue for investigation
 - Survives crashes and restarts
+
+#### Cluster-Mode Outbox (`store_manager/outbox.rs`)
+
+In cluster mode, the `ClusterOutbox` provides the same durability guarantee for change events on local partitions. The outbox entry is written atomically with the data in a single fjall batch via `PartitionStorage::write_with_outbox()`. On startup, `recover_pending_outbox()` scans for undelivered entries and replays them.
+
+Writes forwarded to remote primaries publish change events fire-and-forget on the originating node — the outbox covers local partition writes only (~1/N of writes in an N-node cluster).
 
 ---
 
@@ -663,35 +672,42 @@ Return Vec<Value>
 
 ---
 
-## 5. Transaction Model
+## 5. Consistency Model
 
-### ACID Guarantees
+| Property | Agent Mode | Cluster Mode |
+|----------|-----------|-------------|
+| Write atomicity | Per-entity batch commit (fjall) | Per-entity write lock serialization |
+| Replication | N/A (standalone) | Eventual consistency (async, epoch-based failover) |
+| Local durability | `Immediate` fsync (default) | `PeriodicMs(10)` (default, configurable) |
+| Constraint enforcement | Atomic with data (same batch) | Best-effort (lock-drop gap, TTL self-heal) |
+| Change events | Outbox (atomic with data) | Outbox for local partitions, fire-and-forget for forwarded |
+| Isolation | Optimistic concurrency (`_version` + batch preconditions) | Per-entity write lock |
 
-**Atomicity:**
-- All operations within `BatchWriter` commit atomically
-- Constraint validation + data updates + index updates = single transaction
-- Failure at any point rolls back entire batch
-- Example: Create with 3 indexes either inserts all 4 keys or none
+### Per-Entity Atomicity (Agent Mode)
 
-**Consistency:**
-- Schema validation before any writes
-- Constraint validation within transaction boundary
-- Optimistic locking prevents concurrent modification conflicts
-- Indexes always consistent with data (updated in same transaction)
+In agent mode, each create, update, or delete commits data, indexes, constraint state, and the outbox entry in a single `BatchWriter.commit()` via fjall. This provides per-entity atomicity: a create with 3 indexes either writes all 4 keys or none. There is no multi-entity transaction — each operation is independent.
 
-**Isolation:**
-- Read transactions see snapshot at transaction start (Fjall MVCC)
-- Write transactions serialized (Fjall single-writer)
-- Optimistic locking detects concurrent modifications
-- Level: Serializable (strongest isolation)
+### Cluster Mode
 
-**Durability:**
-- Configurable via `DatabaseConfig`:
-  - `Immediate`: fsync before commit returns (safest)
-  - `Periodic(ms)`: background flush at intervals (balanced)
-  - `None`: no fsync (fastest, testing only)
-- Immediate mode guarantees persistence before acknowledgment
-- Periodic mode has recovery window equal to flush interval
+In cluster mode, each data write is persisted to fjall via `PartitionStorage` before updating in-memory stores. Writes are serialized per-entity via the `NodeController` write lock. Async replication propagates writes to replica nodes with sequence numbers, gap detection, and epoch-based failover.
+
+Change events are persisted atomically with data via a transactional outbox (`ClusterOutbox`). On the happy path, the event is published immediately and the outbox entry removed. On crash, startup recovery scans pending outbox entries and replays them. The outbox covers writes to local partitions (~1/3 of writes in a 3-node cluster). Writes forwarded to remote primaries publish change events fire-and-forget on the originating node.
+
+### Constraint Enforcement
+
+- Schema validation runs before writes
+- Unique constraints use a two-phase reservation protocol (reserve with TTL, commit or release)
+- Foreign key constraints use a one-phase existence check (create/update) and scatter-gather reverse lookup (delete)
+- Optimistic locking via `_version` field detects concurrent modifications
+
+### Durability
+
+Configurable via `stores_durability`:
+- `Immediate`: fsync before commit returns (agent mode default)
+- `Periodic(ms)`: background flush at intervals (cluster mode default: 10ms)
+- `None`: no explicit flush (testing only)
+
+The Raft log always uses `Immediate` durability. Agent mode defaults to `Immediate` for maximum safety. Cluster mode defaults to `PeriodicMs(10)` — the outbox pattern guarantees consistency between data and change events regardless of fsync timing, since both share the same batch. The 10ms window trades a small durability risk on hard crash (power loss) for significantly higher write throughput. Note that replication is asynchronous: a primary failure can lose writes that were acknowledged but not yet replicated to the replica, regardless of the local fsync mode.
 
 ### Optimistic Locking
 
@@ -1475,7 +1491,7 @@ DatabaseConfig::new("db")
 - `integration_test.rs`: CRUD, subscriptions, indexes, relationships, TTL
 - `constraint_test.rs`: All constraint types and combinations
 - `crash_recovery_test.rs`: Restart scenarios, data integrity
-- `transaction_test.rs`: ACID guarantees, conflicts
+- `atomicity_test.rs`: Per-entity atomicity, concurrent writes
 - `concurrency_test.rs`: Parallel writes, race conditions
 - `durability_test.rs`: Fsync behavior, crash simulation
 - `point_to_point_test.rs`: Shared subscriptions, consumer groups, heartbeat
@@ -1856,7 +1872,7 @@ else:
 1. **Native MQTT Integration:** Embedded broker with topic-based database API
 2. **Distributed Clustering:** 256-partition sharding with Raft consensus and automatic rebalancing
 3. **Point-to-Point Delivery:** Consumer groups with LoadBalanced and Ordered modes
-4. **ACID Transactions:** Full transactional guarantees with outbox pattern
+4. **Per-Entity Atomicity:** Data, indexes, and outbox committed in single batch
 5. **Reactive Subscriptions:** MQTT-style patterns for real-time change notifications
 6. **Platform Flexibility:** Runs native (Fjall) or in browsers (WASM/Memory)
 7. **Rust Safety:** Memory-safe, no data races, strong type system
@@ -1866,7 +1882,7 @@ else:
 > **Correct, then fast. Simple, then featureful.**
 
 MQDB prioritizes:
-- Correctness (ACID, constraints, checksums)
+- Correctness (per-entity atomicity, constraints, checksums)
 - Simplicity (clear components, explicit errors)
 - Then performance (good enough for embedded scale)
 - Then features (incremental additions)

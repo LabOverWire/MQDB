@@ -3,6 +3,7 @@
 
 mod broadcast;
 mod db_messages;
+mod fk;
 mod heartbeat;
 mod publish;
 mod query;
@@ -15,6 +16,7 @@ mod tests;
 
 pub use broadcast::{TopicSubscriptionBroadcast, WildcardBroadcast, WildcardOp};
 pub use db_messages::{JsonDbRequest, JsonDbResponse};
+pub use fk::{FkCheckRequest, FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse};
 pub use heartbeat::Heartbeat;
 pub use publish::{ForwardTarget, ForwardedPublish};
 pub use query::{BatchReadRequest, BatchReadResponse, QueryRequest, QueryResponse};

@@ -4,7 +4,7 @@ A high-performance reactive database with native MQTT integration, point-to-poin
 
 ## Features
 
-ACID-compliant database with atomic multi-key transactions and correlation ID dedup.
+Per-entity atomicity with constraint enforcement and correlation ID dedup.
 
 - Schemas with type validation, required fields, and default values
 - Unique constraints (single and composite), not-null constraints
@@ -237,7 +237,7 @@ let posts = db.list("posts".into(), vec![], vec![], None, vec!["author".into()])
 
 ## Constraints & Data Integrity
 
-MQDB provides a comprehensive constraint system for maintaining data integrity with ACID guarantees.
+MQDB provides a comprehensive constraint system for maintaining data integrity.
 
 ### Schemas with Type Validation
 
@@ -575,7 +575,8 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | Authentication | Full | Password, SCRAM, JWT, federated JWT, rate limiting |
 | Backups | Partial | Per-node only (no cluster-wide snapshot) |
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
-| FK / NOT NULL constraints | — | Not yet available in cluster mode |
+| Foreign key constraints | Full | Distributed existence checks, cascade/set-null with ack-wait, in-memory reverse index |
+| NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
 | Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
 ## CLI Tool

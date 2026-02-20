@@ -244,11 +244,25 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     let is_wildcard = topic.contains('+') || topic.contains('#');
                     let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
 
-                    if !is_wildcard && !is_response_topic {
-                        trace!(topic, "broker handles local retained delivery natively");
-                        if let Some(rx) = ctrl.start_async_retained_query(topic).await {
-                            debug!(topic, "started remote retained query");
-                            pending_queries.push((topic.to_string(), rx));
+                    if !is_response_topic {
+                        if is_wildcard {
+                            let receivers = ctrl.start_async_retained_wildcard_query(topic).await;
+                            if !receivers.is_empty() {
+                                debug!(
+                                    topic,
+                                    count = receivers.len(),
+                                    "started remote retained wildcard queries"
+                                );
+                                for rx in receivers {
+                                    pending_queries.push((topic.to_string(), rx));
+                                }
+                            }
+                        } else {
+                            trace!(topic, "broker handles local retained delivery natively");
+                            if let Some(rx) = ctrl.start_async_retained_query(topic).await {
+                                debug!(topic, "started remote retained query");
+                                pending_queries.push((topic.to_string(), rx));
+                            }
                         }
                     }
 
@@ -269,10 +283,16 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
 
             if !retained_to_deliver.is_empty() {
                 let ctrl = self.controller.read().await;
+                let remote_only: Vec<_> = retained_to_deliver
+                    .into_iter()
+                    .filter(|msg| ctrl.query_local_retained_exact(msg.topic_str()).is_none())
+                    .collect();
                 let transport = ctrl.transport().clone();
                 drop(ctrl);
 
-                deliver_retained_messages(&transport, &synced_topics, retained_to_deliver).await;
+                if !remote_only.is_empty() {
+                    deliver_retained_messages(&transport, &synced_topics, remote_only).await;
+                }
             }
         })
     }

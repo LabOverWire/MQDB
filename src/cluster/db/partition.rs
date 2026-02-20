@@ -47,6 +47,37 @@ pub fn schema_partition(entity: &str) -> PartitionId {
     PartitionId::new((hash % u32::from(NUM_PARTITIONS)) as u16).unwrap()
 }
 
+#[must_use]
+pub fn generate_id_for_partition(
+    node_id: u16,
+    entity: &str,
+    partition: PartitionId,
+    data: &[u8],
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    entity.hash(&mut hasher);
+    data.hash(&mut hasher);
+    node_id.hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+        .hash(&mut hasher);
+
+    let base_id = hasher.finish();
+
+    for suffix in 0..1000_u16 {
+        let id = format!("{base_id:016x}-{suffix:04x}");
+        if data_partition(entity, &id) == partition {
+            return id;
+        }
+    }
+
+    format!("{base_id:016x}-p{}", partition.get())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

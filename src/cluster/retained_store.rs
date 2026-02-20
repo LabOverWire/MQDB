@@ -337,16 +337,23 @@ impl RetainedStore {
     #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
-        _filter: Option<&str>,
+        filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<RetainedMessage>, bool, Option<Vec<u8>>) {
         let messages = self.messages.read().unwrap();
         let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+        let exact_topic = filter.and_then(|f| f.strip_prefix("topic="));
+        let pattern = filter.and_then(|f| f.strip_prefix("pattern="));
 
         let mut results: Vec<_> = messages
             .iter()
             .filter(|(key, _)| start_key.is_none_or(|sk| key.as_str() > sk))
+            .filter(|(key, _)| match (exact_topic, pattern) {
+                (Some(t), _) => key.as_str() == t,
+                (_, Some(p)) => topic_matches_pattern(key, p),
+                _ => true,
+            })
             .take(limit as usize + 1)
             .collect();
 
@@ -529,5 +536,38 @@ mod tests {
 
         let matches = store.query_matching_pattern("actuators/+");
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn query_filters_by_exact_topic() {
+        let store = RetainedStore::new(node(1));
+        store.set("sensors/temp", 1, b"25.0", 1000);
+        store.set("sensors/humidity", 1, b"65%", 1000);
+        store.set("actuators/fan", 0, b"on", 1000);
+
+        let (results, _, _) = store.query(Some("topic=sensors/temp"), 100, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].topic_str(), "sensors/temp");
+
+        let (results, _, _) = store.query(Some("topic=nonexistent"), 100, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn query_filters_by_wildcard_pattern() {
+        let store = RetainedStore::new(node(1));
+        store.set("sensors/building1/temp", 1, b"25.0", 1000);
+        store.set("sensors/building2/temp", 1, b"26.0", 1000);
+        store.set("sensors/building1/humidity", 1, b"65%", 1000);
+        store.set("actuators/fan", 0, b"on", 1000);
+
+        let (results, _, _) = store.query(Some("pattern=sensors/+/temp"), 100, None);
+        assert_eq!(results.len(), 2);
+
+        let (results, _, _) = store.query(Some("pattern=sensors/#"), 100, None);
+        assert_eq!(results.len(), 3);
+
+        let (results, _, _) = store.query(None, 100, None);
+        assert_eq!(results.len(), 4);
     }
 }

@@ -142,8 +142,10 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
         use super::super::db_handler::DbPublishResult;
+        use super::super::node_controller::fk::await_fk_checks;
         use super::super::node_controller::unique::await_unique_reserves;
 
         debug!(topic = %event.topic, "handling $DB/ request");
@@ -195,6 +197,93 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                         &mut ctrl,
                         local_reserved,
                         remote_results,
+                        continuation,
+                    )
+                    .await
+                {
+                    ctrl.transport()
+                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                        .await;
+                }
+            }
+            DbPublishResult::PendingFkCheck(pending) => {
+                use super::super::db_handler::FkCheckCompletion;
+
+                let pending_checks = pending.pending_checks;
+                let continuation = pending.continuation;
+                drop(ctrl);
+                let fk_result = await_fk_checks(pending_checks).await;
+                let mut ctrl = self.controller.write().await;
+                let (fk_ok, fk_error) = match fk_result {
+                    Ok(()) => (true, None),
+                    Err(msg) => (false, Some(msg)),
+                };
+                match self
+                    .db_handler
+                    .complete_pending_fk_check(&mut ctrl, fk_ok, fk_error, continuation)
+                    .await
+                {
+                    FkCheckCompletion::Done(Some(response)) => {
+                        ctrl.transport()
+                            .queue_local_publish(
+                                response.topic,
+                                response.payload,
+                                qos_to_u8(event.qos),
+                            )
+                            .await;
+                    }
+                    FkCheckCompletion::NeedUniqueCheck(pending) => {
+                        let local_reserved = pending.phase1.local_reserved;
+                        let pending_remote = pending.phase1.pending_remote;
+                        let continuation = pending.continuation;
+                        drop(ctrl);
+                        let remote_results = await_unique_reserves(pending_remote).await;
+                        let mut ctrl = self.controller.write().await;
+                        if let Some(response) = self
+                            .db_handler
+                            .complete_pending_unique_check(
+                                &mut ctrl,
+                                local_reserved,
+                                remote_results,
+                                continuation,
+                            )
+                            .await
+                        {
+                            ctrl.transport()
+                                .queue_local_publish(
+                                    response.topic,
+                                    response.payload,
+                                    qos_to_u8(event.qos),
+                                )
+                                .await;
+                        }
+                    }
+                    FkCheckCompletion::Done(None) => {}
+                }
+            }
+            DbPublishResult::PendingFkDelete(pending) => {
+                let local_results = pending.local_results;
+                let pending_lookups = pending.pending_lookups;
+                let continuation = pending.continuation;
+                let (del_entity, del_id) = continuation.entity_id();
+                let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
+                drop(ctrl);
+                let (restrict_error, side_effects) =
+                    super::super::node_controller::fk::collect_recursive_cascade(
+                        &self.controller,
+                        &del_entity,
+                        &del_id,
+                        local_results,
+                        pending_lookups,
+                    )
+                    .await;
+                let mut ctrl = self.controller.write().await;
+                if let Some(response) = self
+                    .db_handler
+                    .complete_pending_fk_delete(
+                        &mut ctrl,
+                        restrict_error,
+                        side_effects,
                         continuation,
                     )
                     .await
