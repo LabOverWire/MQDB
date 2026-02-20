@@ -299,7 +299,7 @@ pub struct ChangeEvent {
     pub entity: String,          // "users", "orders", etc.
     pub id: String,              // Record identifier
     pub operation: Operation,    // Create, Update, or Delete
-    pub data: Option<Value>,     // Full record data (None for deletes)
+    pub data: Option<Value>,     // Full record data, including for deletes
     pub sender: Option<String>,  // Who initiated the write
     pub client_id: Option<String>,
     pub scope: Option<(String, String)>,
