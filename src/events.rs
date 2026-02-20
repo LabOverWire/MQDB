@@ -85,8 +85,8 @@ impl ChangeEvent {
     }
 
     #[must_use]
-    pub fn delete(entity: String, id: String) -> Self {
-        Self::new(entity, id, Operation::Delete, None)
+    pub fn delete(entity: String, id: String, data: serde_json::Value) -> Self {
+        Self::new(entity, id, Operation::Delete, Some(data))
     }
 
     #[must_use]
@@ -167,7 +167,7 @@ mod tests {
     fn test_partition_same_entity_same_id() {
         let e1 = ChangeEvent::create("orders".into(), "42".into(), serde_json::json!({"a": 1}));
         let e2 = ChangeEvent::update("orders".into(), "42".into(), serde_json::json!({"b": 2}));
-        let e3 = ChangeEvent::delete("orders".into(), "42".into());
+        let e3 = ChangeEvent::delete("orders".into(), "42".into(), serde_json::json!({"a": 1}));
 
         assert_eq!(e1.partition(8), e2.partition(8));
         assert_eq!(e2.partition(8), e3.partition(8));

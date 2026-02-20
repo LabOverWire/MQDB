@@ -781,8 +781,9 @@ impl<T: ClusterTransport> NodeController<T> {
         ack_receivers: Vec<oneshot::Receiver<bool>>,
     ) -> Vec<u8> {
         match self.db_delete_prepare(entity, id) {
-            Ok((_db_entity, write)) => {
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string());
+            Ok((db_entity, write)) => {
+                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data);
                 let outbox = build_change_event_outbox(&event);
                 if let Some(cas) = cascade {
                     self.db_commit_with_cascade(write, outbox.clone(), cas)
@@ -897,8 +898,10 @@ impl<T: ClusterTransport> NodeController<T> {
         for effect in effects {
             match effect {
                 CascadeSideEffect::LocalDelete { entity, id } => {
-                    if let Ok((_, write)) = self.db_delete_prepare(entity, id) {
-                        let event = ChangeEvent::delete(entity.clone(), id.clone());
+                    if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
+                        let data: Value =
+                            serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                        let event = ChangeEvent::delete(entity.clone(), id.clone(), data);
                         let outbox = build_change_event_outbox(&event);
                         self.db_commit(write, outbox.clone()).await;
                         self.publish_and_deliver_change_event(event, &outbox.operation_id)
@@ -961,8 +964,10 @@ impl<T: ClusterTransport> NodeController<T> {
                     id,
                 } => {
                     if self.is_primary_for_partition(*partition) {
-                        if let Ok((_, write)) = self.db_delete_prepare(entity, id) {
-                            let event = ChangeEvent::delete(entity.clone(), id.clone());
+                        if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
+                            let data: Value =
+                                serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                            let event = ChangeEvent::delete(entity.clone(), id.clone(), data);
                             let outbox = build_change_event_outbox(&event);
                             self.db_commit(write, outbox.clone()).await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)

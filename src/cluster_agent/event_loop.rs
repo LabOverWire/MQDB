@@ -801,8 +801,10 @@ async fn execute_local_cascade_work(
         for op in &item.ops {
             match op {
                 crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
-                    if let Ok((_, write)) = ctrl.db_delete_prepare(entity, id) {
-                        let event = crate::ChangeEvent::delete(entity.clone(), id.clone());
+                    if let Ok((db_entity, write)) = ctrl.db_delete_prepare(entity, id) {
+                        let data: serde_json::Value = serde_json::from_slice(&db_entity.data)
+                            .unwrap_or(serde_json::Value::Null);
+                        let event = crate::ChangeEvent::delete(entity.clone(), id.clone(), data);
                         let outbox =
                             crate::cluster::node_controller::db_ops::build_change_event_outbox(
                                 &event,
