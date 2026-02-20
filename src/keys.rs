@@ -99,6 +99,28 @@ pub fn encode_meta_key(key_name: &str) -> Vec<u8> {
     key
 }
 
+#[must_use]
+fn encode_i64_sortable(val: i64) -> [u8; 8] {
+    let bits = val.to_be_bytes();
+    let mut out = bits;
+    out[0] ^= 0x80;
+    out
+}
+
+#[must_use]
+fn encode_f64_sortable(val: f64) -> [u8; 8] {
+    let bits = val.to_bits().to_be_bytes();
+    let mut out = bits;
+    if val.is_sign_negative() {
+        for b in &mut out {
+            *b ^= 0xFF;
+        }
+    } else {
+        out[0] ^= 0x80;
+    }
+    out
+}
+
 /// # Errors
 /// Returns an error if the value cannot be indexed.
 pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
@@ -113,9 +135,9 @@ pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
         }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(format!("{i:020}").into_bytes())
+                Ok(encode_i64_sortable(i).to_vec())
             } else if let Some(f) = n.as_f64() {
-                Ok(format!("{f:020.6}").into_bytes())
+                Ok(encode_f64_sortable(f).to_vec())
             } else {
                 Ok(n.to_string().into_bytes())
             }
@@ -159,12 +181,55 @@ mod tests {
 
     #[test]
     fn test_encode_value_for_index() {
-        let val = serde_json::json!(42);
-        let encoded = encode_value_for_index(&val).unwrap();
-        assert_eq!(encoded, b"00000000000000000042");
-
         let val = serde_json::json!("hello");
         let encoded = encode_value_for_index(&val).unwrap();
         assert_eq!(encoded, b"hello");
+    }
+
+    #[test]
+    fn i64_encoding_preserves_sort_order() {
+        let values: &[i64] = &[i64::MIN, -1000, -1, 0, 1, 1000, i64::MAX];
+        let encoded: Vec<[u8; 8]> = values.iter().map(|v| encode_i64_sortable(*v)).collect();
+        for pair in encoded.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{:?} should sort before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn f64_encoding_preserves_sort_order() {
+        let values: &[f64] = &[
+            f64::NEG_INFINITY,
+            -1e10,
+            -1.0,
+            -0.001,
+            0.0,
+            0.001,
+            1.0,
+            1e10,
+            f64::INFINITY,
+        ];
+        let encoded: Vec<[u8; 8]> = values.iter().map(|v| encode_f64_sortable(*v)).collect();
+        for pair in encoded.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{:?} should sort before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn negative_integers_sort_before_positive_in_index() {
+        let neg = encode_value_for_index(&serde_json::json!(-5)).unwrap();
+        let zero = encode_value_for_index(&serde_json::json!(0)).unwrap();
+        let pos = encode_value_for_index(&serde_json::json!(5)).unwrap();
+        assert!(neg < zero);
+        assert!(zero < pos);
     }
 }

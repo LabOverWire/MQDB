@@ -18,8 +18,8 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | Ch | Title | Status | Draft Date | Revision Date | Word Count |
 |----|-------|--------|------------|---------------|------------|
 | 1 | Why Unify Messaging and Storage? | First draft | 2026-02-16 | | 3,522 |
-| 2 | The Storage Foundation | First draft | 2026-02-18 | | 5,393 |
-| 3 | MQTT 5.0 as a Database Protocol | Not started | | | |
+| 2 | The Storage Foundation | First draft | 2026-02-18 | 2026-02-19 | 5,663 |
+| 3 | MQTT 5.0 as a Database Protocol | First draft | 2026-02-19 | | 5,379 |
 | 4 | Partitioning | Not started | | | |
 | 5 | Replication | Not started | | | |
 | 6 | Consensus with Raft | Not started | | | |
@@ -138,6 +138,48 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 - Forward references to Chapters 5, 8, 9, and 15 are planted for continuity
 - The "What Went Wrong" on outbox durability coupling is a real lesson from development — the coupling between batch atomicity and durability mode is non-obvious
 
+### Session 6 — 2026-02-19
+
+**Work done:**
+- Wrote Chapter 3 first draft (`ch03-mqtt-protocol.md`, 5,379 words)
+- Sections: MQTT 5.0 Essentials, Self-Subscribing Broker, Request/Response, Topic API, User Properties, QoS as Durability Knob, What Went Wrong
+- Read all 8 source files before writing: `agent/broker.rs`, `agent/tasks.rs`, `agent/handlers.rs`, `agent/mod.rs`, `broker_defaults.rs`, `protocol/mod.rs`, `topic_rules.rs`, `topic_protection.rs`, `bin/mqdb/common.rs`, `events.rs`, `auth_config.rs`
+- Verified broker config constants against `broker_defaults.rs` (3 values)
+- Verified topic protection patterns against `topic_rules.rs` (10 rules, 3 tiers)
+- Verified user property names against `handlers.rs` (x-mqtt-sender, x-mqtt-client-id) and `tasks.rs` (x-origin-client-id)
+- Verified AdminOperation count: 25 total variants, 21 under `$DB/_admin/`, 3 under `$DB/_sub/`, 1 at `$DB/_health`
+- Verified service account naming pattern: `mqdb-internal-{uuid}` from `auth_config.rs`
+- Verified internal client names: `mqdb-internal-handler`, `mqdb-response-publisher`, `mqdb-event-publisher`
+- Cross-referenced Ch1's `$DB/` topic table (Section 1.3) — consistent
+- Cross-referenced Ch2's `Request` enum and response format — consistent
+
+**Key decisions:**
+- Three "What Went Wrong" anecdotes: feedback loop, backpressure discovery, service account bootstrapping
+- Included the REST vs topic-based API design comparison (method verbs vs topic keywords) to explain disambiguation
+- Included the alternative design discussion (separate `$DB_REQ/` and `$DB_EVT/` prefixes) to explain why the feedback loop was accepted
+- Did NOT include full admin operation table — 21 operations are too many to enumerate individually, grouped by subnamespace instead
+- Kept OpenTelemetry section brief — it is feature-gated and not core to the protocol mapping story
+
+**Notes on Chapter 3:**
+- 5,379 words, within range of the 5,000-6,000 target
+- Chapter completes Part I — all three foundation chapters done
+- Forward references to Chapters 4, 12, and 15 planted for continuity
+- The QoS backpressure discovery is one of the strongest "What Went Wrong" anecdotes in the book — QoS 0 being slower than QoS 1 is genuinely counterintuitive
+- The service account bootstrapping problem connects to the anonymous mode bug documented in CLAUDE.md's known issues
+
+### Session 7 — 2026-02-19
+
+**Work done:**
+- Revised Chapter 2 encoding section: rewrote "The Numeric Encoding Trick" (lines 46-76) to match the new binary sign-bit-flipping encoding in `src/keys.rs`
+- Old approach: zero-padded text encoding (`format!("{i:020}")`) — didn't handle negative numbers
+- New approach: `encode_i64_sortable` (big-endian bytes, XOR sign bit 0x80) and `encode_f64_sortable` (IEEE 754 bits, negative floats XOR all 0xFF, positive floats XOR sign bit 0x80)
+- Fixed prefix count: "Nine prefixes" → "Eight prefixes" — the `fkref/` prefix from Session 5's expansion never existed in the codebase
+- Updated word count: 5,393 → 5,488
+
+**Notes:**
+- The binary encoding produces 8 fixed bytes per number vs variable-length text — more compact and `memcmp`-friendly
+- All sort-order tests pass for the full range from `i64::MIN`/`f64::NEG_INFINITY` through zero to `i64::MAX`/`f64::INFINITY`
+
 ---
 
 ## Writing Process Notes
@@ -190,6 +232,9 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `fkref/`, `_dead_letter/`, `_crypto/` are real parts of the keyspace
 - Run a systematic verification pass after writing: list every factual claim (constant values, defaults, struct fields) and check each against source. This caught zero errors in Ch2 but the discipline prevents drift as the code evolves
 - The "What Went Wrong" sections are most powerful when they describe a real bug from development — the outbox durability coupling bug came from the cluster mode transition, not from agent mode itself
+- When writing about architecture with multiple interacting components (internal clients, auth providers, topic protection), the "why not the simpler approach?" question generates the most insight — explaining why separate topic prefixes were rejected is more instructive than just describing the chosen design
+- Count enum variants and match arms carefully — discrepancies between the code and the prose are easy to introduce when summarizing (AdminOperation has 25 variants total, not "22" as the plan estimated)
+- Always verify prefix/namespace counts against actual code constants, not session notes — Session 5 expanded to "9 prefixes" including `fkref/`, but `fkref/` was never implemented. The code has 8 prefixes.
 
 ### Memories for Future Sessions
 

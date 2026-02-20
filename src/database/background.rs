@@ -212,7 +212,11 @@ async fn ttl_cleanup_task(
             let index_mgr = index_manager.read().await;
             index_mgr.remove_indexes(&mut batch, entity);
 
-            events.push(ChangeEvent::delete(entity.name.clone(), entity.id.clone()));
+            events.push(ChangeEvent::delete(
+                entity.name.clone(),
+                entity.id.clone(),
+                entity.data.clone(),
+            ));
         }
 
         outbox.enqueue_events(&mut batch, &operation_id, &events);

@@ -274,7 +274,7 @@ impl WasmDatabase {
             let _ = Box::pin(self.delete(cascade_entity, cascade_id)).await;
         }
 
-        let event = ChangeEvent::delete(entity, id);
+        let event = ChangeEvent::delete(entity, id, existing);
         self.dispatch_event(&event);
 
         Ok(())
@@ -446,7 +446,7 @@ impl WasmDatabase {
             let _ = self.delete_sync(cascade_entity, cascade_id);
         }
 
-        let event = ChangeEvent::delete(entity, id);
+        let event = ChangeEvent::delete(entity, id, existing);
         self.dispatch_event(&event);
 
         Ok(())

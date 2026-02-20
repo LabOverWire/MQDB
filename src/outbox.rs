@@ -337,9 +337,9 @@ mod tests {
         let outbox = Outbox::new(Arc::clone(&storage));
 
         let events = vec![
-            ChangeEvent::delete("users".to_string(), "1".to_string()),
-            ChangeEvent::delete("posts".to_string(), "10".to_string()),
-            ChangeEvent::delete("posts".to_string(), "11".to_string()),
+            ChangeEvent::delete("users".to_string(), "1".to_string(), serde_json::json!({})),
+            ChangeEvent::delete("posts".to_string(), "10".to_string(), serde_json::json!({})),
+            ChangeEvent::delete("posts".to_string(), "11".to_string(), serde_json::json!({})),
         ];
 
         let mut batch = storage.batch();

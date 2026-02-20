@@ -305,15 +305,15 @@ impl Database {
 
         let primary_scope = scope_config.resolve_scope(&entity_name, &existing_entity.data);
         let mut events = vec![
-            ChangeEvent::delete(entity_name, id)
+            ChangeEvent::delete(entity_name, id, existing_entity.data)
                 .with_sender(sender.map(String::from))
                 .with_client_id(client_id.map(String::from))
                 .with_scope(primary_scope),
         ];
-        for (cascade_entity, cascade_id, cascade_data) in &deleted_entities {
-            let cascade_scope = scope_config.resolve_scope(cascade_entity, cascade_data);
+        for (cascade_entity, cascade_id, cascade_data) in deleted_entities {
+            let cascade_scope = scope_config.resolve_scope(&cascade_entity, &cascade_data);
             events.push(
-                ChangeEvent::delete(cascade_entity.clone(), cascade_id.clone())
+                ChangeEvent::delete(cascade_entity, cascade_id, cascade_data)
                     .with_sender(sender.map(String::from))
                     .with_client_id(client_id.map(String::from))
                     .with_scope(cascade_scope),

@@ -902,8 +902,9 @@ impl DbRequestHandler {
         };
 
         match controller.db_delete_prepare(entity, id) {
-            Ok((_db_entity, write)) => {
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string())
+            Ok((db_entity, write)) => {
+                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data)
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
