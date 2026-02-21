@@ -135,6 +135,8 @@ pub(crate) enum Commands {
         limit: Option<usize>,
         #[arg(short, long, help = "Number of records to skip")]
         offset: Option<usize>,
+        #[arg(long, help = "Comma-separated list of fields to return")]
+        projection: Option<String>,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "json")]

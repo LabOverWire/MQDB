@@ -28,6 +28,7 @@ impl ClusterOutbox {
         Self { backend }
     }
 
+    #[must_use]
     pub fn build_entry(
         operation_id: &str,
         topic: &str,
@@ -107,6 +108,7 @@ pub struct CascadePendingEntry {
 }
 
 impl ClusterOutbox {
+    #[must_use]
     pub fn build_cascade_entry(operation_id: &str, ops: &[CascadeRemoteOp]) -> (Vec<u8>, Vec<u8>) {
         let key = format!("_cascade/{operation_id}");
         let stored = StoredCascadeEntry {

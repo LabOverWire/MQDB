@@ -2899,3 +2899,152 @@ mqdb dev kill
 - [ ] Empty range returns empty from all nodes
 - [ ] Updated records reflected in subsequent range queries
 - [ ] Deleted records excluded from subsequent range queries
+
+## 24. Field Projection (Partial Responses)
+
+Field projection allows clients to request only specific fields in read and list responses, reducing payload size.
+
+### Agent Mode
+
+#### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-projection --bind 127.0.0.1:1883 --anonymous
+```
+
+Create test data:
+
+```bash
+mqdb create users -d '{"name": "Alice", "email": "alice@example.com", "age": 30, "city": "NYC"}'
+mqdb create users -d '{"name": "Bob", "email": "bob@example.com", "age": 25, "city": "LA"}'
+mqdb create users -d '{"name": "Charlie", "email": "charlie@example.com", "age": 35, "city": "NYC"}'
+```
+
+#### Test 1: Read with Projection
+
+```bash
+ID=$(mqdb list users | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read users "$ID" --projection name,email
+```
+
+Expected: response contains only `id`, `name`, and `email` fields. No `age` or `city`.
+
+#### Test 2: Read Projection Always Includes ID
+
+```bash
+mqdb read users "$ID" --projection name
+```
+
+Expected: response contains `id` and `name` only. `id` is always included even when not in projection list.
+
+#### Test 3: List with Projection
+
+```bash
+mqdb list users --projection name,city
+```
+
+Expected: each result contains only `id`, `name`, and `city`. No `email` or `age`.
+
+#### Test 4: Projection with Filters Combined
+
+```bash
+mqdb list users --filter 'city=NYC' --projection name
+```
+
+Expected: returns only NYC users, each with only `id` and `name` fields.
+
+#### Test 5: Projection with Nonexistent Field (No Schema)
+
+```bash
+mqdb read users "$ID" --projection name,nonexistent
+```
+
+Expected: returns `id` and `name`. The `nonexistent` field is silently omitted.
+
+#### Test 6: Projection with Schema Validation
+
+```bash
+cat > /tmp/users_schema.json << 'EOF'
+{"entity": "users_strict", "fields": {"name": {"type": "string"}, "email": {"type": "string"}}}
+EOF
+mqdb schema set users_strict -f /tmp/users_schema.json
+mqdb create users_strict -d '{"name": "Dave", "email": "dave@example.com"}'
+ID2=$(mqdb list users_strict | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read users_strict "$ID2" --projection nonexistent
+```
+
+Expected: error response indicating the projection field does not exist in the schema.
+
+#### Cleanup
+
+```bash
+pkill -f "mqdb agent"
+rm -rf /tmp/mqdb-projection
+```
+
+### Cluster Mode
+
+#### Setup
+
+```bash
+mqdb dev start-cluster --nodes 3 --clean
+sleep 5
+```
+
+Create test data:
+
+```bash
+mqdb create items -d '{"name": "widget", "price": 10, "category": "A"}' --broker 127.0.0.1:1883
+mqdb create items -d '{"name": "gadget", "price": 20, "category": "B"}' --broker 127.0.0.1:1883
+mqdb create items -d '{"name": "doohickey", "price": 30, "category": "A"}' --broker 127.0.0.1:1883
+```
+
+#### Test 7: Read with Projection from Any Node
+
+```bash
+ID=$(mqdb list items --broker 127.0.0.1:1883 | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read items "$ID" --projection name --broker 127.0.0.1:1883
+mqdb read items "$ID" --projection name --broker 127.0.0.1:1884
+mqdb read items "$ID" --projection name --broker 127.0.0.1:1885
+```
+
+Expected: all nodes return only `id` and `name`, including when the request is forwarded to the primary.
+
+#### Test 8: List with Projection Across Nodes
+
+```bash
+mqdb list items --projection name,price --broker 127.0.0.1:1883
+mqdb list items --projection name,price --broker 127.0.0.1:1884
+mqdb list items --projection name,price --broker 127.0.0.1:1885
+```
+
+Expected: all nodes return all 3 items with only `id`, `name`, and `price`. No `category` field.
+
+#### Test 9: List with Projection and Filters Across Nodes
+
+```bash
+mqdb list items --filter 'category=A' --projection name --broker 127.0.0.1:1884
+```
+
+Expected: returns 2 items (widget, doohickey) with only `id` and `name`.
+
+#### Cleanup
+
+```bash
+mqdb dev kill
+```
+
+### Verification Checklist
+
+**Agent Mode:**
+- [ ] Read with projection returns only selected fields + id
+- [ ] List with projection returns only selected fields + id for all results
+- [ ] Projection + filters work together
+- [ ] Nonexistent projection field silently omitted (no schema)
+- [ ] Schema-validated projection rejects unknown fields
+
+**Cluster Mode:**
+- [ ] Read projection works from primary node
+- [ ] Read projection works when forwarded to primary
+- [ ] List projection works with scatter-gather across all nodes
+- [ ] List projection + filters work across nodes

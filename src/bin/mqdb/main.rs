@@ -89,9 +89,15 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             sort,
             limit,
             offset,
+            projection,
             conn,
             format,
-        } => Box::pin(cmd_list(entity, filter, sort, limit, offset, conn, format)).await?,
+        } => {
+            Box::pin(cmd_list(
+                entity, filter, sort, limit, offset, projection, conn, format,
+            ))
+            .await?;
+        }
         Commands::Watch {
             entity,
             filter,

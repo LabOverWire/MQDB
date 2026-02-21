@@ -102,6 +102,7 @@ impl DbRequestHandler {
                     controller,
                     entity,
                     id,
+                    payload,
                     response_topic,
                     correlation_data,
                     sender,
@@ -490,6 +491,7 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
+        payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
@@ -514,7 +516,7 @@ impl DbRequestHandler {
                     JsonDbOp::Read,
                     entity,
                     Some(id),
-                    &[],
+                    payload,
                     response_topic,
                     correlation_data,
                     sender,
@@ -542,9 +544,16 @@ impl DbRequestHandler {
             ));
         }
 
+        let projection = Self::parse_projection(payload);
+
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let data = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data, fields)
+                } else {
+                    data
+                };
                 let result = json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -941,6 +950,7 @@ impl DbRequestHandler {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_json_list<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1018,6 +1028,7 @@ impl DbRequestHandler {
             payload.to_vec()
         };
 
+        let projection = Self::parse_projection(payload);
         let has_remote_nodes = !controller.alive_nodes().is_empty();
 
         if has_remote_nodes {
@@ -1028,6 +1039,7 @@ impl DbRequestHandler {
                     response_topic.to_string(),
                     filters.clone(),
                     sorts,
+                    projection.clone(),
                 )
                 .await;
 
@@ -1044,6 +1056,11 @@ impl DbRequestHandler {
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
+                let data = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data, fields)
+                } else {
+                    data
+                };
                 Some(json!({
                     "id": e.id_str(),
                     "data": data
