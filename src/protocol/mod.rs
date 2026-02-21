@@ -70,6 +70,7 @@ pub enum AdminOperation {
     AclAssignmentAssign,
     AclAssignmentUnassign,
     AclAssignmentList,
+    IndexAdd { entity: String },
 }
 
 type ListOptions = (
@@ -113,6 +114,9 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
             entity: (*entity).to_string(),
         }),
         ["constraint", entity, "list"] => Some(AdminOperation::ConstraintList {
+            entity: (*entity).to_string(),
+        }),
+        ["index", entity, "add"] => Some(AdminOperation::IndexAdd {
             entity: (*entity).to_string(),
         }),
         ["backup"] => Some(AdminOperation::Backup),

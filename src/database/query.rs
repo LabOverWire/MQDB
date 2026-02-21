@@ -12,6 +12,9 @@ use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 
+type RangeBound = (Vec<u8>, bool);
+type RangeBounds = (String, Option<RangeBound>, Option<RangeBound>);
+
 impl Database {
     /// # Errors
     /// Returns an error if scanning, filtering, or deserialization fails.
@@ -152,21 +155,81 @@ impl Database {
     async fn list_with_filters(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
         let index_manager = self.index_manager.read().await;
 
-        if let Some(filter) = filters.first()
-            && filter.op == FilterOp::Eq
+        for filter in filters {
+            if filter.op == FilterOp::Eq
+                && index_manager.is_field_indexed(entity_name, &filter.field)
+            {
+                let value_bytes = keys::encode_value_for_index(&filter.value)?;
+                let ids = index_manager.lookup_by_field(
+                    &self.storage,
+                    entity_name,
+                    &filter.field,
+                    &value_bytes,
+                )?;
+                if !ids.is_empty() {
+                    return self.list_from_index_ids(entity_name, &ids, filters).await;
+                }
+            }
+        }
+
+        if let Some((field, lower, upper)) =
+            Self::collect_range_bounds(filters, |f| index_manager.is_field_indexed(entity_name, f))?
         {
-            let value_bytes = keys::encode_value_for_index(&filter.value)?;
-            let ids = index_manager.lookup_by_field(
+            let ids = index_manager.lookup_by_range(
                 &self.storage,
                 entity_name,
-                &filter.field,
-                &value_bytes,
+                &field,
+                lower.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+                upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
             )?;
             if !ids.is_empty() {
                 return self.list_from_index_ids(entity_name, &ids, filters).await;
             }
         }
+
         self.scan_filtered_entities(entity_name, filters)
+    }
+
+    fn collect_range_bounds(
+        filters: &[Filter],
+        is_indexed: impl Fn(&str) -> bool,
+    ) -> Result<Option<RangeBounds>> {
+        let range_field = filters
+            .iter()
+            .find(|f| {
+                matches!(
+                    f.op,
+                    FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
+                ) && is_indexed(&f.field)
+            })
+            .map(|f| f.field.clone());
+
+        let Some(field) = range_field else {
+            return Ok(None);
+        };
+
+        let mut lower: Option<(Vec<u8>, bool)> = None;
+        let mut upper: Option<(Vec<u8>, bool)> = None;
+
+        for filter in filters.iter().filter(|f| f.field == field) {
+            match filter.op {
+                FilterOp::Gt => {
+                    lower = Some((keys::encode_value_for_index(&filter.value)?, false));
+                }
+                FilterOp::Gte => {
+                    lower = Some((keys::encode_value_for_index(&filter.value)?, true));
+                }
+                FilterOp::Lt => {
+                    upper = Some((keys::encode_value_for_index(&filter.value)?, false));
+                }
+                FilterOp::Lte => {
+                    upper = Some((keys::encode_value_for_index(&filter.value)?, true));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(Some((field, lower, upper)))
     }
 
     async fn list_from_index_ids(

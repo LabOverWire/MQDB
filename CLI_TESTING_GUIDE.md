@@ -2060,6 +2060,12 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Consumer groups
 - [ ] Backup/Restore
 
+### Agent Mode — Index Range Queries
+- [ ] Range filters (>, >=, <, <=) on indexed field return correct results
+- [ ] Combined range (>= AND <=) on indexed field returns correct range
+- [ ] Range on indexed + equality on non-indexed filters correctly
+- [ ] Boundary precision (inclusive vs exclusive) correct
+
 ### Cluster Mode
 - [ ] Single-node cluster start
 - [ ] Multi-node cluster formation
@@ -2090,6 +2096,13 @@ Run through this checklist to verify MQDB works completely:
 - [ ] LWT cross-node delivery
 - [ ] Session persistence across failover
 - [ ] No message duplication under load
+
+### Cluster Mode — Index Range Queries
+- [ ] Range query returns same results from all nodes
+- [ ] Combined range correct from non-owner node
+- [ ] Range + non-indexed filter works across nodes
+- [ ] Updated records reflected in range queries
+- [ ] Deleted records excluded from range queries
 
 ### Constraints (Cluster)
 - [ ] Unique constraint enforced across nodes (create)
@@ -2606,3 +2619,283 @@ mqdb dev start-cluster --nodes 3 --clean \
 **Edge cases:**
 - [ ] Entity without ownership config allows all operations
 - [ ] Record missing the owner field allows all operations (no crash)
+
+---
+
+## 23. Index-Based Range Queries
+
+When a field has an index (`mqdb index add`), range filters (`>`, `>=`, `<`, `<=`) use the
+index for lookup instead of scanning all records. This section verifies that indexed range
+queries return correct results in agent mode, cluster mode, and across cluster nodes.
+
+### Agent Mode
+
+#### Setup
+
+```bash
+# Start agent
+mqdb agent start --db /tmp/mqdb-range-test --anonymous
+
+# Add index on the price field (requires dev-insecure build for --anonymous)
+mqdb index add products --fields price --broker 127.0.0.1:1883
+
+# Create test data
+mqdb create products -d '{"name": "Mouse", "price": 25, "category": "electronics"}' --broker 127.0.0.1:1883
+mqdb create products -d '{"name": "Keyboard", "price": 75, "category": "electronics"}' --broker 127.0.0.1:1883
+mqdb create products -d '{"name": "Monitor", "price": 300, "category": "electronics"}' --broker 127.0.0.1:1883
+mqdb create products -d '{"name": "Desk", "price": 200, "category": "furniture"}' --broker 127.0.0.1:1883
+mqdb create products -d '{"name": "Chair", "price": 150, "category": "furniture"}' --broker 127.0.0.1:1883
+```
+
+#### Test 1: Greater Than (>) on Indexed Field
+
+```bash
+mqdb list products --filter 'price>100' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Monitor (300), Desk (200), Chair (150). Does NOT return Mouse (25) or Keyboard (75).
+
+#### Test 2: Greater Than or Equal (>=) on Indexed Field
+
+```bash
+mqdb list products --filter 'price>=150' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Monitor (300), Desk (200), Chair (150). Does NOT return Mouse (25) or Keyboard (75).
+
+#### Test 3: Less Than (<) on Indexed Field
+
+```bash
+mqdb list products --filter 'price<100' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Mouse (25), Keyboard (75). Does NOT return others.
+
+#### Test 4: Less Than or Equal (<=) on Indexed Field
+
+```bash
+mqdb list products --filter 'price<=75' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Mouse (25), Keyboard (75).
+
+#### Test 5: Combined Range (>= AND <=) on Indexed Field
+
+```bash
+mqdb list products --filter 'price>=75' --filter 'price<=200' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Keyboard (75), Chair (150), Desk (200). Does NOT return Mouse (25) or Monitor (300).
+
+#### Test 6: Combined Range (> AND <) Exclusive Bounds
+
+```bash
+mqdb list products --filter 'price>75' --filter 'price<300' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Chair (150), Desk (200). Does NOT return Keyboard (75) or Monitor (300).
+
+#### Test 7: Range on Indexed Field + Equality on Non-Indexed Field
+
+```bash
+mqdb list products --filter 'price>=100' --filter 'category=furniture' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns Desk (200), Chair (150). The index narrows candidates by price, then
+the non-indexed `category` filter is applied in-memory.
+
+#### Test 8: Range Returns Empty Set
+
+```bash
+mqdb list products --filter 'price>500' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns empty list (no products above 500).
+
+#### Test 9: Boundary Precision
+
+```bash
+mqdb list products --filter 'price>=300' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns exactly Monitor (300). Verifies inclusive lower bound includes the exact value.
+
+```bash
+mqdb list products --filter 'price>300' --broker 127.0.0.1:1883
+```
+
+**Expected:** Returns empty list. Verifies exclusive lower bound excludes the exact value.
+
+#### Cleanup
+
+```bash
+# Stop agent
+pkill -f "mqdb agent"
+rm -rf /tmp/mqdb-range-test
+```
+
+### Cluster Mode — Single Node
+
+Note: `mqdb index add` is agent-mode only. In cluster mode, range filters work via full
+table scan (correct results, no index optimization). All cluster commands require
+`--user admin --pass admin` (credentials generated by `dev start-cluster`).
+
+#### Setup
+
+```bash
+mqdb dev start-cluster --nodes 1 --clean
+sleep 8
+
+mqdb create products -d '{"name": "Mouse", "price": 25}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Keyboard", "price": 75}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Monitor", "price": 300}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Desk", "price": 200}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Chair", "price": 150}' --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+#### Test 10: Range Query in Single-Node Cluster
+
+```bash
+mqdb list products --filter 'price>=100' --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+**Expected:** Returns Monitor (300), Desk (200), Chair (150).
+
+#### Test 11: Combined Range in Single-Node Cluster
+
+```bash
+mqdb list products --filter 'price>50' --filter 'price<250' --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+**Expected:** Returns Keyboard (75), Chair (150), Desk (200).
+
+#### Cleanup
+
+```bash
+mqdb dev kill
+```
+
+### Cluster Mode — Multi-Node (Cross-Node Range Queries)
+
+#### Setup
+
+```bash
+mqdb dev start-cluster --nodes 3 --clean
+sleep 8
+
+# Create records via different nodes so data is distributed across partitions
+mqdb create products -d '{"name": "Mouse", "price": 25}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Keyboard", "price": 75}' --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create products -d '{"name": "Monitor", "price": 300}' --broker 127.0.0.1:1885 --user admin --pass admin
+mqdb create products -d '{"name": "Desk", "price": 200}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create products -d '{"name": "Chair", "price": 150}' --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create products -d '{"name": "Lamp", "price": 50}' --broker 127.0.0.1:1885 --user admin --pass admin
+mqdb create products -d '{"name": "Headphones", "price": 120}' --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+#### Test 12: Range Query from Each Node
+
+Query from every node and verify the same results:
+
+```bash
+mqdb list products --filter 'price>100' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb list products --filter 'price>100' --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb list products --filter 'price>100' --broker 127.0.0.1:1885 --user admin --pass admin
+```
+
+**Expected:** All three return the same 4 records: Headphones (120), Chair (150), Desk (200), Monitor (300). The order may vary but the set must match.
+
+#### Test 13: Combined Range from Non-Owner Node
+
+```bash
+mqdb list products --filter 'price>=50' --filter 'price<=200' --broker 127.0.0.1:1884 --user admin --pass admin
+```
+
+**Expected:** Returns Lamp (50), Keyboard (75), Headphones (120), Chair (150), Desk (200). Five records regardless of which node is queried.
+
+#### Test 14: Range + Non-Indexed Filter Across Nodes
+
+```bash
+# First add some category data
+mqdb create items -d '{"name": "A", "score": 10, "tier": "gold"}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create items -d '{"name": "B", "score": 20, "tier": "silver"}' --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create items -d '{"name": "C", "score": 30, "tier": "gold"}' --broker 127.0.0.1:1885 --user admin --pass admin
+mqdb create items -d '{"name": "D", "score": 40, "tier": "silver"}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create items -d '{"name": "E", "score": 50, "tier": "gold"}' --broker 127.0.0.1:1884 --user admin --pass admin
+
+mqdb list items --filter 'score>=20' --filter 'tier=gold' --broker 127.0.0.1:1885 --user admin --pass admin
+```
+
+**Expected:** Returns C (score 30, gold) and E (score 50, gold).
+
+#### Test 15: Empty Range Across Nodes
+
+```bash
+mqdb list products --filter 'price>1000' --broker 127.0.0.1:1884 --user admin --pass admin
+```
+
+**Expected:** Returns empty list from any node.
+
+#### Test 16: Consistency After Update
+
+Verify range queries reflect updated values:
+
+```bash
+# Get the ID of the Mouse record
+mqdb list products --filter 'name=Mouse' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID
+
+# Update Mouse's price from 25 to 250
+mqdb update products <mouse-id> -d '{"price": 250}' --broker 127.0.0.1:1883 --user admin --pass admin
+
+# Mouse should now appear in price>200 results
+mqdb list products --filter 'price>200' --broker 127.0.0.1:1884 --user admin --pass admin
+```
+
+**Expected:** Returns Mouse (250) and Monitor (300).
+
+#### Test 17: Consistency After Delete
+
+```bash
+# Delete the Desk record
+mqdb list products --filter 'name=Desk' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID
+
+mqdb delete products <desk-id> --broker 127.0.0.1:1883 --user admin --pass admin
+
+# Desk should no longer appear
+mqdb list products --filter 'price>=200' --broker 127.0.0.1:1885 --user admin --pass admin
+```
+
+**Expected:** Returns Mouse (250, from Test 16 update) and Monitor (300). Desk no longer appears.
+
+#### Cleanup
+
+```bash
+mqdb dev kill
+```
+
+### Verification Checklist
+
+**Agent Mode:**
+- [ ] `>` on indexed field returns correct subset
+- [ ] `>=` on indexed field includes boundary value
+- [ ] `<` on indexed field returns correct subset
+- [ ] `<=` on indexed field includes boundary value
+- [ ] Combined `>=` and `<=` returns correct range
+- [ ] Combined `>` and `<` excludes boundaries
+- [ ] Range on indexed + equality on non-indexed filters correctly
+- [ ] Empty range returns empty list
+- [ ] Boundary precision (inclusive vs exclusive)
+
+**Single-Node Cluster:**
+- [ ] Range query returns correct results
+- [ ] Combined range returns correct results
+
+**Multi-Node Cluster:**
+- [ ] Same range query returns identical results from all nodes
+- [ ] Combined range returns correct results from non-owner node
+- [ ] Range + non-indexed filter works across nodes
+- [ ] Empty range returns empty from all nodes
+- [ ] Updated records reflected in subsequent range queries
+- [ ] Deleted records excluded from subsequent range queries

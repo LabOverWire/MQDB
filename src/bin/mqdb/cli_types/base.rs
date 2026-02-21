@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use super::agent::{AgentAction, ClusterAction};
 use super::auth::AclAction;
 use super::bench::BenchAction;
-use super::db::{BackupAction, ConstraintAction, ConsumerGroupAction, DbAction, SchemaAction};
+use super::db::{
+    BackupAction, ConstraintAction, ConsumerGroupAction, DbAction, IndexAction, SchemaAction,
+};
 use super::dev::DevAction;
 
 #[derive(Parser)]
@@ -158,6 +160,11 @@ pub(crate) enum Commands {
     Constraint {
         #[command(subcommand)]
         action: ConstraintAction,
+    },
+    #[command(about = "Manage entity indexes for query optimization")]
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
     },
     #[command(about = "Create and manage database backups")]
     Backup {

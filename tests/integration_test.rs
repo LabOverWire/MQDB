@@ -1053,3 +1053,136 @@ async fn test_list_truncates_at_max_list_results() {
         filtered.len()
     );
 }
+
+#[tokio::test]
+async fn test_list_with_gt_filter_uses_index() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    db.add_index("products".into(), vec!["price".into()])
+        .await
+        .unwrap();
+
+    let prices = [10, 20, 30, 40, 50];
+    for (i, price) in prices.iter().enumerate() {
+        db.create(
+            "products".into(),
+            json!({"name": format!("p{i}"), "price": price}),
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let gt_filter = Filter::new("price".into(), FilterOp::Gt, json!(30));
+    let results = db
+        .list(
+            "products".into(),
+            vec![gt_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(r["price"].as_i64().unwrap() > 30);
+    }
+}
+
+#[tokio::test]
+async fn test_list_with_combined_range_filters() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    db.add_index("products".into(), vec!["price".into()])
+        .await
+        .unwrap();
+
+    for i in 1..=10 {
+        db.create(
+            "products".into(),
+            json!({"name": format!("p{i}"), "price": i * 10}),
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let gte_filter = Filter::new("price".into(), FilterOp::Gte, json!(30));
+    let lte_filter = Filter::new("price".into(), FilterOp::Lte, json!(70));
+    let results = db
+        .list(
+            "products".into(),
+            vec![gte_filter, lte_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 5);
+    for r in &results {
+        let price = r["price"].as_i64().unwrap();
+        assert!((30..=70).contains(&price), "price {price} out of range");
+    }
+}
+
+#[tokio::test]
+async fn test_list_with_range_and_non_indexed_filter() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    db.add_index("products".into(), vec!["price".into()])
+        .await
+        .unwrap();
+
+    let items = [
+        json!({"name": "widget", "price": 10, "category": "A"}),
+        json!({"name": "gadget", "price": 20, "category": "B"}),
+        json!({"name": "doohickey", "price": 30, "category": "A"}),
+        json!({"name": "thingamajig", "price": 40, "category": "B"}),
+        json!({"name": "whatchamacallit", "price": 50, "category": "A"}),
+    ];
+
+    for item in items {
+        db.create("products".into(), item, None, None, &ScopeConfig::default())
+            .await
+            .unwrap();
+    }
+
+    let gte_filter = Filter::new("price".into(), FilterOp::Gte, json!(20));
+    let cat_filter = Filter::new("category".into(), FilterOp::Eq, json!("A"));
+    let results = db
+        .list(
+            "products".into(),
+            vec![gte_filter, cat_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(r["price"].as_i64().unwrap() >= 20);
+        assert_eq!(r["category"], "A");
+    }
+}

@@ -15,5 +15,7 @@ pub(crate) use base::{
     SubscriptionModeArg,
 };
 pub(crate) use bench::BenchAction;
-pub(crate) use db::{BackupAction, ConstraintAction, ConsumerGroupAction, DbAction, SchemaAction};
+pub(crate) use db::{
+    BackupAction, ConstraintAction, ConsumerGroupAction, DbAction, IndexAction, SchemaAction,
+};
 pub(crate) use dev::{DevAction, DevBaselineAction, DevBenchScenario};
