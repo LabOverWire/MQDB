@@ -7,7 +7,7 @@ mod common;
 
 use cli_types::{
     AclAction, AgentAction, BackupAction, BenchAction, Cli, ClusterAction, Commands,
-    ConstraintAction, ConsumerGroupAction, DbAction, DevAction, SchemaAction,
+    ConstraintAction, ConsumerGroupAction, DbAction, DevAction, IndexAction, SchemaAction,
 };
 use commands::agent::{AgentStartArgs, cmd_agent_start, cmd_agent_status};
 use commands::bench::{BenchDbArgs, BenchPubsubArgs, cmd_bench_db, cmd_bench_pubsub};
@@ -16,8 +16,8 @@ use commands::cluster::{
 };
 use commands::crud::{
     cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list, cmd_create,
-    cmd_delete, cmd_list, cmd_read, cmd_restore, cmd_schema_get, cmd_schema_set, cmd_subscribe,
-    cmd_update, cmd_watch,
+    cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get, cmd_schema_set,
+    cmd_subscribe, cmd_update, cmd_watch,
 };
 
 use clap::Parser;
@@ -100,6 +100,7 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         } => Box::pin(cmd_watch(entity, filter, conn, format)).await?,
         Commands::Schema { action } => dispatch_schema(action).await?,
         Commands::Constraint { action } => dispatch_constraint(action).await?,
+        Commands::Index { action } => dispatch_index(action).await?,
         Commands::Backup { action } => dispatch_backup(action).await?,
         Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
         Commands::Subscribe {
@@ -228,6 +229,16 @@ async fn dispatch_constraint(action: ConstraintAction) -> Result<(), Box<dyn std
             conn,
             format,
         } => Box::pin(cmd_constraint_list(entity, conn, format)).await,
+    }
+}
+
+async fn dispatch_index(action: IndexAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        IndexAction::Add {
+            entity,
+            fields,
+            conn,
+        } => Box::pin(cmd_index_add(entity, fields, conn)).await,
     }
 }
 

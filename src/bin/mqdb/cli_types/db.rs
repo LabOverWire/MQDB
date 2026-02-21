@@ -124,3 +124,14 @@ pub(crate) enum ConstraintAction {
         format: OutputFormat,
     },
 }
+
+#[derive(Subcommand)]
+pub(crate) enum IndexAction {
+    Add {
+        entity: String,
+        #[arg(long, num_args = 1.., required = true, help = "Fields to index")]
+        fields: Vec<String>,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+    },
+}

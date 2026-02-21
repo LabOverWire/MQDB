@@ -307,6 +307,19 @@ pub(crate) async fn cmd_restore(
     Ok(())
 }
 
+pub(crate) async fn cmd_index_add(
+    entity: String,
+    fields: Vec<String>,
+    conn: ConnectionArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/_admin/index/{entity}/add");
+    let payload = json!({"fields": fields});
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
+    output_response(&response, &OutputFormat::Json);
+    check_response_status(&response)?;
+    Ok(())
+}
+
 pub(crate) async fn cmd_subscribe(
     pattern: String,
     entity: Option<String>,

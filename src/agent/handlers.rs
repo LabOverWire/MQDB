@@ -179,6 +179,7 @@ async fn handle_admin_operation(
         AdminOperation::AclAssignmentList => {
             handle_acl_assignment_list(auth_providers, &payload).await
         }
+        AdminOperation::IndexAdd { entity } => handle_index_add(db, entity, &payload).await,
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -216,6 +217,29 @@ async fn handle_schema_get(db: &Database, entity: &str) -> Response {
             crate::ErrorCode::NotFound,
             format!("no schema for entity: {entity}"),
         ),
+    }
+}
+
+async fn handle_index_add(db: &Database, entity: String, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let fields: Vec<String> = payload
+        .get("fields")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if fields.is_empty() {
+        return Response::error(crate::ErrorCode::BadRequest, "index requires fields array");
+    }
+
+    match db.add_index(entity, fields).await {
+        Ok(()) => Response::ok(json!({"message": "index added"})),
+        Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
     }
 }
 

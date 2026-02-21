@@ -1,6 +1,6 @@
 # Chapter 2: The Storage Foundation
 
-Before distributing anything, build the single-node database. The components introduced in this chapter — key encoding, pluggable backends, the schema and constraint system, secondary indexes, reactive subscriptions, and the transactional outbox — reappear in Part II when the system goes distributed. The agent-mode design is the foundation that cluster mode extends.
+Before distributing anything, one needs to build the single-node database. The components introduced in this chapter — key encoding, pluggable backends, the schema and constraint system, secondary indexes, reactive subscriptions, and the transactional outbox — reappear in Part II when the system goes distributed. The agent-mode design is the foundation that cluster mode extends.
 
 ## 2.1 A Flat Key Space
 
@@ -25,7 +25,7 @@ Why a flat keyspace instead of separate column families or tables? Because the a
 
 ### Lexicographic Ordering
 
-The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A prefix scan on `meta/constraint/` loads every constraint in the system at startup. Every query the database supports reduces to either a point lookup or a prefix scan over sorted bytes.
+The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A range scan between `idx/users/age/{encoded_30}` and `idx/users/age/{encoded_65}` returns all user IDs with ages in that range — provided the numeric encoding preserves sort order in byte representation, which is the subject of the next subsection. Every query the database supports reduces to either a point lookup, a prefix scan, or a range scan over sorted bytes.
 
 This works because the key encoding function for data keys follows a rigid structure:
 
@@ -283,11 +283,17 @@ fn update_indexes(&self, batch: &mut BatchWriter, entity: &Entity, old_entity: O
 
 On update, old index entries are removed and new ones are added in the same batch. The `commit()` that persists the data also persists the index changes. There is no window where the data says one thing and the index says another.
 
-The `lookup_by_field` method performs the reverse operation: given a field name and value, find all matching entity IDs. It prefix-scans `idx/{entity}/{field}/{value}/` and extracts the ID from each key's last segment. The list operation uses this for index-accelerated filtering: if the first filter is an equality check and an index exists for that field, the query fetches candidate IDs from the index rather than scanning every record.
+Two lookup methods perform the reverse operation — finding entity IDs from index entries:
+
+`lookup_by_field` handles equality: given a field name and value, it prefix-scans `idx/{entity}/{field}/{value}/` and extracts the ID from each key's last segment. A query filtering `email = "alice@example.com"` hits the index directly instead of scanning every record.
+
+`lookup_by_range` handles inequalities: given a field name with optional lower and upper bounds, it range-scans the index between the encoded bound values. A query filtering `age > 30` scans from the encoded representation of 30 to the end of the `age` index. Each bound carries an inclusive flag — `>=` includes the boundary value, `>` excludes it. This is where the sort-preserving numeric encoding pays off: because `encode_i64_sortable(30)` sorts before `encode_i64_sortable(31)` in byte order, the storage engine's `range_scan` returns exactly the right records without any post-filtering.
+
+The query planner in `list_with_filters` tries three strategies in order: first, an indexed equality filter via `lookup_by_field`; second, indexed range filters via `lookup_by_range` (combining multiple range conditions on the same field into a single scan with both lower and upper bounds); third, a full table scan as fallback. The first two produce a candidate ID set that the remaining non-indexed filters narrow down.
 
 Arrays and objects cannot be indexed — `encode_value_for_index` returns an error for these types. Only scalar values (strings, numbers, booleans, null) produce index entries. This keeps the index structure flat and the lookup semantics unambiguous.
 
-Index entries serve three consumers, not one. The `IndexManager` creates them for field-value lookups. The `ConstraintManager` scans them to enforce unique constraints — `validate_unique` prefix-scans `idx/{entity}/{field}/{value}/` and rejects the write if any key exists with a different ID. And the query path in `list_with_filters` uses them for index-accelerated equality filtering, fetching candidate IDs from the index rather than scanning every record in the entity. The same empty-value keys serve all three purposes because the information is in the key structure, not the value.
+Index entries serve three consumers, not one. The `IndexManager` uses them for equality and range lookups. The `ConstraintManager` scans them to enforce unique constraints — `validate_unique` prefix-scans `idx/{entity}/{field}/{value}/` and rejects the write if any key exists with a different ID. And the query planner routes through them whenever a filter targets an indexed field. The same empty-value keys serve all three purposes because the information is in the key structure, not the value.
 
 ## 2.6 Reactive Subscriptions
 
@@ -395,7 +401,7 @@ The guarantee is the same as the traditional outbox: data and event share one tr
 
 The outbox design contains a subtle coupling that only became apparent during cluster mode development. In agent mode with `Immediate` durability, every `batch.commit()` forces an fsync. The outbox entry hits disk before the process continues. If the process crashes after commit but before dispatch, the entry survives.
 
-In cluster mode with `PeriodicMs(10)`, fsync happens every 10 milliseconds. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
+Cluster mode uses a `PeriodicMs(10)`, where fsync happens every 10 milliseconds. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
 
 The lesson: the outbox guarantee is not just "data and event are in the same batch." It is "data and event have the same durability fate." If one can survive a crash that the other cannot, the guarantee is broken regardless of batch atomicity.
 

@@ -18,7 +18,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | Ch | Title | Status | Draft Date | Revision Date | Word Count |
 |----|-------|--------|------------|---------------|------------|
 | 1 | Why Unify Messaging and Storage? | First draft | 2026-02-16 | | 3,522 |
-| 2 | The Storage Foundation | First draft | 2026-02-18 | 2026-02-19 | 5,663 |
+| 2 | The Storage Foundation | First draft | 2026-02-18 | 2026-02-19 | 5,806 |
 | 3 | MQTT 5.0 as a Database Protocol | First draft | 2026-02-19 | | 5,379 |
 | 4 | Partitioning | Not started | | | |
 | 5 | Replication | Not started | | | |
