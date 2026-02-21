@@ -227,7 +227,7 @@ impl ClusteredAgent {
 
     fn handle_index_add(_entity: &str, _payload: &[u8]) -> Response {
         Response::error(
-            ErrorCode::BadRequest,
+            ErrorCode::Forbidden,
             "index management is only supported in agent mode",
         )
     }

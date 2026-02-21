@@ -166,9 +166,11 @@ impl Database {
                     &filter.field,
                     &value_bytes,
                 )?;
-                if !ids.is_empty() {
-                    return self.list_from_index_ids(entity_name, &ids, filters).await;
-                }
+                return if ids.is_empty() {
+                    Ok(vec![])
+                } else {
+                    self.list_from_index_ids(entity_name, &ids, filters).await
+                };
             }
         }
 
