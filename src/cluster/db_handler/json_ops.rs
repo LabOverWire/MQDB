@@ -11,6 +11,7 @@ use super::super::node_controller::{
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
+use super::helpers::parse_projection;
 use crate::events::ChangeEvent;
 use crate::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS};
 use serde_json::{Value, json};
@@ -544,7 +545,7 @@ impl DbRequestHandler {
             ));
         }
 
-        let projection = Self::parse_projection(payload);
+        let projection = parse_projection(payload);
 
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
@@ -1028,7 +1029,7 @@ impl DbRequestHandler {
             payload.to_vec()
         };
 
-        let projection = Self::parse_projection(payload);
+        let projection = parse_projection(payload);
         let has_remote_nodes = !controller.alive_nodes().is_empty();
 
         if has_remote_nodes {

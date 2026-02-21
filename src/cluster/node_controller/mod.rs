@@ -612,24 +612,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect();
                 filtered.truncate(MAX_LIST_RESULTS);
 
-                let projected = if let Some(ref fields) = pending.projection {
-                    filtered
-                        .into_iter()
-                        .map(|mut item| {
-                            if let Some(data) = item.get("data").cloned()
-                                && let Some(obj) = item.as_object_mut()
-                            {
-                                obj.insert(
-                                    "data".to_string(),
-                                    crate::Database::project_fields(data, fields),
-                                );
-                            }
-                            item
-                        })
-                        .collect()
-                } else {
-                    filtered
-                };
+                let projected = Self::apply_list_projection(filtered, &pending.projection);
 
                 let result = serde_json::json!({
                     "status": "ok",

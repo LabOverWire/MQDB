@@ -1293,6 +1293,45 @@ async fn test_list_with_projection() {
 }
 
 #[tokio::test]
+async fn test_list_with_projection_and_filter() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    for (name, city) in [("Alice", "NYC"), ("Bob", "LA"), ("Charlie", "NYC")] {
+        let user = json!({ "name": name, "email": format!("{name}@example.com"), "city": city });
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
+            .await
+            .unwrap();
+    }
+
+    let filter = Filter::new("city".into(), FilterOp::Eq, json!("NYC"));
+    let results = db
+        .list(
+            "users".into(),
+            vec![filter],
+            vec![],
+            None,
+            vec![],
+            Some(vec!["name".into()]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(r.get("id").is_some());
+        assert!(r.get("name").is_some());
+        assert!(r.get("email").is_none());
+        assert!(r.get("city").is_none());
+    }
+    let names: Vec<&str> = results.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Charlie"));
+}
+
+#[tokio::test]
 async fn test_read_projection_validates_against_schema() {
     let tmp = TempDir::new().unwrap();
     let db = Database::open_without_background_tasks(tmp.path())

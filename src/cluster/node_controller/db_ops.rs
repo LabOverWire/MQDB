@@ -13,24 +13,9 @@ use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
+use crate::cluster::db_handler::helpers::parse_projection;
 
-fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
-    if payload.is_empty() {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(payload).ok()?;
-    let arr = parsed.get("projection")?.as_array()?;
-    let fields: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-    if fields.is_empty() {
-        None
-    } else {
-        Some(fields)
-    }
-}
+const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
 pub(crate) fn spawn_cascade_ack_waiter(
     outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,

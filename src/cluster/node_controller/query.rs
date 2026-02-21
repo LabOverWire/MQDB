@@ -195,21 +195,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
             filtered.truncate(MAX_LIST_RESULTS);
 
-            let projected = if let Some(ref fields) = completed.projection {
-                filtered
-                    .into_iter()
-                    .map(|mut item| {
-                        if let Some(data) = item.get("data").cloned()
-                            && let Some(obj) = item.as_object_mut()
-                        {
-                            obj.insert("data".to_string(), Database::project_fields(data, fields));
-                        }
-                        item
-                    })
-                    .collect()
-            } else {
-                filtered
-            };
+            let projected = Self::apply_list_projection(filtered, &completed.projection);
 
             let result = serde_json::json!({
                 "status": "ok",
@@ -221,6 +207,26 @@ impl<T: ClusterTransport> NodeController<T> {
                 .queue_local_publish(completed.client_response_topic, payload, 0)
                 .await;
         }
+    }
+
+    pub(super) fn apply_list_projection(
+        items: Vec<serde_json::Value>,
+        projection: &Option<Vec<String>>,
+    ) -> Vec<serde_json::Value> {
+        let Some(fields) = projection else {
+            return items;
+        };
+        items
+            .into_iter()
+            .map(|mut item| {
+                if let Some(data) = item.get("data").cloned()
+                    && let Some(obj) = item.as_object_mut()
+                {
+                    obj.insert("data".to_string(), Database::project_fields(data, fields));
+                }
+                item
+            })
+            .collect()
     }
 
     fn sort_scatter_results(results: &mut [serde_json::Value], sorts: &[crate::SortOrder]) {

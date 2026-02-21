@@ -37,21 +37,21 @@ impl DbRequestHandler {
     ) -> String {
         super::super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
+}
 
-    pub(super) fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
-        if payload.is_empty() {
-            return None;
-        }
-        let parsed: Value = serde_json::from_slice(payload).ok()?;
-        let arr = parsed.get("projection")?.as_array()?;
-        let fields: Vec<String> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        if fields.is_empty() {
-            None
-        } else {
-            Some(fields)
-        }
+pub(crate) fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let parsed: Value = serde_json::from_slice(payload).ok()?;
+    let arr = parsed.get("projection")?.as_array()?;
+    let fields: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
     }
 }
