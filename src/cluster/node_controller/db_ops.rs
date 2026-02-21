@@ -15,6 +15,23 @@ use tokio::sync::oneshot;
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
+fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let parsed: Value = serde_json::from_slice(payload).ok()?;
+    let arr = parsed.get("projection")?.as_array()?;
+    let fields: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
+    }
+}
+
 pub(crate) fn spawn_cascade_ack_waiter(
     outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,
     operation_id: String,
@@ -379,7 +396,10 @@ impl<T: ClusterTransport> NodeController<T> {
         let (response_payload, pending) = match request.op {
             JsonDbOp::Read => {
                 let id = request.id.as_deref().unwrap_or("");
-                (self.handle_json_read_local(&request.entity, id), None)
+                (
+                    self.handle_json_read_local(&request.entity, id, &request.payload),
+                    None,
+                )
             }
             JsonDbOp::Update => {
                 let id = request.id.as_deref().unwrap_or("");
@@ -488,11 +508,16 @@ impl<T: ClusterTransport> NodeController<T> {
         None
     }
 
-    fn handle_json_read_local(&self, entity: &str, id: &str) -> Vec<u8> {
+    fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
         match self.stores.db_get(entity, id) {
             Some(db_entity) => {
                 let data_json: serde_json::Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
+                let data_json = if let Some(fields) = parse_projection(payload) {
+                    crate::Database::project_fields(data_json, &fields)
+                } else {
+                    data_json
+                };
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
