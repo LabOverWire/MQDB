@@ -74,12 +74,14 @@ pub(crate) async fn cmd_delete(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_list(
     entity: String,
     filters: Vec<String>,
     sort: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+    projection: Option<String>,
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -110,6 +112,11 @@ pub(crate) async fn cmd_list(
             "limit": limit.unwrap_or(100),
             "offset": offset.unwrap_or(0)
         });
+    }
+
+    if let Some(proj) = projection {
+        let fields: Vec<&str> = proj.split(',').collect();
+        payload["projection"] = json!(fields);
     }
 
     let response = Box::pin(execute_request(&conn, &topic, payload)).await?;

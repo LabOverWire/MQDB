@@ -1317,9 +1317,10 @@ Note: These benchmarks are for single-node agent mode. For cluster mode performa
    - Only parse JSON when accessed
    - Store raw bytes, deserialize on-demand
 
-2. **Projection Pushdown:**
-   - Return subset of fields
-   - Reduces parse time and network transfer
+2. **Projection Pushdown:** (implemented)
+   - Clients specify `--projection field1,field2` to return a subset of fields
+   - Applied after filtering/sorting in both agent and cluster modes
+   - In scatter-gather, projection is applied at the aggregation step to preserve filter fields
 
 3. **Batch Foreign Key Validation:**
    - Current: Individual lookups for each FK

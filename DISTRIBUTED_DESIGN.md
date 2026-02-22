@@ -308,7 +308,7 @@ Distributed queries fan out to multiple partitions and aggregate results:
 1. **Coordinator** generates `QueryRequest` for each target partition
 2. **Partition owners** execute local queries, return `QueryResponse`
 3. **Coordinator** collects responses, detects completion or timeout
-4. **Merge phase** deduplicates by ID, applies filters, then sorts results
+4. **Merge phase** deduplicates by ID, applies filters, sorts, then applies projection
 5. **Result** includes aggregated data plus pagination cursor
 
 The merge phase ensures consistent ordering regardless of which node receives the query or the order in which partition responses arrive.

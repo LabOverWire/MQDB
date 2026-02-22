@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 mod binary_ops;
-mod helpers;
+pub(crate) mod helpers;
 mod json_ops;
 #[cfg(test)]
 mod tests;

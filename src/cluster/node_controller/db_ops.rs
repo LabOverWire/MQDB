@@ -13,6 +13,8 @@ use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
+use crate::cluster::db_handler::helpers::{parse_projection, validate_projection_against_schema};
+
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
 pub(crate) fn spawn_cascade_ack_waiter(
@@ -379,7 +381,10 @@ impl<T: ClusterTransport> NodeController<T> {
         let (response_payload, pending) = match request.op {
             JsonDbOp::Read => {
                 let id = request.id.as_deref().unwrap_or("");
-                (self.handle_json_read_local(&request.entity, id), None)
+                (
+                    self.handle_json_read_local(&request.entity, id, &request.payload),
+                    None,
+                )
             }
             JsonDbOp::Update => {
                 let id = request.id.as_deref().unwrap_or("");
@@ -488,11 +493,26 @@ impl<T: ClusterTransport> NodeController<T> {
         None
     }
 
-    fn handle_json_read_local(&self, entity: &str, id: &str) -> Vec<u8> {
+    fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
+        let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(cluster_schema) = self.stores.schema_get(entity)
+            && let Some(msg) =
+                validate_projection_against_schema(&cluster_schema.data, entity, fields)
+        {
+            return Self::json_error(400, &msg);
+        }
+
         match self.stores.db_get(entity, id) {
             Some(db_entity) => {
                 let data_json: serde_json::Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
+                let data_json = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data_json, fields)
+                } else {
+                    data_json
+                };
                 let result = serde_json::json!({
                     "status": "ok",
                     "id": db_entity.id_str(),

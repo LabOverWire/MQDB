@@ -206,15 +206,14 @@ impl StoreManager {
     }
 
     fn apply_db_constraint(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
-        if write.operation == crate::cluster::protocol::Operation::Insert {
-            if let Some(constraint) = crate::cluster::db::ConstraintStore::deserialize(&write.data)
-            {
-                self.db_constraints
-                    .apply_replicated(write.operation, &write.id, &write.data)
-                    .map_err(|_| StoreApplyError::DbConstraintError)?;
-                self.rebuild_fk_index_for_constraint(&constraint);
-                return Ok(());
-            }
+        if write.operation == crate::cluster::protocol::Operation::Insert
+            && let Some(constraint) = crate::cluster::db::ConstraintStore::deserialize(&write.data)
+        {
+            self.db_constraints
+                .apply_replicated(write.operation, &write.id, &write.data)
+                .map_err(|_| StoreApplyError::DbConstraintError)?;
+            self.rebuild_fk_index_for_constraint(&constraint);
+            return Ok(());
         }
         self.db_constraints
             .apply_replicated(write.operation, &write.id, &write.data)

@@ -341,10 +341,10 @@ agent.run().await?;
 | Topic | Action |
 |-------|--------|
 | `$DB/{entity}/create` | Create entity (include `"id"` in payload for client-provided ID) |
-| `$DB/{entity}/{id}` | Read entity |
+| `$DB/{entity}/{id}` | Read entity (payload: `{"projection": ["field1"]}` for partial response) |
 | `$DB/{entity}/{id}/update` | Update entity |
 | `$DB/{entity}/{id}/delete` | Delete entity |
-| `$DB/{entity}/list` | List entities with filters |
+| `$DB/{entity}/list` | List entities (payload: filters, sort, projection) |
 | `$DB/{entity}/events/#` | Subscribe to change events |
 
 #### Admin Operations
@@ -618,9 +618,11 @@ mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl 
 mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
 mqdb create users '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
 mqdb read users 1
+mqdb read users 1 --projection name,email
 mqdb update users 1 '{"name": "Alice Smith"}'
 mqdb delete users 1
 mqdb list users --filter "status=active" --sort "-created_at" --limit 10
+mqdb list users --projection name,email
 
 # Watch for changes
 mqdb watch users
@@ -686,6 +688,24 @@ mqdb acl user-roles alice -f acl.txt
 mqdb list users --format json    # JSON output (default)
 mqdb list users --format table   # Table format
 mqdb list users --format csv     # CSV format
+```
+
+### Field Projection (Partial Responses)
+
+Return only selected fields from `read` and `list` operations. The `id` field is always included.
+
+```bash
+mqdb read users abc123 --projection name,email
+mqdb list users --projection name,email
+mqdb list users --filter "city=NYC" --projection name
+```
+
+When a schema is defined, projection fields are validated against it. Without a schema, unknown fields are silently omitted.
+
+Via MQTT, include `"projection"` in the request payload:
+
+```json
+{"projection": ["name", "email"]}
 ```
 
 ## Testing

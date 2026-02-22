@@ -11,6 +11,7 @@ use super::super::node_controller::{
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
+use super::helpers::{self, parse_projection};
 use crate::events::ChangeEvent;
 use crate::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS};
 use serde_json::{Value, json};
@@ -65,6 +66,17 @@ impl DbRequestHandler {
         None
     }
 
+    fn validate_projection_fields<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        entity: &str,
+        fields: &[String],
+    ) -> Option<Vec<u8>> {
+        let cluster_schema = controller.stores().schema_get(entity)?;
+        let msg =
+            helpers::validate_projection_against_schema(&cluster_schema.data, entity, fields)?;
+        Some(Self::json_error(400, &msg))
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
@@ -102,6 +114,7 @@ impl DbRequestHandler {
                     controller,
                     entity,
                     id,
+                    payload,
                     response_topic,
                     correlation_data,
                     sender,
@@ -490,6 +503,7 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
+        payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
         sender: Option<&str>,
@@ -514,7 +528,7 @@ impl DbRequestHandler {
                     JsonDbOp::Read,
                     entity,
                     Some(id),
-                    &[],
+                    payload,
                     response_topic,
                     correlation_data,
                     sender,
@@ -542,9 +556,22 @@ impl DbRequestHandler {
             ));
         }
 
+        let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
+        {
+            return JsonOpResult::Response(err);
+        }
+
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let data = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data, fields)
+                } else {
+                    data
+                };
                 let result = json!({
                     "status": "ok",
                     "id": db_entity.id_str(),
@@ -941,6 +968,7 @@ impl DbRequestHandler {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn handle_json_list<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1018,6 +1046,14 @@ impl DbRequestHandler {
             payload.to_vec()
         };
 
+        let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
+        {
+            return Some(err);
+        }
+
         let has_remote_nodes = !controller.alive_nodes().is_empty();
 
         if has_remote_nodes {
@@ -1028,6 +1064,7 @@ impl DbRequestHandler {
                     response_topic.to_string(),
                     filters.clone(),
                     sorts,
+                    projection.clone(),
                 )
                 .await;
 
@@ -1044,6 +1081,11 @@ impl DbRequestHandler {
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
+                let data = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data, fields)
+                } else {
+                    data
+                };
                 Some(json!({
                     "id": e.id_str(),
                     "data": data

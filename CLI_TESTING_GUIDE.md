@@ -2899,3 +2899,157 @@ mqdb dev kill
 - [ ] Empty range returns empty from all nodes
 - [ ] Updated records reflected in subsequent range queries
 - [ ] Deleted records excluded from subsequent range queries
+
+## 24. Field Projection (Partial Responses)
+
+Field projection allows clients to request only specific fields in read and list responses, reducing payload size.
+
+### Agent Mode
+
+#### Setup
+
+```bash
+mqdb passwd testuser -b testpass -f /tmp/mqdb-projection-passwd
+mqdb agent start --db /tmp/mqdb-projection --bind 127.0.0.1:1883 --passwd /tmp/mqdb-projection-passwd
+```
+
+Create test data:
+
+```bash
+mqdb create users -d '{"name": "Alice", "email": "alice@example.com", "age": 30, "city": "NYC"}' --user testuser --pass testpass
+mqdb create users -d '{"name": "Bob", "email": "bob@example.com", "age": 25, "city": "LA"}' --user testuser --pass testpass
+mqdb create users -d '{"name": "Charlie", "email": "charlie@example.com", "age": 35, "city": "NYC"}' --user testuser --pass testpass
+```
+
+#### Test 1: Read with Projection
+
+```bash
+ID=$(mqdb list users --user testuser --pass testpass | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read users "$ID" --projection name,email --user testuser --pass testpass
+```
+
+Expected: response contains only `id`, `name`, and `email` fields. No `age` or `city`.
+
+#### Test 2: Read Projection Always Includes ID
+
+```bash
+mqdb read users "$ID" --projection name --user testuser --pass testpass
+```
+
+Expected: response contains `id` and `name` only. `id` is always included even when not in projection list.
+
+#### Test 3: List with Projection
+
+```bash
+mqdb list users --projection name,city --user testuser --pass testpass
+```
+
+Expected: each result contains only `id`, `name`, and `city`. No `email` or `age`.
+
+#### Test 4: Projection with Filters Combined
+
+```bash
+mqdb list users --filter 'city=NYC' --projection name --user testuser --pass testpass
+```
+
+Expected: returns only NYC users, each with only `id` and `name` fields.
+
+#### Test 5: Projection with Nonexistent Field (No Schema)
+
+```bash
+mqdb read users "$ID" --projection name,nonexistent --user testuser --pass testpass
+```
+
+Expected: returns `id` and `name`. The `nonexistent` field is silently omitted.
+
+#### Test 6: Projection with Schema Validation
+
+```bash
+cat > /tmp/users_schema.json << 'EOF'
+{"entity": "users_strict", "fields": {"name": {"name": "name", "field_type": "String", "required": false, "default": null}, "email": {"name": "email", "field_type": "String", "required": false, "default": null}}}
+EOF
+mqdb schema set users_strict -f /tmp/users_schema.json --user testuser --pass testpass
+mqdb create users_strict -d '{"name": "Dave", "email": "dave@example.com"}' --user testuser --pass testpass
+ID2=$(mqdb list users_strict --user testuser --pass testpass | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read users_strict "$ID2" --projection nonexistent --user testuser --pass testpass
+```
+
+Expected: error response indicating the projection field does not exist in the schema.
+
+#### Cleanup
+
+```bash
+pkill -f "mqdb agent"
+rm -rf /tmp/mqdb-projection /tmp/mqdb-projection-passwd
+```
+
+### Cluster Mode
+
+`mqdb dev start-cluster` auto-generates credentials `admin`/`admin` in `/tmp/mqdb-test-passwd`.
+
+#### Setup
+
+```bash
+mqdb dev start-cluster --nodes 3 --clean
+sleep 5
+```
+
+Create test data:
+
+```bash
+mqdb create items -d '{"name": "widget", "price": 10, "category": "A"}' --user admin --pass admin --broker 127.0.0.1:1883
+mqdb create items -d '{"name": "gadget", "price": 20, "category": "B"}' --user admin --pass admin --broker 127.0.0.1:1883
+mqdb create items -d '{"name": "doohickey", "price": 30, "category": "A"}' --user admin --pass admin --broker 127.0.0.1:1883
+```
+
+#### Test 7: Read with Projection from Primary Node
+
+```bash
+ID=$(mqdb list items --user admin --pass admin --broker 127.0.0.1:1883 | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
+mqdb read items "$ID" --projection name --user admin --pass admin --broker 127.0.0.1:1883
+mqdb read items "$ID" --projection name --user admin --pass admin --broker 127.0.0.1:1884
+mqdb read items "$ID" --projection name --user admin --pass admin --broker 127.0.0.1:1885
+```
+
+Expected: the primary node for this partition returns only `id` and `name`. Non-primary nodes forward to the primary and also return projected data.
+
+#### Test 8: List with Projection Across Nodes
+
+```bash
+mqdb list items --projection name,price --user admin --pass admin --broker 127.0.0.1:1883
+mqdb list items --projection name,price --user admin --pass admin --broker 127.0.0.1:1884
+mqdb list items --projection name,price --user admin --pass admin --broker 127.0.0.1:1885
+```
+
+Expected: all nodes return all 3 items with only `id`, `name`, and `price`. No `category` field.
+
+#### Test 9: List with Projection and Filters Across Nodes
+
+```bash
+mqdb list items --filter 'category=A' --projection name --user admin --pass admin --broker 127.0.0.1:1883
+mqdb list items --filter 'category=A' --projection name --user admin --pass admin --broker 127.0.0.1:1884
+mqdb list items --filter 'category=A' --projection name --user admin --pass admin --broker 127.0.0.1:1885
+```
+
+Expected: all nodes return 2 items (widget, doohickey) with only `id` and `name`. Filters are applied before projection in the scatter-gather aggregation.
+
+#### Cleanup
+
+```bash
+mqdb dev kill
+```
+
+### Verification Checklist
+
+**Agent Mode:**
+- [ ] Read with projection returns only selected fields + id
+- [ ] List with projection returns only selected fields + id for all results
+- [ ] Projection + filters work together
+- [ ] Nonexistent projection field silently omitted (no schema)
+- [ ] Schema-validated projection rejects unknown fields
+
+**Cluster Mode:**
+- [ ] Read projection works from primary node
+- [ ] Read projection works when forwarded to primary
+- [ ] List projection works with scatter-gather across all nodes
+- [ ] List projection + filters work across nodes

@@ -457,7 +457,7 @@ impl Database {
         })
     }
 
-    pub(super) fn project_fields(entity: Value, fields: &[String]) -> Value {
+    pub(crate) fn project_fields(entity: Value, fields: &[String]) -> Value {
         if let Value::Object(obj) = entity {
             let mut projected = serde_json::Map::new();
 

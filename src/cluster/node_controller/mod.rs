@@ -73,6 +73,7 @@ pub struct PendingScatterRequest {
     pub created_at_ms: u64,
     pub filters: Vec<crate::Filter>,
     pub sorts: Vec<crate::SortOrder>,
+    pub projection: Option<Vec<String>>,
 }
 
 struct UniqueReservationParams<'a> {
@@ -611,9 +612,12 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect();
                 filtered.truncate(MAX_LIST_RESULTS);
 
+                let projected =
+                    Self::apply_list_projection(filtered, pending.projection.as_deref());
+
                 let result = serde_json::json!({
                     "status": "ok",
-                    "data": filtered,
+                    "data": projected,
                     "partial": true
                 });
                 let payload = serde_json::to_vec(&result).unwrap_or_default();

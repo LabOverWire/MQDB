@@ -9,6 +9,7 @@ use super::query_coordinator::QueryCoordinator;
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingScatterRequest,
 };
+use crate::Database;
 use crate::types::MAX_LIST_RESULTS;
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -73,6 +74,7 @@ impl<T: ClusterTransport> NodeController<T> {
         client_response_topic: String,
         filters: Vec<crate::Filter>,
         sorts: Vec<crate::SortOrder>,
+        projection: Option<Vec<String>>,
     ) -> bool {
         let alive_nodes = self.heartbeat.alive_nodes();
         let remote_nodes: Vec<NodeId> = alive_nodes
@@ -108,6 +110,7 @@ impl<T: ClusterTransport> NodeController<T> {
             created_at_ms: self.current_time,
             filters,
             sorts,
+            projection,
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
@@ -192,9 +195,11 @@ impl<T: ClusterTransport> NodeController<T> {
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
             filtered.truncate(MAX_LIST_RESULTS);
 
+            let projected = Self::apply_list_projection(filtered, completed.projection.as_deref());
+
             let result = serde_json::json!({
                 "status": "ok",
-                "data": filtered
+                "data": projected
             });
             let payload = serde_json::to_vec(&result).unwrap_or_default();
 
@@ -202,6 +207,26 @@ impl<T: ClusterTransport> NodeController<T> {
                 .queue_local_publish(completed.client_response_topic, payload, 0)
                 .await;
         }
+    }
+
+    pub(super) fn apply_list_projection(
+        items: Vec<serde_json::Value>,
+        projection: Option<&[String]>,
+    ) -> Vec<serde_json::Value> {
+        let Some(fields) = projection else {
+            return items;
+        };
+        items
+            .into_iter()
+            .map(|mut item| {
+                if let Some(data) = item.get("data").cloned()
+                    && let Some(obj) = item.as_object_mut()
+                {
+                    obj.insert("data".to_string(), Database::project_fields(data, fields));
+                }
+                item
+            })
+            .collect()
     }
 
     fn sort_scatter_results(results: &mut [serde_json::Value], sorts: &[crate::SortOrder]) {

@@ -38,3 +38,36 @@ impl DbRequestHandler {
         super::super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
 }
+
+pub(crate) fn validate_projection_against_schema(
+    schema_data: &[u8],
+    entity: &str,
+    fields: &[String],
+) -> Option<String> {
+    let schema: crate::schema::Schema = serde_json::from_slice(schema_data).ok()?;
+    for field in fields {
+        if field != "id" && !schema.fields.contains_key(field) {
+            return Some(format!(
+                "schema violation for '{entity}': projection field '{field}' does not exist in schema",
+            ));
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let parsed: Value = serde_json::from_slice(payload).ok()?;
+    let arr = parsed.get("projection")?.as_array()?;
+    let fields: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if fields.is_empty() {
+        None
+    } else {
+        Some(fields)
+    }
+}

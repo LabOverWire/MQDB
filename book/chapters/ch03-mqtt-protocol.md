@@ -18,7 +18,7 @@ Retained messages let the broker store the last message published to a topic and
 
 Sessions are persistent. A client disconnects and reconnects; the broker holds its subscription state for a configurable duration. MQDB sets this to 1 hour (`SESSION_EXPIRY_SECS = 3600`). A client can also request a clean start, discarding all prior session state.
 
-MQTT 5.0 — the version MQDB uses — added features that make the protocol viable as a database interface: response topics (enabling request/response patterns), user properties (arbitrary key-value metadata per message), shared subscriptions (load-balanced delivery across a consumer group), topic aliases (compact representations for frequently-used topics), and session expiry intervals.
+MQTT 5.0 — the version MQDB uses — added features that made it possible, for someone with imagination, to use MQTT as a database interface: response topics (enabling request/response patterns), user properties (arbitrary key-value metadata per message), shared subscriptions (load-balanced delivery across a consumer group), topic aliases (compact representations for frequently-used topics), and session expiry intervals.
 
 The MQDB broker runs with these defaults:
 
@@ -34,9 +34,9 @@ The MQDB broker runs with these defaults:
 
 These are not aspirational settings. The 10 MB packet size accommodates large JSON documents — list responses with thousands of records, backup payloads, bulk operations. The 10,000 client limit reflects the intended deployment: IoT gateways with hundreds of devices, not a million-connection CDN. Both values are tuneable at startup, but the defaults reflect the system's target workload.
 
-That is the protocol. The question is: how does a database use it? The naive approach would be to build a separate service — a translation layer that receives MQTT messages, calls a database API, and publishes responses. This would work, but it would reintroduce the two-system problem from Chapter 1: the MQTT broker and the database would be separate processes with separate failure modes, requiring exactly the synchronization infrastructure that MQDB exists to eliminate.
+That is the protocol. The question is: how does a database use it? The naive approach would be to build a separate service — a translation layer that receives MQTT messages, calls a database API, and publishes responses. This works, and other people have attempted it, but it reintroduces the two-system problem from Chapter 1: the MQTT broker and the database would be separate processes with separate failure modes, requiring exactly the synchronization infrastructure that MQDB exists to eliminate.
 
-MQDB takes a different path. The database embeds itself inside the broker.
+MQDB takes a different path. The database embeds itself inside the broker. It's an integral part of the broker's architecture, designed to work seamlessly with the broker's core functionality.
 
 ## 3.2 The Self-Subscribing Broker
 
@@ -44,7 +44,7 @@ The most important architectural decision in MQDB's protocol layer is that the b
 
 An MQTT broker routes messages between clients. Client A publishes to topic X, and the broker delivers that message to all clients subscribed to topic X. In MQDB, the broker itself is one of those clients. Three internal MQTT clients connect to the broker on startup, each with a specific role:
 
-**`mqdb-internal-handler`** subscribes to `$DB/#` — the entire database topic namespace. Every database request from any external client arrives in this subscription callback. The callback pushes messages into an `mpsc::channel<Message>(256)`, and a `tokio::select!` loop processes them sequentially.
+**`mqdb-internal-handler`** subscribes to `$DB/#` — the entire database topic namespace. Every database request from any external client arrives in this subscription callback. The callback pushes messages into an `mpsc::channel<Message>`, and a `tokio::select!` loop processes them sequentially.
 
 **`mqdb-response-publisher`** publishes responses back to clients' response topics. When the handler finishes processing a database request, the response is sent through this client, not through the handler client.
 
@@ -52,7 +52,7 @@ An MQTT broker routes messages between clients. Client A publishes to topic X, a
 
 Why three clients instead of one? The handler receives messages via a subscription callback that pushes into an `mpsc` channel. If the same client published responses inside that callback, the broker's internal publish path could deadlock — the handler is processing an incoming message (holding broker resources) while trying to publish an outgoing message (which requires acquiring those same resources). The separate response client breaks the cycle. The event publisher is separate for the same reason: it publishes to event topics that the handler is subscribed to via `$DB/#`, and mixing roles would create a feedback loop.
 
-Why loopback TCP connections to its own broker? Because the internal clients authenticate through the full MQTT auth stack. The broker generates a service account on startup — `mqdb-internal-{uuid}` with a random UUID password — and registers it with the password provider. The internal clients connect using these credentials. The same `TopicProtectionAuthProvider` that blocks external clients from internal topics wraps the entire auth chain, but it recognizes the service account via `is_internal_service` and lets it bypass topic restrictions. One auth path, not two. This means the service account is tested by the same code that tests every other user — no special-case authentication logic that can silently diverge.
+Why loopback connections to its own broker? Because the internal clients authenticate through the full MQTT auth stack. The broker generates a service account on startup — `mqdb-internal-{uuid}` with a random UUID password — and registers it with the password provider. The internal clients connect using these credentials. The same `TopicProtectionAuthProvider` that blocks external clients from internal topics wraps the entire auth chain, but it recognizes the service account via `is_internal_service` and lets it bypass topic restrictions. One auth path, not two. This means the service account is tested by the same code that tests every other user — no special-case authentication logic that can silently diverge.
 
 The startup sequence in `MqdbAgent::run` proceeds in strict order:
 

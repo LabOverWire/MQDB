@@ -1,7 +1,10 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use mqdb::{Database, DatabaseConfig, Filter, FilterOp, ScopeConfig, SortDirection, SortOrder};
+use mqdb::{
+    Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, Schema, ScopeConfig,
+    SortDirection, SortOrder,
+};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -1185,4 +1188,175 @@ async fn test_list_with_range_and_non_indexed_filter() {
         assert!(r["price"].as_i64().unwrap() >= 20);
         assert_eq!(r["category"], "A");
     }
+}
+
+#[tokio::test]
+async fn test_read_with_projection() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let user = json!({
+        "name": "Alice",
+        "email": "alice@example.com",
+        "age": 30
+    });
+
+    let created = db
+        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let result = db
+        .read("users".into(), id, vec![], Some(vec!["name".into()]))
+        .await
+        .unwrap();
+
+    assert_eq!(result["name"], "Alice");
+    assert!(result.get("id").is_some());
+    assert!(result.get("email").is_none());
+    assert!(result.get("age").is_none());
+}
+
+#[tokio::test]
+async fn test_read_projection_always_includes_id() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let user = json!({
+        "name": "Bob",
+        "email": "bob@example.com"
+    });
+
+    let created = db
+        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let result = db
+        .read(
+            "users".into(),
+            id.clone(),
+            vec![],
+            Some(vec!["email".into()]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result["id"], id);
+    assert_eq!(result["email"], "bob@example.com");
+    assert!(result.get("name").is_none());
+}
+
+#[tokio::test]
+async fn test_list_with_projection() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    for i in 0..3 {
+        let user = json!({
+            "name": format!("user_{i}"),
+            "email": format!("user_{i}@example.com"),
+            "age": 20 + i
+        });
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
+            .await
+            .unwrap();
+    }
+
+    let results = db
+        .list(
+            "users".into(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+            Some(vec!["name".into()]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    for r in &results {
+        assert!(r.get("id").is_some());
+        assert!(r.get("name").is_some());
+        assert!(r.get("email").is_none());
+        assert!(r.get("age").is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_list_with_projection_and_filter() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    for (name, city) in [("Alice", "NYC"), ("Bob", "LA"), ("Charlie", "NYC")] {
+        let user = json!({ "name": name, "email": format!("{name}@example.com"), "city": city });
+        db.create("users".into(), user, None, None, &ScopeConfig::default())
+            .await
+            .unwrap();
+    }
+
+    let filter = Filter::new("city".into(), FilterOp::Eq, json!("NYC"));
+    let results = db
+        .list(
+            "users".into(),
+            vec![filter],
+            vec![],
+            None,
+            vec![],
+            Some(vec!["name".into()]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        assert!(r.get("id").is_some());
+        assert!(r.get("name").is_some());
+        assert!(r.get("email").is_none());
+        assert!(r.get("city").is_none());
+    }
+    let names: Vec<&str> = results.iter().filter_map(|r| r["name"].as_str()).collect();
+    assert!(names.contains(&"Alice"));
+    assert!(names.contains(&"Charlie"));
+}
+
+#[tokio::test]
+async fn test_read_projection_validates_against_schema() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let schema = Schema::new("users")
+        .add_field(FieldDefinition::new("name", FieldType::String))
+        .add_field(FieldDefinition::new("email", FieldType::String));
+    db.add_schema(schema).await.unwrap();
+
+    let user = json!({
+        "name": "Charlie",
+        "email": "charlie@example.com"
+    });
+
+    let created = db
+        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let result = db
+        .read("users".into(), id, vec![], Some(vec!["nonexistent".into()]))
+        .await;
+
+    assert!(result.is_err());
 }
