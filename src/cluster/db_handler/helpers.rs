@@ -39,6 +39,22 @@ impl DbRequestHandler {
     }
 }
 
+pub(crate) fn validate_projection_against_schema(
+    schema_data: &[u8],
+    entity: &str,
+    fields: &[String],
+) -> Option<String> {
+    let schema: crate::schema::Schema = serde_json::from_slice(schema_data).ok()?;
+    for field in fields {
+        if field != "id" && !schema.fields.contains_key(field) {
+            return Some(format!(
+                "schema violation for '{entity}': projection field '{field}' does not exist in schema",
+            ));
+        }
+    }
+    None
+}
+
 pub(crate) fn parse_projection(payload: &[u8]) -> Option<Vec<String>> {
     if payload.is_empty() {
         return None;

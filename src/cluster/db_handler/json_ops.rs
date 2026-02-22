@@ -11,7 +11,7 @@ use super::super::node_controller::{
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
-use super::helpers::parse_projection;
+use super::helpers::{self, parse_projection};
 use crate::events::ChangeEvent;
 use crate::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS};
 use serde_json::{Value, json};
@@ -72,21 +72,9 @@ impl DbRequestHandler {
         fields: &[String],
     ) -> Option<Vec<u8>> {
         let cluster_schema = controller.stores().schema_get(entity)?;
-        let schema: crate::schema::Schema = match serde_json::from_slice(&cluster_schema.data) {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-        for field in fields {
-            if field != "id" && !schema.fields.contains_key(field) {
-                return Some(Self::json_error(
-                    400,
-                    &format!(
-                        "schema violation for '{entity}': projection field '{field}' does not exist in schema",
-                    ),
-                ));
-            }
-        }
-        None
+        let msg =
+            helpers::validate_projection_against_schema(&cluster_schema.data, entity, fields)?;
+        Some(Self::json_error(400, &msg))
     }
 
     #[allow(clippy::too_many_lines)]

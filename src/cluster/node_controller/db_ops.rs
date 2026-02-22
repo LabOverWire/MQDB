@@ -13,7 +13,7 @@ use crate::types::MAX_LIST_RESULTS;
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::cluster::db_handler::helpers::parse_projection;
+use crate::cluster::db_handler::helpers::{parse_projection, validate_projection_against_schema};
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
@@ -498,19 +498,10 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if let Some(ref fields) = projection
             && let Some(cluster_schema) = self.stores.schema_get(entity)
-            && let Ok(schema) =
-                serde_json::from_slice::<crate::schema::Schema>(&cluster_schema.data)
+            && let Some(msg) =
+                validate_projection_against_schema(&cluster_schema.data, entity, fields)
         {
-            for field in fields {
-                if field != "id" && !schema.fields.contains_key(field) {
-                    return Self::json_error(
-                        400,
-                        &format!(
-                            "schema violation for '{entity}': projection field '{field}' does not exist in schema",
-                        ),
-                    );
-                }
-            }
+            return Self::json_error(400, &msg);
         }
 
         match self.stores.db_get(entity, id) {

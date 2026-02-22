@@ -2966,7 +2966,7 @@ Expected: returns `id` and `name`. The `nonexistent` field is silently omitted.
 
 ```bash
 cat > /tmp/users_schema.json << 'EOF'
-{"entity": "users_strict", "fields": {"name": {"type": "string"}, "email": {"type": "string"}}}
+{"entity": "users_strict", "fields": {"name": {"name": "name", "field_type": "String", "required": false, "default": null}, "email": {"name": "email", "field_type": "String", "required": false, "default": null}}}
 EOF
 mqdb schema set users_strict -f /tmp/users_schema.json --user testuser --pass testpass
 mqdb create users_strict -d '{"name": "Dave", "email": "dave@example.com"}' --user testuser --pass testpass
