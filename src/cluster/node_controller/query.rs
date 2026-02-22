@@ -195,7 +195,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
             filtered.truncate(MAX_LIST_RESULTS);
 
-            let projected = Self::apply_list_projection(filtered, &completed.projection);
+            let projected = Self::apply_list_projection(filtered, completed.projection.as_deref());
 
             let result = serde_json::json!({
                 "status": "ok",
@@ -211,7 +211,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(super) fn apply_list_projection(
         items: Vec<serde_json::Value>,
-        projection: &Option<Vec<String>>,
+        projection: Option<&[String]>,
     ) -> Vec<serde_json::Value> {
         let Some(fields) = projection else {
             return items;

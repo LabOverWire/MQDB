@@ -66,6 +66,29 @@ impl DbRequestHandler {
         None
     }
 
+    fn validate_projection_fields<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        entity: &str,
+        fields: &[String],
+    ) -> Option<Vec<u8>> {
+        let cluster_schema = controller.stores().schema_get(entity)?;
+        let schema: crate::schema::Schema = match serde_json::from_slice(&cluster_schema.data) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        for field in fields {
+            if field != "id" && !schema.fields.contains_key(field) {
+                return Some(Self::json_error(
+                    400,
+                    &format!(
+                        "schema violation for '{entity}': projection field '{field}' does not exist in schema",
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
@@ -546,6 +569,12 @@ impl DbRequestHandler {
         }
 
         let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
+        {
+            return JsonOpResult::Response(err);
+        }
 
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
@@ -1030,6 +1059,13 @@ impl DbRequestHandler {
         };
 
         let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
+        {
+            return Some(err);
+        }
+
         let has_remote_nodes = !controller.alive_nodes().is_empty();
 
         if has_remote_nodes {

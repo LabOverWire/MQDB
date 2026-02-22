@@ -494,12 +494,31 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
+        let projection = parse_projection(payload);
+
+        if let Some(ref fields) = projection
+            && let Some(cluster_schema) = self.stores.schema_get(entity)
+            && let Ok(schema) =
+                serde_json::from_slice::<crate::schema::Schema>(&cluster_schema.data)
+        {
+            for field in fields {
+                if field != "id" && !schema.fields.contains_key(field) {
+                    return Self::json_error(
+                        400,
+                        &format!(
+                            "schema violation for '{entity}': projection field '{field}' does not exist in schema",
+                        ),
+                    );
+                }
+            }
+        }
+
         match self.stores.db_get(entity, id) {
             Some(db_entity) => {
                 let data_json: serde_json::Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
-                let data_json = if let Some(fields) = parse_projection(payload) {
-                    crate::Database::project_fields(data_json, &fields)
+                let data_json = if let Some(ref fields) = projection {
+                    crate::Database::project_fields(data_json, fields)
                 } else {
                     data_json
                 };

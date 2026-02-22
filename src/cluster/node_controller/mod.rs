@@ -612,7 +612,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect();
                 filtered.truncate(MAX_LIST_RESULTS);
 
-                let projected = Self::apply_list_projection(filtered, &pending.projection);
+                let projected = Self::apply_list_projection(filtered, pending.projection.as_deref());
 
                 let result = serde_json::json!({
                     "status": "ok",
