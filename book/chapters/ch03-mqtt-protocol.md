@@ -109,7 +109,7 @@ The response envelope is a JSON object with a consistent structure:
 
 Error codes follow HTTP status semantics: 400 for bad requests (malformed JSON, missing fields), 403 for forbidden operations (ACL or ownership violations), 404 for missing entities, 409 for constraint conflicts (unique, foreign key, or optimistic concurrency violations), and 500 for internal errors.
 
-The protocol layer converts the topic and raw bytes into the same request type that the database's create, read, update, delete, and list methods accept. The protocol layer does not have its own execution path — it parses the MQTT message into the database API's native type and calls the database directly. The MQTT protocol adds transport, authentication, and response routing. The database API provides storage, constraints, and atomicity. The boundary between them is a function call.
+The protocol layer does not have its own execution path — it parses the MQTT message into the database API's native request type and calls the database directly. The boundary between protocol and database is a function call.
 
 This separation matters when the system goes distributed. In cluster mode, the handler receives a message from a remote node, parses it into a request, and routes it to the partition that owns the entity — potentially on a different node. The parse-and-dispatch logic is identical. Only the routing changes.
 
@@ -281,7 +281,7 @@ When change-only delivery is enabled for these patterns, reconnecting subscriber
 
 The three topic patterns cover different scoping depths: single-segment entity (`$DB/+/events/#`), two-segment scoped entity (`$DB/+/+/events/#`), and three-segment deeply-scoped entity (`$DB/+/+/+/events/#`). The `+` wildcards match any entity or scope value. These patterns mirror the event topic structures described in Section 3.4 — agent mode, cluster mode, and scoped mode.
 
-Without change-only delivery, MQTT's retained message semantics create a tension with event-driven subscriptions. Retained messages are designed for "current state" use cases — a temperature sensor publishes a retained message, and new subscribers immediately know the current temperature. Event topics carry a different semantic: "something happened." Replaying thousands of "something happened" messages to a reconnecting subscriber does not help — the subscriber needs "what happened since I disconnected," not the entire event history. Change-only delivery bridges this gap by suppressing duplicate retained payloads while preserving new ones.
+Without change-only delivery, MQTT's retained message semantics create a tension with event-driven subscriptions. Retained messages are designed for "current state" use cases — a temperature sensor publishes a retained message, and new subscribers immediately know the current temperature. Event topics have a different meaning: "something happened." Replaying thousands of "something happened" messages to a reconnecting subscriber does not help — the subscriber needs "what happened since I disconnected," not the entire event history. Change-only delivery bridges this gap by suppressing duplicate retained payloads while preserving new ones.
 
 ### The QoS Spectrum for Database Workloads
 

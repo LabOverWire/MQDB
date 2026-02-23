@@ -65,7 +65,7 @@ fn encode_i64_sortable(val: i64) -> [u8; 8] {
 }
 ```
 
-Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort *after* all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives move below zero, positives stay above. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
+Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort *after* all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives now sort before positives in byte order. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
 
 Floats use the same sign-bit idea on IEEE 754 bits, but negative floats need all bits flipped because IEEE 754 reverses the magnitude ordering for negative values — a more negative float has a larger binary representation:
 
@@ -313,7 +313,7 @@ pub struct ChangeEvent {
 }
 ```
 
-The sequence field comes from a global atomic counter, incremented with sequentially-consistent ordering on every event creation. This provides a total ordering within a single process — every event has a unique, monotonically increasing sequence number. In cluster mode, sequence numbers are scoped to partitions (Chapter 5), but in agent mode the global counter suffices.
+The sequence field comes from a global atomic counter incremented on every event creation. Every event has a unique, monotonically increasing sequence number. In cluster mode, sequence numbers are scoped to partitions (Chapter 5), but in agent mode the global counter suffices.
 
 ### Pattern Matching
 
@@ -355,7 +355,7 @@ The `event_type` suffix distinguishes operation types: `created`, `updated`, `de
 
 ### Subscription Persistence
 
-Subscriptions are persisted in storage as serialized JSON. The subscription registry loads them at startup and maintains an in-memory map for fast matching. On every event dispatch, the registry scans all subscriptions and returns those that match — a linear scan through the subscription list. For workloads with thousands of subscriptions, this becomes the chapter's performance story: the current implementation trades simplicity for throughput. A trie-based index (similar to what the cluster mode uses for MQTT topic subscriptions in Chapter 8) would accelerate matching, but the agent-mode subscription count is typically small enough that linear scanning is acceptable.
+Subscriptions are persisted in storage as serialized JSON. The subscription registry loads them at startup and maintains an in-memory map for fast matching. On every event dispatch, the registry scans all subscriptions and returns those that match — a linear scan through the subscription list. For workloads with thousands of subscriptions, this becomes the chapter's performance story: the current implementation trades throughput for simplicity. A trie-based index (similar to what the cluster mode uses for MQTT topic subscriptions in Chapter 8) would accelerate matching, but the agent-mode subscription count is typically small enough that linear scanning is acceptable.
 
 ## 2.7 The Outbox Pattern
 
@@ -402,19 +402,19 @@ The guarantee is the same as the traditional outbox: data and event share one tr
 
 The outbox design contains a subtle coupling that only became apparent during cluster mode development. In agent mode with immediate durability, every batch commit forces an fsync. The outbox entry hits disk before the process continues. If the process crashes after commit but before dispatch, the entry survives.
 
-Cluster mode uses periodic flushing (every 10 milliseconds), where fsync happens on a timer. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
+Cluster mode uses periodic flushing (every 10 milliseconds), where fsync happens on a timer. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that led to many hours of formal modelling before the root cause became clear.
 
 The lesson: the outbox guarantee is not just "data and event are in the same batch." It is "data and event have the same durability fate." If one can survive a crash that the other cannot, the guarantee is broken regardless of batch atomicity.
 
 ## 2.8 What Cluster Mode Changes
 
-In a network distributed system, things change slightly. Every component in this chapter has a cluster-mode counterpart. The single-node design is not thrown away — it is the foundation that cluster mode extends.
+In a distributed system, most components in this chapter change substantially. The single-node design is not thrown away — it is the foundation that cluster mode extends.
 
 **Storage** moves from the LSM-tree on disk to in-memory hash maps per partition, with the LSM-tree backing for crash recovery. Each partition maintains its own data store, index store, and constraint store. The storage trait is not used directly in cluster mode — instead, a store manager holds per-partition maps that provide the same operations (get, insert, remove, prefix scan) but scoped to a single partition.
 
 **Schemas and constraints** become binary structs replicated across nodes via the replication pipeline. When a schema is created in cluster mode, it is serialized into a compact binary format and replicated to all nodes as a partitioned write. The schema registry and constraint manager still exist, but they are populated from replicated data rather than loaded from local metadata keys.
 
-**Indexes** become hex-encoded entries in an in-memory sorted map. The encoding changes from raw bytes to hex strings to accommodate the in-memory storage format, but the lookup semantics — prefix scan by entity, field, and value — remain identical.
+**Indexes** become hex-encoded entries in an in-memory sorted map. The encoding changes from raw bytes to hex strings because the in-memory map uses string keys (for JSON serialization during replication), and raw bytes are not valid UTF-8. The lookup semantics — prefix scan by entity, field, and value — remain identical.
 
 **Foreign key validation** becomes async cross-node requests. In agent mode, validating a foreign key is a synchronous local key lookup. In cluster mode, the target entity may live on a different node's partition. The constraint check sends a request over the cluster transport, drops the lock, awaits the response, reacquires the lock, and completes the operation. Cascade side effects are partitioned into local and remote operations — local deletes and set-nulls execute immediately in the same batch, while remote effects are fired over the cluster transport to the partition that owns the target entity. Chapter 15 covers this lock-drop/reacquire pattern and the consistency implications of the gap between check and write.
 
@@ -435,4 +435,4 @@ let config = DatabaseConfig::new("./data/mydb")
 
 A configuration option disables all background tasks — used in tests to avoid flaky timing-dependent assertions, and in cluster mode where the cluster's own event loop handles the equivalent work.
 
-These configuration knobs are the translation layer between the design decisions in this chapter and the operational requirements of deployment. The defaults are chosen for agent mode: immediate durability (safety first), 60-second TTL cleanup (minimal background I/O), 10 outbox retries before dead-lettering (enough to survive transient failures without infinite loops). Cluster mode overrides most of these: periodic flushing for throughput, background tasks disabled (the cluster event loop handles outbox and cleanup), and in-memory stores instead of the LSM-tree for partition data.
+The defaults are chosen for agent mode: immediate durability (safety first), 60-second TTL cleanup (minimal background I/O), 10 outbox retries before dead-lettering (enough to survive transient failures without infinite loops). Cluster mode overrides most of these: periodic flushing for throughput, background tasks disabled (the cluster event loop handles outbox and cleanup), and in-memory stores instead of the LSM-tree for partition data.
