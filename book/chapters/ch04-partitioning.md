@@ -131,7 +131,9 @@ When a mutation is generated — a database record created, a session updated, a
 
 1. **Am I the primary?** Check the local partition map. If yes: apply the write locally, assign a sequence number, send it to replicas.
 2. **Am I not the primary, but I know who is?** Look up the primary in the partition map. Forward the write to that node as a write request over the cluster transport.
-3. **Is there no primary at all?** The partition is unassigned — the cluster is bootstrapping or in a degraded state. Log a warning. The write is lost.
+3. **Is there no primary at all?** The partition is unassigned — the cluster is bootstrapping or in a degraded state. The behavior depends on the code path. Client-facing database operations (create, update, delete) return a 503 error to the caller, who can retry. Internal broker state writes (sessions, subscriptions, client locations) are silently dropped with a warning log. This split is safe because the two categories have different recovery properties: client operations require an explicit outcome, while broker state is re-established when the client reconnects.
+
+In steady state, the third branch never fires. The health check gates cluster readiness on all 256 partitions having a primary and a Raft leader being present. No client can reach the cluster until every partition is assigned. The "no primary" case exists only during the transient bootstrap window before the cluster advertises availability, or during the brief interval after a node failure where the rebalancer has not yet promoted replicas to primaries.
 
 The second case is the common path for non-primary nodes. A client connects to Node 2 and creates a record. The record's key hashes to partition 47. Node 2's partition map says Node 1 is primary for partition 47. Node 2 forwards the write to Node 1. Node 1 applies it, replicates it to Node 3 (the replica), and the write is complete. The client receives a response through the MQTT response topic, unaware that the write was forwarded.
 
@@ -141,7 +143,9 @@ The forwarding decision happens on every write. Its cost is a partition map look
 
 ### Reads Follow a Similar Pattern
 
-Read operations (get, list) also check partition ownership. For a single-record read, the node checks whether it is the primary or a replica for the partition. If it is either, it serves the read locally — replicas can serve reads because MQDB uses eventual consistency, and a slightly stale read is acceptable. If the node has no role for the partition, it forwards the request to the primary.
+Read operations (get, list) also check partition ownership. For a single-record read, the node serves it locally if it holds any copy of the partition — primary or replica. If it has no copy, it forwards the request to the primary.
+
+Serving reads from replicas means a client might receive data that is behind the primary. In a request-response system, this would be a real concern — the client has no way to know whether the value it received is current or stale without polling again. But MQDB is reactive first. A client that reads a record and subscribes to its change events will receive the current value from the replica, and then receive an update within milliseconds if the primary had a newer version. The subscription closes the consistency gap automatically. Eventual consistency is a meaningful guarantee only when the system actively pushes updates to interested clients. Without subscriptions, "eventual" means "whenever you decide to ask again." With subscriptions, "eventual" means "the next change event, which is already on its way."
 
 List operations are more complex because they must aggregate results across all partitions. A list of all users requires scanning every partition's data store. In cluster mode, this becomes a scatter-gather operation: the coordinating node sends a list request to every node, each node scans its primary partitions and returns matching records, and the coordinator merges the results. Chapter 8 covers this in detail.
 
@@ -161,8 +165,6 @@ Partitioned entities include:
 - **Inflight messages** — pending QoS 1 acknowledgments, partitioned by client ID
 - **Database records** — all user-created entity data, partitioned by entity name and record ID
 
-For these entities, the partition primary is the only node that needs the data at write time. Other nodes may hold replicas for durability, but they never need to query the data as part of handling an unrelated request.
-
 ### Broadcast Entities
 
 Some entities must exist completely on every node. These are the broadcast entities, and they exist because of a specific requirement: **publish routing must be local**.
@@ -178,7 +180,7 @@ Broadcast entities include:
 - **Database schema** — entity schema definitions (needed for validation on every node)
 - **Constraint definitions** — constraint metadata (needed for enforcement on every node)
 
-The first three are essential for message routing. The topic index and wildcard store are read on every publish to determine where to forward the message. Client locations are read when the topic index says a subscriber is on another node — the location tells the publisher which node to send to. Without local copies, every publish would require cross-node queries before the message could be delivered.
+The first three are essential for message routing. The topic index and wildcard store are read on every publish to determine where to forward the message. Client locations are read when the topic index says a subscriber is on another node — the location tells the publisher which node to send to.
 
 Schema and constraint definitions are broadcast for a different reason: validation. When a database write arrives at any node, that node must validate the record against the entity's schema and check constraints before forwarding to the partition primary. If schemas lived only on one partition, every validation would require a network request.
 
@@ -192,14 +194,14 @@ The propagation mechanism varies by entity. The topic index uses a dedicated bro
 
 ## 4.6 Write Amplification
 
-Broadcast entities trade write cost for read locality. The trade is not always cheap.
+Local publish routing requires every node to hold the complete subscriber map. That means a single logical operation — one client subscribes to one topic — must propagate to every node in the cluster. One logical write becomes many physical writes. This is write amplification, and it is the price of eliminating network round trips from the publish path. Understanding the cost matters because it determines how the system behaves under subscription churn.
 
 ### Exact Topic Subscriptions
 
 When a client subscribes to an exact topic like `sensors/temperature`, two things happen:
 
-1. The subscription record is stored as a partitioned write, hashed by client ID. One replication write to the subscription's partition primary.
-2. The topic index is updated via a single cluster broadcast message. One message sent to all other nodes.
+1. The subscription record is stored as a partitioned write, hashed by client ID.
+2. The topic index is updated via a single cluster broadcast message.
 
 Total cost: 1 replication write + 1 broadcast message. This is lightweight. The broadcast message is small (topic name, client ID, partition, QoS) and is handled in-memory on each receiving node.
 
@@ -217,15 +219,13 @@ The 256 local writes deserve explanation. The wildcard trie is an in-memory data
 
 The 256 writes are local disk writes, not network operations. They go to the node's own storage engine in a batch. On modern SSDs, 256 small writes in a batch complete in under a millisecond. The cost is real but bounded.
 
-### Why This Is Fundamental
+### Minimizing the Cost
 
-The write amplification is not a bug to be optimized away. It is a direct consequence of the design requirement that publish routing be local. The only question is the propagation mechanism — and MQDB chose broadcast messages over per-partition replication writes specifically to minimize the amplification.
+An earlier design sent 256 individual replication writes through the Raft log for each broadcast entity update. This was expensive: the Raft log grew quickly, and each write required consensus. The current design bypasses Raft for broadcast propagation entirely. Broadcast messages are sent directly over the cluster transport, and each node applies them to its local stores without consensus. Broadcast updates are eventually consistent — a node might briefly have a stale subscriber map — but the convergence time is bounded by the heartbeat interval, and the Raft log stays compact.
 
-An earlier design considered sending 256 individual replication writes through the Raft log for each broadcast entity update. This was correct but expensive: the Raft log grew quickly, and each write required consensus. The current design bypasses Raft for broadcast propagation entirely. The broadcast messages are sent directly over the cluster transport, and each node applies them to its local stores without consensus. This means broadcast updates are eventually consistent — a node might briefly have a stale subscriber map — but the convergence time is bounded by the heartbeat interval, and the Raft log stays compact.
+For workloads with relatively stable subscriptions — subscribe once, receive many messages — the amplification is amortized over the lifetime of the subscription. A sensor that subscribes to a command topic on startup and stays subscribed for weeks generates 256 local writes once. The thousands of messages it receives afterward are all routed with local lookups, zero network round trips.
 
-For workloads with relatively stable subscriptions — subscribe once, receive many messages — the write amplification is amortized over the lifetime of the subscription. A sensor that subscribes to a command topic on startup and stays subscribed for weeks generates 256 local writes once. The thousands of messages it receives afterward are all routed with local lookups, zero network round trips. The one-time write cost buys ongoing read efficiency.
-
-For workloads with rapidly churning subscriptions — clients that subscribe and unsubscribe frequently — the amplification can become noticeable, especially for wildcard patterns. This is an inherent tension in the design: local read performance requires global write propagation. MQDB optimizes for the common case (stable subscriptions) and accepts the cost for the uncommon case (rapid churn).
+For workloads with rapidly churning subscriptions — clients that subscribe and unsubscribe frequently — the amplification becomes noticeable, especially for wildcard patterns. MQDB optimizes for the common case (stable subscriptions) and accepts the cost for the uncommon case (rapid churn).
 
 ## 4.7 What Went Wrong
 
@@ -249,7 +249,7 @@ The fix was trivial: batch all Raft-applied writes into a single flush. Processi
 
 The lesson is that I/O patterns matter more than algorithms. The partitioning algorithm was correct. The rebalancing algorithm was correct. The Raft implementation was correct. But 256 sequential disk flushes, each waiting for the drive to confirm the write, turned a sub-millisecond operation into a 20-second one. The difference between batching and not batching was the difference between a working cluster and a cluster that could not add nodes.
 
-This is Chapter 6's territory in detail, but the root cause belongs here: the partition count (256) directly determined the number of flushes. A system with 16 partitions would have flushed 16 times — still slow, but perhaps not enough to trigger death detection. A system with 4096 partitions would have flushed 4096 times and been completely unusable. The fixed partition count made the problem predictable and the fix straightforward. With dynamic partition counts, the batch size would vary, and the performance cliff would appear at different cluster sizes.
+This is Chapter 6's territory in detail, but the root cause belongs here: the partition count directly determined the number of flushes. A system with 16 partitions would have flushed 16 times — still slow, but perhaps not enough to trigger death detection. A system with 4096 partitions would have flushed 4096 times and been completely unusable. The fixed partition count made the problem predictable and the fix straightforward. With dynamic partition counts, the batch size would vary, and the performance cliff would appear at different cluster sizes. We got lucky.
 
 ### The Heartbeat Partition Map Race
 
@@ -257,7 +257,7 @@ Nodes learn about partition assignments from two sources: Raft log entries and h
 
 A new node joins the cluster. The Raft leader proposes partition assignments for the new node. The Raft entry is committed but has not yet been applied on all nodes. Meanwhile, the new node starts sending heartbeats with its primary bitmap set for the partitions it believes it owns (because it applied the Raft entry locally). Other nodes receive the heartbeat and update their view of the partition map — but the Raft entry has not arrived yet, so the heartbeat and the Raft state disagree.
 
-The fix was to make the partition map authoritative: the local partition map (populated from Raft) is the primary source, and the heartbeat partition map is a secondary source used only as a fallback. The write-or-forward decision checks the local map first. If the local map has no primary for a partition but the heartbeat map does, the heartbeat value is used as a best-effort fallback. This covers the convergence window without undermining Raft's authority over the partition map.
+The fix was to make the partition map authoritative: the local partition map (populated from Raft) is the primary source, and the heartbeat partition map is a secondary source used only as a fallback. The write-or-forward decision checks the local map first. If the local map has no primary for a partition but the heartbeat map does, the heartbeat value is used as a best-effort fallback. This lets a node route writes during the gap between Raft commit and local apply, without letting heartbeats override Raft's assignments.
 
 ## 4.8 Rebalancing
 
