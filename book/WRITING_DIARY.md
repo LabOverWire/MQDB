@@ -229,7 +229,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Dead code in store_manager (`subscribe_topic_replicated`, `schema_register_replicated`) was removed — these created 256-write fan-outs but were superseded by lightweight broadcast messages
 - When a method exists but is never called, check git blame/log to find when the calling code changed
 - Avoid tautologies — don't restate a definition as a use case (e.g., "suits scenarios where MQTT is unnecessary" for the no-MQTT mode). Use concrete examples instead.
-- When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `fkref/`, `_dead_letter/`, `_crypto/` are real parts of the keyspace
+- When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `_dead_letter/`, `_crypto/` are real parts of the keyspace
 - Run a systematic verification pass after writing: list every factual claim (constant values, defaults, struct fields) and check each against source. This caught zero errors in Ch2 but the discipline prevents drift as the code evolves
 - The "What Went Wrong" sections are most powerful when they describe a real bug from development — the outbox durability coupling bug came from the cluster mode transition, not from agent mode itself
 - When writing about architecture with multiple interacting components (internal clients, auth providers, topic protection), the "why not the simpler approach?" question generates the most insight — explaining why separate topic prefixes were rejected is more instructive than just describing the chosen design

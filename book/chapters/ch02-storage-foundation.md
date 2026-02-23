@@ -97,17 +97,17 @@ pub fn encode_with_checksum(data: &[u8]) -> Vec<u8> {
 }
 ```
 
-On read, `decode_and_verify` extracts the stored checksum, recomputes it over the payload, and returns a `ChecksumMismatch` error if they differ. The error propagates as `Error::Corruption { entity, id }` — the database knows exactly which record is damaged.
+On read, the corresponding decode function extracts the stored checksum, recomputes it over the payload, and returns an error if they differ. The error identifies exactly which record is damaged — the entity and ID are included in the error context.
 
 This catches bitflips in storage, truncated writes, and corruption from misaligned reads. CRC32 is not cryptographic — it won't detect intentional tampering — but it is fast enough to run on every read without measurable overhead. The test suite verifies that flipping any single bit in the payload triggers detection.
 
 ### ID Extraction
 
-The `id` field lives in the storage key, not in the JSON blob. When `Entity::from_json` receives input data, it extracts the `id` field and removes it from the JSON object. When `Entity::to_json` returns data to a caller, it re-inserts `id` into the JSON. This separation serves two purposes: it eliminates redundant storage (the ID is already encoded in the key), and it ensures the ID is always consistent with the key — no possibility of the JSON `id` field disagreeing with the storage key.
+The `id` field lives in the storage key, not in the JSON blob. When an entity is constructed from input JSON, the `id` field is extracted and removed from the object. When the entity is serialized back to JSON, `id` is re-inserted. This separation serves two purposes: it eliminates redundant storage (the ID is already encoded in the key), and it ensures the ID is always consistent with the key — no possibility of the JSON `id` field disagreeing with the storage key.
 
 ## 2.2 Pluggable Storage Backends
 
-The storage layer is defined by a trait, not a concrete type. `StorageBackend` declares seven operations:
+The storage layer is defined by a trait, not a concrete type. The storage trait declares seven operations:
 
 ```rust
 pub trait StorageBackend: Send + Sync {
@@ -123,15 +123,15 @@ pub trait StorageBackend: Send + Sync {
 
 Three implementations exist:
 
-**Fjall** is the production backend. It wraps an LSM-tree engine (the `fjall` crate), using a single keyspace named `"main"`. Three durability modes control fsync behavior: `Immediate` flushes every write with `PersistMode::SyncAll`, `PeriodicMs(n)` relies on the engine's background flush (used in cluster mode for throughput), and `None` skips persistence entirely. Prefix scans and range scans operate on a snapshot (`self.db.snapshot()`), providing a consistent view even while concurrent writes land — the iterator sees the database as it was at snapshot creation time.
+**Fjall** is the production backend. It wraps an LSM-tree engine using a single keyspace. Three durability modes control fsync behavior: Immediate flushes every write synchronously, Periodic relies on the engine's background flush at a configurable interval (used in cluster mode for throughput), and None skips persistence entirely. Prefix scans and range scans operate on a snapshot, providing a consistent view even while concurrent writes land — the iterator sees the database as it was at snapshot creation time.
 
-**Memory** is a `BTreeMap<Vec<u8>, Vec<u8>>` behind an `RwLock`. It provides the same sort order as Fjall — `BTreeMap` iterates in sorted key order, just like an LSM-tree. Prefix scans use `range(prefix..)` with a `take_while` predicate. This backend runs in tests and in WASM where filesystem access is unavailable.
+**Memory** is a sorted map behind a read-write lock. It provides the same sort order as Fjall — the map iterates in sorted key order, just like an LSM-tree. Prefix scans use range iteration with a predicate. This backend runs in tests and in WASM where filesystem access is unavailable.
 
 **Encrypted** is a decorator that wraps any other backend. It uses AES-256-GCM for per-value encryption with a key derived from a passphrase via PBKDF2 (600,000 iterations of HMAC-SHA256). Each value gets a fresh 12-byte random nonce. The storage key itself is used as Associated Authenticated Data (AAD) for the GCM cipher — meaning a value encrypted under key `data/users/42` cannot be decrypted if someone moves it to key `data/users/99`. On first open, the backend generates a random 32-byte salt, stores it at `_crypto/salt`, encrypts a known plaintext (`"mqdb"`) and stores it at `_crypto/check`. On subsequent opens, it re-derives the key and attempts to decrypt the check value — a wrong passphrase fails immediately rather than silently producing garbage on later reads.
 
 ### The Batch Contract
 
-The `BatchOperations` trait is where atomicity lives:
+The batch operations trait is where atomicity lives:
 
 ```rust
 pub trait BatchOperations: Send {
@@ -142,17 +142,17 @@ pub trait BatchOperations: Send {
 }
 ```
 
-`insert` and `remove` queue operations. `expect_value` registers a precondition: at commit time, the current value for this key must match the expected value exactly, or the entire batch is rejected with a `Conflict` error. This is optimistic concurrency control — no locks are held during the batch construction phase. The check and write happen atomically at `commit()`.
+The insert and remove methods queue operations. The expect-value method registers a precondition: at commit time, the current value for this key must match the expected value exactly, or the entire batch is rejected with a conflict error. This is optimistic concurrency control — no locks are held during the batch construction phase. The check and write happen atomically at commit time.
 
-In the Fjall backend, `commit()` first takes a snapshot and checks all preconditions against it, then applies all operations in a single fjall batch. In the memory backend, `commit()` acquires the write lock, checks preconditions, and applies operations while holding the lock — the write lock serializes all batch commits.
+In the Fjall backend, commit first takes a snapshot and checks all preconditions against it, then applies all operations in a single batch. In the memory backend, commit acquires the write lock, checks preconditions, and applies operations while holding the lock — the write lock serializes all batch commits.
 
-The encrypted backend has a subtlety: `expect_value` receives a plaintext expected value, but the underlying backend stores ciphertext. During `commit()`, the encrypted batch reads the current ciphertext, decrypts it, compares with the expected plaintext, and if matched, re-encrypts and passes the ciphertext expectation to the inner batch. Two layers of precondition checking, but the caller only sees plaintext.
+The encrypted backend has a subtlety: the expect-value call receives a plaintext expected value, but the underlying backend stores ciphertext. During commit, the encrypted batch reads the current ciphertext, decrypts it, compares with the expected plaintext, and if matched, re-encrypts and passes the ciphertext expectation to the inner batch. Two layers of precondition checking, but the caller only sees plaintext.
 
 Why trait-based abstraction? Because the same database code — CRUD operations, constraint validation, index maintenance — runs identically regardless of whether data is on disk (Fjall), in memory (tests), or encrypted. The caller never knows which backend is active. This pays off immediately in testing (memory backend, no filesystem setup) and later in WASM deployment (memory backend, no native dependencies).
 
 ## 2.3 The Database API
 
-The `Database` struct ties the components together. It holds 13 `Arc`-wrapped fields:
+The database struct ties the components together. It holds 13 shared-ownership fields:
 
 ```rust
 pub struct Database {
@@ -172,41 +172,41 @@ pub struct Database {
 }
 ```
 
-`Database::open` is the entry point. It opens storage (encrypted or plain, depending on config), loads schemas and constraints from `meta/*` keys, loads subscriptions from `sub/*` keys, and spawns up to three background tasks: the outbox processor (retries failed event dispatches), TTL cleanup (scans for expired records), and consumer timeout cleanup (evicts stale members from consumer groups). The `shutdown_tx` watch channel coordinates shutdown — sending `true` triggers all background tasks to exit their loops.
+The open method is the entry point. It opens storage (encrypted or plain, depending on config), loads schemas and constraints from metadata keys, loads subscriptions from storage, and spawns up to three background tasks: the outbox processor (retries failed event dispatches), TTL cleanup (scans for expired records), and consumer timeout cleanup (evicts stale members from consumer groups). A watch channel coordinates shutdown — sending a signal triggers all background tasks to exit their loops.
 
 ### The Create Path
 
-Walking through `Database::create` reveals the atomicity model:
+Walking through the create path reveals the atomicity model:
 
 1. **Apply schema defaults.** If a schema exists for this entity, insert any missing fields that have default values defined.
-2. **Generate or accept ID.** If the input JSON contains an `id` field, use it. Otherwise, generate a sequential ID by reading the counter at `meta/seq:{entity}`, incrementing it, and writing it back. The `id_gen_lock` mutex serializes ID generation to prevent duplicates.
-3. **Handle TTL.** If `ttl_secs` is present, compute `_expires_at = now + ttl_secs` and remove the `ttl_secs` field. The TTL cleanup task will delete the record after expiration.
-4. **Inject version.** Set `_version = 1`. Every update increments this field, enabling optimistic concurrency on updates via `expect_value`.
+2. **Generate or accept ID.** If the input JSON contains an `id` field, use it. Otherwise, generate a sequential ID by reading a per-entity counter from metadata, incrementing it, and writing it back. A mutex serializes ID generation to prevent duplicates.
+3. **Handle TTL.** If a TTL is present, compute an expiration timestamp and remove the TTL field. The TTL cleanup task will delete the record after expiration.
+4. **Inject version.** Set the version counter to 1. Every update increments this field, enabling optimistic concurrency on updates via the expect-value precondition.
 5. **Validate schema.** If a schema exists, verify all required fields are present and all provided values match their declared types.
-6. **Create BatchWriter.** This is the atomicity boundary. Everything from here to `commit()` is all-or-nothing.
+6. **Create a batch.** This is the atomicity boundary. Everything from here to commit is all-or-nothing.
 7. **Validate constraints.** Check unique constraints (no duplicate values), foreign key constraints (referenced entity exists), and not-null constraints (required fields are non-null). These checks happen against the current storage state.
 8. **Insert data key.** Serialize the entity (with CRC32 checksum) and add the insert to the batch.
 9. **Update indexes.** For each indexed field, add an index entry to the batch.
-10. **Enqueue outbox entry.** Serialize the change event and add it to the batch under `_outbox/{uuid}`.
-11. **Commit.** One call to `batch.commit()` persists data, indexes, and outbox entry atomically.
+10. **Enqueue outbox entry.** Serialize the change event and add it to the batch under the outbox prefix.
+11. **Commit.** One call persists data, indexes, and outbox entry atomically.
 12. **Dispatch event.** Push the change event to subscribers through the event dispatcher.
 13. **Mark delivered.** Delete the outbox entry. If dispatch fails or the process crashes, the outbox processor will retry on the next sweep.
 
-Steps 7 through 11 share one `BatchWriter`. That single `commit()` is the atomicity boundary. Either the record, its indexes, and its outbox entry all exist, or none of them do. There is no window where data exists without its corresponding event, and no window where an event exists without its corresponding data.
+Steps 7 through 11 share one batch. That single commit is the atomicity boundary. Either the record, its indexes, and its outbox entry all exist, or none of them do. There is no window where data exists without its corresponding event, and no window where an event exists without its corresponding data.
 
 ### The Update Path
 
-The update path follows the same structure but adds an `expect_value` precondition. After reading the existing record, the update merges new fields into the existing data (a shallow merge — top-level keys are replaced, nested objects are not deep-merged), increments `_version`, validates the schema, and builds a batch. Before inserting the new value, it calls `batch.expect_value(key, existing_data)` — the raw bytes of the record as they were read. At `commit()` time, if the stored bytes differ (because another concurrent update landed in between), the entire batch is rejected with a `Conflict` error. The caller can retry with a fresh read.
+The update path follows the same structure but adds a precondition. After reading the existing record, the update merges new fields into the existing data (a shallow merge — top-level keys are replaced, nested objects are not deep-merged), increments the version, validates the schema, and builds a batch. Before inserting the new value, it registers an expect-value precondition — the raw bytes of the record as they were read. At commit time, if the stored bytes differ (because another concurrent update landed in between), the entire batch is rejected with a conflict error. The caller can retry with a fresh read.
 
-This is optimistic concurrency control at the storage layer. No locks are held during the read-modify-write cycle. The window between read and commit is a race window, but the `expect_value` precondition makes the race detectable rather than destructive. In practice, conflicts are rare because MQDB's primary workloads — IoT telemetry, event streams — are insert-heavy rather than update-heavy.
+This is optimistic concurrency control at the storage layer. No locks are held during the read-modify-write cycle. The window between read and commit is a race window, but the precondition makes the race detectable rather than destructive. In practice, conflicts are rare because MQDB's primary workloads — IoT telemetry, event streams — are insert-heavy rather than update-heavy.
 
 ### The Delete Path
 
-Delete is the most complex operation because it triggers constraint cascades. The sequence: read the existing record, check constraints (which may return a `Vec<DeleteOperation>`), build a batch containing the primary delete plus all cascade and set-null operations, enqueue outbox events for every affected record, and commit. The delete path demonstrates the full power of the single-batch model: a cascade that touches 20 records across 3 entities still commits in one atomic operation. If any part fails — a constraint blocks it, serialization fails, the batch commit encounters a conflict — nothing changes.
+Delete is the most complex operation because it triggers constraint cascades. The sequence: read the existing record, check constraints (which may return a list of cascade and set-null operations), build a batch containing the primary delete plus all side effects, enqueue outbox events for every affected record, and commit. The delete path demonstrates the full power of the single-batch model: a cascade that touches 20 records across 3 entities still commits in one atomic operation. If any part fails — a constraint blocks it, serialization fails, the batch commit encounters a conflict — nothing changes.
 
 ### Background Tasks
 
-Three tasks run in the background after `Database::open`:
+Three tasks run in the background after the database opens:
 
 **The outbox processor** wakes on a configurable interval (default 5 seconds), scans `_outbox/*`, and re-dispatches pending entries. This is the crash recovery mechanism described in Section 2.7.
 
@@ -214,7 +214,7 @@ Three tasks run in the background after `Database::open`:
 
 **The consumer timeout task** wakes at half the consumer timeout interval, iterates through all consumer groups, and evicts members whose last heartbeat exceeds the timeout. Evicted members' partitions are redistributed to surviving members via the rebalance algorithm.
 
-All three tasks are coordinated by a `watch::channel<bool>`. On shutdown, the `Database` sends `true` on the channel, and each task exits its `tokio::select!` loop.
+All three tasks are coordinated by a watch channel. On shutdown, the database signals the channel, and each task exits its select loop.
 
 ## 2.4 Schema and Constraints
 
@@ -222,7 +222,7 @@ Schemas are opt-in. An entity without a schema accepts any JSON object — the d
 
 Six types are supported: String, Number, Boolean, Array, Object, and Null. Each field definition carries a name, a type, a required flag, and an optional default value. Defaults are applied before validation — a field with a default value is never "missing" by the time validation runs.
 
-Schemas are persisted under `meta/schema/{entity}` as JSON and loaded into memory at startup. The `SchemaRegistry` holds an in-memory `HashMap<String, Schema>` and delegates validation: if a schema exists for the entity, validate; otherwise, pass through.
+Schemas are persisted in the metadata keyspace as JSON and loaded into memory at startup. The schema registry holds an in-memory map and delegates validation: if a schema exists for the entity, validate; otherwise, pass through.
 
 ### Three Constraint Types
 
@@ -236,13 +236,13 @@ Schemas are persisted under `meta/schema/{entity}` as JSON and loaded into memor
 
 The interesting complexity is in delete. When a record is deleted, the constraint manager must find all records that reference it via foreign key and apply the configured policy. Three policies exist:
 
-**Restrict** blocks the delete if any referencing records exist. The check scans all records of the source entity (a prefix scan on `data/{source_entity}/`), deserializes each one, and checks whether its FK field points to the record being deleted.
+**Restrict** blocks the delete if any referencing records exist. The check scans all records of the source entity, deserializes each one, and checks whether its FK field points to the record being deleted.
 
-**Cascade** deletes all referencing records recursively. `validate_delete` returns a `Vec<DeleteOperation>` containing every cascade and set-null operation needed. The implementation uses depth-first search with a visited set to detect cycles — if entity A references entity B which references entity A, the cycle is broken by the visited check.
+**Cascade** deletes all referencing records recursively. The constraint validation returns a list of every cascade and set-null operation needed. The implementation uses depth-first search with a visited set to detect cycles — if entity A references entity B which references entity A, the cycle is broken by the visited check.
 
-**SetNull** nullifies the FK field in referencing records instead of deleting them. The field is set to JSON `null` and the record's `_version` is incremented.
+**SetNull** nullifies the FK field in referencing records instead of deleting them. The field is set to JSON `null` and the record's version is incremented.
 
-The caller builds a single `BatchWriter` containing the primary delete, all cascade deletes, all set-null updates, and all corresponding index removals and outbox events. One `commit()` — the entire cascade tree is atomic. Either the parent and all its cascaded children are deleted, or nothing changes.
+The caller builds a single batch containing the primary delete, all cascade deletes, all set-null updates, and all corresponding index removals and outbox events. One commit — the entire cascade tree is atomic. Either the parent and all its cascaded children are deleted, or nothing changes.
 
 ```rust
 let delete_ops = constraint_manager.validate_delete(&existing_entity, &self.storage)?;
@@ -252,7 +252,7 @@ batch.remove(key.clone());
 batch.commit()?;
 ```
 
-Constraints are persisted under `meta/constraint/{type}/{entity}/{name}` and loaded at startup. This means constraint definitions survive restarts — they are part of the database state, not ephemeral configuration.
+Constraints are persisted in the metadata keyspace and loaded at startup. This means constraint definitions survive restarts — they are part of the database state, not ephemeral configuration.
 
 This entire constraint system is agent-mode only — local key lookups, local prefix scans, one batch commit. Chapter 15 covers what happens when foreign key validation must cross partition boundaries in cluster mode: the local key lookup becomes an async cross-node request, the lock must be dropped and reacquired, and the consistency window between check and write opens wider.
 
@@ -270,7 +270,7 @@ Why empty values? Index entries are write-heavy. Every create adds index entries
 
 ### Atomic Index Maintenance
 
-The `IndexManager` provides two operations: `update_indexes` (for creates and updates) and `remove_indexes` (for deletes). Both operate on a `BatchWriter`:
+The index manager provides two operations: update (for creates and updates) and remove (for deletes). Both operate on the same batch as the data write:
 
 ```rust
 fn update_indexes(&self, batch: &mut BatchWriter, entity: &Entity, old_entity: Option<&Entity>) {
@@ -281,19 +281,19 @@ fn update_indexes(&self, batch: &mut BatchWriter, entity: &Entity, old_entity: O
 }
 ```
 
-On update, old index entries are removed and new ones are added in the same batch. The `commit()` that persists the data also persists the index changes. There is no window where the data says one thing and the index says another.
+On update, old index entries are removed and new ones are added in the same batch. The commit that persists the data also persists the index changes. There is no window where the data says one thing and the index says another.
 
-Two lookup methods perform the reverse operation — finding entity IDs from index entries:
+Two lookup modes perform the reverse operation — finding entity IDs from index entries:
 
-`lookup_by_field` handles equality: given a field name and value, it prefix-scans `idx/{entity}/{field}/{value}/` and extracts the ID from each key's last segment. A query filtering `email = "alice@example.com"` hits the index directly instead of scanning every record.
+**Equality lookup** handles exact matches: given a field name and value, it prefix-scans the index for that value and extracts the ID from each key's last segment. A query filtering `email = "alice@example.com"` hits the index directly instead of scanning every record.
 
-`lookup_by_range` handles inequalities: given a field name with optional lower and upper bounds, it range-scans the index between the encoded bound values. A query filtering `age > 30` scans from the encoded representation of 30 to the end of the `age` index. Each bound carries an inclusive flag — `>=` includes the boundary value, `>` excludes it. This is where the sort-preserving numeric encoding pays off: because `encode_i64_sortable(30)` sorts before `encode_i64_sortable(31)` in byte order, the storage engine's `range_scan` returns exactly the right records without any post-filtering.
+**Range lookup** handles inequalities: given a field name with optional lower and upper bounds, it range-scans the index between the encoded bound values. A query filtering `age > 30` scans from the encoded representation of 30 to the end of the age index. Each bound carries an inclusive flag — `>=` includes the boundary value, `>` excludes it. This is where the sort-preserving numeric encoding pays off: because the encoding of 30 sorts before the encoding of 31 in byte order, the storage engine's range scan returns exactly the right records without any post-filtering.
 
-The query planner in `list_with_filters` tries three strategies in order: first, an indexed equality filter via `lookup_by_field`; second, indexed range filters via `lookup_by_range` (combining multiple range conditions on the same field into a single scan with both lower and upper bounds); third, a full table scan as fallback. The first two produce a candidate ID set that the remaining non-indexed filters narrow down.
+The query planner tries three strategies in order: first, an indexed equality filter; second, indexed range filters (combining multiple range conditions on the same field into a single scan with both lower and upper bounds); third, a full table scan as fallback. The first two produce a candidate ID set that the remaining non-indexed filters narrow down.
 
-Arrays and objects cannot be indexed — `encode_value_for_index` returns an error for these types. Only scalar values (strings, numbers, booleans, null) produce index entries. This keeps the index structure flat and the lookup semantics unambiguous.
+Arrays and objects cannot be indexed — only scalar values (strings, numbers, booleans, null) produce index entries. This keeps the index structure flat and the lookup semantics unambiguous.
 
-Index entries serve three consumers, not one. The `IndexManager` uses them for equality and range lookups. The `ConstraintManager` scans them to enforce unique constraints — `validate_unique` prefix-scans `idx/{entity}/{field}/{value}/` and rejects the write if any key exists with a different ID. And the query planner routes through them whenever a filter targets an indexed field. The same empty-value keys serve all three purposes because the information is in the key structure, not the value.
+Index entries serve three consumers, not one. The index manager uses them for equality and range lookups. The constraint manager scans them to enforce unique constraints — prefix-scanning for a field value and rejecting the write if any key exists with a different ID. And the query planner routes through them whenever a filter targets an indexed field. The same empty-value keys serve all three purposes because the information is in the key structure, not the value.
 
 ## 2.6 Reactive Subscriptions
 
@@ -301,18 +301,19 @@ Every write produces a `ChangeEvent`:
 
 ```rust
 pub struct ChangeEvent {
-    pub sequence: u64,           // Global monotonic counter
-    pub entity: String,          // "users", "orders", etc.
-    pub id: String,              // Record identifier
-    pub operation: Operation,    // Create, Update, or Delete
-    pub data: Option<Value>,     // Full record data, including for deletes
-    pub sender: Option<String>,  // Who initiated the write
+    pub sequence: u64,              // Global monotonic counter
+    pub entity: String,             // "users", "orders", etc.
+    pub id: String,                 // Record identifier
+    pub operation: Operation,       // Create, Update, or Delete
+    pub data: Option<Value>,        // Full record data, including for deletes
+    pub operation_id: Option<String>, // Tracks multi-event operations (e.g., cascades)
+    pub sender: Option<String>,     // Who initiated the write
     pub client_id: Option<String>,
     pub scope: Option<(String, String)>,
 }
 ```
 
-The `sequence` field comes from a global `AtomicU64`, incremented with `SeqCst` ordering on every event creation. This provides a total ordering within a single process — every event has a unique, monotonically increasing sequence number. In cluster mode, sequence numbers are scoped to partitions (Chapter 5), but in agent mode the global counter suffices.
+The sequence field comes from a global atomic counter, incremented with sequentially-consistent ordering on every event creation. This provides a total ordering within a single process — every event has a unique, monotonically increasing sequence number. In cluster mode, sequence numbers are scoped to partitions (Chapter 5), but in agent mode the global counter suffices.
 
 ### Pattern Matching
 
@@ -326,21 +327,21 @@ Each `Subscription` optionally filters on entity name before pattern matching �
 
 ### Three Dispatch Modes
 
-The `EventDispatcher` categorizes matching subscriptions by their mode:
+The event dispatcher categorizes matching subscriptions by their mode:
 
-**Broadcast** is the default. Every matching subscription receives every event. The dispatcher iterates through all matching broadcast subscriptions and sends the event to each listener's broadcast channel. This is the mode used by MQTT clients subscribing to `$DB/users/events/#` — every subscriber sees every user change.
+**Broadcast** is the default. Every matching subscription receives every event. The dispatcher iterates through all matching broadcast subscriptions and sends the event to each listener's channel. This is the mode used by MQTT clients subscribing to `$DB/users/events/#` — every subscriber sees every user change.
 
-**LoadBalanced** distributes events across members of a share group using round-robin. An `AtomicUsize` counter per group tracks the current position. Each event goes to exactly one member of the group — `subs[counter % subs.len()]`. This is the shared subscription model: multiple workers processing events with each event handled by exactly one worker.
+**LoadBalanced** distributes events across members of a share group using round-robin. An atomic counter per group tracks the current position. Each event goes to exactly one member of the group. This is the shared subscription model: multiple workers processing events with each event handled by exactly one worker.
 
-**Ordered** routes events by partition. The event's partition is computed as `hash(entity:id) % num_partitions`, using `DefaultHasher` for deterministic assignment. The `ConsumerGroup` tracks which consumer owns which partition. All events for the same `entity:id` combination always land on the same partition and therefore the same consumer. This guarantees ordering: a create followed by an update followed by a delete for `users/42` will always arrive at the same consumer in that order.
+**Ordered** routes events by partition. The event's partition is computed by hashing the entity and ID combination, modulo the partition count. A consumer group tracks which consumer owns which partition. All events for the same entity-and-ID combination always land on the same partition and therefore the same consumer. This guarantees ordering: a create followed by an update followed by a delete for `users/42` will always arrive at the same consumer in that order.
 
 ### Consumer Groups
 
-Consumer groups implement partition assignment. When a consumer joins, `ConsumerGroup::add_member` triggers a rebalance. The algorithm is simple: sort consumer IDs lexicographically, then assign partitions round-robin. With 8 partitions and 2 consumers (`"a"` and `"b"`), consumer `"a"` gets partitions [0, 2, 4, 6] and consumer `"b"` gets [1, 3, 5, 7]. The lexicographic sort ensures deterministic assignment — two group instances with the same members produce identical assignments regardless of join order.
+Consumer groups implement partition assignment. When a consumer joins, the group triggers a rebalance. The algorithm is simple: sort consumer IDs lexicographically, then assign partitions round-robin. With 8 partitions and 2 consumers (`"a"` and `"b"`), consumer `"a"` gets partitions [0, 2, 4, 6] and consumer `"b"` gets [1, 3, 5, 7]. The lexicographic sort ensures deterministic assignment — two group instances with the same members produce identical assignments regardless of join order.
 
 Stale member detection runs as a background task. Each member has a `last_heartbeat` timestamp updated on activity. If the elapsed time exceeds `consumer_timeout_ms` (default 30 seconds), the member is removed and the group rebalances. The surviving members absorb the evicted member's partitions.
 
-The partition count for consumer groups defaults to 8 — configurable via `SharedSubscriptionConfig`. This is independent of the 256 partitions used for data distribution in cluster mode. These are logical partitions for event routing, not storage partitions.
+The partition count for consumer groups defaults to 8 — configurable at startup. This is independent of the 256 partitions used for data distribution in cluster mode. These are logical partitions for event routing, not storage partitions.
 
 ### Event Topics
 
@@ -354,13 +355,13 @@ The `event_type` suffix distinguishes operation types: `created`, `updated`, `de
 
 ### Subscription Persistence
 
-Subscriptions are persisted under `sub/{id}` as serialized JSON. The `SubscriptionRegistry` loads them from storage at startup and maintains an in-memory `HashMap` for fast matching. On every event dispatch, the registry scans all subscriptions and returns those that match — a linear scan through the subscription list. For workloads with thousands of subscriptions, this becomes the chapter's performance story: the current implementation trades simplicity for throughput. A trie-based index (similar to what the cluster mode uses for MQTT topic subscriptions in Chapter 8) would accelerate matching, but the agent-mode subscription count is typically small enough that linear scanning is acceptable.
+Subscriptions are persisted in storage as serialized JSON. The subscription registry loads them at startup and maintains an in-memory map for fast matching. On every event dispatch, the registry scans all subscriptions and returns those that match — a linear scan through the subscription list. For workloads with thousands of subscriptions, this becomes the chapter's performance story: the current implementation trades simplicity for throughput. A trie-based index (similar to what the cluster mode uses for MQTT topic subscriptions in Chapter 8) would accelerate matching, but the agent-mode subscription count is typically small enough that linear scanning is acceptable.
 
 ## 2.7 The Outbox Pattern
 
 Chapter 1 described the two-system problem: data and events served by separate systems, with the engineering challenge of keeping them synchronized. The outbox pattern was presented as the best available mitigation. MQDB goes one step further: the outbox is not a separate table polled by a relay. It is entries in the same key-value store, committed in the same batch as the data.
 
-The `Outbox` struct manages entries under the `_outbox/` prefix. `enqueue_event` adds a `StoredOutboxEntry` to a `BatchWriter`:
+The outbox manages entries under a dedicated key prefix. Enqueueing an event adds a stored entry to the batch:
 
 ```rust
 pub fn enqueue_event(&self, batch: &mut BatchWriter, operation_id: &str, event: &ChangeEvent) {
@@ -379,29 +380,29 @@ The batch is not committed here — the caller does that, after also inserting d
 
 ### The Happy Path
 
-The normal flow: `batch.commit()` → `dispatcher.dispatch(event)` → `outbox.mark_delivered(operation_id)`. The `mark_delivered` call simply removes the `_outbox/{operation_id}` key. The entry existed for a few microseconds between commit and dispatch.
+The normal flow: commit the batch, dispatch the event to subscribers, then mark the outbox entry as delivered. Marking delivered simply removes the outbox key. The entry existed for a few microseconds between commit and dispatch.
 
 ### The Crash Path
 
-If the process crashes between `batch.commit()` and `mark_delivered`, the outbox entry survives in storage. On restart, the `OutboxProcessor` background task periodically scans `_outbox/*` and re-dispatches pending entries. For each entry, it skips already-dispatched events using the `dispatched_count` field (supporting partial recovery for multi-event entries like cascade deletes), dispatches remaining events, and either marks the entry delivered or increments its retry count.
+If the process crashes between commit and delivery, the outbox entry survives in storage. On restart, the outbox processor background task periodically scans the outbox prefix and re-dispatches pending entries. For each entry, it skips already-dispatched events using a dispatched count field (supporting partial recovery for multi-event entries like cascade deletes), dispatches remaining events, and either marks the entry delivered or increments its retry count.
 
-After `max_retries` (default 10), entries are moved to `_dead_letter/` — same structure, different prefix. Dead letter entries can be inspected and manually replayed or removed. They never disappear silently.
+After exhausting retries (default 10), entries are moved to the dead letter prefix — same structure, different location. Dead letter entries can be inspected and manually replayed or removed. They never disappear silently.
 
 ### Multi-Event Entries
 
-A cascade delete produces multiple events from one operation: the primary delete plus all cascaded deletes and set-null updates. The `enqueue_events` method stores a `Vec<ChangeEvent>` in a single outbox entry. If dispatch fails partway through (say, 2 of 5 events dispatched), `update_dispatched_count` records the progress. On retry, the processor skips the already-dispatched events and resumes from where it left off.
+A cascade delete produces multiple events from one operation: the primary delete plus all cascaded deletes and set-null updates. A single outbox entry stores the entire batch of change events. If dispatch fails partway through (say, 2 of 5 events dispatched), the dispatched count records the progress. On retry, the processor skips the already-dispatched events and resumes from where it left off.
 
 ### Why This Eliminates the Two-System Problem
 
-The traditional outbox pattern requires a separate relay process that polls the outbox table and publishes events to a message broker. MQDB's outbox publishes events to the same system that stored them — because the event dispatcher is part of the database, not an external broker. The "relay" is a simple scan of `_outbox/*` keys, dispatching directly to in-process subscribers. No network hop, no external broker, no polling lag.
+The traditional outbox pattern requires a separate relay process that polls the outbox table and publishes events to a message broker. MQDB's outbox publishes events to the same system that stored them — because the event dispatcher is part of the database, not an external broker. The "relay" is a simple scan of the outbox keyspace, dispatching directly to in-process subscribers. No network hop, no external broker, no polling lag.
 
 The guarantee is the same as the traditional outbox: data and event share one transaction boundary. But the implementation is simpler because there is only one system.
 
 ### What Went Wrong: The Durability-Consistency Coupling
 
-The outbox design contains a subtle coupling that only became apparent during cluster mode development. In agent mode with `Immediate` durability, every `batch.commit()` forces an fsync. The outbox entry hits disk before the process continues. If the process crashes after commit but before dispatch, the entry survives.
+The outbox design contains a subtle coupling that only became apparent during cluster mode development. In agent mode with immediate durability, every batch commit forces an fsync. The outbox entry hits disk before the process continues. If the process crashes after commit but before dispatch, the entry survives.
 
-Cluster mode uses a `PeriodicMs(10)`, where fsync happens every 10 milliseconds. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
+Cluster mode uses periodic flushing (every 10 milliseconds), where fsync happens on a timer. A crash within that window loses both the data write and the outbox entry — which is correct, because they share the same batch. But during development, an early version of the cluster outbox wrote the data to an in-memory store and the outbox entry to Fjall separately. A crash could lose the in-memory data while the outbox entry survived on disk, causing the processor to replay events for records that no longer existed. The fix was to ensure that the in-memory store and the Fjall-backed outbox entry share the same write path, so their durability fates are always coupled. This is a classic mistake that lead to many hours of TLA+ modelling.
 
 The lesson: the outbox guarantee is not just "data and event are in the same batch." It is "data and event have the same durability fate." If one can survive a crash that the other cannot, the guarantee is broken regardless of batch atomicity.
 
@@ -409,21 +410,21 @@ The lesson: the outbox guarantee is not just "data and event are in the same bat
 
 In a network distributed system, things change slightly. Every component in this chapter has a cluster-mode counterpart. The single-node design is not thrown away — it is the foundation that cluster mode extends.
 
-**Storage** moves from Fjall on disk to in-memory `HashMap` per partition, with Fjall backing for crash recovery. Each partition maintains its own data store, index store, and constraint store. The `StorageBackend` trait is not used directly in cluster mode — instead, the `StoreManager` holds `HashMap`-based stores that provide the same operations (get, insert, remove, prefix scan) but scoped to a single partition.
+**Storage** moves from the LSM-tree on disk to in-memory hash maps per partition, with the LSM-tree backing for crash recovery. Each partition maintains its own data store, index store, and constraint store. The storage trait is not used directly in cluster mode — instead, a store manager holds per-partition maps that provide the same operations (get, insert, remove, prefix scan) but scoped to a single partition.
 
-**Schemas and constraints** become binary `BeBytes` structs replicated across nodes via the `ReplicationWrite` pipeline. When a schema is created in cluster mode, it is serialized into a compact binary format and replicated to all nodes as a partitioned write. The `SchemaRegistry` and `ConstraintManager` still exist, but they are populated from replicated data rather than loaded from local `meta/*` keys.
+**Schemas and constraints** become binary structs replicated across nodes via the replication pipeline. When a schema is created in cluster mode, it is serialized into a compact binary format and replicated to all nodes as a partitioned write. The schema registry and constraint manager still exist, but they are populated from replicated data rather than loaded from local metadata keys.
 
-**Indexes** become hex-encoded entries in an in-memory `BTreeMap`. The encoding changes from raw bytes to hex strings to accommodate the in-memory storage format, but the lookup semantics — prefix scan on `{entity}/{field}/{value}/` — remain identical.
+**Indexes** become hex-encoded entries in an in-memory sorted map. The encoding changes from raw bytes to hex strings to accommodate the in-memory storage format, but the lookup semantics — prefix scan by entity, field, and value — remain identical.
 
-**Foreign key validation** becomes async cross-node requests. In agent mode, validating a foreign key is a synchronous local key lookup: `storage.get(&target_key)`. In cluster mode, the target entity may live on a different node's partition. The constraint check sends a request over the cluster transport, drops the lock, awaits the response, reacquires the lock, and completes the operation. Cascade side effects are partitioned into local and remote operations via a `CascadeSideEffect` enum with four variants: `LocalDelete`, `LocalSetNull`, `RemoteDelete`, and `RemoteSetNull`. Local effects execute immediately in the same batch. Remote effects are fired over the cluster transport to the partition that owns the target entity. Chapter 15 covers this lock-drop/reacquire pattern and the consistency implications of the gap between check and write.
+**Foreign key validation** becomes async cross-node requests. In agent mode, validating a foreign key is a synchronous local key lookup. In cluster mode, the target entity may live on a different node's partition. The constraint check sends a request over the cluster transport, drops the lock, awaits the response, reacquires the lock, and completes the operation. Cascade side effects are partitioned into local and remote operations — local deletes and set-nulls execute immediately in the same batch, while remote effects are fired over the cluster transport to the partition that owns the target entity. Chapter 15 covers this lock-drop/reacquire pattern and the consistency implications of the gap between check and write.
 
-**The outbox** becomes the `ClusterOutbox`, following the same pattern: data and event share one batch commit, with a background processor for crash recovery. The guarantee is preserved — data and its corresponding event have the same durability fate. Cluster mode adds a second outbox prefix, `_cascade/`, for remote FK side effects. When a delete triggers cascade or set-null operations on entities owned by other partitions, the remote operations are recorded as a `CascadeOutboxPayload` in the same atomic batch as the primary delete. The coordinating node sends the cascade requests and waits for acknowledgments from each target partition. The `_cascade/` entry is marked delivered only after all acks arrive. If the node crashes before acknowledgments complete, the startup recovery procedure scans both `_outbox/` and `_cascade/` prefixes and replays any pending operations.
+**The outbox** becomes the cluster outbox, following the same pattern: data and event share one batch commit, with a background processor for crash recovery. The guarantee is preserved — data and its corresponding event have the same durability fate. Cluster mode adds a second outbox prefix for remote FK side effects. When a delete triggers cascade or set-null operations on entities owned by other partitions, the remote operations are recorded in the same atomic batch as the primary delete. The coordinating node sends the cascade requests and waits for acknowledgments from each target partition. The cascade entry is marked delivered only after all acknowledgments arrive. If the node crashes before acknowledgments complete, the startup recovery procedure scans both outbox prefixes and replays any pending operations.
 
 The agent-mode design's value is that it makes every invariant explicit and testable in a single-process environment. Constraint validation, index maintenance, the outbox guarantee — all of these are correct and complete on a single node. Cluster mode adds routing and coordination on top, but the per-partition logic is the same logic that runs in agent mode. The foundation holds.
 
 ### The Configuration Surface
 
-The `DatabaseConfig` struct controls every tunable in the system: durability mode (Immediate, PeriodicMs, or None), event channel capacity (default 1,000), maximum list results (default 10,000), maximum subscriptions (default 1,000), TTL cleanup interval, cursor and sort buffer sizes, outbox retry parameters, shared subscription partition count, and an optional encryption passphrase. The builder-pattern API lets each parameter be overridden independently:
+The database configuration controls every tunable in the system: durability mode (immediate, periodic, or none), event channel capacity (default 1,000), maximum list results (default 10,000), maximum subscriptions (default 1,000), TTL cleanup interval, cursor and sort buffer sizes, outbox retry parameters, shared subscription partition count, and an optional encryption passphrase. The builder-pattern API lets each parameter be overridden independently:
 
 ```rust
 let config = DatabaseConfig::new("./data/mydb")
@@ -432,6 +433,6 @@ let config = DatabaseConfig::new("./data/mydb")
     .with_passphrase("secret".into());
 ```
 
-A `without_background_tasks()` method disables all background tasks — used in tests to avoid flaky timing-dependent assertions, and in cluster mode where the cluster's own event loop handles the equivalent work.
+A configuration option disables all background tasks — used in tests to avoid flaky timing-dependent assertions, and in cluster mode where the cluster's own event loop handles the equivalent work.
 
-These configuration knobs are the translation layer between the design decisions in this chapter and the operational requirements of deployment. The defaults are chosen for agent mode: `Immediate` durability (safety first), 60-second TTL cleanup (minimal background I/O), 10 outbox retries before dead-lettering (enough to survive transient failures without infinite loops). Cluster mode overrides most of these: `PeriodicMs(10)` for throughput, background tasks disabled (the cluster event loop handles outbox and cleanup), and in-memory stores instead of Fjall for partition data.
+These configuration knobs are the translation layer between the design decisions in this chapter and the operational requirements of deployment. The defaults are chosen for agent mode: immediate durability (safety first), 60-second TTL cleanup (minimal background I/O), 10 outbox retries before dead-lettering (enough to survive transient failures without infinite loops). Cluster mode overrides most of these: periodic flushing for throughput, background tasks disabled (the cluster event loop handles outbox and cleanup), and in-memory stores instead of the LSM-tree for partition data.

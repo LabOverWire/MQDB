@@ -6,7 +6,7 @@ These two systems have evolved independently for decades. Relational databases p
 
 But the seam between them is where the hardest problems live.
 
-This book is about what happens when ask yourself, what would happen if data and broker were unified — when you build a system that treats storage and messaging as a single concern. It follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively. Every design decision, every bug, every tradeoff is drawn from a real system running real workloads. The distributed systems principles, however, are universal.
+This book is about what happens when you ask yourself what would happen if data and broker were unified — when you build a system that treats storage and messaging as a single concern. It follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively. Every design decision, every bug, every tradeoff is drawn from a real system running real workloads. The distributed systems principles, however, are universal.
 
 ## 1.1 The Two-System Problem
 
@@ -78,7 +78,7 @@ This is the question MQDB tries to answer.
 
 ## 1.2 The Core Insight
 
-At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. Sure, a subscription may live longer than a record, but that's not the point.
+At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. They differ in lifetime — a subscription persists across sessions while a record may be ephemeral — and in access patterns. But the storage mechanics are the same: serialize a value, compute a partition, write to a key.
 
 When a database inserts a record, it writes a value keyed by entity and identifier:
 
@@ -103,7 +103,7 @@ value: {"connected_node": 1, "clean_start": false}
 
 Strip away the domain-specific semantics, and every operation reduces to the same primitive:
 
-> Given a key, write a value. Sure, there are other operations, but except for reads, they also boil down to writes.
+> Given a key, write a value. Updates overwrite existing keys. Deletes write tombstones or remove keys. Reads are the only operation that does not modify storage. Everything else is a write.
 
 This is the core insight. If both database records and broker state are keyed writes, then the machinery for managing them — partitioning, replication, consistency, querying — can be unified. One storage engine. One replication pipeline. One consensus protocol.
 
@@ -135,7 +135,7 @@ Not all data behaves the same way. MQDB distinguishes between two classes:
 
 **Broadcast entities** must exist on every node. When a message arrives on Node A, the node must immediately determine which clients — potentially connected to Node B or Node C — subscribe to that topic. Cross-node queries on every publish destroys throughput (believe me, we tried). So MQDB replicates certain entities to all nodes: the topic-to-subscriber index, the wildcard subscription trie, and the client-to-node location map.
 
-This distinction is fundamental. Partitioned entities scale horizontally — add more nodes, and each node handles fewer partitions. Broadcast entities trade write amplification for read locality. The cost varies by subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a single cluster broadcast message, while a wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, publish routing requires zero network round trips because every node maintains a complete subscriber map.
+This distinction is fundamental. Partitioned entities scale horizontally — add more nodes, and each node handles fewer partitions. Broadcast entities trade write amplification for read locality. The cost varies by subscription type: an exact topic subscription generates one replication write plus a single cluster broadcast message, while a wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, publish routing requires zero network round trips because every node maintains a complete subscriber map.
 
 Chapter 4 covers partitioning in detail. Chapter 8 explains why broadcast entities are necessary for cross-node pub/sub routing.
 
@@ -184,9 +184,9 @@ Every protocol choice is a tradeoff. Here is what MQTT provides that alternative
 
 **Versus a custom protocol:** A purpose-built protocol could optimize for the exact needs of a distributed database. But it would require building and maintaining client libraries for every target language and platform. By using MQTT, MQDB inherits a mature ecosystem of clients, debugging tools, and operational knowledge.
 
-**What MQTT sacrifices:** Type safety at the protocol level (payloads are opaque byte arrays, not typed schemas), SQL-style query expressiveness require a dedicated translation layer, and developer familiarity (most backend engineers know SQL; fewer know MQTT topic patterns).
+**What MQTT sacrifices:** Type safety at the protocol level (payloads are opaque byte arrays, not typed schemas), SQL-style query expressiveness requires a dedicated translation layer, and developer familiarity (most backend engineers know SQL; fewer know MQTT topic patterns).
 
-These sacrifices are real. MQDB compensates through schema validation at the application layer (Chapter 2), a filter system (Chapter 9), and comprehensive CLI tooling that abstracts the MQTT protocol from day-to-day use.
+MQDB compensates through schema validation at the application layer (Chapter 2), a filter system (Chapter 9), and comprehensive CLI tooling that abstracts the MQTT protocol from day-to-day use.
 
 ## 1.4 What We're Building
 
@@ -216,7 +216,7 @@ Inter-node communication uses direct QUIC streams with mTLS authentication. Each
 
 These three layers map to three deployment modes:
 
-**Library.** Import `mqdb` as a Rust crate and use the `Database` API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
+**Library.** Import the crate and use the database API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
 
 ```rust
 let db = Database::open("./data/mydb").await?;
@@ -317,7 +317,7 @@ For MQDB, eventual consistency is not a compromise — it is the natural fit for
 
 The write model is per-entity atomicity on the primary: each single-entity operation is serialized, with data and its outbox entry persisted in the same storage batch. In agent mode, the default is `Immediate` fsync — writes are durable before the client is acknowledged. In cluster mode, the default is `PeriodicMs(10)` — the storage engine flushes every 10ms, trading a small durability window on hard crash for higher write throughput. The outbox guarantees that data and change events share the same durability fate: if a crash loses the last 10ms of unfsynced writes, the corresponding outbox entries are also lost, so there are no orphaned events. A primary failure can also lose writes that were acknowledged but not yet replicated, which is an acceptable tradeoff for a system where the dominant workloads are sensor telemetry, reactive dashboards, and event-driven microservices.
 
-For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a `QuorumTracker` that returns a oneshot receiver for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
+For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a quorum tracker that returns a notification channel for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
 
 Chapter 5 covers the replication pipeline, sequence ordering, and gap catchup in detail.
 
@@ -333,13 +333,13 @@ The fixed count is a deliberate tradeoff between horizontal scaling and synchron
 
 MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch.
 
-Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap is discussed in Chapter 15.
+Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). In cluster mode, foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap is discussed in Chapter 15.
 
 This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB currently prioritizes throughput over cross-partition consistency. But the constraint enforcement infrastructure — two-phase reservation for unique constraints, scatter-gather for foreign key checks — already demonstrates cross-partition coordination with well-defined consistency windows. A formal distributed transaction protocol is a possible future addition, built on the same inter-partition messaging primitives.
 
 ### Write Amplification for Broadcast Entities
 
-Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
+Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates one replication write plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
 
 For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning wildcard subscriptions, the local persistence writes can become a bottleneck. But that's not good practice overall.
 
