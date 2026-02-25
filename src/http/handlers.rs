@@ -48,6 +48,7 @@ pub struct ServerState {
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
+    pub trust_proxy: bool,
 }
 
 type HttpResponse = Response<Full<Bytes>>;

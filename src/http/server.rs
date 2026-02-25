@@ -29,6 +29,7 @@ pub struct HttpServerConfig {
     pub cookie_secure: bool,
     pub cors_origin: Option<String>,
     pub ticket_rate_limit: u32,
+    pub trust_proxy: bool,
 }
 
 pub struct HttpServer {
@@ -69,6 +70,7 @@ impl HttpServer {
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
             jti_revocation: JtiRevocationStore::new(),
+            trust_proxy: self.config.trust_proxy,
         });
 
         loop {
@@ -107,12 +109,20 @@ impl HttpServer {
     }
 }
 
-fn client_ip(headers: &http::header::HeaderMap, peer_addr: SocketAddr) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map_or_else(|| peer_addr.ip().to_string(), |s| s.trim().to_string())
+fn client_ip(
+    headers: &http::header::HeaderMap,
+    peer_addr: SocketAddr,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy
+        && let Some(xff) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+    {
+        return xff.trim().to_string();
+    }
+    peer_addr.ip().to_string()
 }
 
 async fn handle_request(
@@ -143,7 +153,7 @@ async fn handle_request(
             handlers::handle_refresh(&state, &body).await
         }
         (&Method::POST, "/auth/ticket") => {
-            let ip = client_ip(&headers, peer_addr);
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
             handlers::handle_ticket(&state, &headers, &ip)
         }
         (&Method::POST, "/auth/logout") => handlers::handle_logout(&state, &headers),
