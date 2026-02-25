@@ -75,13 +75,13 @@ impl HttpServer {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
-                        Ok((stream, _addr)) => {
+                        Ok((stream, addr)) => {
                             let state = Arc::clone(&state);
                             let io = hyper_util::rt::TokioIo::new(stream);
                             tokio::spawn(async move {
                                 let service = service_fn(move |req| {
                                     let state = Arc::clone(&state);
-                                    async move { handle_request(req, state).await }
+                                    async move { handle_request(req, state, addr).await }
                                 });
                                 if let Err(e) = http1::Builder::new()
                                     .serve_connection(io, service)
@@ -107,9 +107,19 @@ impl HttpServer {
     }
 }
 
+fn client_ip(headers: &http::header::HeaderMap, peer_addr: SocketAddr) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| peer_addr.ip().to_string())
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     state: Arc<ServerState>,
+    peer_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -133,7 +143,10 @@ async fn handle_request(
                 .unwrap_or_default();
             handlers::handle_refresh(&state, &body).await
         }
-        (&Method::POST, "/auth/ticket") => handlers::handle_ticket(&state, &headers),
+        (&Method::POST, "/auth/ticket") => {
+            let ip = client_ip(&headers, peer_addr);
+            handlers::handle_ticket(&state, &headers, &ip)
+        }
         (&Method::POST, "/auth/logout") => handlers::handle_logout(&state, &headers),
         (&Method::GET, "/auth/session") => handlers::handle_session_status(&state, &headers),
         _ => {
