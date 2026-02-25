@@ -112,8 +112,7 @@ fn client_ip(headers: &http::header::HeaderMap, peer_addr: SocketAddr) -> String
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| peer_addr.ip().to_string())
+        .map_or_else(|| peer_addr.ip().to_string(), |s| s.trim().to_string())
 }
 
 async fn handle_request(
