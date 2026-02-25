@@ -152,6 +152,37 @@ impl StorageKind {
         }
     }
 
+    pub(crate) async fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<KvPairs, JsValue> {
+        let raw = match &self.backend {
+            BackendKind::Memory(s) => s.range_scan(start, end).map_err(err_to_js)?,
+            BackendKind::IndexedDb(s) => s.range_scan(start, end).await.map_err(err_to_js)?,
+        };
+        if let Some(c) = &self.crypto {
+            let mut decrypted = Vec::with_capacity(raw.len());
+            for (k, v) in raw {
+                let plaintext = c.decrypt(&k, &v).await.map_err(err_to_js)?;
+                decrypted.push((k, plaintext));
+            }
+            Ok(decrypted)
+        } else {
+            Ok(raw)
+        }
+    }
+
+    pub(crate) fn range_scan_sync(&self, start: &[u8], end: &[u8]) -> Result<KvPairs, JsValue> {
+        if self.crypto.is_some() {
+            return Err(JsValue::from_str(
+                "sync operations not available with encryption",
+            ));
+        }
+        match &self.backend {
+            BackendKind::Memory(s) => s.range_scan(start, end).map_err(err_to_js),
+            BackendKind::IndexedDb(_) => {
+                Err(JsValue::from_str("sync operations require memory backend"))
+            }
+        }
+    }
+
     pub(crate) fn is_memory(&self) -> bool {
         matches!(self.backend, BackendKind::Memory(_))
     }

@@ -4,6 +4,11 @@
 use super::{
     CountOptions, FilterJs, JsValue, ListOptions, SortOrderJs, WasmDatabase, wasm_bindgen,
 };
+use crate::encoding::encode_value_for_index;
+
+type ScanResult = Option<(Vec<serde_json::Value>, Vec<FilterJs>)>;
+type RangeBound = Option<(Vec<u8>, bool)>;
+type RangeBounds = (RangeBound, RangeBound, Vec<usize>);
 
 #[wasm_bindgen]
 impl WasmDatabase {
@@ -20,33 +25,11 @@ impl WasmDatabase {
         };
 
         let mut results = if let Some((records, remaining)) =
-            self.index_scan_async(&entity, &opts.filters).await?
+            self.try_index_scans_async(&entity, &opts.filters).await?
         {
-            let mut filtered = Vec::new();
-            for record in records {
-                if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
-                    filtered.push(record);
-                }
-            }
-            filtered
+            Self::apply_remaining_filters(records, &remaining)
         } else {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
-            let mut filtered = Vec::new();
-            for (_key, value) in items {
-                let parsed: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-                if opts
-                    .filters
-                    .iter()
-                    .all(|f| Self::matches_filter(&parsed, f))
-                {
-                    filtered.push(parsed);
-                }
-            }
-            filtered
+            self.full_scan_async(&entity, &opts.filters).await?
         };
 
         if !opts.sort.is_empty() {
@@ -90,34 +73,13 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let mut results =
-            if let Some((records, remaining)) = self.index_scan_sync(&entity, &opts.filters)? {
-                let mut filtered = Vec::new();
-                for record in records {
-                    if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
-                        filtered.push(record);
-                    }
-                }
-                filtered
-            } else {
-                let prefix = format!("data/{entity}/");
-                let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
-
-                let mut filtered = Vec::new();
-                for (_key, value) in items {
-                    let parsed: serde_json::Value = serde_json::from_slice(&value)
-                        .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-                    if opts
-                        .filters
-                        .iter()
-                        .all(|f| Self::matches_filter(&parsed, f))
-                    {
-                        filtered.push(parsed);
-                    }
-                }
-                filtered
-            };
+        let mut results = if let Some((records, remaining)) =
+            self.try_index_scans_sync(&entity, &opts.filters)?
+        {
+            Self::apply_remaining_filters(records, &remaining)
+        } else {
+            self.full_scan_sync(&entity, &opts.filters)?
+        };
 
         if !opts.sort.is_empty() {
             Self::sort_results(&mut results, &opts.sort);
@@ -160,15 +122,13 @@ impl WasmDatabase {
             return Ok(items.len());
         }
 
-        if let Some((records, remaining)) = self.index_scan_async(&entity, &opts.filters).await? {
+        if let Some((records, remaining)) =
+            self.try_index_scans_async(&entity, &opts.filters).await?
+        {
             if remaining.is_empty() {
                 return Ok(records.len());
             }
-            let count = records
-                .iter()
-                .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
-                .count();
-            return Ok(count);
+            return Ok(Self::apply_remaining_filters(records, &remaining).len());
         }
 
         let prefix = format!("data/{entity}/");
@@ -206,15 +166,11 @@ impl WasmDatabase {
             return Ok(items.len());
         }
 
-        if let Some((records, remaining)) = self.index_scan_sync(&entity, &opts.filters)? {
+        if let Some((records, remaining)) = self.try_index_scans_sync(&entity, &opts.filters)? {
             if remaining.is_empty() {
                 return Ok(records.len());
             }
-            let count = records
-                .iter()
-                .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
-                .count();
-            return Ok(count);
+            return Ok(Self::apply_remaining_filters(records, &remaining).len());
         }
 
         let prefix = format!("data/{entity}/");
@@ -241,14 +197,87 @@ impl WasmDatabase {
         matches!(op, "" | "eq")
     }
 
-    fn filter_index_value(filter: &FilterJs) -> String {
-        match &filter.value {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        }
+    fn is_range_op(op: &str) -> bool {
+        matches!(op, "gt" | ">" | "gte" | ">=" | "lt" | "<" | "lte" | "<=")
     }
 
-    fn find_single_field_index<'a>(
+    pub(crate) fn apply_remaining_filters(
+        records: Vec<serde_json::Value>,
+        remaining: &[FilterJs],
+    ) -> Vec<serde_json::Value> {
+        records
+            .into_iter()
+            .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
+            .collect()
+    }
+
+    pub(crate) async fn full_scan_async(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<Vec<serde_json::Value>, JsValue> {
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+        let mut filtered = Vec::new();
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if filters.iter().all(|f| Self::matches_filter(&parsed, f)) {
+                filtered.push(parsed);
+            }
+        }
+        Ok(filtered)
+    }
+
+    fn full_scan_sync(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<Vec<serde_json::Value>, JsValue> {
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+        let mut filtered = Vec::new();
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if filters.iter().all(|f| Self::matches_filter(&parsed, f)) {
+                filtered.push(parsed);
+            }
+        }
+        Ok(filtered)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn try_index_scans_async(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<ScanResult, JsValue> {
+        if let Some(result) = self.equality_scan_async(entity, filters).await? {
+            return Ok(Some(result));
+        }
+        if let Some(result) = self.range_scan_async(entity, filters).await? {
+            return Ok(Some(result));
+        }
+        Ok(None)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn try_index_scans_sync(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<ScanResult, JsValue> {
+        if let Some(result) = self.equality_scan_sync(entity, filters)? {
+            return Ok(Some(result));
+        }
+        if let Some(result) = self.range_scan_sync(entity, filters)? {
+            return Ok(Some(result));
+        }
+        Ok(None)
+    }
+
+    fn find_equality_index<'a>(
         &self,
         entity: &str,
         filters: &'a [FilterJs],
@@ -270,29 +299,139 @@ impl WasmDatabase {
         Ok(None)
     }
 
-    #[allow(clippy::type_complexity)]
-    pub(crate) async fn index_scan_async(
+    fn find_range_field(
         &self,
         entity: &str,
         filters: &[FilterJs],
-    ) -> Result<Option<(Vec<serde_json::Value>, Vec<FilterJs>)>, JsValue> {
-        let matched = self.find_single_field_index(entity, filters)?;
+    ) -> Result<Option<String>, JsValue> {
+        let inner = self.borrow_inner()?;
+        let Some(index_defs) = inner.indexes.get(entity) else {
+            return Ok(None);
+        };
+
+        for filter in filters {
+            if !Self::is_range_op(&filter.op) {
+                continue;
+            }
+            let target = vec![filter.field.clone()];
+            if index_defs.contains(&target) {
+                return Ok(Some(filter.field.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn collect_range_bounds(filters: &[FilterJs], field: &str) -> Result<RangeBounds, JsValue> {
+        let mut lower: Option<(Vec<u8>, bool)> = None;
+        let mut upper: Option<(Vec<u8>, bool)> = None;
+        let mut consumed_indices = Vec::new();
+
+        for (i, filter) in filters.iter().enumerate() {
+            if filter.field != field {
+                continue;
+            }
+            match filter.op.as_str() {
+                "gt" | ">" => {
+                    lower = Some((encode_value_for_index(&filter.value)?, false));
+                    consumed_indices.push(i);
+                }
+                "gte" | ">=" => {
+                    lower = Some((encode_value_for_index(&filter.value)?, true));
+                    consumed_indices.push(i);
+                }
+                "lt" | "<" => {
+                    upper = Some((encode_value_for_index(&filter.value)?, false));
+                    consumed_indices.push(i);
+                }
+                "lte" | "<=" => {
+                    upper = Some((encode_value_for_index(&filter.value)?, true));
+                    consumed_indices.push(i);
+                }
+                _ => {}
+            }
+        }
+
+        Ok((lower, upper, consumed_indices))
+    }
+
+    fn build_range_keys(
+        entity: &str,
+        field: &str,
+        lower: Option<(&[u8], bool)>,
+        upper: Option<(&[u8], bool)>,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let field_prefix = format!("index/{entity}/{field}");
+        let field_prefix_bytes = field_prefix.as_bytes();
+
+        let start = if let Some((value, inclusive)) = lower {
+            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1 + value.len() + 2);
+            key.extend_from_slice(field_prefix_bytes);
+            key.push(b'/');
+            key.extend_from_slice(value);
+            key.push(b'/');
+            if !inclusive {
+                key.push(0xFF);
+            }
+            key
+        } else {
+            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1);
+            key.extend_from_slice(field_prefix_bytes);
+            key.push(b'/');
+            key
+        };
+
+        let end = if let Some((value, inclusive)) = upper {
+            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1 + value.len() + 2);
+            key.extend_from_slice(field_prefix_bytes);
+            key.push(b'/');
+            key.extend_from_slice(value);
+            key.push(b'/');
+            if inclusive {
+                key.push(0xFF);
+            }
+            key
+        } else {
+            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1);
+            key.extend_from_slice(field_prefix_bytes);
+            key.push(0xFF);
+            key
+        };
+
+        (start, end)
+    }
+
+    fn extract_ids_from_index_keys(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
+        let mut ids = Vec::new();
+        for (key, _) in entries {
+            if let Some(id_start) = key.iter().rposition(|&b| b == b'/')
+                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec())
+            {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    async fn equality_scan_async(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<ScanResult, JsValue> {
+        let matched = self.find_equality_index(entity, filters)?;
         let Some((matched_idx, matched_filter)) = matched else {
             return Ok(None);
         };
 
-        let value_str = Self::filter_index_value(matched_filter);
-        let index_prefix = format!("index/{entity}/{}/{value_str}/", matched_filter.field);
-        let index_entries = self.storage.prefix_scan(index_prefix.as_bytes()).await?;
+        let encoded_value = encode_value_for_index(&matched_filter.value)?;
+        let mut index_prefix = format!("index/{entity}/{}/", matched_filter.field).into_bytes();
+        index_prefix.extend_from_slice(&encoded_value);
+        index_prefix.push(b'/');
 
-        let mut records = Vec::with_capacity(index_entries.len());
-        for (key, _) in &index_entries {
-            let key_str = std::str::from_utf8(key)
-                .map_err(|e| JsValue::from_str(&format!("invalid index key: {e}")))?;
-            let id = key_str
-                .rsplit('/')
-                .next()
-                .ok_or_else(|| JsValue::from_str("malformed index key"))?;
+        let index_entries = self.storage.prefix_scan(&index_prefix).await?;
+        let ids = Self::extract_ids_from_index_keys(&index_entries);
+
+        let mut records = Vec::with_capacity(ids.len());
+        for id in &ids {
             let data_key = format!("data/{entity}/{id}");
             if let Some(data) = self.storage.get(data_key.as_bytes()).await? {
                 let parsed: serde_json::Value = serde_json::from_slice(&data)
@@ -311,29 +450,26 @@ impl WasmDatabase {
         Ok(Some((records, remaining)))
     }
 
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn index_scan_sync(
+    fn equality_scan_sync(
         &self,
         entity: &str,
         filters: &[FilterJs],
-    ) -> Result<Option<(Vec<serde_json::Value>, Vec<FilterJs>)>, JsValue> {
-        let matched = self.find_single_field_index(entity, filters)?;
+    ) -> Result<ScanResult, JsValue> {
+        let matched = self.find_equality_index(entity, filters)?;
         let Some((matched_idx, matched_filter)) = matched else {
             return Ok(None);
         };
 
-        let value_str = Self::filter_index_value(matched_filter);
-        let index_prefix = format!("index/{entity}/{}/{value_str}/", matched_filter.field);
-        let index_entries = self.storage.prefix_scan_sync(index_prefix.as_bytes())?;
+        let encoded_value = encode_value_for_index(&matched_filter.value)?;
+        let mut index_prefix = format!("index/{entity}/{}/", matched_filter.field).into_bytes();
+        index_prefix.extend_from_slice(&encoded_value);
+        index_prefix.push(b'/');
 
-        let mut records = Vec::with_capacity(index_entries.len());
-        for (key, _) in &index_entries {
-            let key_str = std::str::from_utf8(key)
-                .map_err(|e| JsValue::from_str(&format!("invalid index key: {e}")))?;
-            let id = key_str
-                .rsplit('/')
-                .next()
-                .ok_or_else(|| JsValue::from_str("malformed index key"))?;
+        let index_entries = self.storage.prefix_scan_sync(&index_prefix)?;
+        let ids = Self::extract_ids_from_index_keys(&index_entries);
+
+        let mut records = Vec::with_capacity(ids.len());
+        for id in &ids {
             let data_key = format!("data/{entity}/{id}");
             if let Some(data) = self.storage.get_sync(data_key.as_bytes())? {
                 let parsed: serde_json::Value = serde_json::from_slice(&data)
@@ -346,6 +482,82 @@ impl WasmDatabase {
             .iter()
             .enumerate()
             .filter(|(i, _)| *i != matched_idx)
+            .map(|(_, f)| f.clone())
+            .collect();
+
+        Ok(Some((records, remaining)))
+    }
+
+    async fn range_scan_async(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<ScanResult, JsValue> {
+        let Some(field) = self.find_range_field(entity, filters)? else {
+            return Ok(None);
+        };
+
+        let (lower, upper, consumed) = Self::collect_range_bounds(filters, &field)?;
+        let (start, end) = Self::build_range_keys(
+            entity,
+            &field,
+            lower.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+            upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+        );
+
+        let index_entries = self.storage.range_scan(&start, &end).await?;
+        let ids = Self::extract_ids_from_index_keys(&index_entries);
+
+        let mut records = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let data_key = format!("data/{entity}/{id}");
+            if let Some(data) = self.storage.get(data_key.as_bytes()).await? {
+                let parsed: serde_json::Value = serde_json::from_slice(&data)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+                records.push(parsed);
+            }
+        }
+
+        let remaining: Vec<FilterJs> = filters
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !consumed.contains(i))
+            .map(|(_, f)| f.clone())
+            .collect();
+
+        Ok(Some((records, remaining)))
+    }
+
+    fn range_scan_sync(&self, entity: &str, filters: &[FilterJs]) -> Result<ScanResult, JsValue> {
+        let Some(field) = self.find_range_field(entity, filters)? else {
+            return Ok(None);
+        };
+
+        let (lower, upper, consumed) = Self::collect_range_bounds(filters, &field)?;
+        let (start, end) = Self::build_range_keys(
+            entity,
+            &field,
+            lower.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+            upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+        );
+
+        let index_entries = self.storage.range_scan_sync(&start, &end)?;
+        let ids = Self::extract_ids_from_index_keys(&index_entries);
+
+        let mut records = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let data_key = format!("data/{entity}/{id}");
+            if let Some(data) = self.storage.get_sync(data_key.as_bytes())? {
+                let parsed: serde_json::Value = serde_json::from_slice(&data)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+                records.push(parsed);
+            }
+        }
+
+        let remaining: Vec<FilterJs> = filters
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !consumed.contains(i))
             .map(|(_, f)| f.clone())
             .collect();
 

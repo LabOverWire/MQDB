@@ -17,33 +17,12 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let index_result = self.index_scan_async(&entity, &opts.filters).await?;
-        let mut all_items = if let Some((records, remaining)) = index_result {
-            let mut filtered = Vec::new();
-            for record in records {
-                if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
-                    filtered.push(record);
-                }
-            }
-            filtered
+        let mut all_items = if let Some((records, remaining)) =
+            self.try_index_scans_async(&entity, &opts.filters).await?
+        {
+            Self::apply_remaining_filters(records, &remaining)
         } else {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
-            let mut filtered = Vec::new();
-            for (_key, value) in items {
-                let parsed: serde_json::Value = serde_json::from_slice(&value)
-                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-                if opts
-                    .filters
-                    .iter()
-                    .all(|f| Self::matches_filter(&parsed, f))
-                {
-                    filtered.push(parsed);
-                }
-            }
-            filtered
+            self.full_scan_async(&entity, &opts.filters).await?
         };
 
         if !opts.sort.is_empty() {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::{ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen};
+use crate::encoding::encode_value_for_index;
 
 #[wasm_bindgen]
 impl WasmDatabase {
@@ -355,24 +356,8 @@ impl WasmDatabase {
 
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
-                let index_values: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| {
-                        value.get(f).map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => v.to_string(),
-                        })
-                    })
-                    .collect();
-
-                if index_values.len() == fields.len() {
-                    let index_key = format!(
-                        "index/{entity}/{}/{}/{}",
-                        fields.join("_"),
-                        index_values.join("_"),
-                        id
-                    );
-                    self.storage.insert(index_key.as_bytes(), &[]).await?;
+                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
+                    self.storage.insert(&key, &[]).await?;
                 }
             }
         }
@@ -393,24 +378,8 @@ impl WasmDatabase {
 
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
-                let index_values: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| {
-                        value.get(f).map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => v.to_string(),
-                        })
-                    })
-                    .collect();
-
-                if index_values.len() == fields.len() {
-                    let index_key = format!(
-                        "index/{entity}/{}/{}/{}",
-                        fields.join("_"),
-                        index_values.join("_"),
-                        id
-                    );
-                    let _ = self.storage.remove(index_key.as_bytes()).await;
+                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
+                    let _ = self.storage.remove(&key).await;
                 }
             }
         }
@@ -577,24 +546,8 @@ impl WasmDatabase {
 
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
-                let index_values: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| {
-                        value.get(f).map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => v.to_string(),
-                        })
-                    })
-                    .collect();
-
-                if index_values.len() == fields.len() {
-                    let index_key = format!(
-                        "index/{entity}/{}/{}/{}",
-                        fields.join("_"),
-                        index_values.join("_"),
-                        id
-                    );
-                    self.storage.insert_sync(index_key.as_bytes(), &[])?;
+                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
+                    self.storage.insert_sync(&key, &[])?;
                 }
             }
         }
@@ -615,28 +568,39 @@ impl WasmDatabase {
 
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
-                let index_values: Vec<String> = fields
-                    .iter()
-                    .filter_map(|f| {
-                        value.get(f).map(|v| match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            _ => v.to_string(),
-                        })
-                    })
-                    .collect();
-
-                if index_values.len() == fields.len() {
-                    let index_key = format!(
-                        "index/{entity}/{}/{}/{}",
-                        fields.join("_"),
-                        index_values.join("_"),
-                        id
-                    );
-                    let _ = self.storage.remove_sync(index_key.as_bytes());
+                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
+                    let _ = self.storage.remove_sync(&key);
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn build_index_key(
+        entity: &str,
+        id: &str,
+        fields: &[String],
+        value: &serde_json::Value,
+    ) -> Result<Option<Vec<u8>>, JsValue> {
+        let mut encoded_values = Vec::new();
+        for field in fields {
+            let Some(v) = value.get(field) else {
+                return Ok(None);
+            };
+            let encoded = encode_value_for_index(v)?;
+            if !encoded_values.is_empty() {
+                encoded_values.push(0x00);
+            }
+            encoded_values.extend_from_slice(&encoded);
+        }
+
+        let prefix = format!("index/{entity}/{}/", fields.join("_"));
+        let mut key = Vec::with_capacity(prefix.len() + encoded_values.len() + 1 + id.len());
+        key.extend_from_slice(prefix.as_bytes());
+        key.extend_from_slice(&encoded_values);
+        key.push(b'/');
+        key.extend_from_slice(id.as_bytes());
+        Ok(Some(key))
     }
 }

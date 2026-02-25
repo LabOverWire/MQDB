@@ -5,6 +5,7 @@ mod constraints;
 mod crud;
 mod crypto;
 mod cursor;
+mod encoding;
 mod execute;
 mod indexeddb;
 mod query;
