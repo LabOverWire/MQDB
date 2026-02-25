@@ -31,9 +31,9 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
 use types::{
-    CursorOptions, DatabaseInner, FieldDefJs, FilterJs, ForeignKeyEntry, ListOptions, PaginationJs,
-    Relationship, SchemaDefinition, SortOrderJs, StorageKind, SubscriptionEntry, SubscriptionMode,
-    deserialize_js, serialize_event, serialize_js,
+    CountOptions, CursorOptions, DatabaseInner, FieldDefJs, FilterJs, ForeignKeyEntry, ListOptions,
+    PaginationJs, Relationship, SchemaDefinition, SortOrderJs, StorageKind, SubscriptionEntry,
+    SubscriptionMode, deserialize_js, serialize_event, serialize_js,
 };
 use wasm_bindgen::prelude::*;
 

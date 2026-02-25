@@ -1,7 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{FilterJs, JsValue, ListOptions, SortOrderJs, WasmDatabase, wasm_bindgen};
+use super::{
+    CountOptions, FilterJs, JsValue, ListOptions, SortOrderJs, WasmDatabase, wasm_bindgen,
+};
 
 #[wasm_bindgen]
 impl WasmDatabase {
@@ -17,22 +19,35 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let prefix = format!("data/{entity}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
-        let mut results = Vec::new();
-        for (_key, value) in items {
-            let parsed: serde_json::Value = serde_json::from_slice(&value)
-                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
-                results.push(parsed);
+        let mut results = if let Some((records, remaining)) =
+            self.index_scan_async(&entity, &opts.filters).await?
+        {
+            let mut filtered = Vec::new();
+            for record in records {
+                if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
+                    filtered.push(record);
+                }
             }
-        }
+            filtered
+        } else {
+            let prefix = format!("data/{entity}/");
+            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+
+            let mut filtered = Vec::new();
+            for (_key, value) in items {
+                let parsed: serde_json::Value = serde_json::from_slice(&value)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+                if opts
+                    .filters
+                    .iter()
+                    .all(|f| Self::matches_filter(&parsed, f))
+                {
+                    filtered.push(parsed);
+                }
+            }
+            filtered
+        };
 
         if !opts.sort.is_empty() {
             Self::sort_results(&mut results, &opts.sort);
@@ -63,6 +78,7 @@ impl WasmDatabase {
         js_sys::JSON::parse(&json_str)
             .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
     }
+
     /// # Errors
     /// Returns an error if options are invalid or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
@@ -74,22 +90,34 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let prefix = format!("data/{entity}/");
-        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+        let mut results =
+            if let Some((records, remaining)) = self.index_scan_sync(&entity, &opts.filters)? {
+                let mut filtered = Vec::new();
+                for record in records {
+                    if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
+                        filtered.push(record);
+                    }
+                }
+                filtered
+            } else {
+                let prefix = format!("data/{entity}/");
+                let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
 
-        let mut results = Vec::new();
-        for (_key, value) in items {
-            let parsed: serde_json::Value = serde_json::from_slice(&value)
-                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+                let mut filtered = Vec::new();
+                for (_key, value) in items {
+                    let parsed: serde_json::Value = serde_json::from_slice(&value)
+                        .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
 
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
-                results.push(parsed);
-            }
-        }
+                    if opts
+                        .filters
+                        .iter()
+                        .all(|f| Self::matches_filter(&parsed, f))
+                    {
+                        filtered.push(parsed);
+                    }
+                }
+                filtered
+            };
 
         if !opts.sort.is_empty() {
             Self::sort_results(&mut results, &opts.sort);
@@ -113,9 +141,217 @@ impl WasmDatabase {
         js_sys::JSON::parse(&json_str)
             .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
     }
+
+    /// Counts records matching optional filters, using indexes when available.
+    ///
+    /// # Errors
+    /// Returns an error if options are invalid or the storage operation fails.
+    pub async fn count(&self, entity: String, options: JsValue) -> Result<usize, JsValue> {
+        let opts: CountOptions = if options.is_null() || options.is_undefined() {
+            CountOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
+        };
+
+        if opts.filters.is_empty() {
+            let prefix = format!("data/{entity}/");
+            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+            return Ok(items.len());
+        }
+
+        if let Some((records, remaining)) = self.index_scan_async(&entity, &opts.filters).await? {
+            if remaining.is_empty() {
+                return Ok(records.len());
+            }
+            let count = records
+                .iter()
+                .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
+                .count();
+            return Ok(count);
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+        let mut count = 0usize;
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+            if opts
+                .filters
+                .iter()
+                .all(|f| Self::matches_filter(&parsed, f))
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// # Errors
+    /// Returns an error if options are invalid or the backend is not memory-based.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn count_sync(&self, entity: String, options: JsValue) -> Result<usize, JsValue> {
+        let opts: CountOptions = if options.is_null() || options.is_undefined() {
+            CountOptions::default()
+        } else {
+            serde_wasm_bindgen::from_value(options)
+                .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
+        };
+
+        if opts.filters.is_empty() {
+            let prefix = format!("data/{entity}/");
+            let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+            return Ok(items.len());
+        }
+
+        if let Some((records, remaining)) = self.index_scan_sync(&entity, &opts.filters)? {
+            if remaining.is_empty() {
+                return Ok(records.len());
+            }
+            let count = records
+                .iter()
+                .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
+                .count();
+            return Ok(count);
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+        let mut count = 0usize;
+        for (_key, value) in items {
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+            if opts
+                .filters
+                .iter()
+                .all(|f| Self::matches_filter(&parsed, f))
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 impl WasmDatabase {
+    fn is_equality_op(op: &str) -> bool {
+        matches!(op, "" | "eq")
+    }
+
+    fn filter_index_value(filter: &FilterJs) -> String {
+        match &filter.value {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    fn find_single_field_index<'a>(
+        &self,
+        entity: &str,
+        filters: &'a [FilterJs],
+    ) -> Result<Option<(usize, &'a FilterJs)>, JsValue> {
+        let inner = self.borrow_inner()?;
+        let Some(index_defs) = inner.indexes.get(entity) else {
+            return Ok(None);
+        };
+
+        for (i, filter) in filters.iter().enumerate() {
+            if !Self::is_equality_op(&filter.op) {
+                continue;
+            }
+            let target = vec![filter.field.clone()];
+            if index_defs.contains(&target) {
+                return Ok(Some((i, filter)));
+            }
+        }
+        Ok(None)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn index_scan_async(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<Option<(Vec<serde_json::Value>, Vec<FilterJs>)>, JsValue> {
+        let matched = self.find_single_field_index(entity, filters)?;
+        let Some((matched_idx, matched_filter)) = matched else {
+            return Ok(None);
+        };
+
+        let value_str = Self::filter_index_value(matched_filter);
+        let index_prefix = format!("index/{entity}/{}/{value_str}/", matched_filter.field);
+        let index_entries = self.storage.prefix_scan(index_prefix.as_bytes()).await?;
+
+        let mut records = Vec::with_capacity(index_entries.len());
+        for (key, _) in &index_entries {
+            let key_str = std::str::from_utf8(key)
+                .map_err(|e| JsValue::from_str(&format!("invalid index key: {e}")))?;
+            let id = key_str
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| JsValue::from_str("malformed index key"))?;
+            let data_key = format!("data/{entity}/{id}");
+            if let Some(data) = self.storage.get(data_key.as_bytes()).await? {
+                let parsed: serde_json::Value = serde_json::from_slice(&data)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+                records.push(parsed);
+            }
+        }
+
+        let remaining: Vec<FilterJs> = filters
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != matched_idx)
+            .map(|(_, f)| f.clone())
+            .collect();
+
+        Ok(Some((records, remaining)))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn index_scan_sync(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+    ) -> Result<Option<(Vec<serde_json::Value>, Vec<FilterJs>)>, JsValue> {
+        let matched = self.find_single_field_index(entity, filters)?;
+        let Some((matched_idx, matched_filter)) = matched else {
+            return Ok(None);
+        };
+
+        let value_str = Self::filter_index_value(matched_filter);
+        let index_prefix = format!("index/{entity}/{}/{value_str}/", matched_filter.field);
+        let index_entries = self.storage.prefix_scan_sync(index_prefix.as_bytes())?;
+
+        let mut records = Vec::with_capacity(index_entries.len());
+        for (key, _) in &index_entries {
+            let key_str = std::str::from_utf8(key)
+                .map_err(|e| JsValue::from_str(&format!("invalid index key: {e}")))?;
+            let id = key_str
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| JsValue::from_str("malformed index key"))?;
+            let data_key = format!("data/{entity}/{id}");
+            if let Some(data) = self.storage.get_sync(data_key.as_bytes())? {
+                let parsed: serde_json::Value = serde_json::from_slice(&data)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+                records.push(parsed);
+            }
+        }
+
+        let remaining: Vec<FilterJs> = filters
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != matched_idx)
+            .map(|(_, f)| f.clone())
+            .collect();
+
+        Ok(Some((records, remaining)))
+    }
+
     pub(crate) fn matches_filter(value: &serde_json::Value, filter: &FilterJs) -> bool {
         let field_value = value.get(&filter.field);
 

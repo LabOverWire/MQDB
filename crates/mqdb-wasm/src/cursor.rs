@@ -17,25 +17,44 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let prefix = format!("data/{entity}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
-        let mut all_items: Vec<serde_json::Value> = Vec::new();
-        for (_key, value) in items {
-            let parsed: serde_json::Value = serde_json::from_slice(&value)
-                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
-                all_items.push(parsed);
+        let index_result = self.index_scan_async(&entity, &opts.filters).await?;
+        let mut all_items = if let Some((records, remaining)) = index_result {
+            let mut filtered = Vec::new();
+            for record in records {
+                if remaining.iter().all(|f| Self::matches_filter(&record, f)) {
+                    filtered.push(record);
+                }
             }
-        }
+            filtered
+        } else {
+            let prefix = format!("data/{entity}/");
+            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+
+            let mut filtered = Vec::new();
+            for (_key, value) in items {
+                let parsed: serde_json::Value = serde_json::from_slice(&value)
+                    .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+
+                if opts
+                    .filters
+                    .iter()
+                    .all(|f| Self::matches_filter(&parsed, f))
+                {
+                    filtered.push(parsed);
+                }
+            }
+            filtered
+        };
 
         if !opts.sort.is_empty() {
             Self::sort_results(&mut all_items, &opts.sort);
+        }
+
+        if let Some(ref projection) = opts.projection {
+            all_items = all_items
+                .into_iter()
+                .map(|v| Self::project_fields(v, projection))
+                .collect();
         }
 
         Ok(WasmCursor {

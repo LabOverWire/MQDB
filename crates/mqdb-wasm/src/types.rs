@@ -208,6 +208,14 @@ pub(crate) struct CursorOptions {
     pub(crate) filters: Vec<FilterJs>,
     #[serde(default)]
     pub(crate) sort: Vec<SortOrderJs>,
+    #[serde(default)]
+    pub(crate) projection: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct CountOptions {
+    #[serde(default)]
+    pub(crate) filters: Vec<FilterJs>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
