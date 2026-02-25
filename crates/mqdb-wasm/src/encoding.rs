@@ -37,7 +37,9 @@ pub(crate) fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8
             } else if let Some(f) = n.as_f64() {
                 Ok(encode_f64_sortable(f).to_vec())
             } else {
-                Ok(n.to_string().into_bytes())
+                Err(JsValue::from_str(
+                    "unsupported number type for index encoding",
+                ))
             }
         }
         serde_json::Value::String(s) => Ok(s.as_bytes().to_vec()),
