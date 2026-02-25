@@ -93,6 +93,22 @@ const results = await db.list('products', {
 });
 ```
 
+**Index-Accelerated Queries:**
+
+When a single-field index exists and an `eq` filter matches that field, `list`, `count`, and `cursor` scan the index instead of doing a full table scan. Remaining filters are applied on the reduced candidate set.
+
+```javascript
+db.add_index('products', ['category']);
+
+// This query scans the index on category, then applies the price filter
+const results = await db.list('products', {
+    filters: [
+        { field: 'category', op: 'eq', value: 'electronics' },
+        { field: 'price', op: 'gt', value: 100 }
+    ]
+});
+```
+
 ### Subscriptions (`subscriptions.html`)
 
 Real-time change notifications.
@@ -170,16 +186,39 @@ const posts = await db.list('posts', {
 });
 ```
 
+### Count
+
+Count records without fetching full data.
+
+```javascript
+// Count all records
+const total = await db.count('products');
+
+// Count with filters (uses index when available)
+const expensive = await db.count('products', {
+    filters: [{ field: 'category', op: 'eq', value: 'electronics' }]
+});
+```
+
 ### Cursor (`cursor.html`)
 
 Streaming iteration over results.
 
 **Create Cursor:**
 ```javascript
-const cursor = db.cursor('products', {
+const cursor = await db.cursor('products', {
     filters: [{ field: 'price', op: 'gt', value: 50 }],
     sort: [{ field: 'price', direction: 'asc' }]
 });
+```
+
+**Cursor with Projection:**
+```javascript
+const cursor = await db.cursor('products', {
+    filters: [{ field: 'category', op: 'eq', value: 'books' }],
+    projection: ['name', 'price']
+});
+// Each item contains only id, name, and price
 ```
 
 **Iterate:**
@@ -248,6 +287,7 @@ The WASM database runs entirely in the browser with no server required:
 | `update(entity, id, fields)` | Update record fields |
 | `delete(entity, id)` | Remove record |
 | `list(entity, options)` | Query records |
+| `count(entity, options)` | Count records matching filters |
 | `cursor(entity, options)` | Create streaming cursor |
 
 ### Database Operations (Sync — memory backend only)
@@ -266,6 +306,7 @@ Use `is_memory_backend()` to check at runtime.
 | `update_sync(entity, id, fields)` | Update record fields |
 | `delete_sync(entity, id)` | Remove record |
 | `list_sync(entity, options)` | Query records (no `includes` support) |
+| `count_sync(entity, options)` | Count records (no `includes` support) |
 | `is_memory_backend()` | Returns `true` if using memory storage |
 
 ```javascript

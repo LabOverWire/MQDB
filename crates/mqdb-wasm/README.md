@@ -30,6 +30,7 @@ const user = await db.create("users", { name: "Alice", email: "alice@example.com
 const found = await db.get("users", user.id);
 await db.update("users", user.id, { name: "Bob" });
 const all = await db.list("users");
+const count = await db.count("users", { filters: [{ field: "name", op: "eq", value: "Alice" }] });
 await db.delete("users", user.id);
 
 // Sync CRUD operations (memory backend only)
@@ -37,6 +38,7 @@ const user2 = db.create_sync("users", { name: "Carol", email: "carol@example.com
 const found2 = db.read_sync("users", user2.id);
 db.update_sync("users", user2.id, { name: "Dave" });
 const all2 = db.list_sync("users");
+const count2 = db.count_sync("users");
 db.delete_sync("users", user2.id);
 
 // Subscribe to changes
@@ -58,6 +60,8 @@ db.unsubscribe(subId);
 | `update(entity, id, fields)` | Partial update, returns merged record |
 | `delete(entity, id)` | Delete record |
 | `list(entity, options?)` | List all records for entity |
+| `count(entity, options?)` | Count records matching filters |
+| `cursor(entity, options?)` | Create streaming cursor |
 
 ### Sync Methods (memory backend only)
 
@@ -68,6 +72,7 @@ db.unsubscribe(subId);
 | `update_sync(entity, id, fields)` | Partial update synchronously |
 | `delete_sync(entity, id)` | Delete record synchronously |
 | `list_sync(entity, options?)` | List records synchronously |
+| `count_sync(entity, options?)` | Count records synchronously |
 | `is_memory_backend()` | Returns `true` if using memory storage |
 
 ### Other
@@ -86,3 +91,5 @@ db.unsubscribe(subId);
 - Sync methods (`*_sync`) only work with the memory backend; they throw on IndexedDB
 - Field types: `string`, `number`, `boolean`, `array`, `object`
 - Subscription patterns: `*` (all), `entity` (exact), `prefix/*` (prefix match)
+- Indexes (`add_index`, `add_unique_constraint`) accelerate equality filters in `list`, `list_sync`, `count`, `count_sync`, and `cursor` — single-field indexes are used automatically when an `eq` filter matches
+- `cursor` accepts an optional `projection` array to reduce memory footprint
