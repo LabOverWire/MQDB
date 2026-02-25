@@ -85,9 +85,14 @@ pub(crate) struct OAuthArgs {
     #[arg(
         long,
         default_value = "10",
-        help = "Max ticket requests per minute per session"
+        help = "Max ticket requests per minute per IP"
     )]
     pub(crate) ticket_rate_limit: u32,
+    #[arg(
+        long,
+        help = "Trust X-Forwarded-For header for client IP (enable when behind a reverse proxy)"
+    )]
+    pub(crate) trust_proxy: bool,
 }
 
 #[derive(Subcommand)]

@@ -29,6 +29,7 @@ pub struct HttpServerConfig {
     pub cookie_secure: bool,
     pub cors_origin: Option<String>,
     pub ticket_rate_limit: u32,
+    pub trust_proxy: bool,
 }
 
 pub struct HttpServer {
@@ -69,19 +70,20 @@ impl HttpServer {
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
             jti_revocation: JtiRevocationStore::new(),
+            trust_proxy: self.config.trust_proxy,
         });
 
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
                     match accept_result {
-                        Ok((stream, _addr)) => {
+                        Ok((stream, addr)) => {
                             let state = Arc::clone(&state);
                             let io = hyper_util::rt::TokioIo::new(stream);
                             tokio::spawn(async move {
                                 let service = service_fn(move |req| {
                                     let state = Arc::clone(&state);
-                                    async move { handle_request(req, state).await }
+                                    async move { handle_request(req, state, addr).await }
                                 });
                                 if let Err(e) = http1::Builder::new()
                                     .serve_connection(io, service)
@@ -107,9 +109,26 @@ impl HttpServer {
     }
 }
 
+fn client_ip(
+    headers: &http::header::HeaderMap,
+    peer_addr: SocketAddr,
+    trust_proxy: bool,
+) -> String {
+    if trust_proxy
+        && let Some(xff) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+    {
+        return xff.trim().to_string();
+    }
+    peer_addr.ip().to_string()
+}
+
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     state: Arc<ServerState>,
+    peer_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -133,7 +152,10 @@ async fn handle_request(
                 .unwrap_or_default();
             handlers::handle_refresh(&state, &body).await
         }
-        (&Method::POST, "/auth/ticket") => handlers::handle_ticket(&state, &headers),
+        (&Method::POST, "/auth/ticket") => {
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_ticket(&state, &headers, &ip)
+        }
         (&Method::POST, "/auth/logout") => handlers::handle_logout(&state, &headers),
         (&Method::GET, "/auth/session") => handlers::handle_session_status(&state, &headers),
         _ => {

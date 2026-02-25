@@ -16,27 +16,27 @@ Three QoS levels govern delivery guarantees. QoS 0 (at most once) is fire-and-fo
 
 Retained messages let the broker store the last message published to a topic and deliver it immediately to new subscribers. This turns MQTT into a last-known-good cache: a subscriber joining late gets the current state without waiting for the next publish.
 
-Sessions are persistent. A client disconnects and reconnects; the broker holds its subscription state for a configurable duration. MQDB sets this to 1 hour (`SESSION_EXPIRY_SECS = 3600`). A client can also request a clean start, discarding all prior session state.
+Sessions are persistent. A client disconnects and reconnects; the broker holds its subscription state for a configurable duration. MQDB sets this to 1 hour by default. A client can also request a clean start, discarding all prior session state.
 
 MQTT 5.0 — the version MQDB uses — added features that made it possible, for someone with imagination, to use MQTT as a database interface: response topics (enabling request/response patterns), user properties (arbitrary key-value metadata per message), shared subscriptions (load-balanced delivery across a consumer group), topic aliases (compact representations for frequently-used topics), and session expiry intervals.
 
 The MQDB broker runs with these defaults:
 
-| Setting | Value | Source |
-|---------|-------|--------|
-| `max_clients` | 10,000 | `broker_defaults.rs:4` |
-| `max_packet_size` | 10 MB | `broker_defaults.rs:5` |
-| `maximum_qos` | 2 | `broker.rs:36` |
-| `topic_alias_maximum` | 100 | `broker.rs:41` |
-| `retain_available` | true | `broker.rs:37` |
-| `shared_subscription_available` | true | `broker.rs:40` |
-| `session_expiry_interval` | 3,600 seconds | `broker_defaults.rs:6` |
+| Setting | Value |
+|---------|-------|
+| Max clients | 10,000 |
+| Max packet size | 10 MB |
+| Maximum QoS | 2 |
+| Topic alias maximum | 100 |
+| Retain available | true |
+| Shared subscriptions | true |
+| Session expiry | 3,600 seconds |
 
 These are not aspirational settings. The 10 MB packet size accommodates large JSON documents — list responses with thousands of records, backup payloads, bulk operations. The 10,000 client limit reflects the intended deployment: IoT gateways with hundreds of devices, not a million-connection CDN. Both values are tuneable at startup, but the defaults reflect the system's target workload.
 
 That is the protocol. The question is: how does a database use it? The naive approach would be to build a separate service — a translation layer that receives MQTT messages, calls a database API, and publishes responses. This works, and other people have attempted it, but it reintroduces the two-system problem from Chapter 1: the MQTT broker and the database would be separate processes with separate failure modes, requiring exactly the synchronization infrastructure that MQDB exists to eliminate.
 
-MQDB takes a different path. The database embeds itself inside the broker. It's an integral part of the broker's architecture, designed to work seamlessly with the broker's core functionality.
+MQDB takes a different path. The database embeds itself inside the broker.
 
 ## 3.2 The Self-Subscribing Broker
 
@@ -44,35 +44,35 @@ The most important architectural decision in MQDB's protocol layer is that the b
 
 An MQTT broker routes messages between clients. Client A publishes to topic X, and the broker delivers that message to all clients subscribed to topic X. In MQDB, the broker itself is one of those clients. Three internal MQTT clients connect to the broker on startup, each with a specific role:
 
-**`mqdb-internal-handler`** subscribes to `$DB/#` — the entire database topic namespace. Every database request from any external client arrives in this subscription callback. The callback pushes messages into an `mpsc::channel<Message>`, and a `tokio::select!` loop processes them sequentially.
+**The handler client** subscribes to `$DB/#` — the entire database topic namespace. Every database request from any external client arrives in this subscription callback. The callback pushes messages into a bounded channel, and a select loop processes them sequentially.
 
-**`mqdb-response-publisher`** publishes responses back to clients' response topics. When the handler finishes processing a database request, the response is sent through this client, not through the handler client.
+**The response client** publishes responses back to clients' response topics. When the handler finishes processing a database request, the response is sent through this client, not through the handler client.
 
-**`mqdb-event-publisher`** subscribes to the `Database`'s internal `broadcast::channel` for `ChangeEvent`s. When a database write produces a change event — every create, update, and delete does — the event publisher serializes it and publishes it to the appropriate event topic at QoS 1.
+**The event client** subscribes to the database's internal broadcast channel for change events. When a database write produces a change event — every create, update, and delete does — the event publisher serializes it and publishes it to the appropriate event topic at QoS 1.
 
-Why three clients instead of one? The handler receives messages via a subscription callback that pushes into an `mpsc` channel. If the same client published responses inside that callback, the broker's internal publish path could deadlock — the handler is processing an incoming message (holding broker resources) while trying to publish an outgoing message (which requires acquiring those same resources). The separate response client breaks the cycle. The event publisher is separate for the same reason: it publishes to event topics that the handler is subscribed to via `$DB/#`, and mixing roles would create a feedback loop.
+Why three clients instead of one? The handler receives messages via a subscription callback that pushes into a bounded channel. If the same client published responses inside that callback, the broker's internal publish path could deadlock — the handler is processing an incoming message (holding broker resources) while trying to publish an outgoing message (which requires acquiring those same resources). The separate response client breaks the cycle. The event publisher is separate for the same reason: it publishes to event topics that the handler is subscribed to via `$DB/#`, and mixing roles would create a feedback loop.
 
-Why loopback connections to its own broker? Because the internal clients authenticate through the full MQTT auth stack. The broker generates a service account on startup — `mqdb-internal-{uuid}` with a random UUID password — and registers it with the password provider. The internal clients connect using these credentials. The same `TopicProtectionAuthProvider` that blocks external clients from internal topics wraps the entire auth chain, but it recognizes the service account via `is_internal_service` and lets it bypass topic restrictions. One auth path, not two. This means the service account is tested by the same code that tests every other user — no special-case authentication logic that can silently diverge.
+Why loopback connections to its own broker? Because the internal clients authenticate through the full MQTT auth stack. The broker generates a service account on startup — a random username and password — and registers it with the password provider. The internal clients connect using these credentials. The same topic protection layer that blocks external clients from internal topics wraps the entire auth chain, but it recognizes the service account and lets it bypass topic restrictions. One auth path, not two. This means the service account is tested by the same code that tests every other user — no special-case authentication logic that can silently diverge.
 
-The startup sequence in `MqdbAgent::run` proceeds in strict order:
+The startup sequence proceeds in strict order:
 
-1. `build_broker_config()` constructs the `BrokerConfig` with all MQTT 5.0 settings.
-2. `apply_transport_config()` adds optional QUIC and WebSocket listeners.
-3. `apply_auth_providers()` chains auth providers and wraps the final result in `TopicProtectionAuthProvider`.
-4. `spawn_handler_task()` — the handler client connects, subscribes to `$DB/#`, enters the message loop.
-5. `spawn_event_task()` — the event publisher connects, enters the `ChangeEvent` broadcast loop.
-6. `spawn_http_task()` — optional HTTP/OAuth gateway.
-7. `broker.run()` — the MQTT accept loop starts.
+1. Build the broker configuration with all MQTT 5.0 settings.
+2. Add optional QUIC and WebSocket listeners.
+3. Chain auth providers and wrap the final result in the topic protection layer.
+4. The handler client connects, subscribes to `$DB/#`, enters the message loop.
+5. The event publisher connects, enters the change event broadcast loop.
+6. Optional HTTP/OAuth gateway starts.
+7. The MQTT accept loop starts.
 
 The handler and event tasks sleep briefly before connecting (100ms and 200ms respectively) to ensure the broker's accept loop is ready. This is a practical sequencing mechanism — the broker must be accepting connections before internal clients try to connect.
 
-The 256-slot `mpsc` channel provides backpressure. Under QoS 0, if the handler cannot keep up, `try_send` drops messages silently — the channel is full, the callback returns, and the message is lost. Under QoS 1, the broker's own flow control prevents this: the PUBACK mechanism means the sending client waits for acknowledgment before sending the next message, naturally throttling the rate to what the handler can process.
+The bounded channel (256 slots) provides backpressure. Under QoS 0, if the handler cannot keep up, the non-blocking send drops messages silently — the channel is full, the callback returns, and the message is lost. Under QoS 1, the broker's own flow control prevents this: the PUBACK mechanism means the sending client waits for acknowledgment before sending the next message, naturally throttling the rate to what the handler can process.
 
 ## 3.3 Request/Response: From PUBLISH to Database
 
 MQTT is fundamentally asynchronous. A client publishes a message and has no built-in way to receive a reply. MQTT 5.0 fixes this with response topics — a property on the PUBLISH packet that tells the receiver where to send the answer. MQDB uses this mechanism to turn an asynchronous protocol into a synchronous-feeling database API.
 
-The client side is in the CLI's `execute_request` function. Three steps:
+The client side involves three steps:
 
 ```rust
 let response_topic = format!("mqdb-cli/responses/{}", uuid::Uuid::new_v4());
@@ -88,14 +88,14 @@ client.publish_with_options(topic, payload, PublishOptions {
 
 Subscribe to a unique response topic, publish the request with that topic attached, wait for the response with a configurable timeout. The UUID in the response topic ensures no collisions between concurrent clients — two clients issuing simultaneous queries get independent response channels.
 
-On the server side, `handle_message` in `handlers.rs` processes each message through a dispatch pipeline:
+On the server side, the message handler processes each message through a dispatch pipeline:
 
-1. **Filter events.** Line 31: `if topic.contains("/events") { return; }`. Skip messages from event topics — these are the broker's own output, not client requests. Section 3.7 explains why this filter is essential.
-2. **Try admin dispatch.** `parse_admin_topic(topic)` checks if the topic matches an admin operation. If so, handle it and return.
-3. **Try DB dispatch.** `parse_db_topic(topic)` extracts entity, operation, and optional ID. If no match, log a warning and return.
-4. **Build request.** `build_request(op, payload)` converts the JSON payload into a typed `Request` enum variant — the same `Request` type that Chapter 2's `Database::create`, `Database::read`, and friends accept.
+1. **Filter events.** Skip messages from event topics — these are the broker's own output, not client requests. Section 3.7 explains why this filter is essential.
+2. **Try admin dispatch.** Check if the topic matches an admin operation. If so, handle it and return.
+3. **Try DB dispatch.** Extract entity, operation, and optional ID from the topic. If no match, log a warning and return.
+4. **Build request.** Convert the JSON payload into a typed request — the same request type that the database's create, read, update, delete, and list methods accept.
 5. **Extract metadata.** Pull `x-mqtt-sender` and `x-mqtt-client-id` from user properties.
-6. **Execute.** `db.execute_with_sender(request, sender, client_id, ownership, scope_config)` runs the database operation with the authenticated user's identity.
+6. **Execute.** Run the database operation with the authenticated user's identity.
 7. **Respond.** If the original message had a response topic, serialize the response and publish it via QoS 1.
 
 If the client omits the response topic, the write still happens — the response is simply not sent. This is fire-and-forget mode: useful for write-only telemetry where the client does not care about the result.
@@ -109,9 +109,9 @@ The response envelope is a JSON object with a consistent structure:
 
 Error codes follow HTTP status semantics: 400 for bad requests (malformed JSON, missing fields), 403 for forbidden operations (ACL or ownership violations), 404 for missing entities, 409 for constraint conflicts (unique, foreign key, or optimistic concurrency violations), and 500 for internal errors.
 
-The connection to Chapter 2 is direct. `build_request` in `protocol/mod.rs` converts the `DbOperation` descriptor and raw bytes into the same `Request` enum that `Database::create`, `Database::read`, `Database::update`, `Database::delete`, and `Database::list` accept. The protocol layer does not have its own execution path — it parses the MQTT message into the database API's native type and calls the database directly. The MQTT protocol adds transport, authentication, and response routing. The database API provides storage, constraints, and atomicity. The boundary between them is a function call.
+The protocol layer does not have its own execution path — it parses the MQTT message into the database API's native request type and calls the database directly. The boundary between protocol and database is a function call.
 
-This separation matters when the system goes distributed. In cluster mode, the handler receives a message from a remote node, parses it into a `Request`, and routes it to the partition that owns the entity — potentially on a different node. The parse-and-dispatch logic is identical. Only the routing changes.
+This separation matters when the system goes distributed. In cluster mode, the handler receives a message from a remote node, parses it into a request, and routes it to the partition that owns the entity — potentially on a different node. The parse-and-dispatch logic is identical. Only the routing changes.
 
 ## 3.4 The Topic API
 
@@ -119,7 +119,7 @@ The topic hierarchy is the API. There is no URL router, no method table, no sche
 
 ### CRUD Topics
 
-`parse_db_topic` in `protocol/mod.rs` strips the `$DB/` prefix and matches on the remaining segments:
+The topic parser strips the `$DB/` prefix and matches on the remaining segments:
 
 ```rust
 match parts.as_slice() {
@@ -165,7 +165,7 @@ Published by the event publisher, subscribed by clients:
 - **Cluster mode:** `$DB/{entity}/events/p{partition}/{id}` — partition number in the topic path enables MQTT shared subscription routing.
 - **Scoped:** `$DB/{scope_entity}/{scope_value}/{entity}/events/{event_type}` — hierarchical event routing for multi-tenant scenarios. A subscriber to `$DB/tenants/acme/#` receives all events across all entities within that tenant.
 
-The `event_type` suffix (`created`, `updated`, `deleted`) is derived from the `Operation` enum on the `ChangeEvent`. The `event_topic` method on `ChangeEvent` generates the topic path dynamically based on operation type, partition count, and scope configuration. In agent mode without scoping (where `num_partitions` is 0), the topic is `$DB/{entity}/events/{id}`. In cluster mode, partition routing is embedded in the path. With scoping enabled, the scope entity and value become topic segments, enabling hierarchical wildcard subscriptions across a tenant's entities.
+The event type suffix (`created`, `updated`, `deleted`) is derived from the operation on the change event. The topic path is generated dynamically based on operation type, partition count, and scope configuration. In agent mode without scoping, the topic is `$DB/{entity}/events/{id}`. In cluster mode, partition routing is embedded in the path. With scoping enabled, the scope entity and value become topic segments, enabling hierarchical wildcard subscriptions across a tenant's entities.
 
 This layered topic structure means that MQTT's native wildcard system provides the filtering that a database would implement in a query engine. A subscriber to `$DB/users/events/#` receives all user changes. A subscriber to `$DB/+/events/p3/#` receives all changes for records hashing to partition 3, across all entities. A subscriber to `$DB/tenants/acme/#` receives everything scoped to the "acme" tenant. No server-side filter registration is needed — the MQTT broker's topic matching engine does the work.
 
@@ -179,11 +179,11 @@ Several topic namespaces exist that external clients never see — they serve cl
 - `$DB/_fk/p{N}/validate` — foreign key existence checks.
 - `$DB/_query/{id}/request|response` — distributed query scatter-gather.
 
-These topics are invisible to external clients because `TopicProtectionAuthProvider` blocks access at the authentication layer. No client — not even admin users — can publish or subscribe to these topics. Only the internal service account can reach them.
+These topics are invisible to external clients because the topic protection layer blocks access at authentication time. No client — not even admin users — can publish or subscribe to these topics. Only the internal service account can reach them.
 
 ### Topic Protection
 
-The `TopicProtectionAuthProvider` wraps every other auth provider as a decorator. It intercepts `authorize_publish` and `authorize_subscribe` calls and applies three protection tiers defined in `topic_rules.rs`:
+The topic protection layer wraps every other auth provider as a decorator. It intercepts publish and subscribe authorization calls and applies three protection tiers:
 
 | Tier | Effect | Topics |
 |------|--------|--------|
@@ -193,13 +193,13 @@ The `TopicProtectionAuthProvider` wraps every other auth provider as a decorator
 
 A catch-all rule blocks non-admin users from any `$DB/` topic where the entity starts with `_` (like `$DB/_sessions/list`), except `$DB/_health`.
 
-The internal service account bypasses all three tiers. Without this, the handler client — which subscribes to `$DB/#`, overlapping with BlockAll topics — would be rejected by its own broker's auth layer. The bypass is simple: `is_internal_service` compares the `user_id` on the message against the stored service account username. A match means unrestricted access. A non-match falls through to the tier checks.
+The internal service account bypasses all three tiers. Without this, the handler client — which subscribes to `$DB/#`, overlapping with BlockAll topics — would be rejected by its own broker's auth layer. The bypass compares the user identity on the message against the stored service account username. A match means unrestricted access. A non-match falls through to the tier checks.
 
 The ReadOnly tier for event topics (`$DB/+/events/#`) deserves explanation. External clients can subscribe to events — that is the entire point of a reactive database. But they cannot publish to event topics. Events are produced exclusively by the event publisher. If an external client could publish to `$DB/users/events/created`, it could inject fake change events into the event stream, breaking the guarantee that events reflect actual database state.
 
 The `$SYS/#` tier follows the same logic. `$SYS/` is the MQTT convention for broker system topics — uptime, connected clients, message rates. Clients should read these for monitoring but never write to them. The ReadOnly tier enforces this at the auth layer, not by convention.
 
-The three-tier model creates a clear security boundary. Regular database operations (`$DB/users/create`, `$DB/orders/list`) pass through with no special checks beyond the underlying ACL. Event and system topics are read-only. Admin operations require explicit admin role membership. Internal cluster topics are invisible. Each tier maps to a real security requirement, not an arbitrary classification.
+The three-tier model creates a clear security boundary. Regular database operations (`$DB/users/create`, `$DB/orders/list`) pass through with no special checks beyond the underlying ACL. Event and system topics are read-only. Admin operations require explicit admin role membership. Internal cluster topics are invisible.
 
 ## 3.5 User Properties as Metadata
 
@@ -216,7 +216,7 @@ These are set by the broker when it relays the PUBLISH to the internal handler. 
 
 Why not use MQTT's built-in username field? Because the internal handler processes messages from multiple clients sequentially through a single subscription. The username is a connection-level property — it identifies who connected to the broker, not who sent a particular message through the internal pipeline. User properties are per-message, so each PUBLISH carries the identity of its originator regardless of how many clients share the handler's subscription channel.
 
-The handler extracts these in `handlers.rs`:
+The handler extracts these from each incoming message:
 
 ```rust
 let sender_uid = message.properties.user_properties.iter()
@@ -228,7 +228,7 @@ let mqtt_client_id = message.properties.user_properties.iter()
     .map(|(_, v)| v.as_str());
 ```
 
-Both are passed to `db.execute_with_sender`, where `sender_uid` enables ownership checks (if configured) and `mqtt_client_id` is attached to the resulting `ChangeEvent` for attribution.
+Both are passed to the database execution path, where the sender identity enables ownership checks (if configured) and the client ID is attached to the resulting change event for attribution.
 
 ### Outbound: On Change Events
 
@@ -236,7 +236,7 @@ Both are passed to `db.execute_with_sender`, where `sender_uid` enables ownershi
 |----------|---------|
 | `x-origin-client-id` | Identifies which client caused the mutation |
 
-Set by the event publisher in `tasks.rs` when publishing change events:
+Set by the event publisher when publishing change events:
 
 ```rust
 if let Some(ref cid) = client_id {
@@ -247,29 +247,29 @@ if let Some(ref cid) = client_id {
 }
 ```
 
-Subscribers use this to filter events they caused. A UI that updates a record does not want to react to its own update event by re-rendering — it already has the new state. The `x-origin-client-id` property lets the subscriber compare the event's originator against its own client ID and skip the echo.
+Subscribers use this to filter events they caused. A UI that updates a record does not want to react to its own update event by re-rendering — it already has the new state. The `x-origin-client-id` property lets the subscriber compare the event's originator against its own client ID and skip the echo. This is different from the `no_local` flag, which prevents the broker from delivering a message back to the client that published it. `no_local` cannot help here because the change event is not published by the client that caused the change — it is published by a dedicated internal client. The originating client and the event publisher are always different connections, so `no_local` would never match. The user property bridges the gap: the internal publisher attaches the originator's identity to the event, and the subscriber decides whether to act on it.
 
 ### OpenTelemetry Propagation
 
-When the `opentelemetry` feature is enabled, `handlers.rs` extracts W3C trace context — `traceparent` and `tracestate` — from user properties and attaches the parent span to the database operation. A trace starting in a Python MQTT client continues through the Rust database handler. The MQTT user properties serve as the propagation medium, replacing the HTTP headers that OpenTelemetry typically uses for context propagation. The database operation's span becomes a child of the caller's span, connecting the distributed trace across the protocol boundary.
+When the OpenTelemetry feature is enabled, the handler extracts W3C trace context — `traceparent` and `tracestate` — from user properties and attaches the parent span to the database operation. A trace starting in a Python MQTT client continues through the Rust database handler. The MQTT user properties serve as the propagation medium, replacing the HTTP headers that OpenTelemetry typically uses for context propagation. The database operation's span becomes a child of the caller's span, connecting the distributed trace across the protocol boundary.
 
 ## 3.6 QoS as a Durability Knob
 
 MQTT's QoS levels map naturally to database durability requirements.
 
-**QoS 0 (at most once)** is fire-and-forget. The broker delivers the message to the handler, but there is no acknowledgment. If the handler is busy, the message may be dropped (the 256-slot channel uses `try_send`). For write-only telemetry — sensor readings, metrics, logs — losing an occasional message is acceptable.
+**QoS 0 (at most once)** is fire-and-forget. The broker delivers the message to the handler, but there is no acknowledgment. If the handler is busy, the message may be dropped (the bounded channel uses a non-blocking send). For write-only telemetry — sensor readings, metrics, logs — losing an occasional message is acceptable.
 
 **QoS 1 (at least once)** is the default for all database operations. The broker sends a PUBACK after processing. The acknowledgment provides two things: confirmation that the write landed in the handler's channel, and natural flow control. The client waits for PUBACK before sending the next message, which prevents the client from outrunning the handler.
 
 **QoS 2 (exactly once)** uses a four-packet exchange. In cluster mode, QoS 2 state — the PUBREC/PUBREL tracking data — is replicated across nodes so that a node failure during the exchange does not break the exactly-once guarantee.
 
-All database responses are published at QoS 1 regardless of the request's QoS. The handler calls `client.publish_qos1(response_topic, payload)` unconditionally. This means the response is acknowledged by the broker before the handler moves on — the client is guaranteed to receive the response if it is connected and subscribed.
+All database responses are published at QoS 1 regardless of the request's QoS. The handler publishes all responses at QoS 1 unconditionally. This means the response is acknowledged by the broker before the handler moves on — the client is guaranteed to receive the response if it is connected and subscribed.
 
 ### Change-Only Delivery
 
 An MQDB-specific broker optimization addresses a problem with retained messages and reconnecting subscribers. In standard MQTT, when a subscriber reconnects and its session is restored, it receives all retained messages matching its subscriptions. For a subscriber to `$DB/+/events/#`, this could mean thousands of last-known-good events flooding in at reconnection — the last event for every entity in the database.
 
-The `ChangeOnlyDeliveryConfig` in the broker configuration targets three topic patterns:
+The change-only delivery configuration targets three topic patterns:
 
 ```
 $DB/+/events/#
@@ -281,7 +281,7 @@ When change-only delivery is enabled for these patterns, reconnecting subscriber
 
 The three topic patterns cover different scoping depths: single-segment entity (`$DB/+/events/#`), two-segment scoped entity (`$DB/+/+/events/#`), and three-segment deeply-scoped entity (`$DB/+/+/+/events/#`). The `+` wildcards match any entity or scope value. These patterns mirror the event topic structures described in Section 3.4 — agent mode, cluster mode, and scoped mode.
 
-Without change-only delivery, MQTT's retained message semantics create a tension with event-driven subscriptions. Retained messages are designed for "current state" use cases — a temperature sensor publishes a retained message, and new subscribers immediately know the current temperature. Event topics carry a different semantic: "something happened." Replaying thousands of "something happened" messages to a reconnecting subscriber does not help — the subscriber needs "what happened since I disconnected," not the entire event history. Change-only delivery bridges this gap by suppressing duplicate retained payloads while preserving new ones.
+Without change-only delivery, MQTT's retained message semantics create a tension with event-driven subscriptions. Retained messages are designed for "current state" use cases — a temperature sensor publishes a retained message, and new subscribers immediately know the current temperature. Event topics have a different meaning: "something happened." Replaying thousands of "something happened" messages to a reconnecting subscriber does not help — the subscriber needs "what happened since I disconnected," not the entire event history. Change-only delivery bridges this gap by suppressing duplicate retained payloads while preserving new ones.
 
 ### The QoS Spectrum for Database Workloads
 
@@ -289,7 +289,7 @@ The choice of QoS level is a per-operation decision that depends on the workload
 
 Write-only sensor telemetry — temperature readings arriving every second from thousands of devices — naturally fits QoS 0. The occasional dropped reading is acceptable, and the reduced protocol overhead (no PUBACK, no retransmission) means lower latency and battery consumption on constrained devices.
 
-Transactional database operations — create a user, update an order, delete a record — require QoS 1. The PUBACK confirms that the message reached the handler, the response topic carries the result, and the flow control prevents the client from overwhelming the broker. QoS 1 does not guarantee exactly-once processing at the database level (the handler may process a retransmitted message twice), but MQDB's optimistic concurrency control via `_version` catches duplicate updates — the second attempt fails with a conflict because the expected version has already been incremented.
+Transactional database operations — create a user, update an order, delete a record — require QoS 1. The PUBACK confirms that the message reached the handler, the response topic carries the result, and the flow control prevents the client from overwhelming the broker. QoS 1 does not guarantee exactly-once processing at the database level (the handler may process a retransmitted message twice), but MQDB's optimistic concurrency control via the version counter catches duplicate updates — the second attempt fails with a conflict because the expected version has already been incremented.
 
 QoS 2 is available for operations where duplicate processing is unacceptable even at the transport level — financial transactions, one-time token consumption. The four-packet exchange guarantees that the message is processed exactly once by the handler. In cluster mode, QoS 2 state is replicated (Chapter 12), so the guarantee survives node failures.
 
@@ -297,23 +297,13 @@ QoS 2 is available for operations where duplicate processing is unacceptable eve
 
 ### The Feedback Loop
 
-Line 31 of `handlers.rs`:
-
-```rust
-if topic.contains("/events") {
-    return;
-}
-```
-
-One line. Easy to miss. Essential.
+The first thing the message handler does when it receives a message is check whether the topic contains an event segment. If it does, the handler drops the message immediately without processing it.
 
 The handler subscribes to `$DB/#`. The event publisher publishes to `$DB/users/events/created`. Both live in the same broker. Without the filter, every database write triggers a change event, the event is published to an event topic, the event topic matches `$DB/#`, the broker delivers it to the handler, and the handler tries to parse it as a database request.
 
-The parse fails — `$DB/users/events/created` does not match any `parse_db_topic` or `parse_admin_topic` pattern — but only after JSON deserialization and pattern matching. Under write-heavy loads, the handler spends more time rejecting its own events than processing real requests.
+The parse fails — `$DB/users/events/created` does not match any database or admin topic pattern — but only after JSON deserialization and pattern matching. Under write-heavy loads, the handler spends more time rejecting its own events than processing real requests.
 
 The overlap between the handler's subscription (`$DB/#`) and the event publisher's output (`$DB/{entity}/events/...`) is intentional. The handler needs all `$DB/` topics to receive database requests. The event publisher needs `$DB/{entity}/events/` topics to deliver change events. The two topic spaces overlap, and no MQTT subscription filter can separate them — wildcards match patterns, not intent. So the filter must be explicit, in application code, at the top of the message handler.
-
-This is a general lesson for self-subscribing architectures: when your subscriber wildcard overlaps with your publisher's topic space, every publish triggers a receive. The architecture creates a cycle. The application must break it.
 
 An alternative design would use separate topic prefixes — `$DB_REQ/` for requests and `$DB_EVT/` for events — so the handler could subscribe to `$DB_REQ/#` without matching event topics. We chose the unified `$DB/` prefix because it makes the API surface coherent: all database-related topics live under one namespace, clients subscribe to `$DB/#` to see everything, and the topic hierarchy reads as a single tree. The cost is the explicit filter in the handler. The benefit is a simpler mental model for API users.
 
@@ -321,25 +311,23 @@ An alternative design would use separate topic prefixes — `$DB_REQ/` for reque
 
 During async benchmark development, QoS 0 achieved approximately 5,000 operations per second before TCP connections started resetting. QoS 1 hit approximately 12,000 operations per second without issues.
 
-The root cause is flow control. QoS 0 has none. The client publishes messages as fast as TCP accepts bytes into its send buffer. The broker receives them, deserializes JSON, executes database operations, and publishes responses — all slower than the raw TCP receive rate. The 256-slot `mpsc` channel fills up. `try_send` starts dropping messages. But the client does not know — QoS 0 provides no feedback. TCP buffers accumulate, backpressure propagates to the TCP layer, and eventually the broker's connection handling falls behind, triggering connection resets.
+The root cause is flow control. QoS 0 has none. The client publishes messages as fast as TCP accepts bytes into its send buffer. The broker receives them, deserializes JSON, executes database operations, and publishes responses — all slower than the raw TCP receive rate. The bounded channel fills up. The non-blocking send starts dropping messages. But the client does not know — QoS 0 provides no feedback. TCP buffers accumulate, backpressure propagates to the TCP layer, and eventually the broker's connection handling falls behind, triggering connection resets.
 
 QoS 1's PUBACK acts as natural backpressure. The client sends a message, waits for the PUBACK, sends the next message. Even with pipelining (multiple in-flight messages), the client cannot outrun the broker by more than the in-flight window size. The PUBACK creates a closed-loop system where the client's send rate is bounded by the broker's processing rate.
 
-The performance lesson is counterintuitive: the protocol's reliability mechanism matters more as a flow control mechanism than as a delivery guarantee. The same acknowledgment that prevents message loss on a 2G cellular link prevents buffer overflow on a localhost benchmark. QoS 0 "should be faster" because it has less protocol overhead — no PUBACK packet, no retransmission timer, no inflight tracking. In practice, the overhead of waiting for PUBACK is what keeps the system stable under load. QoS 1 is not just more reliable than QoS 0 — it is faster, because it does not crash.
-
-The async benchmark mode (pipelined, not request-response) makes this especially visible. In pipelined mode, the client sends messages without waiting for individual responses, measuring how many operations the system can sustain per second. With QoS 0, the client has no signal to slow down. With QoS 1, the broker's PUBACK processing rate becomes the natural speed limit — the client can have multiple messages in flight, but the inflight window bounds the gap between send rate and processing rate. The benchmark documentation records this as an explicit warning: QoS 0 in async mode causes connection resets at approximately 5,000 operations per second due to lack of flow control.
+The performance lesson is counterintuitive: the protocol's reliability mechanism matters more as a flow control mechanism than as a delivery guarantee. The same acknowledgment that prevents message loss on a 2G cellular link prevents buffer overflow on a localhost benchmark. QoS 0 "should be faster" because it has less protocol overhead — no PUBACK packet, no retransmission timer, no inflight tracking. In practice, the overhead of waiting for PUBACK is what keeps the system stable under load.
 
 This is not unique to MQTT. TCP uses acknowledgments for flow control. gRPC uses HTTP/2 flow control frames. Any protocol that removes acknowledgments — for performance, for simplicity, for any reason — must replace the flow control mechanism with something else, or accept that the sender will eventually overwhelm the receiver. MQTT QoS 0 removes acknowledgments and provides no replacement. The result is predictable in hindsight.
 
 ### The Service Account Bootstrapping Problem
 
-The internal clients need credentials to authenticate with the broker. The broker generates these credentials — `mqdb-internal-{uuid}` with a random UUID password — during startup, before the accept loop begins. But the credential generation path depends on the authentication configuration. Three cases arise:
+The internal clients need credentials to authenticate with the broker. The broker generates these credentials — a random username and password — during startup, before the accept loop begins. But the credential generation path depends on the authentication configuration. Three cases arise:
 
-When a password file is configured, the service account is added to the password provider using the same `add_user` API that external user management uses. The account lives alongside human-created users in the same credential store. When SCRAM or JWT authentication is configured (enhanced auth methods), the service account bypasses the enhanced auth entirely — it authenticates via username/password through a `CompositeAuthProvider` that tries the primary auth (SCRAM/JWT) first and falls back to the password provider. When anonymous mode is enabled, the service account is still created — anonymous clients do not need credentials, but the internal clients do, because `TopicProtectionAuthProvider` must identify them to grant the bypass.
+When a password file is configured, the service account is added to the password provider using the same user management API that external user creation uses. The account lives alongside human-created users in the same credential store. When SCRAM or JWT authentication is configured (enhanced auth methods), the service account bypasses the enhanced auth entirely — it authenticates via username/password through a composite provider that tries the primary auth (SCRAM/JWT) first and falls back to the password provider. When anonymous mode is enabled, the service account is still created — anonymous clients do not need credentials, but the internal clients do, because `TopicProtectionAuthProvider` must identify them to grant the bypass.
 
-The initial implementation of anonymous mode exposed a gap. The service account was created, but `TopicProtectionAuthProvider` did not know about admin users in anonymous mode (there were none configured). Internal clients that needed to publish to admin topics (`$DB/_admin/`) or event topics (`$DB/+/events/#`) were blocked by their own topic protection. The fix added an `all_users_admin` flag: when anonymous mode is enabled and no explicit admin users are configured, all users are treated as admin. This is acceptable because anonymous mode is a development convenience, not a production security posture.
+The initial implementation of anonymous mode exposed a gap. The service account was created, but the topic protection layer did not know about admin users in anonymous mode (there were none configured). Internal clients that needed to publish to admin topics (`$DB/_admin/`) or event topics (`$DB/+/events/#`) were blocked by their own topic protection. The fix added an `all_users_admin` flag: when anonymous mode is enabled and no explicit admin users are configured, all users are treated as admin. This is acceptable because anonymous mode is a development convenience, not a production security posture.
 
-The broader lesson: when a system authenticates with itself, every authentication path in the system must accommodate self-referential connections. A new auth method (SCRAM) broke internal connectivity because the internal clients used password auth, not SCRAM. The `CompositeAuthProvider` — try primary, fall back to secondary — was the fix. Every future auth method addition must account for the internal service account, or the broker will lock itself out of its own database.
+The broader lesson: when a system authenticates with itself, every authentication path in the system must accommodate self-referential connections. A new auth method (SCRAM) broke internal connectivity because the internal clients used password auth, not SCRAM. The composite auth provider — try primary, fall back to secondary — was the fix. Every future auth method addition must account for the internal service account, or the broker will lock itself out of its own database.
 
 ## What Comes Next
 

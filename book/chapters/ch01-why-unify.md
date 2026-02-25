@@ -6,7 +6,7 @@ These two systems have evolved independently for decades. Relational databases p
 
 But the seam between them is where the hardest problems live.
 
-This book is about what happens when ask yourself, what would happen if data and broker were unified — when you build a system that treats storage and messaging as a single concern. It follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively. Every design decision, every bug, every tradeoff is drawn from a real system running real workloads. The distributed systems principles, however, are universal.
+This book follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively and treats storage and messaging as a single concern. Every decision, bug, and tradeoff comes from building it. It shows the gap between concept and implementation, and the process of bridging them.
 
 ## 1.1 The Two-System Problem
 
@@ -78,7 +78,7 @@ This is the question MQDB tries to answer.
 
 ## 1.2 The Core Insight
 
-At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. Sure, a subscription may live longer than a record, but that's not the point.
+At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. They differ in lifetime — a subscription persists across sessions while a record may be ephemeral — and in access patterns. But the storage mechanics are the same: serialize a value, compute a partition, write to a key.
 
 When a database inserts a record, it writes a value keyed by entity and identifier:
 
@@ -103,9 +103,9 @@ value: {"connected_node": 1, "clean_start": false}
 
 Strip away the domain-specific semantics, and every operation reduces to the same primitive:
 
-> Given a key, write a value. Sure, there are other operations, but except for reads, they also boil down to writes.
+> Given a key, write a value. Updates overwrite existing keys. Deletes write tombstones or remove keys. Reads are the only operation that does not modify storage. Everything else is a write.
 
-This is the core insight. If both database records and broker state are keyed writes, then the machinery for managing them — partitioning, replication, consistency, querying — can be unified. One storage engine. One replication pipeline. One consensus protocol.
+This is the core insight. If both database records and broker state are keyed writes, then the machinery for managing them — partitioning, replication, consistency, querying — can be unified.
 
 ### ReplicationWrite: The Universal Mutation
 
@@ -125,7 +125,7 @@ pub struct ReplicationWrite {
 
 The `entity` field is a plain string that distinguishes between different types of data. Database records use entity names like `"users"` or `"orders"`. MQTT state uses internal names like `"_sessions"`, `"_mqtt_subs"`, or `"_topic_index"`. The replication pipeline doesn't care about the distinction. It routes writes by partition, orders them by sequence, and delivers them to replicas.
 
-This unification has a profound consequence: when the database writes a record, the MQTT broker already knows about it — because the write flowed through the same event system that manages subscriptions. There is no separate CDC connector, no outbox table, no relay process. The write *is* the event.
+This unification means that when the database writes a record, the MQTT broker already knows about it — because the write flowed through the same event system that manages subscriptions. There is no separate CDC connector, no outbox table, no relay process. The write *is* the event.
 
 ### Two Classes of Entities
 
@@ -134,8 +134,6 @@ Not all data behaves the same way. MQDB distinguishes between two classes:
 **Partitioned entities** follow standard hash-based distribution. A database record with key `users/user-42` hashes to partition `hash("users/user-42") % 256`. Only the node that owns that partition stores the primary copy. Sessions, subscriptions, QoS state, retained messages, and user-defined database records are all partitioned entities.
 
 **Broadcast entities** must exist on every node. When a message arrives on Node A, the node must immediately determine which clients — potentially connected to Node B or Node C — subscribe to that topic. Cross-node queries on every publish destroys throughput (believe me, we tried). So MQDB replicates certain entities to all nodes: the topic-to-subscriber index, the wildcard subscription trie, and the client-to-node location map.
-
-This distinction is fundamental. Partitioned entities scale horizontally — add more nodes, and each node handles fewer partitions. Broadcast entities trade write amplification for read locality. The cost varies by subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a single cluster broadcast message, while a wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, publish routing requires zero network round trips because every node maintains a complete subscriber map.
 
 Chapter 4 covers partitioning in detail. Chapter 8 explains why broadcast entities are necessary for cross-node pub/sub routing.
 
@@ -170,9 +168,7 @@ MQDB maps database operations to MQTT topics under a reserved `$DB/` prefix:
 | `$DB/{entity}/list` | List records with filters |
 | `$DB/{entity}/events/#` | Subscribe to changes |
 
-A client creating a user record publishes JSON to `$DB/users/create` with a response topic. The server creates the record, assigns an ID, and publishes the result (or an error) back to the response topic. The request and response flow through the same protocol channel that carries MQTT messages.
-
-This design means that any MQTT client — in any language, on any platform — can perform database operations without a custom driver. The `mosquitto_pub` and `mosquitto_sub` command-line tools work. MQTT client libraries for Python, JavaScript, Go, Java, C, and every other language work. The database API is the messaging API.
+A client creating a user record publishes JSON to `$DB/users/create` with a response topic. The server creates the record, assigns an ID, and publishes the result (or an error) back to the response topic. This design means that any MQTT client — in any language, on any platform — can perform database operations without a custom driver. The `mosquitto_pub` and `mosquitto_sub` command-line tools work. MQTT client libraries for Python, JavaScript, Go, Java, C, and every other language work. The database API is the messaging API.
 
 ### Why Not REST, gRPC, or a Custom Protocol?
 
@@ -184,9 +180,9 @@ Every protocol choice is a tradeoff. Here is what MQTT provides that alternative
 
 **Versus a custom protocol:** A purpose-built protocol could optimize for the exact needs of a distributed database. But it would require building and maintaining client libraries for every target language and platform. By using MQTT, MQDB inherits a mature ecosystem of clients, debugging tools, and operational knowledge.
 
-**What MQTT sacrifices:** Type safety at the protocol level (payloads are opaque byte arrays, not typed schemas), SQL-style query expressiveness require a dedicated translation layer, and developer familiarity (most backend engineers know SQL; fewer know MQTT topic patterns).
+**What MQTT sacrifices:** Type safety at the protocol level (payloads are opaque byte arrays, not typed schemas), SQL-style query expressiveness requires a dedicated translation layer, and developer familiarity (most backend engineers know SQL; fewer know MQTT topic patterns).
 
-These sacrifices are real. MQDB compensates through schema validation at the application layer (Chapter 2), a filter system (Chapter 9), and comprehensive CLI tooling that abstracts the MQTT protocol from day-to-day use.
+MQDB compensates through schema validation at the application layer (Chapter 2), a filter system (Chapter 9), and comprehensive CLI tooling that abstracts the MQTT protocol from day-to-day use.
 
 ## 1.4 What We're Building
 
@@ -204,7 +200,7 @@ The reactive core also includes an outbox with configurable retry logic and a de
 
 The database is embedded inside a full MQTT 5.0 broker. For this, a purpose-built MQTT broker was used. In order to truly embed transactions within the MQTT pipeline, one must intercept MQTT events as they are processed by the broker. The advantage is that the protocol is the still MQTT, so standard MQTT clients connect, subscribe to topics, publish messages, and use QoS 0/1/2 delivery guarantees. The broker supports TLS, QUIC transport, password-based authentication (Argon2), SCRAM-SHA-256 challenge-response, JWT tokens (symmetric and asymmetric), and federated JWT with multiple issuers. These are necessary if the premise is to flatten the stack into a single system.
 
-The broker and the database share a single storage layer. MQTT session state (subscriptions, QoS inflight messages, retained messages) and database records live in the same key-value store, managed by the same replication pipeline. This sharing is what eliminates the two-system problem — there is no seam between the broker and the database because they are the same system.
+The broker and the database share a single storage layer. MQTT session state (subscriptions, QoS inflight messages, retained messages) and database records live in the same key-value store, managed by the same replication pipeline. This sharing is what eliminates the two-system problem.
 
 ### Layer 3: Distributed Cluster
 
@@ -216,7 +212,7 @@ Inter-node communication uses direct QUIC streams with mTLS authentication. Each
 
 These three layers map to three deployment modes:
 
-**Library.** Import `mqdb` as a Rust crate and use the `Database` API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
+**Library.** Import the crate and use the database API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
 
 ```rust
 let db = Database::open("./data/mydb").await?;
@@ -249,7 +245,7 @@ MQDB is not the first system to ask whether the layers between data and user are
 
 **Meteor** (2012–2016) took the idea further by unifying the reactive pipeline end to end. Its Distributed Data Protocol (DDP) used publish/subscribe over WebSockets, with a local MiniMongo replica on the client that stayed in sync automatically. The developer experience was genuinely magical — applications "just worked" in real time. Meteor faded as the React ecosystem matured and its MongoDB dependency became a constraint, but it proved that a protocol-native reactive system could eliminate entire categories of glue code.
 
-Both RethinkDB and Meteor demonstrated demand for reactive data systems. Both also demonstrated what happens when the reactive layer is bolted onto an existing database rather than being the database itself.
+Both RethinkDB and Meteor demonstrated demand for reactive data systems. Both also showed the fragility of adding reactivity on top of a storage engine that was not designed for it — RethinkDB's changefeeds were a layer above its B-tree storage, and Meteor's DDP depended on MongoDB's oplog, which was built for replication, not application-level subscriptions.
 
 ### The Local-First Wave
 
@@ -311,13 +307,9 @@ But the architecture does not preclude SQL. The storage layer already supports s
 
 ### Eventual Consistency
 
-MQDB replicates data asynchronously with sequence-based ordering and gap detection. When a client writes to the primary, the primary applies the write locally, sends it to replicas, and acknowledges the client — without waiting for replicas to confirm. Replicas apply writes in sequence order and request catchup for any gaps. This is textbook eventual consistency.
+MQDB replicates data asynchronously. The primary acknowledges the client without waiting for replicas to confirm. This is eventual consistency, and it fits a reactive data model: clients subscribe to change events rather than polling, so the data arrives when it arrives. Chapter 4 explains why replica staleness is less of a concern than it sounds, and Chapter 5 covers the replication pipeline in detail.
 
-For MQDB, eventual consistency is not a compromise — it is the natural fit for a reactive data model. Clients do not query and poll for results. They subscribe to `$DB/{entity}/events/#` and receive change events as they propagate. The data arrives when it arrives. There is no "read-after-write" consistency problem because the interaction model is subscriptions, not reads. MQTT's QoS guarantees (at-least-once for QoS 1, exactly-once for QoS 2) handle delivery reliability at the protocol level, and events arrive in sequence order within each partition. This requires a good deal of care in the implementation, because MQDB needs to ensure that eventual consistency is not compromised by out-of-order delivery or missing events.
-
-The write model is per-entity atomicity on the primary: each single-entity operation is serialized, with data and its outbox entry persisted in the same storage batch. In agent mode, the default is `Immediate` fsync — writes are durable before the client is acknowledged. In cluster mode, the default is `PeriodicMs(10)` — the storage engine flushes every 10ms, trading a small durability window on hard crash for higher write throughput. The outbox guarantees that data and change events share the same durability fate: if a crash loses the last 10ms of unfsynced writes, the corresponding outbox entries are also lost, so there are no orphaned events. A primary failure can also lose writes that were acknowledged but not yet replicated, which is an acceptable tradeoff for a system where the dominant workloads are sensor telemetry, reactive dashboards, and event-driven microservices.
-
-For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a `QuorumTracker` that returns a oneshot receiver for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
+For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a quorum tracker that returns a notification channel for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
 
 Chapter 5 covers the replication pipeline, sequence ordering, and gap catchup in detail.
 
@@ -333,15 +325,15 @@ The fixed count is a deliberate tradeoff between horizontal scaling and synchron
 
 MQDB provides per-entity atomicity within a single partition. In agent mode, each create, update, or delete writes data, indexes, and the outbox entry in a single batch commit to the LSM-tree. In cluster mode, each partition's data is persisted to fjall before updating in-memory stores, with the change event outbox entry written atomically in the same batch. On crash recovery, pending outbox entries are scanned and replayed. The outbox guarantees consistency between data and change events regardless of fsync timing, since both share the same fjall batch.
 
-Constraint enforcement crosses partition boundaries but is not transactional. Unique constraints use a two-phase reservation protocol (reserve with TTL, then commit or release). Foreign key constraints use a one-phase existence check on create/update and a scatter-gather reverse lookup on delete — each node scans only its primary partitions, excluding stale replica data that may not yet reflect remote deletes. Both protocols have a window between the check and the write where concurrent operations can create inconsistencies — the lock-drop/reacquire gap is discussed in Chapter 15.
+Constraint enforcement (unique checks, foreign key validation) crosses partition boundaries but is not transactional — there is a window between the check and the write where concurrent operations can create inconsistencies. Chapter 15 covers the protocols and their consistency gaps.
 
 This is the same tradeoff made by many distributed databases. Google Spanner provides cross-partition transactions through synchronized clocks. CockroachDB uses a distributed transaction protocol. Both pay for it in latency and complexity. MQDB currently prioritizes throughput over cross-partition consistency. But the constraint enforcement infrastructure — two-phase reservation for unique constraints, scatter-gather for foreign key checks — already demonstrates cross-partition coordination with well-defined consistency windows. A formal distributed transaction protocol is a possible future addition, built on the same inter-partition messaging primitives.
 
 ### Write Amplification for Broadcast Entities
 
-Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates 1 `ReplicationWrite` plus 256 local persistence writes (to rebuild the wildcard trie on restart) plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
+Broadcast entities trade write cost for read locality. The cost depends on the subscription type: an exact topic subscription generates 1 `ReplicationWrite` plus a lightweight cluster broadcast message. A wildcard subscription generates one replication write plus 256 local persistence writes plus a cluster broadcast message. In both cases, every node maintains a complete subscriber map so that publish routing requires zero network round trips.
 
-For workloads with relatively stable subscriptions (subscribe once, receive many messages), this cost is amortized. For workloads with rapidly churning wildcard subscriptions, the local persistence writes can become a bottleneck. But that's not good practice overall.
+Chapter 4 quantifies this cost and explains when it matters.
 
 ## What Comes Next
 

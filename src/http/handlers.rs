@@ -48,6 +48,7 @@ pub struct ServerState {
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
+    pub trust_proxy: bool,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -117,16 +118,16 @@ fn json_response_with_credentials(
     cors_origin: Option<&str>,
 ) -> HttpResponse {
     let body_bytes = serde_json::to_vec(body).unwrap_or_default();
-    let origin = cors_origin.unwrap_or("*");
     let mut builder = Response::builder()
         .status(status)
-        .header("Content-Type", "application/json")
-        .header("Access-Control-Allow-Origin", origin)
-        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Content-Type");
+        .header("Content-Type", "application/json");
 
-    if cors_origin.is_some() {
-        builder = builder.header("Access-Control-Allow-Credentials", "true");
+    if let Some(origin) = cors_origin {
+        builder = builder
+            .header("Access-Control-Allow-Origin", origin)
+            .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            .header("Access-Control-Allow-Headers", "Content-Type")
+            .header("Access-Control-Allow-Credentials", "true");
     }
 
     builder
@@ -146,15 +147,15 @@ fn json_response_with_cookie(
     cors_origin: Option<&str>,
 ) -> HttpResponse {
     let body_bytes = serde_json::to_vec(body).unwrap_or_default();
-    let origin = cors_origin.unwrap_or("*");
     let mut builder = Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        .header("Access-Control-Allow-Origin", origin)
         .header("Set-Cookie", cookie);
 
-    if cors_origin.is_some() {
-        builder = builder.header("Access-Control-Allow-Credentials", "true");
+    if let Some(origin) = cors_origin {
+        builder = builder
+            .header("Access-Control-Allow-Origin", origin)
+            .header("Access-Control-Allow-Credentials", "true");
     }
 
     builder
@@ -533,16 +534,15 @@ pub fn handle_options() -> HttpResponse {
 }
 
 pub fn handle_options_with_credentials(cors_origin: Option<&str>) -> HttpResponse {
-    let origin = cors_origin.unwrap_or("*");
-    let mut builder = Response::builder()
-        .status(204)
-        .header("Access-Control-Allow-Origin", origin)
-        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "Content-Type")
-        .header("Access-Control-Max-Age", "3600");
+    let mut builder = Response::builder().status(204);
 
-    if cors_origin.is_some() {
-        builder = builder.header("Access-Control-Allow-Credentials", "true");
+    if let Some(origin) = cors_origin {
+        builder = builder
+            .header("Access-Control-Allow-Origin", origin)
+            .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            .header("Access-Control-Allow-Headers", "Content-Type")
+            .header("Access-Control-Max-Age", "3600")
+            .header("Access-Control-Allow-Credentials", "true");
     }
 
     builder
@@ -550,7 +550,7 @@ pub fn handle_options_with_credentials(cors_origin: Option<&str>) -> HttpRespons
         .expect("static response")
 }
 
-pub fn handle_ticket(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
+pub fn handle_ticket(state: &ServerState, headers: &HeaderMap, client_ip: &str) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
     let cookie_header = headers
         .get(http::header::COOKIE)
@@ -569,7 +569,7 @@ pub fn handle_ticket(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
         );
     };
 
-    if !state.ticket_rate_limiter.check_and_record(session_id) {
+    if !state.ticket_rate_limiter.check_and_record(client_ip) {
         return json_response_with_credentials(
             429,
             &json!({"error": "too many ticket requests, try again later"}),

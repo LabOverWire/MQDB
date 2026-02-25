@@ -260,5 +260,6 @@ pub(crate) fn build_http_config(
         cookie_secure: oauth.cookie_secure,
         cors_origin: oauth.cors_origin.clone(),
         ticket_rate_limit: oauth.ticket_rate_limit,
+        trust_proxy: oauth.trust_proxy,
     })
 }

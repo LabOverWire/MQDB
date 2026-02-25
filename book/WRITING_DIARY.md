@@ -6,8 +6,8 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 
 | Part | Chapters | Pages (est.) | Status |
 |------|----------|-------------|--------|
-| I: The Design Thesis | 1-3 | ~70 | In progress |
-| II: Distributing the System | 4-9 | ~150 | Not started |
+| I: The Design Thesis | 1-3 | ~70 | Complete |
+| II: Distributing the System | 4-9 | ~150 | In progress |
 | III: Cluster Lifecycle | 10-14 | ~100 | Not started |
 | IV: Advanced Patterns | 15-18 | ~80 | Not started |
 | V: Operating and Extending | 19-20 | ~50 | Not started |
@@ -20,10 +20,10 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 1 | Why Unify Messaging and Storage? | First draft | 2026-02-16 | | 3,522 |
 | 2 | The Storage Foundation | First draft | 2026-02-18 | 2026-02-19 | 5,806 |
 | 3 | MQTT 5.0 as a Database Protocol | First draft | 2026-02-19 | | 5,379 |
-| 4 | Partitioning | Not started | | | |
-| 5 | Replication | Not started | | | |
-| 6 | Consensus with Raft | Not started | | | |
-| 7 | Transport Layer Evolution | Not started | | | |
+| 4 | Partitioning | First draft | 2026-02-20 | 2026-02-21 | ~4,200 |
+| 5 | Replication | First draft | 2026-02-21 | | 3,899 |
+| 6 | Consensus with Raft | First draft | 2026-02-23 | | 4,213 |
+| 7 | Transport Layer Evolution | First draft | 2026-02-25 | | 4,474 |
 | 8 | Cross-Node Pub/Sub Routing | Not started | | | |
 | 9 | Query Coordination | Not started | | | |
 | 10 | Failure Detection and Recovery | Not started | | | |
@@ -229,12 +229,78 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Dead code in store_manager (`subscribe_topic_replicated`, `schema_register_replicated`) was removed — these created 256-write fan-outs but were superseded by lightweight broadcast messages
 - When a method exists but is never called, check git blame/log to find when the calling code changed
 - Avoid tautologies — don't restate a definition as a use case (e.g., "suits scenarios where MQTT is unnecessary" for the no-MQTT mode). Use concrete examples instead.
-- When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `fkref/`, `_dead_letter/`, `_crypto/` are real parts of the keyspace
+- When writing about prefixes/namespaces, enumerate ALL real prefixes from the code, not just the "visible" ones — infrastructure prefixes like `_dead_letter/`, `_crypto/` are real parts of the keyspace
 - Run a systematic verification pass after writing: list every factual claim (constant values, defaults, struct fields) and check each against source. This caught zero errors in Ch2 but the discipline prevents drift as the code evolves
 - The "What Went Wrong" sections are most powerful when they describe a real bug from development — the outbox durability coupling bug came from the cluster mode transition, not from agent mode itself
 - When writing about architecture with multiple interacting components (internal clients, auth providers, topic protection), the "why not the simpler approach?" question generates the most insight — explaining why separate topic prefixes were rejected is more instructive than just describing the chosen design
 - Count enum variants and match arms carefully — discrepancies between the code and the prose are easy to introduce when summarizing (AdminOperation has 25 variants total, not "22" as the plan estimated)
 - Always verify prefix/namespace counts against actual code constants, not session notes — Session 5 expanded to "9 prefixes" including `fkref/`, but `fkref/` was never implemented. The code has 8 prefixes.
+
+### Session 8 — 2026-02-21
+
+**Work done:**
+- Wrote Chapter 5 first draft (`ch05-replication.md`, 3,899 words)
+- Sections: Universal Write Abstraction, Two-Tier Replication Model, Durability Tradeoff, Sequence Ordering on Replicas, Catchup Mechanism, Epoch-Based Consistency, Store Abstraction Layer, What Went Wrong (catchup flooding bug)
+- Read all primary source files before writing: `protocol/replication.rs` (wire format), `replication.rs` (ReplicaState, 4-case handle_write), `write_log.rs` (BoundedLog, 10K cap), `quorum.rs` (QuorumTracker, PendingWrites), `node_controller/replication_ops.rs` (replicate_write, write_or_forward_impl), `node_controller/session_ops.rs` (replicate_write_async), `node_controller/catchup.rs` (catchup request/response, snapshot trigger), `snapshot.rs` (SnapshotBuilder, SnapshotSender, 64KB chunks), `store_manager/apply.rs` (16 entity types), `entity.rs` (17 constants, 16 in dispatch), `raft/state.rs` (4 RaftCommand types), `protocol/types.rs` (Operation enum)
+- Verified wire header is 22 bytes (version:1, partition:2, operation:1, epoch:4, sequence:8, entity_len:1, id_len:1, data_len:4)
+- Verified two replication functions: `replicate_write` (quorum-tracked, session creation only) vs `replicate_write_async` (fire-and-forget, all other writes)
+- Verified 16 entity types in dispatch (17 defined in entity.rs, but OAUTH_TOKENS is not in apply_to_memory)
+- Verified AwaitingSnapshot role and its behavior (NotReplica ack, no catchup requests, snapshot request tracking)
+
+**Key decisions:**
+- 3,899 words, below 5,000-6,000 target — similar to Ch1 (3,522). Chapter is lean but complete; no padding added
+- Included "What Went Wrong" section on the catchup flooding bug (AwaitingSnapshot fix) — consistent with other chapters
+- Included the dual-return store pattern (returns domain object + ReplicationWrite) — shows the separation between store logic and replication routing
+- Did NOT include detailed description of each entity type in the dispatch — the 16-entry match statement speaks for itself
+- Did NOT pad the comparison with etcd/MySQL/Redis beyond the minimum needed to frame the tradeoff
+- Forward references to Chapter 6 (Raft) at both the two-tier model section and the closing "What Comes Next"
+
+### Session 9 — 2026-02-23
+
+**Work done:**
+- Wrote Chapter 6 first draft (`ch06-raft.md`, 4,213 words)
+- Sections: What Raft Manages, State Machine, Leader Election, Log Replication, Single-Node Bootstrap, Batch Flush Bug, Missing Peer Bug, Log Compaction, Persistence
+- Read all primary source files before writing: `raft/state.rs` (RaftState, RaftCommand, LogEntry, compact_log, try_advance_commit_index, quorum_size), `raft/node.rs` (RaftConfig defaults, tick, election, heartbeats, RaftOutput command pattern), `raft/storage.rs` (persistence keys, batch vs individual persist, RaftPersistentState 10 bytes), `raft/rpc.rs` (wire format for RequestVote/AppendEntries), `raft/coordinator/replication.rs` (apply_command, handle_node_alive with add_peer at line 123, handle_node_death), `raft_task.rs` (initialize_partitions with BATCH_SIZE=8, 200ms tick interval, startup grace period flow)
+- Verified PartitionUpdate is 11 bytes (u8 + u16 + u16 + u16 + u32), not 13 as plan estimated
+- Verified RaftPersistentState is 10 bytes (u64 + u16)
+- Verified quorum_size formula: `peers.len().div_ceil(2) + 1`
+- Verified startup grace period is 10000ms, election timeout 3000-5000ms, heartbeat 500ms
+- Verified add_peer initializes next_index to last_log_index()+1 when called on leader
+- Verified compact_log keeps 1000 entries, uses min(last_applied, commit_index) as safe index
+
+**Key decisions:**
+- 4,213 words, below 5,000-6,000 target but consistent with Ch1 (3,522) and Ch5 (3,899). Chapter covers well-understood territory (Raft) so focuses on implementation decisions and bugs, not textbook explanations.
+- Two "What Went Wrong" sections: batch flush (Issue 11.5) and missing peer registration (Issue 11.2). Both have clear narrative arcs: symptom, root cause, fix, lesson.
+- Included the RaftOutput command pattern as a design highlight — separating state machine from I/O is a pattern readers can apply broadly.
+- Included `can_grant_vote` with full log recentness check — this is the subtlest part of the election and readers should see the real code.
+- Included `try_advance_commit_index` with the current-term-only safety property — another Raft subtlety that matters in practice.
+- Did NOT include detailed RPC wire format — already covered enough in the LogEntry and PartitionUpdate byte layouts.
+- Did NOT include the coordinator's full process_outputs implementation — the RaftOutput enum description is sufficient.
+- Forward reference to Chapter 7 (Transport) at the closing.
+- Chapter 4 already introduced the batch flush bug from the partitioning angle; this chapter tells the same story from the Raft/storage angle with more implementation detail.
+
+### Session 10 — 2026-02-25
+
+**Work done:**
+- Wrote Chapter 7 first draft (`ch07-transport.md`, 4,474 words)
+- Sections: MQTT Bridges Initial Design, Bridge Topology Options, Bridge Overhead Problem, Transport Abstraction, Direct QUIC Transport, mTLS for Cluster Security, Performance Results, What Went Wrong (fire-and-forget bug), Lessons
+- Read all primary source files before writing: `transport.rs` (ClusterTransport trait, ClusterMessage enum), `quic_transport.rs` (QuicDirectTransport, bind/connect/send, wire format, mTLS config), `mqtt_transport.rs` (MqttTransport, dual clients, topic subscriptions), `cluster_agent/transport.rs` (ClusterTransportKind wrapper), `cluster_agent/config.rs` (cluster_port_offset=100)
+- Verified all benchmark data against `COMPLETE_MATRIX_RESULTS.md` (lines 157-248)
+- Verified root cause analysis data against `COMPLETE_MATRIX_DOC.md` (lines 325-416)
+- Verified bridge loop prevention against `DISTRIBUTED_DESIGN.md` (lines 477-485)
+- Verified 35 ClusterMessage variants by counting `transport.rs:21-67`
+- Verified constants: SEND_TIMEOUT_MS=5000, INBOX_CHANNEL_CAPACITY=16384, MAX_MESSAGE_SIZE=10MB, cluster_port_offset=100
+- Verified 5 MQTT subscription topic patterns from `mqtt_transport.rs:142-221`
+
+**Key decisions:**
+- 4,474 words, below 5,000-6,000 target but consistent with Ch5 (3,899) and Ch6 (4,213). The chapter is data-driven — tables carry narrative weight that word count undercounts.
+- Included full root cause analysis with profiling data — the lock contention hypothesis being disproven is the chapter's strongest narrative moment.
+- Included message type distribution data (Write, Ack, Heartbeat counts) to make the CPU contention concrete.
+- Included PeerConnection struct and QuicDirectTransport struct — readers need to see the data structure to understand the per-peer mutex design.
+- Included a Lessons section (3 lessons: measure before optimizing, abstractions enable experiments, reuse is not always cheaper) — first chapter to have an explicit lessons section separate from "What Went Wrong".
+- Did NOT include detailed `InboundMessage::parse_from_payload` implementation — the wire format diagram suffices.
+- Did NOT include the `build_server_config` / `build_client_config_secure` implementations — the description of mTLS behavior is sufficient without showing the rustls API calls.
+- Forward reference to Chapter 8 (Cross-Node Pub/Sub) at the closing.
 
 ### Memories for Future Sessions
 

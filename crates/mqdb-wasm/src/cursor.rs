@@ -17,25 +17,23 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
 
-        let prefix = format!("data/{entity}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
-        let mut all_items: Vec<serde_json::Value> = Vec::new();
-        for (_key, value) in items {
-            let parsed: serde_json::Value = serde_json::from_slice(&value)
-                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
-                all_items.push(parsed);
-            }
-        }
+        let mut all_items = if let Some((records, remaining)) =
+            self.try_index_scans_async(&entity, &opts.filters).await?
+        {
+            Self::apply_remaining_filters(records, &remaining)
+        } else {
+            self.full_scan_async(&entity, &opts.filters).await?
+        };
 
         if !opts.sort.is_empty() {
             Self::sort_results(&mut all_items, &opts.sort);
+        }
+
+        if let Some(ref projection) = opts.projection {
+            all_items = all_items
+                .into_iter()
+                .map(|v| Self::project_fields(v, projection))
+                .collect();
         }
 
         Ok(WasmCursor {

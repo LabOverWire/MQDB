@@ -4,7 +4,7 @@
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -590,9 +590,10 @@ fn build_server_config(
     let key_file = std::fs::File::open(key_path)
         .map_err(|e| TransportError::SendFailed(format!("failed to open key file: {e}")))?;
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
-        .filter_map(Result::ok)
-        .collect();
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_reader_iter(BufReader::new(cert_file))
+            .filter_map(Result::ok)
+            .collect();
 
     if certs.is_empty() {
         return Err(TransportError::SendFailed(
@@ -600,17 +601,14 @@ fn build_server_config(
         ));
     }
 
-    let key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-        .map_err(|e| TransportError::SendFailed(format!("failed to parse key file: {e}")))?
-        .ok_or_else(|| {
-            TransportError::SendFailed("no private key found in key file".to_string())
-        })?;
+    let key = PrivateKeyDer::from_pem_reader(BufReader::new(key_file))
+        .map_err(|e| TransportError::SendFailed(format!("failed to parse key file: {e}")))?;
 
     let server_crypto = if let Some(ca_path) = ca_path {
         let ca_file = std::fs::File::open(ca_path)
             .map_err(|e| TransportError::SendFailed(format!("failed to open CA file: {e}")))?;
         let ca_certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+            CertificateDer::pem_reader_iter(BufReader::new(ca_file))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| TransportError::SendFailed(format!("failed to parse CA cert: {e}")))?;
         let mut root_store = rustls::RootCertStore::empty();
@@ -657,7 +655,7 @@ fn build_client_config_secure(
         let ca_file = std::fs::File::open(ca_path)
             .map_err(|e| TransportError::SendFailed(format!("failed to open CA file: {e}")))?;
         let certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut BufReader::new(ca_file))
+            CertificateDer::pem_reader_iter(BufReader::new(ca_file))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| TransportError::SendFailed(format!("failed to parse CA cert: {e}")))?;
         for cert in certs {
@@ -691,14 +689,11 @@ fn build_client_config_secure(
         let key_file = std::fs::File::open(key_path)
             .map_err(|e| TransportError::SendFailed(format!("failed to open client key: {e}")))?;
         let client_certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut BufReader::new(cert_file))
+            CertificateDer::pem_reader_iter(BufReader::new(cert_file))
                 .filter_map(Result::ok)
                 .collect();
-        let client_key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-            .map_err(|e| TransportError::SendFailed(format!("failed to parse client key: {e}")))?
-            .ok_or_else(|| {
-                TransportError::SendFailed("no private key found in client key file".to_string())
-            })?;
+        let client_key = PrivateKeyDer::from_pem_reader(BufReader::new(key_file))
+            .map_err(|e| TransportError::SendFailed(format!("failed to parse client key: {e}")))?;
         info!("QUIC client configured with mTLS (presenting client certificate)");
         rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -731,14 +726,11 @@ fn build_client_config_insecure(
         let key_file = std::fs::File::open(key_path)
             .map_err(|e| TransportError::SendFailed(format!("failed to open client key: {e}")))?;
         let client_certs: Vec<CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut BufReader::new(cert_file))
+            CertificateDer::pem_reader_iter(BufReader::new(cert_file))
                 .filter_map(Result::ok)
                 .collect();
-        let client_key = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-            .map_err(|e| TransportError::SendFailed(format!("failed to parse client key: {e}")))?
-            .ok_or_else(|| {
-                TransportError::SendFailed("no private key found in client key file".to_string())
-            })?;
+        let client_key = PrivateKeyDer::from_pem_reader(BufReader::new(key_file))
+            .map_err(|e| TransportError::SendFailed(format!("failed to parse client key: {e}")))?;
         rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
