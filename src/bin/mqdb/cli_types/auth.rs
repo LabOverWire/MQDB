@@ -93,6 +93,11 @@ pub(crate) struct OAuthArgs {
         help = "Trust X-Forwarded-For header for client IP (enable when behind a reverse proxy)"
     )]
     pub(crate) trust_proxy: bool,
+    #[arg(
+        long,
+        help = "Path to 32-byte identity encryption key file (auto-generated if omitted)"
+    )]
+    pub(crate) identity_key_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

@@ -188,11 +188,6 @@ pub(crate) fn build_http_config(
     auth: &AuthArgs,
     oauth: &OAuthArgs,
 ) -> Result<mqdb::http::HttpServerConfig, Box<dyn std::error::Error>> {
-    let client_secret = match oauth.oauth_client_secret.as_ref() {
-        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
-        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
-    };
-
     let jwt_key_path = auth
         .jwt_key
         .as_ref()
@@ -232,6 +227,21 @@ pub(crate) fn build_http_config(
         String::from,
     );
 
+    let mut registry = mqdb::http::ProviderRegistry::new();
+
+    let google_secret = match oauth.oauth_client_secret.as_ref() {
+        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
+        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
+    };
+
+    registry.register(mqdb::http::Provider::Google(
+        mqdb::http::GoogleProvider::new(mqdb::http::ProviderConfig {
+            client_id: client_id.clone(),
+            client_secret: google_secret,
+            redirect_uri,
+        }),
+    ));
+
     let issuer = auth
         .jwt_issuer
         .clone()
@@ -241,13 +251,11 @@ pub(crate) fn build_http_config(
         .clone()
         .or_else(|| Some(client_id.clone()));
 
+    let identity_crypto = build_identity_crypto(oauth)?;
+
     Ok(mqdb::http::HttpServerConfig {
         bind_address: http_bind,
-        oauth_config: mqdb::http::OAuthConfig {
-            client_id,
-            client_secret,
-            redirect_uri,
-        },
+        provider_registry: registry,
         jwt_config: mqdb::http::JwtSigningConfig {
             algorithm: mqdb::http::JwtSigningAlgorithm::HS256,
             key_bytes: jwt_key_bytes,
@@ -261,5 +269,37 @@ pub(crate) fn build_http_config(
         cors_origin: oauth.cors_origin.clone(),
         ticket_rate_limit: oauth.ticket_rate_limit,
         trust_proxy: oauth.trust_proxy,
+        identity_crypto,
     })
+}
+
+fn build_identity_crypto(
+    oauth: &OAuthArgs,
+) -> Result<Option<mqdb::http::IdentityCrypto>, Box<dyn std::error::Error>> {
+    if cfg!(feature = "dev-insecure") {
+        let _ = oauth;
+        tracing::info!("dev-insecure: identity encryption disabled");
+        return Ok(None);
+    }
+    if let Some(ref key_path) = oauth.identity_key_file {
+        let key_bytes = std::fs::read(key_path).map_err(|e| {
+            format!(
+                "failed to read identity key file '{}': {e}",
+                key_path.display()
+            )
+        })?;
+        let crypto = mqdb::http::IdentityCrypto::from_external_key(&key_bytes)
+            .map_err(|e| format!("invalid identity key: {e}"))?;
+        tracing::info!("identity encryption enabled (external key)");
+        Ok(Some(crypto))
+    } else {
+        let (crypto, material) = mqdb::http::IdentityCrypto::generate()
+            .map_err(|e| format!("identity key generation failed: {e}"))?;
+        tracing::info!(
+            salt_len = material.salt.len(),
+            wrapped_key_len = material.wrapped_key.len(),
+            "identity encryption enabled (auto-generated key)"
+        );
+        Ok(Some(crypto))
+    }
 }

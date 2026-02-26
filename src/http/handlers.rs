@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::cookies::{build_delete_cookie_header, build_set_cookie_header, parse_session_id};
+use super::identity_crypto::IdentityCrypto;
 use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
-use super::oauth::{self, OAuthConfig};
 use super::pkce::PkceCache;
+use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
 use base64::Engine;
@@ -37,7 +38,7 @@ fn escape_html(s: &str) -> String {
 }
 
 pub struct ServerState {
-    pub oauth_config: OAuthConfig,
+    pub provider_registry: ProviderRegistry,
     pub jwt_config: JwtSigningConfig,
     pub pkce_cache: Mutex<PkceCache>,
     pub mqtt_client: Arc<MqttClient>,
@@ -49,6 +50,7 @@ pub struct ServerState {
     pub ticket_rate_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
     pub trust_proxy: bool,
+    pub identity_crypto: Option<IdentityCrypto>,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -179,7 +181,20 @@ pub fn handle_health(state: &ServerState) -> HttpResponse {
     )
 }
 
-pub async fn handle_authorize(state: &ServerState) -> HttpResponse {
+pub async fn handle_authorize(state: &ServerState, query: &str) -> HttpResponse {
+    let params = parse_query(query);
+    let provider_name = params.get("provider").map_or("", String::as_str);
+
+    let provider = if provider_name.is_empty() {
+        state.provider_registry.default_provider()
+    } else {
+        state.provider_registry.get(provider_name)
+    };
+
+    let Some(provider) = provider else {
+        return json_response(400, &json!({"error": "unknown or unconfigured provider"}));
+    };
+
     let rng = SystemRandom::new();
     let mut verifier_bytes = [0u8; 32];
     if rng.fill(&mut verifier_bytes).is_err() {
@@ -198,32 +213,48 @@ pub async fn handle_authorize(state: &ServerState) -> HttpResponse {
 
     {
         let mut cache = state.pkce_cache.lock().await;
-        cache.insert(oauth_state.clone(), code_verifier);
+        cache.insert(
+            oauth_state.clone(),
+            code_verifier,
+            provider.name().to_string(),
+        );
     }
 
-    let url = oauth::build_authorize_url(&state.oauth_config, &oauth_state, &code_challenge);
+    let url = provider.authorize_url(&oauth_state, &code_challenge);
     redirect_response(&url)
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
-    let id_payload = match exchange_and_verify_callback(state, query).await {
-        Ok((payload, token_response)) => {
-            if let Some(refresh_token) = &token_response.refresh_token {
-                persist_oauth_tokens(state, &payload, refresh_token).await;
-            }
-            payload
+    let (identity, token_response, provider) =
+        match exchange_and_verify_callback(state, query).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        };
+
+    let link_key = format!("{}:{}", identity.provider, identity.provider_sub);
+
+    let canonical_id = match resolve_or_create_identity(state, &identity, &link_key).await {
+        Ok(id) => id,
+        Err(e) => {
+            error!(error = %e, "failed to resolve identity");
+            return json_response(500, &json!({"error": "identity resolution failed"}));
         }
-        Err(resp) => return resp,
     };
 
-    let jwt = mint_callback_jwt(state, &id_payload);
+    if let Some(refresh_token) = &token_response.refresh_token {
+        persist_oauth_tokens(state, &link_key, &canonical_id, refresh_token).await;
+    }
+
+    let jwt = mint_callback_jwt(state, &canonical_id, &identity);
 
     let Some(session_id) = state.session_store.create(
         jwt,
-        id_payload.sub.clone(),
-        id_payload.email.clone(),
-        id_payload.name.clone(),
-        id_payload.picture.clone(),
+        canonical_id,
+        provider.to_string(),
+        identity.email.clone(),
+        identity.name.clone(),
+        identity.picture.clone(),
     ) else {
         return json_response(500, &json!({"error": "failed to create session"}));
     };
@@ -232,10 +263,11 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
 
     let redirect_uri = state.frontend_redirect_uri.as_deref().unwrap_or("/");
     let user_json = serde_json::to_string(&json!({
-        "email": id_payload.email,
-        "name": id_payload.name,
-        "picture": id_payload.picture,
-        "google_sub": id_payload.sub,
+        "email": identity.email,
+        "name": identity.name,
+        "picture": identity.picture,
+        "provider": identity.provider,
+        "provider_sub": identity.provider_sub,
     }))
     .unwrap_or_else(|_| "{}".into());
 
@@ -248,7 +280,14 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
 async fn exchange_and_verify_callback(
     state: &ServerState,
     query: &str,
-) -> Result<(oauth::IdTokenPayload, oauth::TokenResponse), HttpResponse> {
+) -> Result<
+    (
+        ProviderIdentity,
+        super::providers::ProviderTokenResponse,
+        &'static str,
+    ),
+    HttpResponse,
+> {
     let params = parse_query(query);
 
     let Some(code) = params.get("code") else {
@@ -272,9 +311,9 @@ async fn exchange_and_verify_callback(
         ));
     };
 
-    let code_verifier = {
+    let (code_verifier, provider_name) = {
         let mut cache = state.pkce_cache.lock().await;
-        cache.take(oauth_state)
+        cache.take(oauth_state).unzip()
     };
 
     let Some(code_verifier) = code_verifier else {
@@ -284,8 +323,15 @@ async fn exchange_and_verify_callback(
         ));
     };
 
-    let token_response = match oauth::exchange_code(code, &code_verifier, &state.oauth_config).await
-    {
+    let provider_name_str = provider_name.unwrap_or_default();
+    let Some(provider) = state.provider_registry.get(&provider_name_str) else {
+        return Err(json_response(
+            400,
+            &json!({"error": "provider not found for this OAuth flow"}),
+        ));
+    };
+
+    let token_response = match provider.exchange_code(code, &code_verifier).await {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "OAuth token exchange failed");
@@ -303,8 +349,8 @@ async fn exchange_and_verify_callback(
         ));
     };
 
-    let id_payload = match oauth::verify_id_token(id_token, &state.oauth_config.client_id).await {
-        Ok(payload) => payload,
+    let identity = match provider.verify_id_token(id_token).await {
+        Ok(id) => id,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
             return Err(json_response(
@@ -314,8 +360,8 @@ async fn exchange_and_verify_callback(
         }
     };
 
-    if !id_payload
-        .sub
+    if !identity
+        .provider_sub
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
     {
@@ -325,22 +371,169 @@ async fn exchange_and_verify_callback(
         ));
     }
 
-    Ok((id_payload, token_response))
+    Ok((identity, token_response, provider.name()))
+}
+
+async fn resolve_or_create_identity(
+    state: &ServerState,
+    identity: &ProviderIdentity,
+    link_key: &str,
+) -> Result<String, String> {
+    if let Some(existing_link) = read_entity(&state.mqtt_client, "_identity_links", link_key).await
+        && let Some(cid) = existing_link.get("canonical_id").and_then(|v| v.as_str())
+    {
+        update_identity_link(state, link_key, identity).await;
+        return Ok(cid.to_string());
+    }
+
+    if identity.email_verified
+        && let Some(ref email) = identity.email
+        && let Some(existing_cid) = find_canonical_id_by_email(state, email).await
+    {
+        create_identity_link(state, link_key, &existing_cid, identity).await;
+        return Ok(existing_cid);
+    }
+
+    let canonical_id = uuid_v4();
+    create_identity(state, &canonical_id, identity).await;
+    create_identity_link(state, link_key, &canonical_id, identity).await;
+    Ok(canonical_id)
+}
+
+async fn create_identity(state: &ServerState, canonical_id: &str, identity: &ProviderIdentity) {
+    let mut data = json!({
+        "id": canonical_id,
+        "primary_email": identity.email,
+        "display_name": identity.name,
+        "created_at": chrono_now_iso(),
+        "vault_enabled": false,
+    });
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.encrypt_json_fields("_identities", &mut data, &["primary_email", "display_name"]);
+    }
+    publish_entity(&state.mqtt_client, "_identities", &data).await;
+}
+
+async fn create_identity_link(
+    state: &ServerState,
+    link_key: &str,
+    canonical_id: &str,
+    identity: &ProviderIdentity,
+) {
+    let mut data = json!({
+        "id": link_key,
+        "canonical_id": canonical_id,
+        "provider": identity.provider,
+        "provider_sub": identity.provider_sub,
+        "email": identity.email,
+        "name": identity.name,
+        "picture": identity.picture,
+    });
+    if let Some(ref crypto) = state.identity_crypto {
+        if let Some(ref email) = identity.email {
+            data["email_hash"] =
+                serde_json::Value::String(crypto.blind_index("_identity_links", email));
+        }
+        crypto.encrypt_json_fields(
+            "_identity_links",
+            &mut data,
+            &["provider_sub", "email", "name", "picture"],
+        );
+    }
+    publish_entity(&state.mqtt_client, "_identity_links", &data).await;
+}
+
+async fn update_identity_link(state: &ServerState, link_key: &str, identity: &ProviderIdentity) {
+    let mut data = json!({
+        "email": identity.email,
+        "name": identity.name,
+        "picture": identity.picture,
+    });
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.encrypt_json_fields("_identity_links", &mut data, &["email", "name", "picture"]);
+    }
+    let topic = format!("$DB/_identity_links/{link_key}/update");
+    let payload = serde_json::to_vec(&data).unwrap_or_default();
+    if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
+        warn!(error = %e, "failed to update identity link");
+    }
+}
+
+async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<String> {
+    let filter = if let Some(ref crypto) = state.identity_crypto {
+        let hash = crypto.blind_index("_identity_links", email);
+        format!("email_hash={hash}")
+    } else {
+        format!("email={email}")
+    };
+    let client = &state.mqtt_client;
+    let topic = "$DB/_identity_links/list".to_string();
+    let response_topic = format!("$DB/_identity_links/_resp/{}", uuid_v4());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        user_properties: vec![("filter".to_string(), filter)],
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if client
+        .publish_with_options(&topic, vec![], options)
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+        .await
+        .ok()?
+        .ok()?;
+
+    let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
+    let items = response.get("data")?.as_array()?;
+    items
+        .first()?
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 async fn persist_oauth_tokens(
     state: &ServerState,
-    id_payload: &oauth::IdTokenPayload,
+    link_key: &str,
+    canonical_id: &str,
     refresh_token: &str,
 ) {
-    let token_data = json!({
-        "id": id_payload.sub,
+    let mut token_data = json!({
+        "id": link_key,
+        "canonical_id": canonical_id,
         "refresh_token": refresh_token,
-        "email": id_payload.email,
-        "name": id_payload.name,
-        "picture": id_payload.picture,
         "updated_at": chrono_now_iso()
     });
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.encrypt_json_fields("_oauth_tokens", &mut token_data, &["refresh_token"]);
+    }
     let topic = "$DB/_oauth_tokens/create".to_string();
     let payload = serde_json::to_vec(&token_data).unwrap_or_default();
     if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
@@ -348,22 +541,27 @@ async fn persist_oauth_tokens(
     }
 }
 
-fn mint_callback_jwt(state: &ServerState, id_payload: &oauth::IdTokenPayload) -> String {
+fn mint_callback_jwt(
+    state: &ServerState,
+    canonical_id: &str,
+    identity: &ProviderIdentity,
+) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
 
     let claims = json!({
-        "sub": id_payload.email.as_deref().unwrap_or(&id_payload.sub),
+        "sub": canonical_id,
         "iss": state.jwt_config.issuer,
         "aud": state.jwt_config.audience,
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
         "jti": JtiRevocationStore::generate_jti(),
-        "google_sub": id_payload.sub,
-        "email": id_payload.email,
-        "name": id_payload.name,
-        "picture": id_payload.picture
+        "email": identity.email,
+        "name": identity.name,
+        "picture": identity.picture,
+        "provider": identity.provider,
+        "provider_sub": identity.provider_sub,
     });
 
     sign_jwt(&claims, &state.jwt_config)
@@ -372,10 +570,11 @@ fn mint_callback_jwt(state: &ServerState, id_payload: &oauth::IdTokenPayload) ->
 pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let (google_sub, stored_data) = match validate_refresh_request(body, state).await {
-        Ok(pair) => pair,
-        Err(resp) => return resp,
-    };
+    let (canonical_id, provider_name, link_key, stored_data) =
+        match validate_refresh_request(body, state).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        };
 
     let Some(stored_refresh_token) = stored_data
         .get("refresh_token")
@@ -389,24 +588,31 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
         );
     };
 
-    let token_response =
-        match oauth::refresh_token(&stored_refresh_token, &state.oauth_config).await {
-            Ok(r) => r,
-            Err(e) => {
-                error!(error = %e, "Google token refresh failed");
-                return json_response_with_credentials(
-                    502,
-                    &json!({"error": "token refresh failed"}),
-                    cors,
-                );
-            }
-        };
+    let Some(provider) = state.provider_registry.get(&provider_name) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "provider not configured"}),
+            cors,
+        );
+    };
+
+    let token_response = match provider.refresh_token(&stored_refresh_token).await {
+        Ok(r) => r,
+        Err(e) => {
+            error!(error = %e, "token refresh failed");
+            return json_response_with_credentials(
+                502,
+                &json!({"error": "token refresh failed"}),
+                cors,
+            );
+        }
+    };
 
     if let Some(new_refresh) = &token_response.refresh_token {
-        persist_new_refresh_token(state, &google_sub, new_refresh).await;
+        persist_new_refresh_token(state, &link_key, new_refresh).await;
     }
 
-    let new_jwt = mint_refresh_jwt(state, &google_sub, &stored_data);
+    let new_jwt = mint_refresh_jwt(state, &canonical_id, &provider_name, &stored_data);
 
     json_response_with_credentials(
         200,
@@ -421,7 +627,7 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
 async fn validate_refresh_request(
     body: &[u8],
     state: &ServerState,
-) -> Result<(String, serde_json::Value), HttpResponse> {
+) -> Result<(String, String, String, serde_json::Value), HttpResponse> {
     let cors = state.cors_origin.as_deref();
 
     let body_value: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
@@ -449,44 +655,72 @@ async fn validate_refresh_request(
         ));
     }
 
-    let google_sub = payload
-        .get("google_sub")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            json_response_with_credentials(
-                400,
-                &json!({"error": "token missing google_sub claim"}),
-                cors,
-            )
-        })?
-        .to_string();
+    let (canonical_id, provider_name, link_key) =
+        extract_identity_from_jwt(&payload, cors).map_err(|b| *b)?;
 
-    if !google_sub
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
-    {
-        return Err(json_response_with_credentials(
-            400,
-            &json!({"error": "invalid google_sub format"}),
-            cors,
-        ));
-    }
-
-    let stored_data = read_oauth_token(&state.mqtt_client, &google_sub)
+    let mut stored_data = read_entity(&state.mqtt_client, "_oauth_tokens", &link_key)
         .await
         .ok_or_else(|| {
             json_response_with_credentials(404, &json!({"error": "user not found"}), cors)
         })?;
 
-    Ok((google_sub, stored_data))
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.decrypt_json_fields("_oauth_tokens", &mut stored_data, &["refresh_token"]);
+    }
+
+    Ok((canonical_id, provider_name, link_key, stored_data))
 }
 
-async fn persist_new_refresh_token(state: &ServerState, google_sub: &str, new_refresh: &str) {
-    let update_data = json!({
+fn extract_identity_from_jwt(
+    payload: &serde_json::Value,
+    cors: Option<&str>,
+) -> Result<(String, String, String), Box<HttpResponse>> {
+    let canonical_id = payload
+        .get("sub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            Box::new(json_response_with_credentials(
+                400,
+                &json!({"error": "token missing sub claim"}),
+                cors,
+            ))
+        })?
+        .to_string();
+    let provider = payload
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            Box::new(json_response_with_credentials(
+                400,
+                &json!({"error": "token missing provider claim"}),
+                cors,
+            ))
+        })?
+        .to_string();
+    let provider_sub = payload
+        .get("provider_sub")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            Box::new(json_response_with_credentials(
+                400,
+                &json!({"error": "token missing provider_sub claim"}),
+                cors,
+            ))
+        })?
+        .to_string();
+    let link_key = format!("{provider}:{provider_sub}");
+    Ok((canonical_id, provider, link_key))
+}
+
+async fn persist_new_refresh_token(state: &ServerState, link_key: &str, new_refresh: &str) {
+    let mut update_data = json!({
         "refresh_token": new_refresh,
         "updated_at": chrono_now_iso()
     });
-    let topic = format!("$DB/_oauth_tokens/{google_sub}/update");
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.encrypt_json_fields("_oauth_tokens", &mut update_data, &["refresh_token"]);
+    }
+    let topic = format!("$DB/_oauth_tokens/{link_key}/update");
     let update_payload = serde_json::to_vec(&update_data).unwrap_or_default();
     if let Err(e) = state.mqtt_client.publish(&topic, update_payload).await {
         warn!(error = %e, "failed to update refresh token");
@@ -495,28 +729,33 @@ async fn persist_new_refresh_token(state: &ServerState, google_sub: &str, new_re
 
 fn mint_refresh_jwt(
     state: &ServerState,
-    google_sub: &str,
+    canonical_id: &str,
+    provider: &str,
     stored_data: &serde_json::Value,
 ) -> String {
-    let email = stored_data
-        .get("email")
-        .and_then(|v| v.as_str())
-        .unwrap_or(google_sub);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
 
+    let provider_sub = stored_data
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|id| id.strip_prefix(&format!("{provider}:")))
+        .or_else(|| stored_data.get("provider_sub").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
     let new_claims = json!({
-        "sub": email,
+        "sub": canonical_id,
         "iss": state.jwt_config.issuer,
         "aud": state.jwt_config.audience,
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
         "jti": JtiRevocationStore::generate_jti(),
-        "google_sub": google_sub,
         "email": stored_data.get("email"),
         "name": stored_data.get("name"),
-        "picture": stored_data.get("picture")
+        "picture": stored_data.get("picture"),
+        "provider": provider,
+        "provider_sub": provider_sub,
     });
 
     sign_jwt(&new_claims, &state.jwt_config)
@@ -582,16 +821,16 @@ pub fn handle_ticket(state: &ServerState, headers: &HeaderMap, client_ip: &str) 
         .map_or(0, |d| d.as_secs());
 
     let ticket_claims = json!({
-        "sub": session.email.as_deref().unwrap_or(&session.google_sub),
+        "sub": session.canonical_id,
         "iss": state.jwt_config.issuer,
         "aud": state.jwt_config.audience,
         "exp": now + state.ticket_expiry_secs,
         "iat": now,
         "jti": JtiRevocationStore::generate_jti(),
-        "google_sub": session.google_sub,
         "email": session.email,
         "name": session.name,
         "picture": session.picture,
+        "provider": session.provider,
         "ticket": true
     });
 
@@ -645,10 +884,11 @@ pub fn handle_session_status(state: &ServerState, headers: &HeaderMap) -> HttpRe
             &json!({
                 "authenticated": true,
                 "user": {
+                    "canonical_id": session.canonical_id,
                     "email": session.email,
                     "name": session.name,
                     "picture": session.picture,
-                    "google_sub": session.google_sub
+                    "provider": session.provider,
                 }
             }),
             cors,
@@ -657,12 +897,76 @@ pub fn handle_session_status(state: &ServerState, headers: &HeaderMap) -> HttpRe
     }
 }
 
-async fn read_oauth_token(client: &MqttClient, google_sub: &str) -> Option<serde_json::Value> {
-    let topic = format!("$DB/_oauth_tokens/{google_sub}/read");
-    let response_topic = format!("$DB/_oauth_tokens/_resp/{}", uuid::Uuid::new_v4());
+pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+    let cookie_header = headers
+        .get(http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let Some(session_id) = parse_session_id(cookie_header) else {
+        return json_response_with_credentials(401, &json!({"error": "no session"}), cors);
+    };
+
+    let Some(session) = state.session_store.get(session_id) else {
+        return json_response_with_credentials(401, &json!({"error": "session expired"}), cors);
+    };
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(provider) = body_value.get("provider").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing provider field"}),
+            cors,
+        );
+    };
+    let Some(provider_sub) = body_value.get("provider_sub").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing provider_sub field"}),
+            cors,
+        );
+    };
+
+    if provider == session.provider {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "cannot unlink current login provider — must keep at least one"}),
+            cors,
+        );
+    }
+
+    let link_key = format!("{provider}:{provider_sub}");
+    let topic = format!("$DB/_identity_links/{link_key}/delete");
+    if let Err(e) = state.mqtt_client.publish(&topic, vec![]).await {
+        warn!(error = %e, "failed to delete identity link");
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to unlink provider"}),
+            cors,
+        );
+    }
+
+    let token_topic = format!("$DB/_oauth_tokens/{link_key}/delete");
+    if let Err(e) = state.mqtt_client.publish(&token_topic, vec![]).await {
+        warn!(error = %e, "failed to delete oauth token for unlinked provider");
+    }
+
+    json_response_with_credentials(200, &json!({"status": "unlinked"}), cors)
+}
+
+async fn read_entity(client: &MqttClient, entity: &str, id: &str) -> Option<serde_json::Value> {
+    let topic = format!("$DB/{entity}/{id}/read");
+    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
     if client
         .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
@@ -702,6 +1006,14 @@ async fn read_oauth_token(client: &MqttClient, google_sub: &str) -> Option<serde
 
     let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
     response.get("data").cloned()
+}
+
+async fn publish_entity(client: &MqttClient, entity: &str, data: &serde_json::Value) {
+    let topic = format!("$DB/{entity}/create");
+    let payload = serde_json::to_vec(data).unwrap_or_default();
+    if let Err(e) = client.publish(&topic, payload).await {
+        warn!(error = %e, entity = entity, "failed to publish entity");
+    }
 }
 
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
@@ -749,6 +1061,38 @@ fn chrono_now_iso() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     format!("{now}")
+}
+
+fn uuid_v4() -> String {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 16];
+    if rng.fill(&mut bytes).is_err() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        bytes = ts.to_le_bytes();
+    }
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }
 
 mod hex {

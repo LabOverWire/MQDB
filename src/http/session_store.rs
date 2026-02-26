@@ -11,7 +11,8 @@ const SESSION_TTL_SECS: u64 = 86400;
 
 pub struct Session {
     pub jwt: String,
-    pub google_sub: String,
+    pub canonical_id: String,
+    pub provider: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
@@ -36,10 +37,12 @@ impl SessionStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         jwt: String,
-        google_sub: String,
+        canonical_id: String,
+        provider: String,
         email: Option<String>,
         name: Option<String>,
         picture: Option<String>,
@@ -53,7 +56,8 @@ impl SessionStore {
         let session_id = hex_encode(&bytes);
         let session = Session {
             jwt,
-            google_sub,
+            canonical_id,
+            provider,
             email,
             name,
             picture,
@@ -77,7 +81,8 @@ impl SessionStore {
 
         Some(SessionRef {
             jwt: session.jwt.clone(),
-            google_sub: session.google_sub.clone(),
+            canonical_id: session.canonical_id.clone(),
+            provider: session.provider.clone(),
             email: session.email.clone(),
             name: session.name.clone(),
             picture: session.picture.clone(),
@@ -100,7 +105,8 @@ impl SessionStore {
 
 pub struct SessionRef {
     pub jwt: String,
-    pub google_sub: String,
+    pub canonical_id: String,
+    pub provider: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
@@ -197,7 +203,8 @@ mod tests {
         let session_id = store
             .create(
                 "jwt123".into(),
-                "google123".into(),
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+                "google".into(),
                 Some("user@example.com".into()),
                 Some("Test User".into()),
                 None,
@@ -208,7 +215,8 @@ mod tests {
 
         let session = store.get(&session_id).expect("get should succeed");
         assert_eq!(session.jwt, "jwt123");
-        assert_eq!(session.google_sub, "google123");
+        assert_eq!(session.canonical_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(session.provider, "google");
         assert_eq!(session.email.as_deref(), Some("user@example.com"));
     }
 
@@ -216,7 +224,14 @@ mod tests {
     fn test_destroy_session() {
         let store = SessionStore::new();
         let session_id = store
-            .create("jwt".into(), "sub".into(), None, None, None)
+            .create(
+                "jwt".into(),
+                "canonical-1".into(),
+                "google".into(),
+                None,
+                None,
+                None,
+            )
             .expect("create should succeed");
 
         assert!(store.get(&session_id).is_some());
