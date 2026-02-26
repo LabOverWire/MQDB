@@ -170,6 +170,11 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn ownership_config_arc(&self) -> Arc<crate::types::OwnershipConfig> {
+        Arc::clone(&self.ownership_config)
+    }
+
+    #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(self, config: crate::http::HttpServerConfig) -> Self {
         *self.http_config.lock().expect("http_config lock") = Some(config);

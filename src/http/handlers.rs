@@ -8,8 +8,10 @@ use super::pkce::PkceCache;
 use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
+use super::vault_crypto::VaultCrypto;
+use crate::types::OwnershipConfig;
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use http::Response;
 use http::header::HeaderMap;
 use http_body_util::Full;
@@ -51,6 +53,7 @@ pub struct ServerState {
     pub jti_revocation: JtiRevocationStore,
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
+    pub ownership_config: Arc<OwnershipConfig>,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -1093,6 +1096,579 @@ fn uuid_v4() -> String {
         bytes[14],
         bytes[15]
     )
+}
+
+async fn list_entities(
+    client: &MqttClient,
+    entity: &str,
+    filter: &str,
+) -> Option<Vec<serde_json::Value>> {
+    let topic = format!("$DB/{entity}/list");
+    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        user_properties: vec![("filter".to_string(), filter.to_string())],
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if client
+        .publish_with_options(&topic, vec![], options)
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+        .await
+        .ok()?
+        .ok()?;
+
+    let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
+    response.get("data").and_then(|v| v.as_array()).cloned()
+}
+
+async fn update_entity(
+    client: &MqttClient,
+    entity: &str,
+    id: &str,
+    data: &serde_json::Value,
+) -> bool {
+    let topic = format!("$DB/{entity}/{id}/update");
+    let payload = serde_json::to_vec(data).unwrap_or_default();
+    client.publish(&topic, payload).await.is_ok()
+}
+
+fn require_session<'a>(
+    state: &'a ServerState,
+    headers: &'a HeaderMap,
+) -> Result<(&'a str, super::session_store::SessionRef), Box<HttpResponse>> {
+    let cors = state.cors_origin.as_deref();
+    let cookie_header = headers
+        .get(http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let session_id = parse_session_id(cookie_header).ok_or_else(|| {
+        Box::new(json_response_with_credentials(
+            401,
+            &json!({"error": "no session"}),
+            cors,
+        ))
+    })?;
+
+    let session = state.session_store.get(session_id).ok_or_else(|| {
+        Box::new(json_response_with_credentials(
+            401,
+            &json!({"error": "session expired"}),
+            cors,
+        ))
+    })?;
+
+    Ok((session_id, session))
+}
+
+fn extract_session_id(headers: &HeaderMap) -> Option<&str> {
+    let cookie_header = headers
+        .get(http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    parse_session_id(cookie_header)
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_vault_enable(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let (session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid.to_string(), s),
+        Err(resp) => return *resp,
+    };
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(passphrase) = body_value.get("passphrase").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing passphrase field"}),
+            cors,
+        );
+    };
+
+    let canonical_id = &session.canonical_id;
+
+    let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
+        return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
+    };
+
+    if identity
+        .get("vault_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json_response_with_credentials(
+            409,
+            &json!({"error": "vault already enabled"}),
+            cors,
+        );
+    }
+
+    let salt = VaultCrypto::generate_salt();
+    let crypto = VaultCrypto::derive(passphrase, &salt);
+
+    let check_token = match crypto.create_check_token() {
+        Ok(t) => t,
+        Err(e) => {
+            error!(error = %e, "vault check token creation failed");
+            return json_response_with_credentials(
+                500,
+                &json!({"error": "encryption failed"}),
+                cors,
+            );
+        }
+    };
+
+    let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
+
+    let identity_update = json!({
+        "vault_enabled": true,
+        "vault_salt": BASE64.encode(salt),
+        "vault_check": check_token,
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &identity_update,
+    )
+    .await;
+
+    let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
+    state.session_store.set_vault_key(&session_id, key_bytes);
+
+    json_response_with_credentials(
+        200,
+        &json!({"status": "enabled", "records_encrypted": count}),
+        cors,
+    )
+}
+
+pub async fn handle_vault_unlock(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let (session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid.to_string(), s),
+        Err(resp) => return *resp,
+    };
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(passphrase) = body_value.get("passphrase").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing passphrase field"}),
+            cors,
+        );
+    };
+
+    let canonical_id = &session.canonical_id;
+
+    let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
+        return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
+    };
+
+    if !identity
+        .get("vault_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json_response_with_credentials(400, &json!({"error": "vault not enabled"}), cors);
+    }
+
+    let Some(salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "vault salt missing from identity"}),
+            cors,
+        );
+    };
+    let Ok(salt) = BASE64.decode(salt_b64) else {
+        return json_response_with_credentials(500, &json!({"error": "invalid vault salt"}), cors);
+    };
+
+    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "vault check token missing"}),
+            cors,
+        );
+    };
+
+    let crypto = VaultCrypto::derive(passphrase, &salt);
+    if !crypto.verify_check_token(check_token) {
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect passphrase"}),
+            cors,
+        );
+    }
+
+    let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
+    state.session_store.set_vault_key(&session_id, key_bytes);
+
+    json_response_with_credentials(200, &json!({"status": "unlocked"}), cors)
+}
+
+pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let Some(session_id) = extract_session_id(headers) else {
+        return json_response_with_credentials(401, &json!({"error": "no session"}), cors);
+    };
+
+    state.session_store.clear_vault_key(session_id);
+
+    json_response_with_credentials(200, &json!({"status": "locked"}), cors)
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_vault_disable(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let (session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid.to_string(), s),
+        Err(resp) => return *resp,
+    };
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(passphrase) = body_value.get("passphrase").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing passphrase field"}),
+            cors,
+        );
+    };
+
+    let canonical_id = &session.canonical_id;
+
+    let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
+        return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
+    };
+
+    if !identity
+        .get("vault_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json_response_with_credentials(400, &json!({"error": "vault not enabled"}), cors);
+    }
+
+    let Some(salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(500, &json!({"error": "vault salt missing"}), cors);
+    };
+    let Ok(salt) = BASE64.decode(salt_b64) else {
+        return json_response_with_credentials(500, &json!({"error": "invalid vault salt"}), cors);
+    };
+
+    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "vault check token missing"}),
+            cors,
+        );
+    };
+
+    let crypto = VaultCrypto::derive(passphrase, &salt);
+    if !crypto.verify_check_token(check_token) {
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect passphrase"}),
+            cors,
+        );
+    }
+
+    let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
+
+    let identity_update = json!({
+        "vault_enabled": false,
+        "vault_salt": null,
+        "vault_check": null,
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &identity_update,
+    )
+    .await;
+
+    state.session_store.clear_vault_key(&session_id);
+
+    json_response_with_credentials(
+        200,
+        &json!({"status": "disabled", "records_decrypted": count}),
+        cors,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_vault_change(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let (session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid.to_string(), s),
+        Err(resp) => return *resp,
+    };
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(old_passphrase) = body_value.get("old_passphrase").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing old_passphrase field"}),
+            cors,
+        );
+    };
+    let Some(new_passphrase) = body_value.get("new_passphrase").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing new_passphrase field"}),
+            cors,
+        );
+    };
+
+    let canonical_id = &session.canonical_id;
+
+    let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
+        return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
+    };
+
+    if !identity
+        .get("vault_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return json_response_with_credentials(400, &json!({"error": "vault not enabled"}), cors);
+    }
+
+    let Some(old_salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(500, &json!({"error": "vault salt missing"}), cors);
+    };
+    let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
+        return json_response_with_credentials(500, &json!({"error": "invalid vault salt"}), cors);
+    };
+
+    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "vault check token missing"}),
+            cors,
+        );
+    };
+
+    let old_crypto = VaultCrypto::derive(old_passphrase, &old_salt);
+    if !old_crypto.verify_check_token(check_token) {
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect old passphrase"}),
+            cors,
+        );
+    }
+
+    let new_salt = VaultCrypto::generate_salt();
+    let new_crypto = VaultCrypto::derive(new_passphrase, &new_salt);
+
+    let new_check = match new_crypto.create_check_token() {
+        Ok(t) => t,
+        Err(e) => {
+            error!(error = %e, "new vault check token creation failed");
+            return json_response_with_credentials(
+                500,
+                &json!({"error": "encryption failed"}),
+                cors,
+            );
+        }
+    };
+
+    let count = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
+
+    let identity_update = json!({
+        "vault_salt": BASE64.encode(new_salt),
+        "vault_check": new_check,
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &identity_update,
+    )
+    .await;
+
+    let new_key_bytes = VaultCrypto::raw_key_bytes(new_passphrase, &new_salt);
+    state
+        .session_store
+        .set_vault_key(&session_id, new_key_bytes);
+
+    json_response_with_credentials(
+        200,
+        &json!({"status": "changed", "records_re_encrypted": count}),
+        cors,
+    )
+}
+
+pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let (_session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid.to_string(), s),
+        Err(resp) => return *resp,
+    };
+
+    let canonical_id = &session.canonical_id;
+    let vault_enabled = if let Some(identity) =
+        read_entity(&state.mqtt_client, "_identities", canonical_id).await
+    {
+        identity
+            .get("vault_enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let unlocked = session.vault_key.is_some();
+
+    json_response_with_credentials(
+        200,
+        &json!({"vault_enabled": vault_enabled, "unlocked": unlocked}),
+        cors,
+    )
+}
+
+enum VaultMode {
+    Encrypt,
+    Decrypt,
+}
+
+async fn batch_vault_operation(
+    state: &ServerState,
+    canonical_id: &str,
+    crypto: &VaultCrypto,
+    mode: VaultMode,
+) -> usize {
+    let mut total = 0;
+    for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
+        let filter = format!("{owner_field}={canonical_id}");
+        let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
+            continue;
+        };
+        for record in records {
+            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut data = record.clone();
+            let skip: Vec<&str> = vec!["id", owner_field.as_str()];
+            match mode {
+                VaultMode::Encrypt => crypto.encrypt_record(entity, id, &mut data, &skip),
+                VaultMode::Decrypt => crypto.decrypt_record(entity, id, &mut data, &skip),
+            }
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("id");
+            }
+            update_entity(&state.mqtt_client, entity, id, &data).await;
+            total += 1;
+        }
+    }
+    total
+}
+
+async fn batch_vault_re_encrypt(
+    state: &ServerState,
+    canonical_id: &str,
+    old_crypto: &VaultCrypto,
+    new_crypto: &VaultCrypto,
+) -> usize {
+    let mut total = 0;
+    for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
+        let filter = format!("{owner_field}={canonical_id}");
+        let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
+            continue;
+        };
+        for record in records {
+            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut data = record.clone();
+            let skip: Vec<&str> = vec!["id", owner_field.as_str()];
+            old_crypto.decrypt_record(entity, id, &mut data, &skip);
+            new_crypto.encrypt_record(entity, id, &mut data, &skip);
+            if let Some(obj) = data.as_object_mut() {
+                obj.remove("id");
+            }
+            update_entity(&state.mqtt_client, entity, id, &data).await;
+            total += 1;
+        }
+    }
+    total
 }
 
 mod hex {

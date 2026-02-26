@@ -8,6 +8,7 @@ use super::pkce::PkceCache;
 use super::providers::ProviderRegistry;
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
+use crate::types::OwnershipConfig;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -32,6 +33,7 @@ pub struct HttpServerConfig {
     pub ticket_rate_limit: u32,
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
+    pub ownership_config: Arc<OwnershipConfig>,
 }
 
 pub struct HttpServer {
@@ -74,6 +76,7 @@ impl HttpServer {
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
+            ownership_config: self.config.ownership_config,
         });
 
         loop {
@@ -141,7 +144,9 @@ async fn handle_request(
     let response = match (&method, path.as_str()) {
         (
             &Method::OPTIONS,
-            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/auth/unlink" | "/oauth/refresh",
+            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/auth/unlink" | "/oauth/refresh"
+            | "/vault/enable" | "/vault/unlock" | "/vault/lock" | "/vault/disable"
+            | "/vault/change" | "/vault/status",
         ) => handlers::handle_options_with_credentials(state.cors_origin.as_deref()),
         (&Method::OPTIONS, _) => handlers::handle_options(),
         (&Method::GET, "/health") => handlers::handle_health(&state),
@@ -169,6 +174,40 @@ async fn handle_request(
                 .unwrap_or_default();
             handlers::handle_unlink(&state, &headers, &body).await
         }
+        (&Method::POST, "/vault/enable") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_enable(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/unlock") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_unlock(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/lock") => handlers::handle_vault_lock(&state, &headers),
+        (&Method::POST, "/vault/disable") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_disable(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/change") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_change(&state, &headers, &body).await
+        }
+        (&Method::GET, "/vault/status") => handlers::handle_vault_status(&state, &headers).await,
         _ => {
             let body = serde_json::json!({"error": "not found"});
             let body_bytes = serde_json::to_vec(&body).unwrap_or_default();

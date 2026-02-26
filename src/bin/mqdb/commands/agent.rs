@@ -70,7 +70,9 @@ pub(crate) async fn cmd_agent_start(
     }
 
     if let Some(http_bind) = args.oauth.http_bind {
-        let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
+        let ownership_for_http = agent.ownership_config_arc();
+        let http_config =
+            build_http_config(http_bind, &args.auth, &args.oauth, ownership_for_http)?;
         if !http_config.cookie_secure {
             tracing::warn!(
                 "session cookies will be sent without Secure flag — use --cookie-secure in production"
@@ -187,6 +189,7 @@ pub(crate) fn build_http_config(
     http_bind: SocketAddr,
     auth: &AuthArgs,
     oauth: &OAuthArgs,
+    ownership_config: std::sync::Arc<mqdb::OwnershipConfig>,
 ) -> Result<mqdb::http::HttpServerConfig, Box<dyn std::error::Error>> {
     let jwt_key_path = auth
         .jwt_key
@@ -270,6 +273,7 @@ pub(crate) fn build_http_config(
         ticket_rate_limit: oauth.ticket_rate_limit,
         trust_proxy: oauth.trust_proxy,
         identity_crypto,
+        ownership_config,
     })
 }
 

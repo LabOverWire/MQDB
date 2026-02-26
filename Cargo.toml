@@ -41,6 +41,7 @@ base64 = { version = "0.22", optional = true }
 lru = { version = "0.16", optional = true }
 jsonwebtoken = { version = "10.3", optional = true }
 rustls-pki-types = { version = "1.14.0", features = ["std"], optional = true }
+zeroize = "1.8.2"
 
 [features]
 default = ["native"]

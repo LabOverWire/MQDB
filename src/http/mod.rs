@@ -10,6 +10,7 @@ pub mod providers;
 mod rate_limiter;
 mod server;
 mod session_store;
+pub mod vault_crypto;
 
 pub use identity_crypto::IdentityCrypto;
 pub use jwt_signer::{JwtSigningAlgorithm, JwtSigningConfig};
@@ -17,3 +18,4 @@ pub use providers::google::GoogleProvider;
 pub use providers::{Provider, ProviderConfig, ProviderRegistry};
 pub use server::{HttpServer, HttpServerConfig};
 pub use session_store::SessionStore;
+pub use vault_crypto::VaultCrypto;
