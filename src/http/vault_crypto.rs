@@ -41,6 +41,16 @@ impl VaultCrypto {
 
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
+    pub fn from_key_bytes(key_bytes: &[u8]) -> Self {
+        let unbound =
+            UnboundKey::new(&AES_256_GCM, key_bytes).expect("AES-256-GCM accepts 32-byte keys");
+        Self {
+            key: LessSafeKey::new(unbound),
+        }
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn generate_salt() -> [u8; SALT_LEN] {
         let rng = SystemRandom::new();
         let mut salt = [0u8; SALT_LEN];
@@ -253,6 +263,29 @@ mod tests {
         wrong.decrypt_record("entity", "rec-1", &mut data, &["id"]);
 
         assert_eq!(data["secret"].as_str().unwrap(), encrypted_secret);
+    }
+
+    #[test]
+    fn from_key_bytes_roundtrip() {
+        let salt = VaultCrypto::generate_salt();
+        let key_bytes = VaultCrypto::raw_key_bytes("test-pass", &salt);
+        let crypto = VaultCrypto::from_key_bytes(&key_bytes);
+        let encrypted = crypto
+            .encrypt_value("entity", "id1", b"plaintext data")
+            .unwrap();
+        let decrypted = crypto.decrypt_value("entity", "id1", &encrypted).unwrap();
+        assert_eq!(decrypted, b"plaintext data");
+    }
+
+    #[test]
+    fn from_key_bytes_matches_derive() {
+        let salt = VaultCrypto::generate_salt();
+        let derived = VaultCrypto::derive("pass", &salt);
+        let token = derived.create_check_token().unwrap();
+
+        let key_bytes = VaultCrypto::raw_key_bytes("pass", &salt);
+        let from_bytes = VaultCrypto::from_key_bytes(&key_bytes);
+        assert!(from_bytes.verify_check_token(&token));
     }
 
     #[test]

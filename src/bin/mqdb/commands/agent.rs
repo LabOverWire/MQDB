@@ -274,6 +274,7 @@ pub(crate) fn build_http_config(
         trust_proxy: oauth.trust_proxy,
         identity_crypto,
         ownership_config,
+        vault_key_store: None,
     })
 }
 

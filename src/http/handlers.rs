@@ -9,6 +9,7 @@ use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
 use super::vault_crypto::VaultCrypto;
+use crate::VaultKeyStore;
 use crate::types::OwnershipConfig;
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
@@ -54,6 +55,7 @@ pub struct ServerState {
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
+    pub vault_key_store: Arc<VaultKeyStore>,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -255,6 +257,7 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         jwt,
         canonical_id,
         provider.to_string(),
+        identity.provider_sub.clone(),
         identity.email.clone(),
         identity.name.clone(),
         identity.picture.clone(),
@@ -892,6 +895,7 @@ pub fn handle_session_status(state: &ServerState, headers: &HeaderMap) -> HttpRe
                     "name": session.name,
                     "picture": session.picture,
                     "provider": session.provider,
+                    "provider_sub": session.provider_sub,
                 }
             }),
             cors,
@@ -965,7 +969,7 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
 }
 
 async fn read_entity(client: &MqttClient, entity: &str, id: &str) -> Option<serde_json::Value> {
-    let topic = format!("$DB/{entity}/{id}/read");
+    let topic = format!("$DB/{entity}/{id}");
     let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1275,6 +1279,7 @@ pub async fn handle_vault_enable(
     .await;
 
     let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
+    state.vault_key_store.set(canonical_id, key_bytes.clone());
     state.session_store.set_vault_key(&session_id, key_bytes);
 
     json_response_with_credentials(
@@ -1354,6 +1359,7 @@ pub async fn handle_vault_unlock(
     }
 
     let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
+    state.vault_key_store.set(canonical_id, key_bytes.clone());
     state.session_store.set_vault_key(&session_id, key_bytes);
 
     json_response_with_credentials(200, &json!({"status": "unlocked"}), cors)
@@ -1366,6 +1372,9 @@ pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpRespon
         return json_response_with_credentials(401, &json!({"error": "no session"}), cors);
     };
 
+    if let Some(session) = state.session_store.get(session_id) {
+        state.vault_key_store.remove(&session.canonical_id);
+    }
     state.session_store.clear_vault_key(session_id);
 
     json_response_with_credentials(200, &json!({"status": "locked"}), cors)
@@ -1452,6 +1461,7 @@ pub async fn handle_vault_disable(
     )
     .await;
 
+    state.vault_key_store.remove(canonical_id);
     state.session_store.clear_vault_key(&session_id);
 
     json_response_with_credentials(
@@ -1565,6 +1575,9 @@ pub async fn handle_vault_change(
 
     let new_key_bytes = VaultCrypto::raw_key_bytes(new_passphrase, &new_salt);
     state
+        .vault_key_store
+        .set(canonical_id, new_key_bytes.clone());
+    state
         .session_store
         .set_vault_key(&session_id, new_key_bytes);
 
@@ -1669,6 +1682,73 @@ async fn batch_vault_re_encrypt(
         }
     }
     total
+}
+
+#[cfg(feature = "dev-insecure")]
+pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(email) = body_value.get("email").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing email field"}), cors);
+    };
+
+    let name = body_value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Dev User");
+
+    let canonical_id = body_value
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .map_or_else(uuid_v4, String::from);
+
+    let existing = read_entity(&state.mqtt_client, "_identities", &canonical_id).await;
+    if existing.is_none() {
+        let data = json!({
+            "id": canonical_id,
+            "primary_email": email,
+            "display_name": name,
+            "created_at": chrono_now_iso(),
+            "vault_enabled": false,
+        });
+        publish_entity(&state.mqtt_client, "_identities", &data).await;
+    }
+
+    let Some(session_id) = state.session_store.create(
+        String::new(),
+        canonical_id.clone(),
+        "dev".to_string(),
+        "dev-local".to_string(),
+        Some(email.to_string()),
+        Some(name.to_string()),
+        None,
+    ) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to create session"}),
+            cors,
+        );
+    };
+
+    let cookie = build_set_cookie_header(&session_id, state.cookie_secure, 86400);
+
+    json_response_with_cookie(
+        200,
+        &json!({
+            "canonical_id": canonical_id,
+            "email": email,
+            "name": name,
+        }),
+        &cookie,
+        cors,
+    )
 }
 
 mod hex {

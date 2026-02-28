@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MQDB Vault + MQTT Demo</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: 16px; color: #38bdf8; }
+  h2 { font-size: 1.1rem; margin-bottom: 8px; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1200px; margin: 0 auto; }
+  .panel { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
+  .full-width { grid-column: 1 / -1; }
+  label { display: block; font-size: 0.85rem; color: #94a3b8; margin-bottom: 4px; }
+  input { width: 100%; padding: 8px; background: #0f172a; border: 1px solid #475569; border-radius: 4px; color: #e2e8f0; font-family: monospace; margin-bottom: 8px; }
+  button { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.85rem; margin-right: 4px; margin-bottom: 4px; }
+  .btn-primary { background: #3b82f6; color: white; }
+  .btn-success { background: #22c55e; color: white; }
+  .btn-warning { background: #f59e0b; color: black; }
+  .btn-danger { background: #ef4444; color: white; }
+  .btn-secondary { background: #475569; color: white; }
+  button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status { font-size: 0.8rem; padding: 4px 8px; border-radius: 4px; display: inline-block; margin-bottom: 8px; }
+  .status-on { background: #166534; color: #bbf7d0; }
+  .status-off { background: #7f1d1d; color: #fecaca; }
+  #log { background: #0f172a; border: 1px solid #334155; border-radius: 4px; padding: 12px; font-family: monospace; font-size: 0.8rem; height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .log-info { color: #38bdf8; }
+  .log-ok { color: #4ade80; }
+  .log-err { color: #f87171; }
+  .log-data { color: #fbbf24; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .flex-grow { flex: 1; margin-bottom: 0; }
+</style>
+</head>
+<body>
+
+<h1>MQDB Vault + MQTT Interactive Demo</h1>
+
+<div class="grid">
+  <div class="panel">
+    <h2>1. Login</h2>
+    <label>Email</label>
+    <input id="email" value="test@example.com">
+    <label>Display Name</label>
+    <input id="name" value="Test User">
+    <label>Canonical ID (= MQTT username)</label>
+    <input id="canonical_id" value="vault-test-user">
+    <label>MQTT Password</label>
+    <input id="mqtt_pass" value="testpass">
+    <div>
+      <button class="btn-primary" onclick="devLogin()">Dev Login</button>
+      <button class="btn-secondary" onclick="checkSession()">Check Session</button>
+      <button class="btn-danger" onclick="logout()">Logout</button>
+    </div>
+    <div id="login-status" class="status status-off">Not logged in</div>
+  </div>
+
+  <div class="panel">
+    <h2>2. Vault</h2>
+    <label>Passphrase</label>
+    <input id="passphrase" value="test-vault-pass" type="password">
+    <div>
+      <button class="btn-success" onclick="vaultEnable()">Enable</button>
+      <button class="btn-primary" onclick="vaultUnlock()">Unlock</button>
+      <button class="btn-warning" onclick="vaultLock()">Lock</button>
+      <button class="btn-danger" onclick="vaultDisable()">Disable</button>
+      <button class="btn-secondary" onclick="vaultStatus()">Status</button>
+    </div>
+    <div id="vault-status" class="status status-off">Unknown</div>
+  </div>
+
+  <div class="panel">
+    <h2>3. MQTT Connection</h2>
+    <label>WebSocket URL</label>
+    <input id="ws_url" value="ws://localhost:18083/mqtt">
+    <div>
+      <button class="btn-primary" onclick="mqttConnect()">Connect</button>
+      <button class="btn-danger" onclick="mqttDisconnect()">Disconnect</button>
+    </div>
+    <div id="mqtt-status" class="status status-off">Disconnected</div>
+  </div>
+
+  <div class="panel">
+    <h2>4. CRUD</h2>
+    <label>Entity</label>
+    <input id="entity" value="notes">
+    <label>Title</label>
+    <input id="note_title" value="Secret Note">
+    <label>Body</label>
+    <input id="note_body" value="This is top secret content">
+    <div class="row">
+      <label style="margin:0">Record ID:</label>
+      <input id="record_id" class="flex-grow" placeholder="(auto-filled on create)">
+    </div>
+    <div>
+      <button class="btn-success" onclick="createRecord()">Create</button>
+      <button class="btn-primary" onclick="readRecord()">Read</button>
+      <button class="btn-warning" onclick="updateRecord()">Update</button>
+      <button class="btn-danger" onclick="deleteRecord()">Delete</button>
+      <button class="btn-secondary" onclick="listRecords()">List</button>
+    </div>
+  </div>
+
+  <div class="panel full-width">
+    <h2>Log</h2>
+    <div>
+      <button class="btn-secondary" onclick="clearLog()">Clear</button>
+    </div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+const HTTP_BASE = 'http://localhost:13000';
+let mqttClient = null;
+let pendingCallbacks = {};
+
+function log(msg, cls = 'log-info') {
+  const el = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML += `<span class="${cls}">[${ts}] ${escapeHtml(msg)}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function logJson(label, obj) {
+  log(label, 'log-info');
+  log(JSON.stringify(obj, null, 2), 'log-data');
+}
+
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function httpPost(path, body) {
+  const resp = await fetch(HTTP_BASE + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(body),
+  });
+  return resp.json();
+}
+
+async function httpGet(path) {
+  const resp = await fetch(HTTP_BASE + path, {
+    credentials: 'include',
+  });
+  return resp.json();
+}
+
+async function devLogin() {
+  try {
+    const data = await httpPost('/auth/dev-login', {
+      email: document.getElementById('email').value,
+      name: document.getElementById('name').value,
+      canonical_id: document.getElementById('canonical_id').value,
+    });
+    logJson('Dev Login response:', data);
+    if (data.canonical_id) {
+      document.getElementById('login-status').className = 'status status-on';
+      document.getElementById('login-status').textContent = 'Logged in as ' + data.canonical_id;
+    }
+  } catch (e) { log('Login failed: ' + e.message, 'log-err'); }
+}
+
+async function checkSession() {
+  try {
+    const data = await httpGet('/auth/session');
+    logJson('Session status:', data);
+  } catch (e) { log('Session check failed: ' + e.message, 'log-err'); }
+}
+
+async function logout() {
+  try {
+    const data = await httpPost('/auth/logout', {});
+    logJson('Logout:', data);
+    document.getElementById('login-status').className = 'status status-off';
+    document.getElementById('login-status').textContent = 'Not logged in';
+  } catch (e) { log('Logout failed: ' + e.message, 'log-err'); }
+}
+
+async function vaultEnable() {
+  try {
+    const data = await httpPost('/vault/enable', {
+      passphrase: document.getElementById('passphrase').value,
+    });
+    logJson('Vault Enable:', data);
+    updateVaultBadge(data);
+  } catch (e) { log('Vault enable failed: ' + e.message, 'log-err'); }
+}
+
+async function vaultUnlock() {
+  try {
+    const data = await httpPost('/vault/unlock', {
+      passphrase: document.getElementById('passphrase').value,
+    });
+    logJson('Vault Unlock:', data);
+    updateVaultBadge(data);
+  } catch (e) { log('Vault unlock failed: ' + e.message, 'log-err'); }
+}
+
+async function vaultLock() {
+  try {
+    const data = await httpPost('/vault/lock', {});
+    logJson('Vault Lock:', data);
+    updateVaultBadge(data);
+  } catch (e) { log('Vault lock failed: ' + e.message, 'log-err'); }
+}
+
+async function vaultDisable() {
+  try {
+    const data = await httpPost('/vault/disable', {
+      passphrase: document.getElementById('passphrase').value,
+    });
+    logJson('Vault Disable:', data);
+    updateVaultBadge(data);
+  } catch (e) { log('Vault disable failed: ' + e.message, 'log-err'); }
+}
+
+async function vaultStatus() {
+  try {
+    const data = await httpGet('/vault/status');
+    logJson('Vault Status:', data);
+    const el = document.getElementById('vault-status');
+    if (data.vault_enabled) {
+      el.className = data.unlocked ? 'status status-on' : 'status status-off';
+      el.textContent = data.unlocked ? 'Enabled + Unlocked' : 'Enabled + Locked';
+    } else {
+      el.className = 'status status-off';
+      el.textContent = 'Disabled';
+    }
+  } catch (e) { log('Vault status failed: ' + e.message, 'log-err'); }
+}
+
+function updateVaultBadge(data) {
+  const el = document.getElementById('vault-status');
+  if (data.status === 'enabled' || data.status === 'unlocked') {
+    el.className = 'status status-on';
+    el.textContent = 'Enabled + Unlocked';
+  } else if (data.status === 'locked') {
+    el.className = 'status status-off';
+    el.textContent = 'Locked';
+  } else if (data.status === 'disabled') {
+    el.className = 'status status-off';
+    el.textContent = 'Disabled';
+  }
+}
+
+function mqttConnect() {
+  if (mqttClient) { mqttClient.end(true); }
+  const url = document.getElementById('ws_url').value;
+  const username = document.getElementById('canonical_id').value;
+  const password = document.getElementById('mqtt_pass').value;
+
+  log('Connecting to ' + url + ' as ' + username + '...');
+  mqttClient = mqtt.connect(url, {
+    username,
+    password,
+    protocolVersion: 5,
+    clean: true,
+  });
+
+  mqttClient.on('connect', () => {
+    log('MQTT connected', 'log-ok');
+    document.getElementById('mqtt-status').className = 'status status-on';
+    document.getElementById('mqtt-status').textContent = 'Connected';
+  });
+
+  mqttClient.on('error', (err) => {
+    log('MQTT error: ' + err.message, 'log-err');
+  });
+
+  mqttClient.on('close', () => {
+    document.getElementById('mqtt-status').className = 'status status-off';
+    document.getElementById('mqtt-status').textContent = 'Disconnected';
+  });
+
+  mqttClient.on('message', (topic, payload, packet) => {
+    const text = new TextDecoder().decode(payload);
+    const cb = pendingCallbacks[topic];
+    if (cb) {
+      delete pendingCallbacks[topic];
+      mqttClient.unsubscribe(topic);
+      try { cb(JSON.parse(text)); } catch { cb(text); }
+    } else {
+      log('Message on ' + topic + ': ' + text, 'log-data');
+    }
+  });
+}
+
+function mqttDisconnect() {
+  if (mqttClient) {
+    mqttClient.end(true);
+    mqttClient = null;
+    log('Disconnected');
+  }
+}
+
+function mqttRequest(topic, payload) {
+  return new Promise((resolve, reject) => {
+    if (!mqttClient || !mqttClient.connected) {
+      reject(new Error('MQTT not connected'));
+      return;
+    }
+    const responseTopic = 'vault-demo/resp/' + Date.now() + '/' + Math.random().toString(36).slice(2);
+    pendingCallbacks[responseTopic] = resolve;
+    mqttClient.subscribe(responseTopic, { qos: 1 }, (err) => {
+      if (err) { delete pendingCallbacks[responseTopic]; reject(err); return; }
+      mqttClient.publish(topic, payload, {
+        qos: 1,
+        properties: { responseTopic },
+      });
+    });
+    setTimeout(() => {
+      if (pendingCallbacks[responseTopic]) {
+        delete pendingCallbacks[responseTopic];
+        mqttClient.unsubscribe(responseTopic);
+        reject(new Error('timeout'));
+      }
+    }, 10000);
+  });
+}
+
+async function createRecord() {
+  const entity = document.getElementById('entity').value;
+  const title = document.getElementById('note_title').value;
+  const body = document.getElementById('note_body').value;
+  const userId = document.getElementById('canonical_id').value;
+  const payload = JSON.stringify({ title, body, userId });
+  try {
+    log('CREATE $DB/' + entity + '/create');
+    const resp = await mqttRequest('$DB/' + entity + '/create', payload);
+    logJson('Create response:', resp);
+    if (resp.data && resp.data.id) {
+      document.getElementById('record_id').value = resp.data.id;
+    }
+  } catch (e) { log('Create failed: ' + e.message, 'log-err'); }
+}
+
+async function readRecord() {
+  const entity = document.getElementById('entity').value;
+  const id = document.getElementById('record_id').value;
+  if (!id) { log('Enter a record ID first', 'log-err'); return; }
+  try {
+    log('READ $DB/' + entity + '/' + id);
+    const resp = await mqttRequest('$DB/' + entity + '/' + id, '');
+    logJson('Read response:', resp);
+  } catch (e) { log('Read failed: ' + e.message, 'log-err'); }
+}
+
+async function updateRecord() {
+  const entity = document.getElementById('entity').value;
+  const id = document.getElementById('record_id').value;
+  const title = document.getElementById('note_title').value;
+  const body = document.getElementById('note_body').value;
+  if (!id) { log('Enter a record ID first', 'log-err'); return; }
+  const payload = JSON.stringify({ title, body });
+  try {
+    log('UPDATE $DB/' + entity + '/' + id + '/update');
+    const resp = await mqttRequest('$DB/' + entity + '/' + id + '/update', payload);
+    logJson('Update response:', resp);
+  } catch (e) { log('Update failed: ' + e.message, 'log-err'); }
+}
+
+async function deleteRecord() {
+  const entity = document.getElementById('entity').value;
+  const id = document.getElementById('record_id').value;
+  if (!id) { log('Enter a record ID first', 'log-err'); return; }
+  try {
+    log('DELETE $DB/' + entity + '/' + id + '/delete');
+    const resp = await mqttRequest('$DB/' + entity + '/' + id + '/delete', '');
+    logJson('Delete response:', resp);
+  } catch (e) { log('Delete failed: ' + e.message, 'log-err'); }
+}
+
+async function listRecords() {
+  const entity = document.getElementById('entity').value;
+  try {
+    log('LIST $DB/' + entity + '/list');
+    const resp = await mqttRequest('$DB/' + entity + '/list', '');
+    logJson('List response:', resp);
+  } catch (e) { log('List failed: ' + e.message, 'log-err'); }
+}
+</script>
+</body>
+</html>

@@ -12,6 +12,7 @@ mod server;
 mod session_store;
 pub mod vault_crypto;
 
+pub use crate::vault_keys::VaultKeyStore;
 pub use identity_crypto::IdentityCrypto;
 pub use jwt_signer::{JwtSigningAlgorithm, JwtSigningConfig};
 pub use providers::google::GoogleProvider;

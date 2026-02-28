@@ -14,6 +14,7 @@ pub struct Session {
     pub jwt: String,
     pub canonical_id: String,
     pub provider: String,
+    pub provider_sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
@@ -45,6 +46,7 @@ impl SessionStore {
         jwt: String,
         canonical_id: String,
         provider: String,
+        provider_sub: String,
         email: Option<String>,
         name: Option<String>,
         picture: Option<String>,
@@ -60,6 +62,7 @@ impl SessionStore {
             jwt,
             canonical_id,
             provider,
+            provider_sub,
             email,
             name,
             picture,
@@ -86,6 +89,7 @@ impl SessionStore {
             jwt: session.jwt.clone(),
             canonical_id: session.canonical_id.clone(),
             provider: session.provider.clone(),
+            provider_sub: session.provider_sub.clone(),
             email: session.email.clone(),
             name: session.name.clone(),
             picture: session.picture.clone(),
@@ -133,6 +137,7 @@ pub struct SessionRef {
     pub jwt: String,
     pub canonical_id: String,
     pub provider: String,
+    pub provider_sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
@@ -232,6 +237,7 @@ mod tests {
                 "jwt123".into(),
                 "550e8400-e29b-41d4-a716-446655440000".into(),
                 "google".into(),
+                "112233445566".into(),
                 Some("user@example.com".into()),
                 Some("Test User".into()),
                 None,
@@ -244,6 +250,7 @@ mod tests {
         assert_eq!(session.jwt, "jwt123");
         assert_eq!(session.canonical_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(session.provider, "google");
+        assert_eq!(session.provider_sub, "112233445566");
         assert_eq!(session.email.as_deref(), Some("user@example.com"));
     }
 
@@ -255,6 +262,7 @@ mod tests {
                 "jwt".into(),
                 "canonical-1".into(),
                 "google".into(),
+                "sub-1".into(),
                 None,
                 None,
                 None,

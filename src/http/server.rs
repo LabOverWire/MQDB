@@ -8,6 +8,7 @@ use super::pkce::PkceCache;
 use super::providers::ProviderRegistry;
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
+use crate::VaultKeyStore;
 use crate::types::OwnershipConfig;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -34,6 +35,7 @@ pub struct HttpServerConfig {
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
+    pub vault_key_store: Option<Arc<VaultKeyStore>>,
 }
 
 pub struct HttpServer {
@@ -62,6 +64,10 @@ impl HttpServer {
         let listener = TcpListener::bind(self.config.bind_address).await?;
         info!(addr = %self.config.bind_address, "HTTP server listening");
 
+        let vault_key_store = self
+            .config
+            .vault_key_store
+            .unwrap_or_else(|| Arc::new(VaultKeyStore::new()));
         let state = Arc::new(ServerState {
             provider_registry: self.config.provider_registry,
             jwt_config: self.config.jwt_config,
@@ -77,6 +83,7 @@ impl HttpServer {
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,
+            vault_key_store,
         });
 
         loop {
@@ -140,6 +147,22 @@ async fn handle_request(
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
+
+    #[cfg(feature = "dev-insecure")]
+    if method == Method::OPTIONS && path == "/auth/dev-login" {
+        return Ok(handlers::handle_options_with_credentials(
+            state.cors_origin.as_deref(),
+        ));
+    }
+    #[cfg(feature = "dev-insecure")]
+    if method == Method::POST && path == "/auth/dev-login" {
+        let body = req
+            .collect()
+            .await
+            .map(http_body_util::Collected::to_bytes)
+            .unwrap_or_default();
+        return Ok(handlers::handle_dev_login(&state, &body).await);
+    }
 
     let response = match (&method, path.as_str()) {
         (
