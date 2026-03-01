@@ -55,7 +55,8 @@ pub(crate) async fn cmd_cluster_start(
     let acl_file = args.auth.acl.clone();
     let auth_setup = build_auth_setup_config(&args.auth)?;
 
-    let mut config = ClusterConfig::new(args.node_id, args.db_path, peer_configs);
+    let db_path = args.db_path;
+    let mut config = ClusterConfig::new(args.node_id, db_path.clone(), peer_configs);
     config = config.with_bind_address(args.bind);
     config = config.with_stores_durability(stores_durability);
 
@@ -102,8 +103,13 @@ pub(crate) async fn cmd_cluster_start(
         std::sync::Arc::new(mqdb::OwnershipConfig::default())
     };
     if let Some(http_bind) = args.oauth.http_bind {
-        let http_config =
-            build_http_config(http_bind, &args.auth, &args.oauth, ownership_arc.clone())?;
+        let http_config = build_http_config(
+            http_bind,
+            &args.auth,
+            &args.oauth,
+            ownership_arc.clone(),
+            &db_path,
+        )?;
         config = config.with_http_config(http_config);
     }
     if args.ownership.is_some() {

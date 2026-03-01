@@ -40,13 +40,11 @@ impl VaultCrypto {
     }
 
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
-    pub fn from_key_bytes(key_bytes: &[u8]) -> Self {
-        let unbound =
-            UnboundKey::new(&AES_256_GCM, key_bytes).expect("AES-256-GCM accepts 32-byte keys");
-        Self {
+    pub fn from_key_bytes(key_bytes: &[u8]) -> Option<Self> {
+        let unbound = UnboundKey::new(&AES_256_GCM, key_bytes).ok()?;
+        Some(Self {
             key: LessSafeKey::new(unbound),
-        }
+        })
     }
 
     #[must_use]
@@ -269,7 +267,7 @@ mod tests {
     fn from_key_bytes_roundtrip() {
         let salt = VaultCrypto::generate_salt();
         let key_bytes = VaultCrypto::raw_key_bytes("test-pass", &salt);
-        let crypto = VaultCrypto::from_key_bytes(&key_bytes);
+        let crypto = VaultCrypto::from_key_bytes(&key_bytes).unwrap();
         let encrypted = crypto
             .encrypt_value("entity", "id1", b"plaintext data")
             .unwrap();
@@ -284,8 +282,15 @@ mod tests {
         let token = derived.create_check_token().unwrap();
 
         let key_bytes = VaultCrypto::raw_key_bytes("pass", &salt);
-        let from_bytes = VaultCrypto::from_key_bytes(&key_bytes);
+        let from_bytes = VaultCrypto::from_key_bytes(&key_bytes).unwrap();
         assert!(from_bytes.verify_check_token(&token));
+    }
+
+    #[test]
+    fn from_key_bytes_wrong_length_returns_none() {
+        assert!(VaultCrypto::from_key_bytes(&[0u8; 16]).is_none());
+        assert!(VaultCrypto::from_key_bytes(&[0u8; 64]).is_none());
+        assert!(VaultCrypto::from_key_bytes(&[]).is_none());
     }
 
     #[test]

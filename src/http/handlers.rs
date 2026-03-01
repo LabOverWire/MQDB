@@ -950,6 +950,28 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
     }
 
     let link_key = format!("{provider}:{provider_sub}");
+
+    let link_record = read_entity(&state.mqtt_client, "_identity_links", &link_key).await;
+    let Some(link_data) = link_record else {
+        return json_response_with_credentials(
+            404,
+            &json!({"error": "identity link not found"}),
+            cors,
+        );
+    };
+
+    let link_canonical_id = link_data
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if link_canonical_id != session.canonical_id {
+        return json_response_with_credentials(
+            403,
+            &json!({"error": "identity link belongs to another user"}),
+            cors,
+        );
+    }
+
     let topic = format!("$DB/_identity_links/{link_key}/delete");
     if let Err(e) = state.mqtt_client.publish(&topic, vec![]).await {
         warn!(error = %e, "failed to delete identity link");

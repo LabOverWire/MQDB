@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mqdb::{Database, MqdbAgent};
@@ -71,8 +71,13 @@ pub(crate) async fn cmd_agent_start(
 
     if let Some(http_bind) = args.oauth.http_bind {
         let ownership_for_http = agent.ownership_config_arc();
-        let http_config =
-            build_http_config(http_bind, &args.auth, &args.oauth, ownership_for_http)?;
+        let http_config = build_http_config(
+            http_bind,
+            &args.auth,
+            &args.oauth,
+            ownership_for_http,
+            &args.db_path,
+        )?;
         if !http_config.cookie_secure {
             tracing::warn!(
                 "session cookies will be sent without Secure flag — use --cookie-secure in production"
@@ -190,6 +195,7 @@ pub(crate) fn build_http_config(
     auth: &AuthArgs,
     oauth: &OAuthArgs,
     ownership_config: std::sync::Arc<mqdb::OwnershipConfig>,
+    db_path: &Path,
 ) -> Result<mqdb::http::HttpServerConfig, Box<dyn std::error::Error>> {
     let jwt_key_path = auth
         .jwt_key
@@ -254,7 +260,7 @@ pub(crate) fn build_http_config(
         .clone()
         .or_else(|| Some(client_id.clone()));
 
-    let identity_crypto = build_identity_crypto(oauth)?;
+    let identity_crypto = build_identity_crypto(oauth, db_path)?;
 
     Ok(mqdb::http::HttpServerConfig {
         bind_address: http_bind,
@@ -280,6 +286,7 @@ pub(crate) fn build_http_config(
 
 fn build_identity_crypto(
     oauth: &OAuthArgs,
+    db_path: &Path,
 ) -> Result<Option<mqdb::http::IdentityCrypto>, Box<dyn std::error::Error>> {
     if cfg!(feature = "dev-insecure") {
         let _ = oauth;
@@ -298,13 +305,53 @@ fn build_identity_crypto(
         tracing::info!("identity encryption enabled (external key)");
         Ok(Some(crypto))
     } else {
-        let (crypto, material) = mqdb::http::IdentityCrypto::generate()
-            .map_err(|e| format!("identity key generation failed: {e}"))?;
-        tracing::info!(
-            salt_len = material.salt.len(),
-            wrapped_key_len = material.wrapped_key.len(),
-            "identity encryption enabled (auto-generated key)"
-        );
-        Ok(Some(crypto))
+        let stored_key_path = db_path.join(".identity_key");
+        if stored_key_path.exists() {
+            let data = std::fs::read(&stored_key_path).map_err(|e| {
+                format!(
+                    "failed to read stored identity key '{}': {e}",
+                    stored_key_path.display()
+                )
+            })?;
+            let (salt, wrapped_key) = deserialize_key_material(&data)?;
+            let crypto = mqdb::http::IdentityCrypto::from_stored(salt, wrapped_key)
+                .map_err(|e| format!("failed to load stored identity key: {e}"))?;
+            tracing::info!("identity encryption enabled (loaded stored key)");
+            Ok(Some(crypto))
+        } else {
+            let (crypto, material) = mqdb::http::IdentityCrypto::generate()
+                .map_err(|e| format!("identity key generation failed: {e}"))?;
+            let serialized = serialize_key_material(&material.salt, &material.wrapped_key);
+            std::fs::write(&stored_key_path, &serialized).map_err(|e| {
+                format!(
+                    "failed to persist identity key to '{}': {e}",
+                    stored_key_path.display()
+                )
+            })?;
+            tracing::info!("identity encryption enabled (generated and persisted key)");
+            Ok(Some(crypto))
+        }
     }
+}
+
+fn serialize_key_material(salt: &[u8], wrapped_key: &[u8]) -> Vec<u8> {
+    let salt_len: u32 = salt.len().try_into().expect("salt length fits in u32");
+    let mut out = Vec::with_capacity(4 + salt.len() + wrapped_key.len());
+    out.extend_from_slice(&salt_len.to_le_bytes());
+    out.extend_from_slice(salt);
+    out.extend_from_slice(wrapped_key);
+    out
+}
+
+fn deserialize_key_material(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if data.len() < 4 {
+        return Err("identity key file too short".into());
+    }
+    let salt_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if data.len() < 4 + salt_len {
+        return Err("identity key file truncated".into());
+    }
+    let salt = &data[4..4 + salt_len];
+    let wrapped_key = &data[4 + salt_len..];
+    Ok((salt, wrapped_key))
 }
