@@ -20,9 +20,8 @@ pub struct VaultCrypto {
 }
 
 impl VaultCrypto {
-    #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn derive(passphrase: &str, salt: &[u8]) -> Self {
+    fn derive_raw(passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
         let iterations = NonZeroU32::new(PBKDF2_ITERATIONS).expect("PBKDF2_ITERATIONS is non-zero");
         let mut key_bytes = [0u8; KEY_LEN];
         pbkdf2::derive(
@@ -32,11 +31,32 @@ impl VaultCrypto {
             passphrase.as_bytes(),
             &mut key_bytes,
         );
+        key_bytes
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn derive(passphrase: &str, salt: &[u8]) -> Self {
+        let key_bytes = Self::derive_raw(passphrase, salt);
         let unbound =
             UnboundKey::new(&AES_256_GCM, &key_bytes).expect("AES-256-GCM accepts 32-byte keys");
         Self {
             key: LessSafeKey::new(unbound),
         }
+    }
+
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn derive_with_raw_key(passphrase: &str, salt: &[u8]) -> (Self, Vec<u8>) {
+        let key_bytes = Self::derive_raw(passphrase, salt);
+        let unbound =
+            UnboundKey::new(&AES_256_GCM, &key_bytes).expect("AES-256-GCM accepts 32-byte keys");
+        (
+            Self {
+                key: LessSafeKey::new(unbound),
+            },
+            key_bytes.to_vec(),
+        )
     }
 
     #[must_use]
@@ -57,18 +77,8 @@ impl VaultCrypto {
     }
 
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn raw_key_bytes(passphrase: &str, salt: &[u8]) -> Vec<u8> {
-        let iterations = NonZeroU32::new(PBKDF2_ITERATIONS).expect("PBKDF2_ITERATIONS is non-zero");
-        let mut key_bytes = [0u8; KEY_LEN];
-        pbkdf2::derive(
-            pbkdf2::PBKDF2_HMAC_SHA256,
-            iterations,
-            salt,
-            passphrase.as_bytes(),
-            &mut key_bytes,
-        );
-        key_bytes.to_vec()
+        Self::derive_raw(passphrase, salt).to_vec()
     }
 
     /// # Errors

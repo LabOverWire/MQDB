@@ -51,6 +51,7 @@ pub struct ServerState {
     pub cookie_secure: bool,
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
+    pub vault_unlock_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
@@ -1271,7 +1272,7 @@ pub async fn handle_vault_enable(
     }
 
     let salt = VaultCrypto::generate_salt();
-    let crypto = VaultCrypto::derive(passphrase, &salt);
+    let (crypto, key_bytes) = VaultCrypto::derive_with_raw_key(passphrase, &salt);
 
     let check_token = match crypto.create_check_token() {
         Ok(t) => t,
@@ -1284,6 +1285,8 @@ pub async fn handle_vault_enable(
             );
         }
     };
+
+    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
     let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
 
@@ -1300,7 +1303,6 @@ pub async fn handle_vault_enable(
     )
     .await;
 
-    let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
     state.vault_key_store.set(canonical_id, key_bytes.clone());
     state.session_store.set_vault_key(&session_id, key_bytes);
 
@@ -1340,6 +1342,14 @@ pub async fn handle_vault_unlock(
 
     let canonical_id = &session.canonical_id;
 
+    if !state.vault_unlock_limiter.check_and_record(canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many unlock attempts, try again later"}),
+            cors,
+        );
+    }
+
     let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
         return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
     };
@@ -1371,7 +1381,7 @@ pub async fn handle_vault_unlock(
         );
     };
 
-    let crypto = VaultCrypto::derive(passphrase, &salt);
+    let (crypto, key_bytes) = VaultCrypto::derive_with_raw_key(passphrase, &salt);
     if !crypto.verify_check_token(check_token) {
         return json_response_with_credentials(
             401,
@@ -1380,7 +1390,6 @@ pub async fn handle_vault_unlock(
         );
     }
 
-    let key_bytes = VaultCrypto::raw_key_bytes(passphrase, &salt);
     state.vault_key_store.set(canonical_id, key_bytes.clone());
     state.session_store.set_vault_key(&session_id, key_bytes);
 
@@ -1432,6 +1441,14 @@ pub async fn handle_vault_disable(
 
     let canonical_id = &session.canonical_id;
 
+    if !state.vault_unlock_limiter.check_and_record(canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many unlock attempts, try again later"}),
+            cors,
+        );
+    }
+
     let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
         return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
     };
@@ -1467,6 +1484,8 @@ pub async fn handle_vault_disable(
             cors,
         );
     }
+
+    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
     let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
 
@@ -1530,6 +1549,14 @@ pub async fn handle_vault_change(
 
     let canonical_id = &session.canonical_id;
 
+    if !state.vault_unlock_limiter.check_and_record(canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many unlock attempts, try again later"}),
+            cors,
+        );
+    }
+
     let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
         return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
     };
@@ -1567,7 +1594,7 @@ pub async fn handle_vault_change(
     }
 
     let new_salt = VaultCrypto::generate_salt();
-    let new_crypto = VaultCrypto::derive(new_passphrase, &new_salt);
+    let (new_crypto, new_key_bytes) = VaultCrypto::derive_with_raw_key(new_passphrase, &new_salt);
 
     let new_check = match new_crypto.create_check_token() {
         Ok(t) => t,
@@ -1580,6 +1607,8 @@ pub async fn handle_vault_change(
             );
         }
     };
+
+    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
     let count = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
 
@@ -1595,7 +1624,6 @@ pub async fn handle_vault_change(
     )
     .await;
 
-    let new_key_bytes = VaultCrypto::raw_key_bytes(new_passphrase, &new_salt);
     state
         .vault_key_store
         .set(canonical_id, new_key_bytes.clone());

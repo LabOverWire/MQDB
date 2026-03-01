@@ -78,6 +78,12 @@ pub(super) async fn handle_message(
         .and_then(|uid| vault_key_store.get(uid))
         .and_then(|key_bytes| VaultCrypto::from_key_bytes(&key_bytes));
 
+    if vault_crypto.is_some()
+        && let Some(uid) = sender_uid
+    {
+        vault_key_store.read_fence(uid).await;
+    }
+
     let request = if let Some(ref crypto) = vault_crypto {
         match vault_transform_request(db, crypto, &op.entity, ownership, request).await {
             Ok(r) => r,

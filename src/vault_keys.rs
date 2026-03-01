@@ -5,8 +5,15 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use zeroize::Zeroizing;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::OwnedRwLockWriteGuard;
+
 pub struct VaultKeyStore {
     keys: RwLock<HashMap<String, Zeroizing<Vec<u8>>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    fences: RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
 impl Default for VaultKeyStore {
@@ -20,6 +27,8 @@ impl VaultKeyStore {
     pub fn new() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            fences: RwLock::new(HashMap::new()),
         }
     }
 
@@ -39,6 +48,34 @@ impl VaultKeyStore {
     pub fn get(&self, canonical_id: &str) -> Option<Zeroizing<Vec<u8>>> {
         let map = self.keys.read().ok()?;
         map.get(canonical_id).cloned()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn acquire_fence(&self, canonical_id: &str) -> OwnedRwLockWriteGuard<()> {
+        let lock = {
+            let mut map = self
+                .fences
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.entry(canonical_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+                .clone()
+        };
+        lock.write_owned().await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_fence(&self, canonical_id: &str) {
+        let lock = {
+            let map = self
+                .fences
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            map.get(canonical_id).cloned()
+        };
+        if let Some(lock) = lock {
+            let _guard = lock.read().await;
+        }
     }
 }
 
@@ -68,5 +105,33 @@ mod tests {
     fn get_nonexistent_returns_none() {
         let store = VaultKeyStore::new();
         assert!(store.get("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn fence_blocks_concurrent_reads() {
+        let store = Arc::new(VaultKeyStore::new());
+        let fence_guard = store.acquire_fence("user-a").await;
+
+        let read_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read_completed_clone = read_completed.clone();
+        let store_clone = store.clone();
+
+        let handle = tokio::spawn(async move {
+            store_clone.read_fence("user-a").await;
+            read_completed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!read_completed.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(fence_guard);
+        let _ = handle.await;
+        assert!(read_completed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn read_fence_noop_without_active_batch() {
+        let store = VaultKeyStore::new();
+        store.read_fence("no-fence-user").await;
     }
 }
