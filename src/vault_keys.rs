@@ -42,6 +42,10 @@ impl VaultKeyStore {
         if let Ok(mut map) = self.keys.write() {
             map.remove(canonical_id);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(mut map) = self.fences.write() {
+            map.remove(canonical_id);
+        }
     }
 
     #[must_use]

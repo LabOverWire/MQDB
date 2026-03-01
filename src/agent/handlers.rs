@@ -73,19 +73,22 @@ pub(super) async fn handle_message(
         .find(|(k, _)| k == "x-mqtt-client-id")
         .map(|(_, v)| v.as_str());
 
+    let has_vault = sender_uid
+        .filter(|_| is_vault_eligible(&op.entity, ownership))
+        .is_some();
+
+    if has_vault && let Some(uid) = sender_uid {
+        vault_key_store.read_fence(uid).await;
+    }
+
     let vault_crypto = sender_uid
         .filter(|_| is_vault_eligible(&op.entity, ownership))
         .and_then(|uid| vault_key_store.get(uid))
         .and_then(|key_bytes| VaultCrypto::from_key_bytes(&key_bytes));
 
-    if vault_crypto.is_some()
-        && let Some(uid) = sender_uid
-    {
-        vault_key_store.read_fence(uid).await;
-    }
-
     let request = if let Some(ref crypto) = vault_crypto {
-        match vault_transform_request(db, crypto, &op.entity, ownership, request).await {
+        match vault_transform_request(db, crypto, &op.entity, ownership, request, sender_uid).await
+        {
             Ok(r) => r,
             Err(err_response) => {
                 if let Some(response_topic) = &message.properties.response_topic
@@ -173,6 +176,7 @@ async fn vault_transform_request(
     entity: &str,
     ownership: &OwnershipConfig,
     request: Request,
+    sender_uid: Option<&str>,
 ) -> Result<Request, Response> {
     let skip = build_vault_skip_fields(entity, ownership);
     match request {
@@ -187,8 +191,10 @@ async fn vault_transform_request(
             id,
             fields: delta,
         } => {
-            let encrypted_request =
-                vault_pre_update(db, crypto, &entity, &id, delta, &skip).await?;
+            let encrypted_request = vault_pre_update(
+                db, crypto, &entity, &id, delta, &skip, sender_uid, ownership,
+            )
+            .await?;
             debug!(entity = %entity, id = %id, "vault-encrypted update");
             Ok(encrypted_request)
         }
@@ -261,6 +267,7 @@ fn decrypt_string(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn vault_pre_update(
     db: &Database,
     crypto: &VaultCrypto,
@@ -268,7 +275,17 @@ async fn vault_pre_update(
     id: &str,
     delta: Value,
     skip_fields: &[String],
+    sender_uid: Option<&str>,
+    ownership: &OwnershipConfig,
 ) -> Result<Request, Response> {
+    if let Some(uid) = sender_uid
+        && !ownership.is_admin(uid)
+        && let Some(owner_field) = ownership.entity_owner_fields.get(entity)
+        && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
+    {
+        return Err(e.into());
+    }
+
     let Ok(mut decrypted_existing) = db
         .read(entity.to_string(), id.to_string(), vec![], None)
         .await
@@ -378,7 +395,8 @@ fn uuid_v7() -> String {
     bytes[5] = (ts & 0xFF) as u8;
 
     let rng = SystemRandom::new();
-    let _ = rng.fill(&mut bytes[6..]);
+    rng.fill(&mut bytes[6..])
+        .expect("system RNG unavailable — OS CSPRNG failure");
 
     bytes[6] = (bytes[6] & 0x0F) | 0x70;
     bytes[8] = (bytes[8] & 0x3F) | 0x80;

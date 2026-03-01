@@ -249,7 +249,7 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
     };
 
     if let Some(refresh_token) = &token_response.refresh_token {
-        persist_oauth_tokens(state, &link_key, &canonical_id, refresh_token).await;
+        persist_oauth_tokens(state, &link_key, &canonical_id, refresh_token, &identity).await;
     }
 
     let jwt = mint_callback_jwt(state, &canonical_id, &identity);
@@ -402,12 +402,24 @@ async fn resolve_or_create_identity(
     }
 
     let canonical_id = uuid_v4();
-    create_identity(state, &canonical_id, identity).await;
+    if !create_identity(state, &canonical_id, identity).await {
+        if let Some(ref email) = identity.email
+            && let Some(existing_cid) = find_canonical_id_by_email(state, email).await
+        {
+            create_identity_link(state, link_key, &existing_cid, identity).await;
+            return Ok(existing_cid);
+        }
+        return Err("failed to create or find identity".to_string());
+    }
     create_identity_link(state, link_key, &canonical_id, identity).await;
     Ok(canonical_id)
 }
 
-async fn create_identity(state: &ServerState, canonical_id: &str, identity: &ProviderIdentity) {
+async fn create_identity(
+    state: &ServerState,
+    canonical_id: &str,
+    identity: &ProviderIdentity,
+) -> bool {
     let mut data = json!({
         "id": canonical_id,
         "primary_email": identity.email,
@@ -418,7 +430,15 @@ async fn create_identity(state: &ServerState, canonical_id: &str, identity: &Pro
     if let Some(ref crypto) = state.identity_crypto {
         crypto.encrypt_json_fields("_identities", &mut data, &["primary_email", "display_name"]);
     }
-    publish_entity(&state.mqtt_client, "_identities", &data).await;
+    let Some(response) =
+        create_entity_with_response(&state.mqtt_client, "_identities", &data).await
+    else {
+        return false;
+    };
+    response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "ok")
 }
 
 async fn create_identity_link(
@@ -509,15 +529,15 @@ async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<
         .await
         .is_err()
     {
+        let _ = client.unsubscribe(&response_topic).await;
         return None;
     }
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-        .await
-        .ok()?
-        .ok()?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = client.unsubscribe(&response_topic).await;
+    let payload = result.ok()?.ok()?;
 
-    let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
+    let response: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     let items = response.get("data")?.as_array()?;
     items
         .first()?
@@ -531,17 +551,24 @@ async fn persist_oauth_tokens(
     link_key: &str,
     canonical_id: &str,
     refresh_token: &str,
+    identity: &ProviderIdentity,
 ) {
     let mut token_data = json!({
-        "id": link_key,
         "canonical_id": canonical_id,
         "refresh_token": refresh_token,
+        "email": identity.email,
+        "name": identity.name,
+        "picture": identity.picture,
         "updated_at": chrono_now_iso()
     });
     if let Some(ref crypto) = state.identity_crypto {
-        crypto.encrypt_json_fields("_oauth_tokens", &mut token_data, &["refresh_token"]);
+        crypto.encrypt_json_fields(
+            "_oauth_tokens",
+            &mut token_data,
+            &["refresh_token", "email", "name"],
+        );
     }
-    let topic = "$DB/_oauth_tokens/create".to_string();
+    let topic = format!("$DB/_oauth_tokens/{link_key}/update");
     let payload = serde_json::to_vec(&token_data).unwrap_or_default();
     if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
         warn!(error = %e, "failed to store OAuth tokens");
@@ -672,7 +699,11 @@ async fn validate_refresh_request(
         })?;
 
     if let Some(ref crypto) = state.identity_crypto {
-        crypto.decrypt_json_fields("_oauth_tokens", &mut stored_data, &["refresh_token"]);
+        crypto.decrypt_json_fields(
+            "_oauth_tokens",
+            &mut stored_data,
+            &["refresh_token", "email", "name"],
+        );
     }
 
     Ok((canonical_id, provider_name, link_key, stored_data))
@@ -1026,15 +1057,15 @@ async fn read_entity(client: &MqttClient, entity: &str, id: &str) -> Option<serd
         .await
         .is_err()
     {
+        let _ = client.unsubscribe(&response_topic).await;
         return None;
     }
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-        .await
-        .ok()?
-        .ok()?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = client.unsubscribe(&response_topic).await;
+    let payload = result.ok()?.ok()?;
 
-    let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
+    let response: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     response.get("data").cloned()
 }
 
@@ -1044,6 +1075,57 @@ async fn publish_entity(client: &MqttClient, entity: &str, data: &serde_json::Va
     if let Err(e) = client.publish(&topic, payload).await {
         warn!(error = %e, entity = entity, "failed to publish entity");
     }
+}
+
+async fn create_entity_with_response(
+    client: &MqttClient,
+    entity: &str,
+    data: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let topic = format!("$DB/{entity}/create");
+    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        return None;
+    }
+
+    let payload = serde_json::to_vec(data).unwrap_or_default();
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if client
+        .publish_with_options(&topic, payload, options)
+        .await
+        .is_err()
+    {
+        let _ = client.unsubscribe(&response_topic).await;
+        return None;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = client.unsubscribe(&response_topic).await;
+    let resp_payload = result.ok()?.ok()?;
+
+    serde_json::from_slice(&resp_payload).ok()
 }
 
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
@@ -1096,12 +1178,8 @@ fn chrono_now_iso() -> String {
 fn uuid_v4() -> String {
     let rng = SystemRandom::new();
     let mut bytes = [0u8; 16];
-    if rng.fill(&mut bytes).is_err() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        bytes = ts.to_le_bytes();
-    }
+    rng.fill(&mut bytes)
+        .expect("system RNG unavailable — OS CSPRNG failure");
     bytes[6] = (bytes[6] & 0x0F) | 0x40;
     bytes[8] = (bytes[8] & 0x3F) | 0x80;
     format!(
@@ -1165,15 +1243,15 @@ async fn list_entities(
         .await
         .is_err()
     {
+        let _ = client.unsubscribe(&response_topic).await;
         return None;
     }
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
-        .await
-        .ok()?
-        .ok()?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), rx).await;
+    let _ = client.unsubscribe(&response_topic).await;
+    let payload = result.ok()?.ok()?;
 
-    let response: serde_json::Value = serde_json::from_slice(&result).ok()?;
+    let response: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     response.get("data").and_then(|v| v.as_array()).cloned()
 }
 
@@ -1215,14 +1293,6 @@ fn require_session<'a>(
     })?;
 
     Ok((session_id, session))
-}
-
-fn extract_session_id(headers: &HeaderMap) -> Option<&str> {
-    let cookie_header = headers
-        .get(http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    parse_session_id(cookie_header)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1288,7 +1358,7 @@ pub async fn handle_vault_enable(
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
-    let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
+    let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
 
     let identity_update = json!({
         "vault_enabled": true,
@@ -1306,11 +1376,12 @@ pub async fn handle_vault_enable(
     state.vault_key_store.set(canonical_id, key_bytes.clone());
     state.session_store.set_vault_key(&session_id, key_bytes);
 
-    json_response_with_credentials(
-        200,
-        &json!({"status": "enabled", "records_encrypted": count}),
-        cors,
-    )
+    let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
+    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
+        body["failed"] = json!(batch.failed);
+        body["warning"] = json!("some records could not be processed");
+    }
+    json_response_with_credentials(200, &body, cors)
 }
 
 pub async fn handle_vault_unlock(
@@ -1399,13 +1470,12 @@ pub async fn handle_vault_unlock(
 pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let Some(session_id) = extract_session_id(headers) else {
-        return json_response_with_credentials(401, &json!({"error": "no session"}), cors);
+    let (session_id, session) = match require_session(state, headers) {
+        Ok((sid, s)) => (sid, s),
+        Err(resp) => return *resp,
     };
 
-    if let Some(session) = state.session_store.get(session_id) {
-        state.vault_key_store.remove(&session.canonical_id);
-    }
+    state.vault_key_store.remove(&session.canonical_id);
     state.session_store.clear_vault_key(session_id);
 
     json_response_with_credentials(200, &json!({"status": "locked"}), cors)
@@ -1487,7 +1557,7 @@ pub async fn handle_vault_disable(
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
-    let count = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
+    let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
 
     let identity_update = json!({
         "vault_enabled": false,
@@ -1505,11 +1575,12 @@ pub async fn handle_vault_disable(
     state.vault_key_store.remove(canonical_id);
     state.session_store.clear_vault_key(&session_id);
 
-    json_response_with_credentials(
-        200,
-        &json!({"status": "disabled", "records_decrypted": count}),
-        cors,
-    )
+    let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
+    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
+        body["failed"] = json!(batch.failed);
+        body["warning"] = json!("some records could not be processed");
+    }
+    json_response_with_credentials(200, &body, cors)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1610,7 +1681,7 @@ pub async fn handle_vault_change(
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
 
-    let count = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
+    let batch = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
 
     let identity_update = json!({
         "vault_salt": BASE64.encode(new_salt),
@@ -1631,11 +1702,12 @@ pub async fn handle_vault_change(
         .session_store
         .set_vault_key(&session_id, new_key_bytes);
 
-    json_response_with_credentials(
-        200,
-        &json!({"status": "changed", "records_re_encrypted": count}),
-        cors,
-    )
+    let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
+    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
+        body["failed"] = json!(batch.failed);
+        body["warning"] = json!("some records could not be processed");
+    }
+    json_response_with_credentials(200, &body, cors)
 }
 
 pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
@@ -1672,16 +1744,27 @@ enum VaultMode {
     Decrypt,
 }
 
+struct BatchResult {
+    succeeded: usize,
+    failed: usize,
+    entities_skipped: Vec<String>,
+}
+
 async fn batch_vault_operation(
     state: &ServerState,
     canonical_id: &str,
     crypto: &VaultCrypto,
     mode: VaultMode,
-) -> usize {
-    let mut total = 0;
+) -> BatchResult {
+    let mut result = BatchResult {
+        succeeded: 0,
+        failed: 0,
+        entities_skipped: Vec::new(),
+    };
     for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
         let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
+            result.entities_skipped.push(entity.clone());
             continue;
         };
         for record in records {
@@ -1697,11 +1780,14 @@ async fn batch_vault_operation(
             if let Some(obj) = data.as_object_mut() {
                 obj.remove("id");
             }
-            update_entity(&state.mqtt_client, entity, id, &data).await;
-            total += 1;
+            if update_entity(&state.mqtt_client, entity, id, &data).await {
+                result.succeeded += 1;
+            } else {
+                result.failed += 1;
+            }
         }
     }
-    total
+    result
 }
 
 async fn batch_vault_re_encrypt(
@@ -1709,11 +1795,16 @@ async fn batch_vault_re_encrypt(
     canonical_id: &str,
     old_crypto: &VaultCrypto,
     new_crypto: &VaultCrypto,
-) -> usize {
-    let mut total = 0;
+) -> BatchResult {
+    let mut result = BatchResult {
+        succeeded: 0,
+        failed: 0,
+        entities_skipped: Vec::new(),
+    };
     for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
         let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
+            result.entities_skipped.push(entity.clone());
             continue;
         };
         for record in records {
@@ -1727,11 +1818,14 @@ async fn batch_vault_re_encrypt(
             if let Some(obj) = data.as_object_mut() {
                 obj.remove("id");
             }
-            update_entity(&state.mqtt_client, entity, id, &data).await;
-            total += 1;
+            if update_entity(&state.mqtt_client, entity, id, &data).await {
+                result.succeeded += 1;
+            } else {
+                result.failed += 1;
+            }
         }
     }
-    total
+    result
 }
 
 #[cfg(feature = "dev-insecure")]
