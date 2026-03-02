@@ -18,7 +18,7 @@ struct MqttTransport {
 }
 ```
 
-Why two clients? A single client with MQTT's `no_local` subscription option could suppress self-echo — that was never the concern. The two-client split was just as simple to set up and proved its value once multiple bridges entered the picture. When Node 1 bridges to Node 2 and Node 2 bridges to Node 3, a forwarded publish delivered locally on Node 2 re-enters the broker's publish pipeline and can propagate onward through the next bridge. The `forward_client`'s recognizable ID (`mqdb-forward-{node_id}`) gave the event handler a marker to suppress re-routing — if the publisher is a forwarding client, don't forward again. A single bridge worked fine without this; multiple bridges made echo tracking unmanageable without an explicit identity marker.
+Why two clients? A single client with MQTT's `no_local` subscription option could suppress self-echo — that was never the concern. The two-client split was just as simple to set up and proved its value once multiple bridges entered the picture. When Node 1 bridged to Node 2 and Node 2 bridged to Node 3, a forwarded publish delivered locally on Node 2 re-entered the broker's publish pipeline and could propagate onward through the next bridge. Stopping this chain required the event handler to distinguish a message that had already been forwarded from a fresh client publish. The `forward_client`'s recognizable ID (`mqdb-forward-{node_id}`) provided exactly that marker — if the publisher matched the forwarding prefix, the handler skipped re-routing. A single bridge worked fine without this; multiple bridges made echo tracking unmanageable without an explicit identity check.
 
 The advantages of this approach were real. Zero new dependencies: the broker already handled connection management, message framing, and delivery guarantees. Topic-based routing: subscribing to `_mqdb/repl/+/+` captured replication traffic, `_mqdb/cluster/heartbeat/+` captured heartbeats. Built-in QoS: at-least-once for replication, at-most-once for heartbeats. Standard debugging tools: any MQTT client could subscribe to cluster topics and observe the traffic.
 
@@ -53,22 +53,7 @@ For a 3-node cluster, three topology options determined which nodes bridged to w
 | `upper`             | Each node bridges to higher-numbered nodes | 2, 1, 0                       |
 | `full`              | Each node bridges to all others            | 2, 2, 2                       |
 
-The topology code computed peers for each node at startup:
-
-```rust
-let peers: Vec<String> = match topology_name {
-    "full" => (1..=nodes)
-        .filter(|&n| n != node_id)
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-    "upper" => ((node_id + 1)..=nodes)
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-    _ => (1..node_id)  // partial: to lower-numbered nodes
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-};
-```
+The topology code computed peers for each node at startup.
 
 Bridge direction interacted with topology in a non-obvious way. Asymmetric topologies (partial, upper) required `Both` direction because each bridge had to carry traffic in both directions — node 2's single bridge to node 1 had to forward 2→1 messages AND receive 1→2 messages. Full mesh topology used `Out` direction because the symmetric connections formed bidirectional pairs: node 1's out-bridge to node 2 plus node 2's out-bridge to node 1 covered both directions.
 
@@ -182,12 +167,20 @@ A `ClusterTransportKind` enum wraps both implementations:
 
 ```rust
 pub enum ClusterTransportKind {
-    Mqtt(MqttTransport),    // deprecated
+    Mqtt(MqttTransport),    // deprecated, but mentioned due to emotional attachment
     Quic(QuicDirectTransport),
 }
 ```
 
 This enum implements `ClusterTransport` by delegating to whichever variant is active. Every caller — the Raft coordinator, the replication pipeline, the heartbeat manager, the event loop — uses `ClusterTransport` methods. Swapping MQTT for QUIC required zero changes to any caller.
+
+## Intermission
+
+A lot of work was done with MQTT bridges as the cluster's main communication method. Too much work, really — the profiling data had been clear for weeks before I accepted what it meant. The reader is right to think I should have moved on sooner.
+
+The truth is, I got attached. I had spent weeks wrestling with bridge topologies, loop prevention, and echo suppression. I racked my brains trying every alternative — split the lock, batch messages, defer processing — anything to avoid admitting that the architecture itself was the problem. When QUIC finally entered the picture, I told myself it was exciting because I would get to play with streams. But the MQTT broker already ran on QUIC for client connections, so I was merely fooling myself with a new justification for a decision the data had already made.
+
+I'm glad we did it. QUIC is faster, more predictable, and made topology choice irrelevant. But the lesson that sticks is not about transport protocols — it's about recognizing when attachment to your own work prevents you from seeing what the work needs. Code is not the product. It's the vehicle. Sometimes the best thing you can do for a project is to let go of the part you built.
 
 ## 7.5 Direct QUIC Transport
 
@@ -225,7 +218,7 @@ The connection lifecycle has three phases:
 
 **Binding.** `bind()` creates the QUIC endpoint and spawns an `acceptor_task()` that listens for incoming connections from peer nodes. When a peer connects, the acceptor reads a 2-byte node ID header from the incoming stream, registers the peer in the connection map, and spawns a `receiver_task()` for that connection.
 
-**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, which suffices for the message rates involved. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
+**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, as it provides extra freedom when when writing code. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
 
 **Messaging.** `send_to_peer()` serializes the message and writes it to the peer's send stream with length-prefixed framing:
 
@@ -238,7 +231,7 @@ The connection lifecycle has three phases:
 
 The receiver task reads the 4-byte length prefix, allocates a buffer of that size, reads the payload, and parses it into an `InboundMessage` using the same `ClusterMessage::decode_from_wire()` method that the MQTT transport uses. The binary protocol is identical between both transports — only the delivery mechanism differs.
 
-The receiver task pushes parsed messages into a bounded `flume` channel (capacity: 16,384 messages) and notifies the event loop via a `tokio::sync::Notify`. If the inbox is full, the message is dropped with a warning log that includes the message type — back-pressure rather than unbounded growth.
+The receiver task pushes parsed messages into a bounded `flume` channel and notifies the event loop via a `tokio::sync::Notify`. If the inbox is full, the message is dropped with a warning log that includes the message type — back-pressure rather than unbounded growth.
 
 Key constants from the implementation:
 
@@ -256,23 +249,25 @@ Broadcasting iterates all peers sequentially, sending to each. A failure to reac
 
 Cluster nodes authenticate each other using mutual TLS. The QUIC protocol mandates TLS 1.3, so encryption is always present. The question is whether nodes verify each other's identity.
 
-Each node has two QUIC endpoints that share the same certificate files but serve different purposes:
+Each node exposes two QUIC endpoints on different ports, but both use the same certificate files (`--quic-cert` and `--quic-key`):
 
 | Endpoint                  | Port                        | Purpose                       | Authentication                         |
 | ------------------------- | --------------------------- | ----------------------------- | -------------------------------------- |
 | MQTT broker QUIC listener | `--bind` port (e.g., 1883)  | MQTT clients over QUIC        | MQTT-level auth (password, SCRAM, JWT) |
 | Cluster transport         | `--bind` + 100 (e.g., 1983) | Heartbeats, Raft, replication | mTLS (when `--quic-ca` provided)       |
 
+The two endpoints share cert files but differ in how they authenticate the other side. The MQTT broker listener relies on application-level authentication — clients prove their identity through MQTT username/password, SCRAM-SHA-256, or JWT tokens after the TLS handshake completes. It does not require or verify client certificates. The cluster transport, by contrast, authenticates at the TLS level itself.
+
 When `--quic-ca` is provided, mTLS is enabled on the cluster endpoint:
 
-- **Server side**: a `WebPkiClientVerifier` built from the CA certificate requires every connecting node to present a client certificate signed by that CA. Connections without valid client certificates are rejected at the TLS handshake.
+- **Server side**: a `WebPkiClientVerifier` built from the CA certificate requires every connecting node to present a client certificate signed by that CA. Connections without valid client certificates are rejected at the TLS handshake — before any application data is exchanged.
 - **Client side**: the connecting node presents its own `--quic-cert`/`--quic-key` as client identity via `with_client_auth_cert()`. The same certificate that identifies the node as a server also serves as its client identity.
 
-The same certificate serves both roles. It must carry both `serverAuth` and `clientAuth` Extended Key Usage (EKU) extensions. The project's `generate_test_certs.sh` script produces certificates with both EKUs for this dual-role usage.
+The certificate must carry both `serverAuth` and `clientAuth` Extended Key Usage (EKU) extensions for this dual role. The project's `generate_test_certs.sh` script produces certificates with both EKUs.
 
 When `--quic-ca` is omitted, the cluster transport falls back to one-way TLS: the server presents its certificate, the client verifies it, but the server does not verify the client. A warning is logged. This mode is acceptable for development (where all nodes run on localhost) but insufficient for production, where an unauthorized node could join the cluster and receive replicated data.
 
-Production deployments should use a dedicated CA for cluster certificates, separate from any CA used for external client TLS. This prevents an external client with a valid TLS certificate from being mistakenly accepted as a cluster peer.
+The security of the cluster endpoint depends entirely on who controls the CA specified in `--quic-ca`. Only certificates signed by that CA can pass the mTLS handshake. If the CA is a private one that the operator controls, only deliberately signed certificates can join the cluster. If it were a public CA (like Let's Encrypt), anyone with a certificate from that CA could potentially connect to the cluster port and receive replicated data. Production deployments should use a private CA dedicated to cluster operations.
 
 ## 7.7 Performance Results
 
@@ -343,7 +338,7 @@ transport.send(peer_id, message).await?;
 
 No more background spawning for send operations. The caller controls the execution, and sequential sends to different peers are naturally serialized. The RPITIT approach means these async methods return `impl Future` without heap allocation — no `Box<dyn Future>`, no trait object overhead. The ergonomics improved alongside the correctness fix.
 
-The lesson generalizes beyond MQTT. Fire-and-forget `spawn()` for I/O operations on shared resources (connections, file handles, channels) creates implicit concurrency that the resource may not tolerate. An MQTT client, like a TCP connection, expects sequential writes. Spawning concurrent tasks that write to the same client violates that expectation. The RPITIT refactor made the sequencing explicit by keeping send operations in the caller's async context instead of detaching them into the runtime's task pool.
+The lesson generalizes beyond MQTT. Fire-and-forget `spawn()` for I/O operations on shared resources (connections, file handles, channels) creates implicit concurrency that the resource may not tolerate. An MQTT client, like a TCP connection, expects sequential writes. Spawning concurrent tasks that write to the same client violates that expectation. The refactor made the sequencing explicit by keeping send operations in the caller's async context instead of detaching them into the runtime's task pool.
 
 This bug also motivated the per-peer `tokio::sync::Mutex<SendStream>` in the QUIC transport design. Even though callers now `await` send operations sequentially, the mutex provides defense in depth — if two different parts of the system happen to send to the same peer concurrently (for example, a heartbeat broadcast overlapping with a directed Raft response), the mutex serializes the writes at the stream level. The cost is negligible: the mutex is uncontended in the common case, and the protection against stream corruption is worth the occasional nanosecond of synchronization overhead.
 
