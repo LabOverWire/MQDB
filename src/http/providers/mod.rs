@@ -26,7 +26,6 @@ pub enum ProviderError {
     TokenExchangeFailed(String),
     TokenVerificationFailed(String),
     RefreshFailed(String),
-    ProviderNotFound(String),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -35,7 +34,6 @@ impl std::fmt::Display for ProviderError {
             Self::TokenExchangeFailed(e) => write!(f, "token exchange failed: {e}"),
             Self::TokenVerificationFailed(e) => write!(f, "token verification failed: {e}"),
             Self::RefreshFailed(e) => write!(f, "token refresh failed: {e}"),
-            Self::ProviderNotFound(name) => write!(f, "provider not found: {name}"),
         }
     }
 }

@@ -33,7 +33,7 @@ impl PkceCache {
     fn cleanup(&mut self) {
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(TTL_SECS))
-            .unwrap();
+            .unwrap_or_else(Instant::now);
         self.entries.retain(|_, (_, _, created)| *created > cutoff);
     }
 }

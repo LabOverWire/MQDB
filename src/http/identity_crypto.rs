@@ -4,10 +4,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use ring::hkdf;
 use ring::hmac;
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
 use std::num::NonZeroU32;
+use zeroize::Zeroizing;
 
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
@@ -15,7 +17,7 @@ const SALT_LEN: usize = 32;
 const TAG_LEN: usize = 16;
 const PBKDF2_ITERATIONS: u32 = 600_000;
 
-const COMPILE_TIME_SEED: &[u8] = b"mqdb-identity-encryption-seed-v1";
+const KEY_DERIVATION_INFO: &[u8] = b"mqdb-identity-encryption-seed-v1";
 
 pub struct IdentityCrypto {
     key: LessSafeKey,
@@ -52,8 +54,8 @@ impl IdentityCrypto {
     pub fn generate() -> Result<(Self, IdentityKeyMaterial), CryptoError> {
         let rng = SystemRandom::new();
 
-        let mut identity_key = [0u8; KEY_LEN];
-        rng.fill(&mut identity_key)
+        let mut identity_key = Zeroizing::new([0u8; KEY_LEN]);
+        rng.fill(identity_key.as_mut())
             .map_err(|_| CryptoError::KeyGeneration("random fill failed".into()))?;
 
         let mut salt = [0u8; SALT_LEN];
@@ -61,9 +63,9 @@ impl IdentityCrypto {
             .map_err(|_| CryptoError::KeyGeneration("salt generation failed".into()))?;
 
         let wrapping_key = derive_wrapping_key(&salt)?;
-        let wrapped_key = wrap_key(&wrapping_key, &identity_key)?;
+        let wrapped_key = wrap_key(&wrapping_key, identity_key.as_ref())?;
 
-        let crypto = Self::from_raw_key(&identity_key)?;
+        let crypto = Self::from_raw_key(identity_key.as_ref())?;
 
         Ok((
             crypto,
@@ -78,7 +80,7 @@ impl IdentityCrypto {
     /// Returns `CryptoError` if unwrapping the stored key fails.
     pub fn from_stored(salt: &[u8], wrapped_key: &[u8]) -> Result<Self, CryptoError> {
         let wrapping_key = derive_wrapping_key(salt)?;
-        let identity_key = unwrap_key(&wrapping_key, wrapped_key)?;
+        let identity_key = Zeroizing::new(unwrap_key(&wrapping_key, wrapped_key)?);
         Self::from_raw_key(&identity_key)
     }
 
@@ -95,9 +97,31 @@ impl IdentityCrypto {
     }
 
     fn from_raw_key(key_bytes: &[u8]) -> Result<Self, CryptoError> {
-        let unbound = UnboundKey::new(&AES_256_GCM, key_bytes)
-            .map_err(|_| CryptoError::KeyGeneration("invalid key".into()))?;
-        let hmac_key = hmac::Key::new(hmac::HMAC_SHA256, key_bytes);
+        let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
+        let prk = salt.extract(key_bytes);
+
+        let mut enc_key = Zeroizing::new([0u8; KEY_LEN]);
+        let enc_okm = prk
+            .expand(&[b"aes-encryption"], hkdf::HKDF_SHA256)
+            .map_err(|_| {
+                CryptoError::KeyGeneration("HKDF expand for encryption key failed".into())
+            })?;
+        enc_okm.fill(enc_key.as_mut()).map_err(|_| {
+            CryptoError::KeyGeneration("HKDF fill for encryption key failed".into())
+        })?;
+
+        let mut hmac_bytes = Zeroizing::new([0u8; KEY_LEN]);
+        let hmac_okm = prk
+            .expand(&[b"hmac-blind-index"], hkdf::HKDF_SHA256)
+            .map_err(|_| CryptoError::KeyGeneration("HKDF expand for HMAC key failed".into()))?;
+        hmac_okm
+            .fill(hmac_bytes.as_mut())
+            .map_err(|_| CryptoError::KeyGeneration("HKDF fill for HMAC key failed".into()))?;
+
+        let unbound = UnboundKey::new(&AES_256_GCM, enc_key.as_ref())
+            .map_err(|_| CryptoError::KeyGeneration("invalid encryption key".into()))?;
+        let hmac_key = hmac::Key::new(hmac::HMAC_SHA256, hmac_bytes.as_ref());
+
         Ok(Self {
             key: LessSafeKey::new(unbound),
             hmac_key,
@@ -199,15 +223,15 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn derive_wrapping_key(salt: &[u8]) -> Result<LessSafeKey, CryptoError> {
     let iterations = NonZeroU32::new(PBKDF2_ITERATIONS)
         .ok_or_else(|| CryptoError::KeyGeneration("invalid iteration count".into()))?;
-    let mut key_bytes = [0u8; KEY_LEN];
+    let mut key_bytes = Zeroizing::new([0u8; KEY_LEN]);
     pbkdf2::derive(
         pbkdf2::PBKDF2_HMAC_SHA256,
         iterations,
         salt,
-        COMPILE_TIME_SEED,
-        &mut key_bytes,
+        KEY_DERIVATION_INFO,
+        key_bytes.as_mut(),
     );
-    let unbound = UnboundKey::new(&AES_256_GCM, &key_bytes)
+    let unbound = UnboundKey::new(&AES_256_GCM, key_bytes.as_ref())
         .map_err(|_| CryptoError::KeyGeneration("wrapping key creation failed".into()))?;
     Ok(LessSafeKey::new(unbound))
 }

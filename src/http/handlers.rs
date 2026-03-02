@@ -554,6 +554,7 @@ async fn persist_oauth_tokens(
     identity: &ProviderIdentity,
 ) {
     let mut token_data = json!({
+        "id": link_key,
         "canonical_id": canonical_id,
         "refresh_token": refresh_token,
         "email": identity.email,
@@ -568,10 +569,24 @@ async fn persist_oauth_tokens(
             &["refresh_token", "email", "name"],
         );
     }
-    let topic = format!("$DB/_oauth_tokens/{link_key}/update");
-    let payload = serde_json::to_vec(&token_data).unwrap_or_default();
-    if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
-        warn!(error = %e, "failed to store OAuth tokens");
+
+    let create_response =
+        create_entity_with_response(&state.mqtt_client, "_oauth_tokens", &token_data).await;
+    let created = create_response
+        .as_ref()
+        .and_then(|r| r.get("status"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "ok");
+
+    if !created {
+        if let Some(obj) = token_data.as_object_mut() {
+            obj.remove("id");
+        }
+        let topic = format!("$DB/_oauth_tokens/{link_key}/update");
+        let payload = serde_json::to_vec(&token_data).unwrap_or_default();
+        if let Err(e) = state.mqtt_client.publish(&topic, payload).await {
+            warn!(error = %e, "failed to store OAuth tokens");
+        }
     }
 }
 
@@ -1357,6 +1372,7 @@ pub async fn handle_vault_enable(
     };
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
+    state.vault_key_store.set(canonical_id, key_bytes);
 
     let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
 
@@ -1373,8 +1389,7 @@ pub async fn handle_vault_enable(
     )
     .await;
 
-    state.vault_key_store.set(canonical_id, key_bytes.clone());
-    state.session_store.set_vault_key(&session_id, key_bytes);
+    state.session_store.set_vault_unlocked(&session_id, true);
 
     let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1461,8 +1476,8 @@ pub async fn handle_vault_unlock(
         );
     }
 
-    state.vault_key_store.set(canonical_id, key_bytes.clone());
-    state.session_store.set_vault_key(&session_id, key_bytes);
+    state.vault_key_store.set(canonical_id, key_bytes);
+    state.session_store.set_vault_unlocked(&session_id, true);
 
     json_response_with_credentials(200, &json!({"status": "unlocked"}), cors)
 }
@@ -1476,7 +1491,7 @@ pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpRespon
     };
 
     state.vault_key_store.remove(&session.canonical_id);
-    state.session_store.clear_vault_key(session_id);
+    state.session_store.set_vault_unlocked(session_id, false);
 
     json_response_with_credentials(200, &json!({"status": "locked"}), cors)
 }
@@ -1556,6 +1571,7 @@ pub async fn handle_vault_disable(
     }
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
+    state.vault_key_store.remove(canonical_id);
 
     let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
 
@@ -1572,8 +1588,7 @@ pub async fn handle_vault_disable(
     )
     .await;
 
-    state.vault_key_store.remove(canonical_id);
-    state.session_store.clear_vault_key(&session_id);
+    state.session_store.set_vault_unlocked(&session_id, false);
 
     let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1680,6 +1695,7 @@ pub async fn handle_vault_change(
     };
 
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
+    state.vault_key_store.set(canonical_id, new_key_bytes);
 
     let batch = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
 
@@ -1695,12 +1711,7 @@ pub async fn handle_vault_change(
     )
     .await;
 
-    state
-        .vault_key_store
-        .set(canonical_id, new_key_bytes.clone());
-    state
-        .session_store
-        .set_vault_key(&session_id, new_key_bytes);
+    state.session_store.set_vault_unlocked(&session_id, true);
 
     let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1730,7 +1741,7 @@ pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> Ht
         false
     };
 
-    let unlocked = session.vault_key.is_some();
+    let unlocked = session.vault_unlocked;
 
     json_response_with_credentials(
         200,

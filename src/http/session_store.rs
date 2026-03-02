@@ -5,7 +5,6 @@ use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
-use zeroize::Zeroizing;
 
 const SESSION_ID_BYTES: usize = 32;
 const SESSION_TTL_SECS: u64 = 86400;
@@ -19,7 +18,7 @@ pub struct Session {
     pub name: Option<String>,
     pub picture: Option<String>,
     pub created_at: SystemTime,
-    pub vault_key: Option<Zeroizing<Vec<u8>>>,
+    pub vault_unlocked: bool,
 }
 
 pub struct SessionStore {
@@ -67,7 +66,7 @@ impl SessionStore {
             name,
             picture,
             created_at: SystemTime::now(),
-            vault_key: None,
+            vault_unlocked: false,
         };
 
         let mut sessions = self.sessions.write().ok()?;
@@ -93,7 +92,7 @@ impl SessionStore {
             email: session.email.clone(),
             name: session.name.clone(),
             picture: session.picture.clone(),
-            vault_key: session.vault_key.clone(),
+            vault_unlocked: session.vault_unlocked,
         })
     }
 
@@ -104,23 +103,12 @@ impl SessionStore {
         sessions.remove(session_id).is_some()
     }
 
-    pub fn set_vault_key(&self, session_id: &str, key: Vec<u8>) -> bool {
+    pub fn set_vault_unlocked(&self, session_id: &str, unlocked: bool) -> bool {
         let Ok(mut sessions) = self.sessions.write() else {
             return false;
         };
         if let Some(session) = sessions.get_mut(session_id) {
-            session.vault_key = Some(Zeroizing::new(key));
-            return true;
-        }
-        false
-    }
-
-    pub fn clear_vault_key(&self, session_id: &str) -> bool {
-        let Ok(mut sessions) = self.sessions.write() else {
-            return false;
-        };
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.vault_key = None;
+            session.vault_unlocked = unlocked;
             return true;
         }
         false
@@ -141,7 +129,7 @@ pub struct SessionRef {
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
-    pub vault_key: Option<Zeroizing<Vec<u8>>>,
+    pub vault_unlocked: bool,
 }
 
 const MAX_REVOKED_JTIS: usize = 10_000;
