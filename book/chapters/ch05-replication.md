@@ -22,16 +22,16 @@ The partition tells the receiver which partition's sequence counter this write b
 
 This maps to a 22-byte fixed wire header:
 
-| Bytes | Field | Type |
-|-------|-------|------|
-| 1 | version | u8 |
-| 2 | partition | u16 |
-| 1 | operation | u8 |
-| 4 | epoch | u32 |
-| 8 | sequence | u64 |
-| 1 | entity length | u8 |
-| 1 | id length | u8 |
-| 4 | data length | u32 |
+| Bytes | Field         | Type |
+| ----- | ------------- | ---- |
+| 1     | version       | u8   |
+| 2     | partition     | u16  |
+| 1     | operation     | u8   |
+| 4     | epoch         | u32  |
+| 8     | sequence      | u64  |
+| 1     | entity length | u8   |
+| 1     | id length     | u8   |
+| 4     | data length   | u32  |
 
 After the header come the entity string, id string, and data payload, with their lengths already encoded in the header. No delimiters, no escaping, no JSON parsing on the receiving end. A receiver reads 22 bytes, extracts the three lengths, and reads exactly that many more bytes.
 
@@ -175,11 +175,11 @@ The quorum tracker treats a `StaleEpoch` response as an immediate failure — if
 
 The acknowledgment protocol carries four statuses:
 
-| Status | Meaning |
-|--------|---------|
-| Ok | Write applied successfully |
-| StaleEpoch | Sender's epoch is behind the replica's |
-| NotReplica | This node is not a replica for this partition |
+| Status      | Meaning                                               |
+| ----------- | ----------------------------------------------------- |
+| Ok          | Write applied successfully                            |
+| StaleEpoch  | Sender's epoch is behind the replica's                |
+| NotReplica  | This node is not a replica for this partition         |
 | SequenceGap | Write is out of order; includes the expected sequence |
 
 Each status drives a different response from the sender. `Ok` counts toward quorum. `StaleEpoch` fails the quorum immediately. `NotReplica` counts as a failed node. `SequenceGap` triggers catchup.

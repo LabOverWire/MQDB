@@ -8,16 +8,16 @@ The entire database lives in a single sorted key-value store. Every piece of dat
 
 Eight prefixes create the full namespace:
 
-| Prefix | Purpose | Example |
-|--------|---------|---------|
-| `data/` | Entity records | `data/users/abc-123` |
-| `idx/` | Secondary indexes, unique constraint checks | `idx/users/email/alice@example.com/abc-123` |
-| `meta/` | Schemas, constraints, counters | `meta/schema/users`, `meta/seq:users` |
-| `sub/` | Subscriptions | `sub/sub-001` |
-| `_outbox/` | Pending change events | `_outbox/op-uuid` |
-| `dedup/` | Deduplication markers | `dedup/corr-id` |
-| `_dead_letter/` | Failed outbox entries | `_dead_letter/op-uuid` |
-| `_crypto/` | Encryption metadata | `_crypto/salt`, `_crypto/check` |
+| Prefix          | Purpose                                     | Example                                     |
+| --------------- | ------------------------------------------- | ------------------------------------------- |
+| `data/`         | Entity records                              | `data/users/abc-123`                        |
+| `idx/`          | Secondary indexes, unique constraint checks | `idx/users/email/alice@example.com/abc-123` |
+| `meta/`         | Schemas, constraints, counters              | `meta/schema/users`, `meta/seq:users`       |
+| `sub/`          | Subscriptions                               | `sub/sub-001`                               |
+| `_outbox/`      | Pending change events                       | `_outbox/op-uuid`                           |
+| `dedup/`        | Deduplication markers                       | `dedup/corr-id`                             |
+| `_dead_letter/` | Failed outbox entries                       | `_dead_letter/op-uuid`                      |
+| `_crypto/`      | Encryption metadata                         | `_crypto/salt`, `_crypto/check`             |
 
 The first six are visible to application logic. The last two are infrastructure: `_dead_letter/` holds outbox entries that exhausted their retries, and `_crypto/` stores the encryption salt and verification marker for the encrypted backend.
 
@@ -45,7 +45,7 @@ The separator is a single byte (`b'/'`), chosen because it never appears in enti
 
 ### Encoding Numbers in Keys
 
-The data keys shown above contain only strings — entity names and IDs — which sort correctly in byte order by default. But the prefix table listed another namespace: `idx/`, for secondary indexes. Section 2.5 covers indexes in full, but the key structure matters here because an index key embeds a field's *value* directly into the key:
+The data keys shown above contain only strings — entity names and IDs — which sort correctly in byte order by default. But the prefix table listed another namespace: `idx/`, for secondary indexes. Section 2.5 covers indexes in full, but the key structure matters here because an index key embeds a field's _value_ directly into the key:
 
 ```
 idx/{entity}/{field}/{encoded_value}/{id}
@@ -53,7 +53,7 @@ idx/{entity}/{field}/{encoded_value}/{id}
 
 A query like "find all users with age greater than 30" becomes a range scan starting at `idx/users/age/{encoded_30}/`. For this to work, the encoded value must sort in the same order as the original number. String values need no special treatment — `"alice"` sorts before `"bob"` in both human and byte order. Numbers are the problem.
 
-If the database stored the number 9 as the ASCII string `"9"` and 42 as `"42"`, then `"9"` would sort *after* `"42"` because `'9' > '4'` in ASCII. Negative numbers are worse — `-1` would sort after `-5` in text because `'1' > '5'` in the second character. Any range query over numeric fields would return garbage.
+If the database stored the number 9 as the ASCII string `"9"` and 42 as `"42"`, then `"9"` would sort _after_ `"42"` because `'9' > '4'` in ASCII. Negative numbers are worse — `-1` would sort after `-5` in text because `'1' > '5'` in the second character. Any range query over numeric fields would return garbage.
 
 The encoding solves both problems by working directly on the binary representation instead of text. For integers, it converts to big-endian bytes and flips the sign bit:
 
@@ -65,7 +65,7 @@ fn encode_i64_sortable(val: i64) -> [u8; 8] {
 }
 ```
 
-Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort *after* all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives now sort before positives in byte order. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
+Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort _after_ all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives now sort before positives in byte order. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
 
 Floats use the same sign-bit idea on IEEE 754 bits, but negative floats need all bits flipped because IEEE 754 reverses the magnitude ordering for negative values — a more negative float has a larger binary representation:
 

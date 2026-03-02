@@ -158,6 +158,7 @@ Not all data follows the partition-and-forward pattern. MQDB divides its entitie
 Most entities are partitioned. A record hashes to a partition, the partition has a primary, and writes go to that primary. This is the standard model described in the previous sections.
 
 Partitioned entities include:
+
 - **Sessions** — client connection state, partitioned by client ID
 - **Subscriptions** — topic subscriptions per client, partitioned by client ID
 - **Retained messages** — messages stored for future subscribers, partitioned by topic
@@ -174,6 +175,7 @@ When a message is published on Node 1, the broker must immediately determine whi
 The solution is to keep a complete copy of the subscriber map on every node. When a client on Node 2 subscribes to `sensors/temperature`, every node learns about it. When a message is published to `sensors/temperature` on Node 1, Node 1 looks up the subscribers in its local copy of the topic index, discovers that a client on Node 2 is subscribed, and forwards the message to Node 2. The lookup is local. The forwarding is a single network hop to a known destination.
 
 Broadcast entities include:
+
 - **Topic index** — maps exact topics to the set of subscribing clients and their connected nodes
 - **Wildcard store** — maps wildcard patterns (e.g., `sensors/+/temperature`) to subscribers
 - **Client locations** — maps client IDs to the node they are currently connected to

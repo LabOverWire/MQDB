@@ -75,11 +75,11 @@ Raft elections are tick-driven, not interrupt-driven. The Raft task calls `tick(
 
 Three timing constants control the protocol:
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| Election timeout | 3000-5000ms | How long a follower waits before starting an election (randomized per attempt) |
-| Heartbeat interval | 500ms | How often the leader sends `AppendEntries` to peers |
-| Startup grace period | 10000ms | How long a single node waits before self-electing |
+| Constant             | Value       | Purpose                                                                        |
+| -------------------- | ----------- | ------------------------------------------------------------------------------ |
+| Election timeout     | 3000-5000ms | How long a follower waits before starting an election (randomized per attempt) |
+| Heartbeat interval   | 500ms       | How often the leader sends `AppendEntries` to peers                            |
+| Startup grace period | 10000ms     | How long a single node waits before self-electing                              |
 
 The election timeout is randomized on each attempt: a linear congruential generator seeded from the node ID produces a value between 3000 and 5000 milliseconds. The wide range (2 seconds) and long minimum (3 seconds) reflect MQDB's operating environment. Unlike academic Raft implementations that use 150-300ms timeouts, MQDB runs over real networks with QUIC transport. A 3-second minimum means a brief network hiccup does not trigger an unnecessary election.
 
