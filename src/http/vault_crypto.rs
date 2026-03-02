@@ -48,7 +48,7 @@ impl VaultCrypto {
 
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn derive_with_raw_key(passphrase: &str, salt: &[u8]) -> (Self, Vec<u8>) {
+    pub fn derive_with_raw_key(passphrase: &str, salt: &[u8]) -> (Self, Zeroizing<Vec<u8>>) {
         let key_bytes = Self::derive_raw(passphrase, salt);
         let unbound = UnboundKey::new(&AES_256_GCM, key_bytes.as_ref())
             .expect("AES-256-GCM accepts 32-byte keys");
@@ -56,7 +56,7 @@ impl VaultCrypto {
             Self {
                 key: LessSafeKey::new(unbound),
             },
-            key_bytes.to_vec(),
+            Zeroizing::new(key_bytes.to_vec()),
         )
     }
 

@@ -32,9 +32,9 @@ impl VaultKeyStore {
         }
     }
 
-    pub fn set(&self, canonical_id: &str, key: Vec<u8>) {
+    pub fn set(&self, canonical_id: &str, key: Zeroizing<Vec<u8>>) {
         if let Ok(mut map) = self.keys.write() {
-            map.insert(canonical_id.to_string(), Zeroizing::new(key));
+            map.insert(canonical_id.to_string(), key);
         }
     }
 
@@ -91,7 +91,7 @@ mod tests {
     fn set_and_get_roundtrip() {
         let store = VaultKeyStore::new();
         let key = vec![1u8; 32];
-        store.set("user-1", key.clone());
+        store.set("user-1", Zeroizing::new(key.clone()));
         let retrieved = store.get("user-1").expect("key should exist");
         assert_eq!(&*retrieved, &key);
     }
@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn remove_clears_key() {
         let store = VaultKeyStore::new();
-        store.set("user-2", vec![2u8; 32]);
+        store.set("user-2", Zeroizing::new(vec![2u8; 32]));
         assert!(store.get("user-2").is_some());
         store.remove("user-2");
         assert!(store.get("user-2").is_none());

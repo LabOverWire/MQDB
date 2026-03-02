@@ -169,14 +169,6 @@ struct GoogleIdTokenPayload {
     email_verified: Option<bool>,
     name: Option<String>,
     picture: Option<String>,
-    #[serde(default)]
-    _iss: Option<String>,
-    #[serde(default)]
-    _aud: Option<String>,
-    #[serde(default)]
-    _exp: Option<u64>,
-    #[serde(default)]
-    _iat: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

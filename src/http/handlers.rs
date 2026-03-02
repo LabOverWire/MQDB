@@ -486,11 +486,18 @@ async fn update_identity_link(state: &ServerState, link_key: &str, identity: &Pr
     }
 }
 
+fn is_safe_filter_value(value: &str) -> bool {
+    !value.is_empty() && !value.contains([',', '<', '>', '=', '!', '~', '?'])
+}
+
 async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<String> {
     let filter = if let Some(ref crypto) = state.identity_crypto {
         let hash = crypto.blind_index("_identity_links", email);
         format!("email_hash={hash}")
     } else {
+        if !is_safe_filter_value(email) {
+            return None;
+        }
         format!("email={email}")
     };
     let client = &state.mqtt_client;
@@ -761,6 +768,24 @@ fn extract_identity_from_jwt(
             ))
         })?
         .to_string();
+    let valid_id = |s: &str| {
+        s.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+    };
+    if !valid_id(&provider) {
+        return Err(Box::new(json_response_with_credentials(
+            400,
+            &json!({"error": "invalid provider format"}),
+            cors,
+        )));
+    }
+    if !valid_id(&provider_sub) {
+        return Err(Box::new(json_response_with_credentials(
+            400,
+            &json!({"error": "invalid provider_sub format"}),
+            cors,
+        )));
+    }
     let link_key = format!("{provider}:{provider_sub}");
     Ok((canonical_id, provider, link_key))
 }
@@ -988,14 +1013,6 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
         );
     };
 
-    if provider == session.provider {
-        return json_response_with_credentials(
-            400,
-            &json!({"error": "cannot unlink current login provider — must keep at least one"}),
-            cors,
-        );
-    }
-
     let link_key = format!("{provider}:{provider_sub}");
 
     let link_record = read_entity(&state.mqtt_client, "_identity_links", &link_key).await;
@@ -1015,6 +1032,19 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
         return json_response_with_credentials(
             403,
             &json!({"error": "identity link belongs to another user"}),
+            cors,
+        );
+    }
+
+    let cid = &session.canonical_id;
+    let link_filter = format!("canonical_id={cid}");
+    let link_count = list_entities(&state.mqtt_client, "_identity_links", &link_filter)
+        .await
+        .map_or(0, |v| v.len());
+    if link_count < 2 {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "cannot unlink last remaining provider"}),
             cors,
         );
     }
