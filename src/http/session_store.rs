@@ -114,6 +114,17 @@ impl SessionStore {
         false
     }
 
+    pub fn set_vault_unlocked_by_canonical_id(&self, canonical_id: &str, unlocked: bool) {
+        let Ok(mut sessions) = self.sessions.write() else {
+            return;
+        };
+        for session in sessions.values_mut() {
+            if session.canonical_id == canonical_id {
+                session.vault_unlocked = unlocked;
+            }
+        }
+    }
+
     pub fn cleanup(&self) {
         if let Ok(mut sessions) = self.sessions.write() {
             cleanup_expired(&mut sessions);

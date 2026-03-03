@@ -40,6 +40,12 @@ fn escape_html(s: &str) -> String {
     result
 }
 
+fn is_valid_provider_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+}
+
 pub struct ServerState {
     pub provider_registry: ProviderRegistry,
     pub jwt_config: JwtSigningConfig,
@@ -403,7 +409,8 @@ async fn resolve_or_create_identity(
 
     let canonical_id = uuid_v4();
     if !create_identity(state, &canonical_id, identity).await {
-        if let Some(ref email) = identity.email
+        if identity.email_verified
+            && let Some(ref email) = identity.email
             && let Some(existing_cid) = find_canonical_id_by_email(state, email).await
         {
             create_identity_link(state, link_key, &existing_cid, identity).await;
@@ -768,18 +775,14 @@ fn extract_identity_from_jwt(
             ))
         })?
         .to_string();
-    let valid_id = |s: &str| {
-        s.chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
-    };
-    if !valid_id(&provider) {
+    if !is_valid_provider_id(&provider) {
         return Err(Box::new(json_response_with_credentials(
             400,
             &json!({"error": "invalid provider format"}),
             cors,
         )));
     }
-    if !valid_id(&provider_sub) {
+    if !is_valid_provider_id(&provider_sub) {
         return Err(Box::new(json_response_with_credentials(
             400,
             &json!({"error": "invalid provider_sub format"}),
@@ -1012,6 +1015,14 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
             cors,
         );
     };
+
+    if !is_valid_provider_id(provider) || !is_valid_provider_id(provider_sub) {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "invalid provider or provider_sub format"}),
+            cors,
+        );
+    }
 
     let link_key = format!("{provider}:{provider_sub}");
 
@@ -1348,7 +1359,7 @@ pub async fn handle_vault_enable(
 ) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let (session_id, session) = match require_session(state, headers) {
+    let (_, session) = match require_session(state, headers) {
         Ok((sid, s)) => (sid.to_string(), s),
         Err(resp) => return *resp,
     };
@@ -1419,7 +1430,9 @@ pub async fn handle_vault_enable(
     )
     .await;
 
-    state.session_store.set_vault_unlocked(&session_id, true);
+    state
+        .session_store
+        .set_vault_unlocked_by_canonical_id(canonical_id, true);
 
     let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1515,13 +1528,15 @@ pub async fn handle_vault_unlock(
 pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let (session_id, session) = match require_session(state, headers) {
+    let (_, session) = match require_session(state, headers) {
         Ok((sid, s)) => (sid, s),
         Err(resp) => return *resp,
     };
 
     state.vault_key_store.remove(&session.canonical_id);
-    state.session_store.set_vault_unlocked(session_id, false);
+    state
+        .session_store
+        .set_vault_unlocked_by_canonical_id(&session.canonical_id, false);
 
     json_response_with_credentials(200, &json!({"status": "locked"}), cors)
 }
@@ -1534,7 +1549,7 @@ pub async fn handle_vault_disable(
 ) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let (session_id, session) = match require_session(state, headers) {
+    let (_, session) = match require_session(state, headers) {
         Ok((sid, s)) => (sid.to_string(), s),
         Err(resp) => return *resp,
     };
@@ -1618,7 +1633,9 @@ pub async fn handle_vault_disable(
     )
     .await;
 
-    state.session_store.set_vault_unlocked(&session_id, false);
+    state
+        .session_store
+        .set_vault_unlocked_by_canonical_id(canonical_id, false);
 
     let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1636,7 +1653,7 @@ pub async fn handle_vault_change(
 ) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
-    let (session_id, session) = match require_session(state, headers) {
+    let (_, session) = match require_session(state, headers) {
         Ok((sid, s)) => (sid.to_string(), s),
         Err(resp) => return *resp,
     };
@@ -1741,7 +1758,9 @@ pub async fn handle_vault_change(
     )
     .await;
 
-    state.session_store.set_vault_unlocked(&session_id, true);
+    state
+        .session_store
+        .set_vault_unlocked_by_canonical_id(canonical_id, true);
 
     let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
