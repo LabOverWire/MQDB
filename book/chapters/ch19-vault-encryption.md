@@ -72,15 +72,21 @@ The vault has five operations, each represented as an HTTP endpoint. The lifecyc
 
 The batch encryption is the expensive part. For a user who owns 500 records across three entities, enable reads each record, encrypts its string fields, and writes it back as an update. This is why enable acquires an exclusive fence (described in Section 19.4) — concurrent reads during batch encryption would see a mix of encrypted and plaintext records.
 
+Every batch operation — enable, disable, and change — tracks its progress via a `vault_migration_status` field on the identity record. Before the batch begins, the status is set to `pending` with a `vault_migration_mode` indicating the operation type (`encrypt`, `decrypt`, or `re_encrypt`). When the batch completes, the status is set to `complete` and the mode is cleared. If the server crashes mid-batch, the next unlock detects the pending status and resumes the batch from the beginning. The read path's graceful fallback (skipping fields that fail decryption) ensures that re-running a partially completed batch is idempotent — already-encrypted fields decrypt-then-re-encrypt to the same ciphertext, and already-plaintext fields encrypt normally.
+
 **Lock** (`POST /vault/lock`): Removes the key from the in-memory key store. No data is modified — the records remain encrypted at rest. Subsequent MQTT reads return encrypted ciphertext because no key is available for decryption. Lock is instantaneous.
 
-**Unlock** (`POST /vault/unlock`): The user provides the passphrase. The server decodes the stored salt, derives the key, and verifies it against the check token. If verification succeeds, the key is stored in the in-memory key store. Reads return plaintext again. Unlock is rate-limited to 5 attempts per user to prevent brute-force passphrase guessing.
+**Unlock** (`POST /vault/unlock`): The user provides the passphrase. The server decodes the stored salt, derives the key, and verifies it against the check token. If verification succeeds, the server acquires the exclusive write fence *before* storing the key in the key store. This ordering matters: if the key were set before the fence, a concurrent MQTT operation could see the key, attempt decryption, and race against a pending migration resume. With the fence held, the key is set, any pending migration is resumed, and only then are MQTT operations unblocked. Unlock is rate-limited to 5 attempts per user to prevent brute-force passphrase guessing.
 
 **Disable** (`POST /vault/disable`): The reverse of enable. The user provides the passphrase for confirmation. The server verifies the passphrase, then batch-decrypts every owned record, writing plaintext back to storage. The salt, check token, and vault-enabled flag are cleared from the identity record. The key is removed from the in-memory key store.
 
 **Change passphrase** (`POST /vault/change`): Rotates the encryption key without a plaintext window. The user provides both the old and new passphrases. The server derives the old key, verifies it, generates a new salt, derives the new key, then re-encrypts every owned record: decrypt with the old key, encrypt with the new key, write back. The identity record is updated with the new salt and check token.
 
 Change is the most expensive operation — it requires reading, decrypting, re-encrypting, and writing every owned record. For a user with many records, this can take several seconds. The exclusive fence prevents concurrent MQTT operations during the re-encryption.
+
+Re-encryption introduces a crash recovery challenge that enable and disable do not face. If the server crashes mid-enable, the records are in a mixed state (some encrypted, some plaintext), but the key is the same for both passes — re-running the batch with the same key converges to the correct state. During a passphrase change, records are being migrated *between two different keys*. A crash leaves some records encrypted with the old key and some with the new. The server must know both keys to resume.
+
+The solution persists the old salt alongside the new salt on the identity record before beginning re-encryption. The migration mode is set to `re_encrypt`, and a `vault_old_salt` field stores the base64-encoded old salt. On the next unlock, the resume logic detects the `re_encrypt` mode, reads the old salt, derives the old crypto from the user's passphrase and the old salt, and calls the re-encryption batch with both old and new crypto objects. When re-encryption completes, the old salt is cleared.
 
 ## 19.4 In-Memory Key Management
 
@@ -185,15 +191,25 @@ The blind index reveals nothing about the plaintext (it is a keyed hash, not rev
 
 ## 19.7 What Went Wrong
 
-### Batch operations are not atomic
+### Re-encryption resume lost the old key
 
-The most significant known issue is crash recovery for batch vault operations. When a user enables the vault, the server iterates through every owned record, encrypts it, and writes it back. If the process crashes at record 50 of 100, fifty records are encrypted and fifty are plaintext. The identity record shows `vault_enabled: true` and has a valid check token.
+The first version of passphrase change had no crash recovery. The batch re-encryption iterated all records, decrypting with the old key and encrypting with the new. If the server crashed mid-batch, the identity record already had the new salt and check token (written before the batch started), but some records were still encrypted with the old key. On next unlock, the server derived the new key from the new salt. Records still encrypted with the old key could not be decrypted — the old salt was gone, and without it, the old key could not be re-derived.
 
-On the next unlock, the server derives the key and stores it in the key store. MQTT reads attempt to decrypt all fields. The fifty plaintext records fail decryption gracefully (the handler leaves them unchanged), so the user sees a mix: some records decrypted correctly, others showing plaintext that was never encrypted.
+The fix persists the old salt on the identity record before beginning re-encryption. The `vault_old_salt` field stores the base64-encoded salt from the previous passphrase, alongside a `vault_migration_mode` of `re_encrypt`. On the next unlock, the resume logic reads the old salt, derives the old crypto from the passphrase and old salt, and calls the re-encryption batch with both the old and new crypto objects. When re-encryption completes, the old salt is cleared.
 
-This is a data consistency problem, not a data loss problem — no records are destroyed, but the vault's promise ("all your data is encrypted") is violated. The read path's graceful fallback (leaving fields unchanged when decryption fails) masks the inconsistency rather than surfacing it.
+The same migration status mechanism handles enable and disable crashes: the `vault_migration_mode` is set to `encrypt` or `decrypt`, and the resume path re-runs the appropriate batch on the next unlock. But re-encryption is the only case where two keys are needed simultaneously, making the old salt persistence essential.
 
-*(Planned)* A `vault_migration_status` field on the identity record would track whether a batch completed successfully. On unlock, if the status is `pending`, the server would re-run the batch operation to encrypt the remaining plaintext records.
+### The fence-key ordering race
+
+The initial unlock implementation set the vault key in the store, then acquired the exclusive write fence. This created a window where a concurrent MQTT operation could see the newly-set key, attempt to decrypt a record, and race against a pending migration resume. If the migration had not yet re-encrypted that record (still under the old key), the MQTT handler's decryption attempt would fail, and the graceful fallback would return encrypted ciphertext to the client.
+
+The fix reorders the operations: acquire the fence first, then set the key. While the fence is held, no MQTT operation can proceed (they block on `read_fence`). The key is set, any pending migration is resumed to completion, and only when the fence is dropped do MQTT operations see a consistent state. The ordering is: fence → key → resume → release. This guarantees that by the time any MQTT handler sees the key, all records are encrypted under the current key.
+
+### Fire-and-forget constraint initialization
+
+The `_identities` entity needs a unique constraint on the email field (or its blind index) to prevent duplicate identity records from concurrent OAuth callbacks. The initial implementation published the constraint-add request to the MQTT admin topic and returned immediately, without waiting for confirmation. This meant the HTTP server could start accepting OAuth callbacks before the constraint was active — a race between the first login and constraint propagation.
+
+The fix uses the same subscribe-publish-wait pattern as other MQTT request-response operations: subscribe to a response topic, publish the constraint-add request with that response topic attached, and wait up to 5 seconds for confirmation. Both success and error responses are accepted (the constraint may already exist from a previous startup). The server only proceeds to accept HTTP requests after the constraint is confirmed or the timeout expires, with a warning logged on timeout.
 
 ### The update TOCTOU window
 
@@ -202,12 +218,6 @@ The vault pre-update path reads a record, decrypts it, merges the delta, re-encr
 The window is extremely narrow: it requires a vault disable (which acquires the exclusive fence) to interleave exactly between a single MQTT update's read and write phases. In practice, the fence serialization makes this nearly impossible — the batch would block subsequent MQTT operations via the read fence. But the theoretical possibility exists.
 
 *(Planned)* A vault generation counter on entity metadata would allow the write path to detect that the vault state changed between read and write, and retry with the current state.
-
-### Identity records lack schema constraints
-
-The `_identities` entity has no unique constraint on the email field. Two concurrent OAuth callbacks for the same email could both create an identity record, producing duplicate canonical IDs. The identity creation code does a read-then-create, but no reservation prevents the race. The existing unique constraint protocol (Chapter 15) could enforce uniqueness, but the internal entity schemas are not initialized at startup.
-
-*(Planned)* An initialization step at HTTP server startup would create schemas and unique constraints for internal entities, providing defense-in-depth beyond application-level guards.
 
 ## Lessons
 
@@ -221,6 +231,6 @@ The `_identities` entity has no unique constraint on the email field. Two concur
 
 ## What Comes Next
 
-*(This chapter will be expanded as the vault implementation matures. The planned additions include: crash recovery for batch operations, vault generation counters for TOCTOU prevention, automatic schema initialization for internal entities, and cluster-mode vault key synchronization.)*
+*(This chapter will be expanded as the vault implementation matures. The planned additions include: vault generation counters for TOCTOU prevention and cluster-mode vault key synchronization.)*
 
 Chapter 20 covers operating MQDB in production — deployment modes, cluster sizing, monitoring, backup, and the CLI tools that tie the system together.

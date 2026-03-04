@@ -35,7 +35,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 16 | Consumer Groups and Event Routing | Not started | | | |
 | 17 | Performance Analysis and Benchmarking | Not started | | | |
 | 18 | Access Control, Ownership, and Scopes | Not started | | | |
-| 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | | 3,514 |
+| 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | 2026-03-03 | 4,068 |
 | 20 | Operating MQDB | Not started | | | |
 | 21 | The WASM Frontier | Not started | | | |
 | A | Wire Protocol Reference | Not started | | | |
@@ -464,6 +464,17 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Marked planned work with *(planned)* tags throughout — matches user's request for placeholder that acknowledges incompleteness.
 - Did NOT include code — used tables, state diagrams, and narrative descriptions.
 - Forward reference to Chapter 20 (Operations) at the closing.
+
+### Session 15b — 2026-03-03
+
+**Work done:**
+- Updated Chapter 19 to reflect three vault fixes pushed by user (commit 341e6d5)
+- Rewrote "What Went Wrong" section: replaced three *(planned)* items with three bug narratives (re-encryption resume losing old key, fence-key ordering race, fire-and-forget constraint init) plus one remaining *(planned)* item (update TOCTOU)
+- Added migration status tracking description to Section 19.3 (vault lifecycle)
+- Added old salt persistence for re-encryption resume to Section 19.3 (change passphrase)
+- Updated unlock description in Section 19.3 to reflect fence-before-key ordering
+- Trimmed "What Comes Next" to reflect only remaining planned work
+- Word count: 3,514 → 4,068
 
 ### Memories for Future Sessions
 
