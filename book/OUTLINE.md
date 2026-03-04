@@ -9,9 +9,10 @@
 ## Positioning
 
 **Comparable titles:**
-- *Designing Data-Intensive Applications* (Kleppmann) — theory-heavy, no implementation
-- *Database Internals* (Petrov) — storage engines and distributed systems internals
-- *Programming Rust* (Blandy/Orendorff) — language-focused, not system design
+
+- _Designing Data-Intensive Applications_ (Kleppmann) — theory-heavy, no implementation
+- _Database Internals_ (Petrov) — storage engines and distributed systems internals
+- _Programming Rust_ (Blandy/Orendorff) — language-focused, not system design
 
 **Gap this book fills:** A concrete, implementation-driven distributed systems book. Readers follow the design and construction of a real system — MQDB — from empty directory to clustered deployment. Every chapter pairs a distributed systems concept with its actual implementation, including the bugs found and design decisions revised along the way.
 
@@ -20,6 +21,7 @@
 ## Target Audience
 
 Senior backend engineers and system designers who:
+
 - Have built services but not distributed infrastructure
 - Want to understand what happens inside systems like Kafka, CockroachDB, or etcd
 - Are interested in Rust for systems programming (but the concepts transcend language)
@@ -336,6 +338,7 @@ Readers can skip Parts IV-V on first reading. Parts I-III form the core narrativ
 ## Sample Chapter Suggestion
 
 **Chapter 7 (Transport Layer Evolution)** is the strongest candidate for a sample chapter:
+
 - Self-contained narrative arc (design → problem → measurement → redesign → validation)
 - Demonstrates the book's approach: real data driving real decisions
 - Includes code, architecture diagrams, performance tables, and bug stories
@@ -347,6 +350,7 @@ Readers can skip Parts IV-V on first reading. Parts I-III form the core narrativ
 ## Writing Approach
 
 Each chapter follows a consistent structure:
+
 1. **The Problem** — What challenge does this component solve?
 2. **Design Options** — What approaches were considered? (with tradeoff tables)
 3. **The Implementation** — How it actually works, with code excerpts and data structure diagrams

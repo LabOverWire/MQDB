@@ -6,6 +6,7 @@ mod handlers;
 mod tasks;
 
 use crate::Database;
+use crate::VaultKeyStore;
 use crate::auth_config::AuthSetupConfig;
 use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, RateLimitConfig};
 use std::collections::HashSet;
@@ -33,6 +34,7 @@ pub struct MqdbAgent {
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
     pub(super) ownership_config: Arc<crate::types::OwnershipConfig>,
     pub(super) scope_config: Arc<crate::types::ScopeConfig>,
+    pub(super) vault_key_store: Arc<VaultKeyStore>,
 }
 
 impl MqdbAgent {
@@ -56,6 +58,7 @@ impl MqdbAgent {
             http_config: std::sync::Mutex::new(None),
             ownership_config: Arc::new(crate::types::OwnershipConfig::default()),
             scope_config: Arc::new(crate::types::ScopeConfig::default()),
+            vault_key_store: Arc::new(VaultKeyStore::new()),
         }
     }
 
@@ -167,6 +170,16 @@ impl MqdbAgent {
     pub fn with_scope_config(mut self, config: crate::types::ScopeConfig) -> Self {
         self.scope_config = Arc::new(config);
         self
+    }
+
+    #[must_use]
+    pub fn ownership_config_arc(&self) -> Arc<crate::types::OwnershipConfig> {
+        Arc::clone(&self.ownership_config)
+    }
+
+    #[must_use]
+    pub fn vault_key_store_arc(&self) -> Arc<VaultKeyStore> {
+        Arc::clone(&self.vault_key_store)
     }
 
     #[must_use]

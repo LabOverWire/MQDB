@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mqdb::{Database, MqdbAgent};
@@ -70,7 +70,14 @@ pub(crate) async fn cmd_agent_start(
     }
 
     if let Some(http_bind) = args.oauth.http_bind {
-        let http_config = build_http_config(http_bind, &args.auth, &args.oauth)?;
+        let ownership_for_http = agent.ownership_config_arc();
+        let http_config = build_http_config(
+            http_bind,
+            &args.auth,
+            &args.oauth,
+            ownership_for_http,
+            &args.db_path,
+        )?;
         if !http_config.cookie_secure {
             tracing::warn!(
                 "session cookies will be sent without Secure flag — use --cookie-secure in production"
@@ -187,12 +194,9 @@ pub(crate) fn build_http_config(
     http_bind: SocketAddr,
     auth: &AuthArgs,
     oauth: &OAuthArgs,
+    ownership_config: std::sync::Arc<mqdb::OwnershipConfig>,
+    db_path: &Path,
 ) -> Result<mqdb::http::HttpServerConfig, Box<dyn std::error::Error>> {
-    let client_secret = match oauth.oauth_client_secret.as_ref() {
-        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
-        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
-    };
-
     let jwt_key_path = auth
         .jwt_key
         .as_ref()
@@ -232,6 +236,21 @@ pub(crate) fn build_http_config(
         String::from,
     );
 
+    let mut registry = mqdb::http::ProviderRegistry::new();
+
+    let google_secret = match oauth.oauth_client_secret.as_ref() {
+        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
+        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
+    };
+
+    registry.register(mqdb::http::Provider::Google(
+        mqdb::http::GoogleProvider::new(mqdb::http::ProviderConfig {
+            client_id: client_id.clone(),
+            client_secret: google_secret,
+            redirect_uri,
+        }),
+    ));
+
     let issuer = auth
         .jwt_issuer
         .clone()
@@ -241,13 +260,11 @@ pub(crate) fn build_http_config(
         .clone()
         .or_else(|| Some(client_id.clone()));
 
+    let identity_crypto = build_identity_crypto(oauth, db_path)?;
+
     Ok(mqdb::http::HttpServerConfig {
         bind_address: http_bind,
-        oauth_config: mqdb::http::OAuthConfig {
-            client_id,
-            client_secret,
-            redirect_uri,
-        },
+        provider_registry: registry,
         jwt_config: mqdb::http::JwtSigningConfig {
             algorithm: mqdb::http::JwtSigningAlgorithm::HS256,
             key_bytes: jwt_key_bytes,
@@ -261,5 +278,80 @@ pub(crate) fn build_http_config(
         cors_origin: oauth.cors_origin.clone(),
         ticket_rate_limit: oauth.ticket_rate_limit,
         trust_proxy: oauth.trust_proxy,
+        identity_crypto,
+        ownership_config,
+        vault_key_store: None,
     })
+}
+
+fn build_identity_crypto(
+    oauth: &OAuthArgs,
+    db_path: &Path,
+) -> Result<Option<mqdb::http::IdentityCrypto>, Box<dyn std::error::Error>> {
+    if cfg!(feature = "dev-insecure") {
+        let _ = oauth;
+        tracing::info!("dev-insecure: identity encryption disabled");
+        return Ok(None);
+    }
+    if let Some(ref key_path) = oauth.identity_key_file {
+        let key_bytes = std::fs::read(key_path).map_err(|e| {
+            format!(
+                "failed to read identity key file '{}': {e}",
+                key_path.display()
+            )
+        })?;
+        let crypto = mqdb::http::IdentityCrypto::from_external_key(&key_bytes)
+            .map_err(|e| format!("invalid identity key: {e}"))?;
+        tracing::info!("identity encryption enabled (external key)");
+        Ok(Some(crypto))
+    } else {
+        let stored_key_path = db_path.join(".identity_key");
+        if stored_key_path.exists() {
+            let data = std::fs::read(&stored_key_path).map_err(|e| {
+                format!(
+                    "failed to read stored identity key '{}': {e}",
+                    stored_key_path.display()
+                )
+            })?;
+            let (salt, wrapped_key) = deserialize_key_material(&data)?;
+            let crypto = mqdb::http::IdentityCrypto::from_stored(salt, wrapped_key)
+                .map_err(|e| format!("failed to load stored identity key: {e}"))?;
+            tracing::info!("identity encryption enabled (loaded stored key)");
+            Ok(Some(crypto))
+        } else {
+            let (crypto, material) = mqdb::http::IdentityCrypto::generate()
+                .map_err(|e| format!("identity key generation failed: {e}"))?;
+            let serialized = serialize_key_material(&material.salt, &material.wrapped_key);
+            std::fs::write(&stored_key_path, &serialized).map_err(|e| {
+                format!(
+                    "failed to persist identity key to '{}': {e}",
+                    stored_key_path.display()
+                )
+            })?;
+            tracing::info!("identity encryption enabled (generated and persisted key)");
+            Ok(Some(crypto))
+        }
+    }
+}
+
+fn serialize_key_material(salt: &[u8], wrapped_key: &[u8]) -> Vec<u8> {
+    let salt_len: u32 = salt.len().try_into().expect("salt length fits in u32");
+    let mut out = Vec::with_capacity(4 + salt.len() + wrapped_key.len());
+    out.extend_from_slice(&salt_len.to_le_bytes());
+    out.extend_from_slice(salt);
+    out.extend_from_slice(wrapped_key);
+    out
+}
+
+fn deserialize_key_material(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
+    if data.len() < 4 {
+        return Err("identity key file too short".into());
+    }
+    let salt_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if data.len() < 4 + salt_len {
+        return Err("identity key file truncated".into());
+    }
+    let salt = &data[4..4 + salt_len];
+    let wrapped_key = &data[4 + salt_len..];
+    Ok((salt, wrapped_key))
 }

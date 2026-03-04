@@ -3,14 +3,20 @@
 
 mod cookies;
 mod handlers;
+pub mod identity_crypto;
 mod jwt_signer;
-mod oauth;
 mod pkce;
+pub mod providers;
 mod rate_limiter;
 mod server;
 mod session_store;
+pub mod vault_crypto;
 
+pub use crate::vault_keys::VaultKeyStore;
+pub use identity_crypto::IdentityCrypto;
 pub use jwt_signer::{JwtSigningAlgorithm, JwtSigningConfig};
-pub use oauth::OAuthConfig;
+pub use providers::google::GoogleProvider;
+pub use providers::{Provider, ProviderConfig, ProviderRegistry};
 pub use server::{HttpServer, HttpServerConfig};
 pub use session_store::SessionStore;
+pub use vault_crypto::VaultCrypto;

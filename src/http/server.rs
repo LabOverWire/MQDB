@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::handlers::{self, ServerState};
+use super::identity_crypto::IdentityCrypto;
 use super::jwt_signer::JwtSigningConfig;
-use super::oauth::OAuthConfig;
 use super::pkce::PkceCache;
+use super::providers::ProviderRegistry;
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
+use crate::VaultKeyStore;
+use crate::types::OwnershipConfig;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -22,7 +25,7 @@ use tracing::{error, info};
 
 pub struct HttpServerConfig {
     pub bind_address: SocketAddr,
-    pub oauth_config: OAuthConfig,
+    pub provider_registry: ProviderRegistry,
     pub jwt_config: JwtSigningConfig,
     pub frontend_redirect_uri: Option<String>,
     pub ticket_expiry_secs: u64,
@@ -30,6 +33,9 @@ pub struct HttpServerConfig {
     pub cors_origin: Option<String>,
     pub ticket_rate_limit: u32,
     pub trust_proxy: bool,
+    pub identity_crypto: Option<IdentityCrypto>,
+    pub ownership_config: Arc<OwnershipConfig>,
+    pub vault_key_store: Option<Arc<VaultKeyStore>>,
 }
 
 pub struct HttpServer {
@@ -58,8 +64,12 @@ impl HttpServer {
         let listener = TcpListener::bind(self.config.bind_address).await?;
         info!(addr = %self.config.bind_address, "HTTP server listening");
 
+        let vault_key_store = self
+            .config
+            .vault_key_store
+            .unwrap_or_else(|| Arc::new(VaultKeyStore::new()));
         let state = Arc::new(ServerState {
-            oauth_config: self.config.oauth_config,
+            provider_registry: self.config.provider_registry,
             jwt_config: self.config.jwt_config,
             pkce_cache: Mutex::new(PkceCache::new()),
             mqtt_client: self.mqtt_client,
@@ -69,8 +79,12 @@ impl HttpServer {
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
+            vault_unlock_limiter: RateLimiter::new(5),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
+            identity_crypto: self.config.identity_crypto,
+            ownership_config: self.config.ownership_config,
+            vault_key_store,
         });
 
         loop {
@@ -135,14 +149,32 @@ async fn handle_request(
     let query = req.uri().query().unwrap_or("").to_string();
     let headers = req.headers().clone();
 
+    #[cfg(feature = "dev-insecure")]
+    if method == Method::OPTIONS && path == "/auth/dev-login" {
+        return Ok(handlers::handle_options_with_credentials(
+            state.cors_origin.as_deref(),
+        ));
+    }
+    #[cfg(feature = "dev-insecure")]
+    if method == Method::POST && path == "/auth/dev-login" {
+        let body = req
+            .collect()
+            .await
+            .map(http_body_util::Collected::to_bytes)
+            .unwrap_or_default();
+        return Ok(handlers::handle_dev_login(&state, &body).await);
+    }
+
     let response = match (&method, path.as_str()) {
         (
             &Method::OPTIONS,
-            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/oauth/refresh",
+            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/auth/unlink" | "/oauth/refresh"
+            | "/vault/enable" | "/vault/unlock" | "/vault/lock" | "/vault/disable"
+            | "/vault/change" | "/vault/status",
         ) => handlers::handle_options_with_credentials(state.cors_origin.as_deref()),
         (&Method::OPTIONS, _) => handlers::handle_options(),
         (&Method::GET, "/health") => handlers::handle_health(&state),
-        (&Method::GET, "/oauth/authorize") => handlers::handle_authorize(&state).await,
+        (&Method::GET, "/oauth/authorize") => handlers::handle_authorize(&state, &query).await,
         (&Method::GET, "/oauth/callback") => handlers::handle_callback(&state, &query).await,
         (&Method::POST, "/oauth/refresh") => {
             let body = req
@@ -158,6 +190,48 @@ async fn handle_request(
         }
         (&Method::POST, "/auth/logout") => handlers::handle_logout(&state, &headers),
         (&Method::GET, "/auth/session") => handlers::handle_session_status(&state, &headers),
+        (&Method::POST, "/auth/unlink") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_unlink(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/enable") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_enable(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/unlock") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_unlock(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/lock") => handlers::handle_vault_lock(&state, &headers),
+        (&Method::POST, "/vault/disable") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_disable(&state, &headers, &body).await
+        }
+        (&Method::POST, "/vault/change") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_vault_change(&state, &headers, &body).await
+        }
+        (&Method::GET, "/vault/status") => handlers::handle_vault_status(&state, &headers).await,
         _ => {
             let body = serde_json::json!({"error": "not found"});
             let body_bytes = serde_json::to_vec(&body).unwrap_or_default();

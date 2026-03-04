@@ -11,11 +11,14 @@ const SESSION_TTL_SECS: u64 = 86400;
 
 pub struct Session {
     pub jwt: String,
-    pub google_sub: String,
+    pub canonical_id: String,
+    pub provider: String,
+    pub provider_sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
     pub created_at: SystemTime,
+    pub vault_unlocked: bool,
 }
 
 pub struct SessionStore {
@@ -36,10 +39,13 @@ impl SessionStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create(
         &self,
         jwt: String,
-        google_sub: String,
+        canonical_id: String,
+        provider: String,
+        provider_sub: String,
         email: Option<String>,
         name: Option<String>,
         picture: Option<String>,
@@ -53,11 +59,14 @@ impl SessionStore {
         let session_id = hex_encode(&bytes);
         let session = Session {
             jwt,
-            google_sub,
+            canonical_id,
+            provider,
+            provider_sub,
             email,
             name,
             picture,
             created_at: SystemTime::now(),
+            vault_unlocked: false,
         };
 
         let mut sessions = self.sessions.write().ok()?;
@@ -77,10 +86,13 @@ impl SessionStore {
 
         Some(SessionRef {
             jwt: session.jwt.clone(),
-            google_sub: session.google_sub.clone(),
+            canonical_id: session.canonical_id.clone(),
+            provider: session.provider.clone(),
+            provider_sub: session.provider_sub.clone(),
             email: session.email.clone(),
             name: session.name.clone(),
             picture: session.picture.clone(),
+            vault_unlocked: session.vault_unlocked,
         })
     }
 
@@ -89,6 +101,28 @@ impl SessionStore {
             return false;
         };
         sessions.remove(session_id).is_some()
+    }
+
+    pub fn set_vault_unlocked(&self, session_id: &str, unlocked: bool) -> bool {
+        let Ok(mut sessions) = self.sessions.write() else {
+            return false;
+        };
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.vault_unlocked = unlocked;
+            return true;
+        }
+        false
+    }
+
+    pub fn set_vault_unlocked_by_canonical_id(&self, canonical_id: &str, unlocked: bool) {
+        let Ok(mut sessions) = self.sessions.write() else {
+            return;
+        };
+        for session in sessions.values_mut() {
+            if session.canonical_id == canonical_id {
+                session.vault_unlocked = unlocked;
+            }
+        }
     }
 
     pub fn cleanup(&self) {
@@ -100,10 +134,13 @@ impl SessionStore {
 
 pub struct SessionRef {
     pub jwt: String,
-    pub google_sub: String,
+    pub canonical_id: String,
+    pub provider: String,
+    pub provider_sub: String,
     pub email: Option<String>,
     pub name: Option<String>,
     pub picture: Option<String>,
+    pub vault_unlocked: bool,
 }
 
 const MAX_REVOKED_JTIS: usize = 10_000;
@@ -197,7 +234,9 @@ mod tests {
         let session_id = store
             .create(
                 "jwt123".into(),
-                "google123".into(),
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+                "google".into(),
+                "112233445566".into(),
                 Some("user@example.com".into()),
                 Some("Test User".into()),
                 None,
@@ -208,7 +247,9 @@ mod tests {
 
         let session = store.get(&session_id).expect("get should succeed");
         assert_eq!(session.jwt, "jwt123");
-        assert_eq!(session.google_sub, "google123");
+        assert_eq!(session.canonical_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(session.provider, "google");
+        assert_eq!(session.provider_sub, "112233445566");
         assert_eq!(session.email.as_deref(), Some("user@example.com"));
     }
 
@@ -216,7 +257,15 @@ mod tests {
     fn test_destroy_session() {
         let store = SessionStore::new();
         let session_id = store
-            .create("jwt".into(), "sub".into(), None, None, None)
+            .create(
+                "jwt".into(),
+                "canonical-1".into(),
+                "google".into(),
+                "sub-1".into(),
+                None,
+                None,
+                None,
+            )
             .expect("create should succeed");
 
         assert!(store.get(&session_id).is_some());

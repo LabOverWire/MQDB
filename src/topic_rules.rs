@@ -57,6 +57,14 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         pattern: "$DB/_oauth_tokens/#",
         tier: ProtectionTier::AdminRequired,
     },
+    TopicRule {
+        pattern: "$DB/_identities/#",
+        tier: ProtectionTier::AdminRequired,
+    },
+    TopicRule {
+        pattern: "$DB/_identity_links/#",
+        tier: ProtectionTier::AdminRequired,
+    },
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +331,30 @@ mod tests {
         );
         assert_eq!(
             check_topic_access("$DB/_oauth_tokens/abc123", true, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn check_access_identities_admin_required() {
+        assert_eq!(
+            check_topic_access("$DB/_identities/list", true, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_identities/create", true, true),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn check_access_identity_links_admin_required() {
+        assert_eq!(
+            check_topic_access("$DB/_identity_links/list", true, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_identity_links/google:123", true, true),
             Ok(())
         );
     }

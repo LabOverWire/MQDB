@@ -48,7 +48,7 @@ CDC eliminates dual writes. The database is the single source of truth, and even
 
 ### The Outbox Pattern
 
-The outbox pattern improves on CDC by making events explicit. The application writes both the business data and the event into the *same* database transaction:
+The outbox pattern improves on CDC by making events explicit. The application writes both the business data and the event into the _same_ database transaction:
 
 ```
 begin_transaction();
@@ -72,7 +72,7 @@ The outbox pattern doesn't eliminate the two-system problem. It manages it.
 
 Dual writes, CDC, and the outbox pattern all accept the same premise: storage and messaging are separate concerns served by separate systems, and the engineering challenge is to synchronize them.
 
-But what if the premise is wrong? What if a single system could store data *and* stream changes, atomically, with no relay, no connector, no synchronization gap?
+But what if the premise is wrong? What if a single system could store data _and_ stream changes, atomically, with no relay, no connector, no synchronization gap?
 
 This is the question MQDB tries to answer.
 
@@ -125,7 +125,7 @@ pub struct ReplicationWrite {
 
 The `entity` field is a plain string that distinguishes between different types of data. Database records use entity names like `"users"` or `"orders"`. MQTT state uses internal names like `"_sessions"`, `"_mqtt_subs"`, or `"_topic_index"`. The replication pipeline doesn't care about the distinction. It routes writes by partition, orders them by sequence, and delivers them to replicas.
 
-This unification means that when the database writes a record, the MQTT broker already knows about it — because the write flowed through the same event system that manages subscriptions. There is no separate CDC connector, no outbox table, no relay process. The write *is* the event.
+This unification means that when the database writes a record, the MQTT broker already knows about it — because the write flowed through the same event system that manages subscriptions. There is no separate CDC connector, no outbox table, no relay process. The write _is_ the event.
 
 ### Two Classes of Entities
 
@@ -159,14 +159,14 @@ MQTT 5.0 is not the lightweight protocol people remember from early IoT deployme
 
 MQDB maps database operations to MQTT topics under a reserved `$DB/` prefix:
 
-| Topic Pattern | Operation |
-|---|---|
-| `$DB/{entity}/create` | Create a record |
-| `$DB/{entity}/{id}` | Read a record |
-| `$DB/{entity}/{id}/update` | Update a record |
-| `$DB/{entity}/{id}/delete` | Delete a record |
-| `$DB/{entity}/list` | List records with filters |
-| `$DB/{entity}/events/#` | Subscribe to changes |
+| Topic Pattern              | Operation                 |
+| -------------------------- | ------------------------- |
+| `$DB/{entity}/create`      | Create a record           |
+| `$DB/{entity}/{id}`        | Read a record             |
+| `$DB/{entity}/{id}/update` | Update a record           |
+| `$DB/{entity}/{id}/delete` | Delete a record           |
+| `$DB/{entity}/list`        | List records with filters |
+| `$DB/{entity}/events/#`    | Subscribe to changes      |
 
 A client creating a user record publishes JSON to `$DB/users/create` with a response topic. The server creates the record, assigns an ID, and publishes the result (or an error) back to the response topic. This design means that any MQTT client — in any language, on any platform — can perform database operations without a custom driver. The `mosquitto_pub` and `mosquitto_sub` command-line tools work. MQTT client libraries for Python, JavaScript, Go, Java, C, and every other language work. The database API is the messaging API.
 
@@ -194,7 +194,7 @@ At its core, MQDB is a key-value database with a document model. Records are JSO
 
 What makes it reactive is that every write — create, update, delete — produces an observable event. Clients subscribe to entity changes using wildcard patterns (`users/#` catches all user changes, `+/123` catches changes to ID 123 across all entities). Subscriptions can be broadcast (all consumers receive all events), load-balanced (round-robin across a consumer group), or ordered (partition-sticky routing so events for the same key always reach the same consumer).
 
-The reactive core also includes an outbox with configurable retry logic and a dead letter queue. This ensures that events derived from writes survive crashes without a separate relay process — because events *are* writes.
+The reactive core also includes an outbox with configurable retry logic and a dead letter queue. This ensures that events derived from writes survive crashes without a separate relay process — because events _are_ writes.
 
 ### Layer 2: MQTT Broker
 
@@ -277,17 +277,17 @@ The tradeoff is that server-rendered UIs have no offline story, latency-dependen
 
 The landscape reveals a pattern. Every project picks a subset of the problem:
 
-| Project | What it flattens | What it misses |
-|---------|-----------------|----------------|
-| RethinkDB | Database-to-application push | Protocol, offline, IoT |
-| CouchDB/PouchDB | Sync, offline-first | Messaging, real-time push |
-| Meteor/DDP | Full reactive stack | Offline, IoT, performance at scale |
-| ElectricSQL | Postgres-to-client sync | Messaging, IoT, protocol ubiquity |
-| Zero | Backend-to-UI-thread | IoT, embedded, messaging |
-| Ditto | Device-to-device mesh | Web, server clusters, protocol standardization |
-| Phoenix LiveView | Frontend/backend boundary | Offline, IoT, client-side state |
-| SurrealDB | Multi-model + live queries | Protocol ubiquity, messaging |
-| Convex | Backend + reactive queries | IoT, embedded, protocol |
+| Project          | What it flattens             | What it misses                                 |
+| ---------------- | ---------------------------- | ---------------------------------------------- |
+| RethinkDB        | Database-to-application push | Protocol, offline, IoT                         |
+| CouchDB/PouchDB  | Sync, offline-first          | Messaging, real-time push                      |
+| Meteor/DDP       | Full reactive stack          | Offline, IoT, performance at scale             |
+| ElectricSQL      | Postgres-to-client sync      | Messaging, IoT, protocol ubiquity              |
+| Zero             | Backend-to-UI-thread         | IoT, embedded, messaging                       |
+| Ditto            | Device-to-device mesh        | Web, server clusters, protocol standardization |
+| Phoenix LiveView | Frontend/backend boundary    | Offline, IoT, client-side state                |
+| SurrealDB        | Multi-model + live queries   | Protocol ubiquity, messaging                   |
+| Convex           | Backend + reactive queries   | IoT, embedded, protocol                        |
 
 MQDB's position in this landscape comes from a single bet: MQTT as the unifying protocol. Every other project either invents a custom protocol (SurrealDB's RPC, Meteor's DDP, Ditto's mesh protocol) or bolts sync onto an existing database protocol (ElectricSQL and Zero extending Postgres). MQTT is already spoken by billions of devices, has mature client libraries in every language including embedded C, and its topic-based publish/subscribe maps naturally to both database subscriptions and message routing.
 

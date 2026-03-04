@@ -8,7 +8,7 @@ The narrative follows a pattern that recurs throughout distributed systems work:
 
 The starting point was obvious: MQDB already has a full MQTT broker. Why not use it for cluster communication?
 
-A bridge is an MQTT client connection from one node's broker to another's. Messages published on cluster topics (`_mqdb/cluster/#` for coordination, `_mqdb/repl/+/+` for replication, `_mqdb/forward/+` for forwarded publishes) are delivered to all nodes subscribed to those topics. Each node's transport creates two internal MQTT clients:
+A bridge is an MQTT client connection from one node's broker to another's. Messages published on cluster topics (`_mqdb/cluster/#` for coordination, `_mqdb/repl/+/+` for replication, `_mqdb/forward/+` for forwarded publishes) were delivered to all nodes subscribed to those topics. Each node's transport created two internal MQTT clients:
 
 ```rust
 struct MqttTransport {
@@ -18,63 +18,48 @@ struct MqttTransport {
 }
 ```
 
-Why two clients? The `client` subscribes to cluster topics and receives all inbound messages. If the same client also published forwarded messages, those messages would trigger its own subscription callbacks — a feedback loop. The `forward_client` publishes without subscribing, breaking the cycle.
+Why two clients? A single client with MQTT's `no_local` subscription option could suppress self-echo — that was never the concern. The two-client split was just as simple to set up and proved its value once multiple bridges entered the picture. When Node 1 bridged to Node 2 and Node 2 bridged to Node 3, a forwarded publish delivered locally on Node 2 re-entered the broker's publish pipeline and could propagate onward through the next bridge. Stopping this chain required the event handler to distinguish a message that had already been forwarded from a fresh client publish. The `forward_client`'s recognizable ID (`mqdb-forward-{node_id}`) provided exactly that marker — if the publisher matched the forwarding prefix, the handler skipped re-routing. A single bridge worked fine without this; multiple bridges made echo tracking unmanageable without an explicit identity check.
 
-The advantages of this approach were real. Zero new dependencies: the broker already handles connection management, message framing, and delivery guarantees. Topic-based routing: subscribe to `_mqdb/repl/+/+` for replication traffic, `_mqdb/cluster/heartbeat/+` for heartbeats. Built-in QoS: at-least-once for replication, at-most-once for heartbeats. Standard debugging tools: any MQTT client can subscribe to cluster topics and observe the traffic.
+The advantages of this approach were real. Zero new dependencies: the broker already handled connection management, message framing, and delivery guarantees. Topic-based routing: subscribing to `_mqdb/repl/+/+` captured replication traffic, `_mqdb/cluster/heartbeat/+` captured heartbeats. Built-in QoS: at-least-once for replication, at-most-once for heartbeats. Standard debugging tools: any MQTT client could subscribe to cluster topics and observe the traffic.
 
-On startup, the transport subscribes to five topic patterns that partition cluster traffic by purpose:
+On startup, the transport subscribed to five topic patterns that partitioned cluster traffic by purpose:
 
-| Topic Pattern | Purpose | QoS |
-|---------------|---------|-----|
-| `_mqdb/cluster/nodes/{node_id}` | Directed messages (Raft, queries) | At-least-once |
-| `_mqdb/cluster/broadcast` | Broadcast messages (partition updates) | At-least-once |
-| `_mqdb/cluster/heartbeat/+` | Heartbeats from all nodes | At-most-once |
-| `_mqdb/repl/+/+` | Replication writes (`p{partition}/seq{n}`) | At-least-once |
-| `_mqdb/forward/+` | Forwarded publishes (cross-node pub/sub) | At-least-once |
+| Topic Pattern                   | Purpose                                    | QoS           |
+| ------------------------------- | ------------------------------------------ | ------------- |
+| `_mqdb/cluster/nodes/{node_id}` | Directed messages (Raft, queries)          | At-least-once |
+| `_mqdb/cluster/broadcast`       | Broadcast messages (partition updates)     | At-least-once |
+| `_mqdb/cluster/heartbeat/+`     | Heartbeats from all nodes                  | At-most-once  |
+| `_mqdb/repl/+/+`                | Replication writes (`p{partition}/seq{n}`) | At-least-once |
+| `_mqdb/forward/+`               | Forwarded publishes (cross-node pub/sub)   | At-least-once |
 
-Each subscription registers a callback that deserializes the MQTT payload into a `ClusterMessage` and pushes it onto the shared inbox channel. The inbox is a bounded `flume` channel (capacity 16,384), the same channel type used by the QUIC transport. All five callbacks feed the same inbox, and the event loop drains it without knowing which subscription produced each message.
+Each subscription registered a callback that deserialized the MQTT payload into a `ClusterMessage` and pushed it onto the shared inbox channel. The inbox was a bounded `flume` channel, the same channel type later used by the QUIC transport. All five callbacks fed the same inbox, and the event loop drained it without knowing which subscription produced each message.
 
-The QoS mapping uses MQTT's delivery guarantees intentionally. Heartbeats use QoS 0 (at-most-once) because they are periodic and self-healing — a missed heartbeat will be replaced by the next one. Raft votes and replication writes also use QoS 0 because the Raft protocol handles retransmission at the application level. Most other messages use QoS 1 (at-least-once), including replication topic publishes and forwarded publishes, because loss would require complex recovery. The MQTT broker handles the PUBACK handshake transparently — the transport code specifies the QoS level and the broker ensures delivery.
+The QoS mapping used MQTT's delivery guarantees intentionally. Heartbeats used QoS 0 (at-most-once) because they are periodic and self-healing — a missed heartbeat is replaced by the next one. Raft votes and replication writes also used QoS 0 because the Raft protocol handles retransmission at the application level. Most other messages used QoS 1 (at-least-once), including replication topic publishes and forwarded publishes, because loss would require complex recovery. The MQTT broker handled the PUBACK handshake transparently — the transport code specified the QoS level and the broker ensured delivery.
 
 The transport code was thin. All it had to do was serialize a `ClusterMessage` into bytes, publish it to the right topic, and deserialize inbound messages from subscription callbacks. The broker handled everything else. This simplicity was the design's strength — and its weakness, as benchmarking would reveal.
 
 ## 7.2 Bridge Topology Options
 
-When node A bridges to node B, A opens an MQTT client connection to B's broker. The direction of message flow depends on the bridge configuration:
+When node A bridged to node B, A opened an MQTT client connection to B's broker. The direction of message flow depended on the bridge configuration:
 
-- **Out**: local publishes are forwarded to the remote broker.
-- **Both**: bidirectional — local publishes go to the remote, and the remote's publishes come back.
+- **Out**: local publishes were forwarded to the remote broker.
+- **Both**: bidirectional — local publishes went to the remote, and the remote's publishes came back.
 
-For a 3-node cluster, three topology options determine which nodes bridge to which:
+For a 3-node cluster, three topology options determined which nodes bridged to which:
 
-| Topology | Peer Configuration | Bridges per Node (N1, N2, N3) |
-|----------|-------------------|-------------------------------|
-| `partial` (default) | Each node bridges to lower-numbered nodes | 0, 1, 2 |
-| `upper` | Each node bridges to higher-numbered nodes | 2, 1, 0 |
-| `full` | Each node bridges to all others | 2, 2, 2 |
+| Topology            | Peer Configuration                         | Bridges per Node (N1, N2, N3) |
+| ------------------- | ------------------------------------------ | ----------------------------- |
+| `partial` (default) | Each node bridges to lower-numbered nodes  | 0, 1, 2                       |
+| `upper`             | Each node bridges to higher-numbered nodes | 2, 1, 0                       |
+| `full`              | Each node bridges to all others            | 2, 2, 2                       |
 
-The topology code computes peers for each node at startup:
+The topology code computed peers for each node at startup.
 
-```rust
-let peers: Vec<String> = match topology_name {
-    "full" => (1..=nodes)
-        .filter(|&n| n != node_id)
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-    "upper" => ((node_id + 1)..=nodes)
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-    _ => (1..node_id)  // partial: to lower-numbered nodes
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect(),
-};
-```
+Bridge direction interacted with topology in a non-obvious way. Asymmetric topologies (partial, upper) required `Both` direction because each bridge had to carry traffic in both directions — node 2's single bridge to node 1 had to forward 2→1 messages AND receive 1→2 messages. Full mesh topology used `Out` direction because the symmetric connections formed bidirectional pairs: node 1's out-bridge to node 2 plus node 2's out-bridge to node 1 covered both directions.
 
-Bridge direction interacts with topology in a non-obvious way. Asymmetric topologies (partial, upper) require `Both` direction because each bridge must carry traffic in both directions — node 2's single bridge to node 1 must forward 2→1 messages AND receive 1→2 messages. Full mesh topology uses `Out` direction because the symmetric connections form bidirectional pairs: node 1's out-bridge to node 2 plus node 2's out-bridge to node 1 covers both directions.
+Full mesh with `Both` direction was tested. The result: channel overflow within seconds, cluster unresponsive. The problem was message amplification. Node 1 published a heartbeat. Its bridge forwarded it to node 2. Node 2's bridge, configured for bidirectional forwarding, forwarded it to node 3. Node 3's bridge forwarded it back to node 1. The heartbeat circulated forever, multiplying with each cycle.
 
-Full mesh with `Both` direction was tested. The result: channel overflow within seconds, cluster unresponsive. The problem is message amplification. Node 1 publishes a heartbeat. Its bridge forwards it to node 2. Node 2's bridge, configured for bidirectional forwarding, forwards it to node 3. Node 3's bridge forwards it back to node 1. The heartbeat circulates forever, multiplying with each cycle.
-
-Bridge loop prevention addresses this for normal operation. Bridge clients use predictable IDs like `mqdb-node-1-to-node-2`. The broker's router detects this pattern and skips forwarding messages that originated from bridge clients to other bridges. Without this check, messages amplify exponentially even in asymmetric topologies:
+Bridge loop prevention addressed this for normal operation. Bridge clients used predictable IDs like `mqdb-node-1-to-node-2`. The broker's router detected this pattern and skipped forwarding messages that originated from bridge clients to other bridges. Without this check, messages would amplify exponentially even in asymmetric topologies:
 
 1. Node 1 publishes heartbeat
 2. Bridge delivers to Node 2 (as client `node-1-to-node-2`)
@@ -82,44 +67,44 @@ Bridge loop prevention addresses this for normal operation. Bridge clients use p
 4. Node 3's router forwards back to Node 1's bridge
 5. Infinite loop
 
-The loop prevention filter breaks this chain by recognizing bridge-origin messages and excluding them from further bridge forwarding. But this filter cannot save full mesh with `Both` direction — the symmetric bidirectional bridges create forwarding paths that the router's pattern matching cannot distinguish from legitimate new messages.
+The loop prevention filter broke this chain by recognizing bridge-origin messages and excluding them from further bridge forwarding. But this filter could not save full mesh with `Both` direction — the symmetric bidirectional bridges created forwarding paths that the router's pattern matching could not distinguish from legitimate new messages.
 
 ## 7.3 The Bridge Overhead Problem
 
-Benchmarking revealed a severe performance pattern: throughput correlated inversely with bridge count, not with being the Raft leader, not with partition ownership, but with the number of MQTT bridge connections on the node.
+Benchmarking revealed a severe performance pattern: throughput correlated inversely with bridge count — not with being the Raft leader, not with partition ownership, but with the number of MQTT bridge connections on the node.
 
 Async insert throughput by bridge count (MQTT transport, 3-node cluster):
 
-| Bridges | Insert ops/s | Get ops/s | Update ops/s |
-|---------|-------------|-----------|-------------|
-| 0 | 7,415–9,800 | 977–15,548 | 8,374–9,800 |
-| 1 | 792–1,872 | 1,252–1,262 | 560–792 |
-| 2 | 1,196–2,128 | 1,220–1,327 | 542–807 |
+| Bridges | Insert ops/s | Get ops/s   | Update ops/s |
+| ------- | ------------ | ----------- | ------------ |
+| 0       | 7,415–9,800  | 977–15,548  | 8,374–9,800  |
+| 1       | 792–1,872    | 1,252–1,262 | 560–792      |
+| 2       | 1,196–2,128  | 1,220–1,327 | 542–807      |
 
-Each bridge reduces throughput by 5-10x. The node with zero bridges performs 6-8x better than nodes with two bridges. In partial topology, node 1 (0 bridges) achieves 9,084 insert ops/s while node 2 (1 bridge) manages 1,414. In full mesh (every node has 2 bridges), the entire cluster drops to a mean of 1,690 insert ops/s.
+Each bridge reduced throughput by 5-10x. The node with zero bridges performed 6-8x better than nodes with two bridges. In partial topology, node 1 (0 bridges) achieved 9,084 insert ops/s while node 2 (1 bridge) managed 1,414. In full mesh (every node had 2 bridges), the entire cluster dropped to a mean of 1,690 insert ops/s.
 
-For updates, the penalty is even worse. Full mesh MQTT averages 569 update ops/s — the worst node manages only 542 ops/s. The update path involves a write plus replication acknowledgment, meaning cluster messages dominate even more than for simple inserts.
+For updates, the penalty was even worse. Full mesh MQTT averaged 569 update ops/s — the worst node managed only 542 ops/s. The update path involves a write plus replication acknowledgment, meaning cluster messages dominated even more than for simple inserts.
 
-The initial hypothesis was RwLock contention. Bridges hold the shared state lock while processing messages; DB operations wait for the same lock. More bridges means more lock holders, more waiting, lower throughput. Intuitive and wrong.
+The initial hypothesis was RwLock contention. Bridges held the shared state lock while processing messages; DB operations waited for the same lock. More bridges meant more lock holders, more waiting, lower throughput. Intuitive and wrong.
 
 Profiling with per-operation timing instrumentation produced this data:
 
-| Node | Bridges | Throughput | Avg Lock Wait | Avg Handle Time |
-|------|---------|-----------|---------------|-----------------|
-| Node 1 | 2 | 1,353 ops/s | 0.23 µs | 55.68 µs |
-| Node 2 | 1 | — | 1.24 µs | 57.17 µs |
-| Node 3 | 0 | 4,222 ops/s | 1.82 µs | 54.26 µs |
+| Node   | Bridges | Throughput  | Avg Lock Wait | Avg Handle Time |
+| ------ | ------- | ----------- | ------------- | --------------- |
+| Node 1 | 2       | 1,353 ops/s | 0.23 µs       | 55.68 µs        |
+| Node 2 | 1       | —           | 1.24 µs       | 57.17 µs        |
+| Node 3 | 0       | 4,222 ops/s | 1.82 µs       | 54.26 µs        |
 
-Node 3, the fastest node, has the **highest** lock wait time at 1.82 µs. Node 1, the slowest, has the lowest at 0.23 µs. If lock contention were the bottleneck, the relationship would be reversed. The hypothesis is disproven.
+Node 3, the fastest node, had the **highest** lock wait time at 1.82 µs. Node 1, the slowest, had the lowest at 0.23 µs. If lock contention had been the bottleneck, the relationship would have been reversed. The hypothesis was disproven.
 
 The actual differentiator is cluster message volume:
 
-| Node | Bridges | Cluster Messages Processed | DB Operations | Ratio |
-|------|---------|---------------------------|---------------|-------|
-| Node 1 | 2 | 42,685 | 23,076 | 1.85:1 |
-| Node 3 | 0 | 14,233 | 148,051 | 0.096:1 |
+| Node   | Bridges | Cluster Messages Processed | DB Operations | Ratio   |
+| ------ | ------- | -------------------------- | ------------- | ------- |
+| Node 1 | 2       | 42,685                     | 23,076        | 1.85:1  |
+| Node 3 | 0       | 14,233                     | 148,051       | 0.096:1 |
 
-Node 1 processes 3x more cluster messages and performs 6.4x fewer DB operations than Node 3. The CPU time explanation is straightforward: bridge callbacks invoke `route_message_local_only()`, which publishes to the local broker. The local broker's event loop, the cluster message processing loop, and client request handling all run on the same Tokio async runtime. Cluster traffic steals CPU cycles from database operations.
+Node 1 processed 3x more cluster messages and performed 6.4x fewer DB operations than Node 3. The CPU time explanation was straightforward: bridge callbacks invoked `route_message_local_only()`, which published to the local broker. The local broker's event loop, the cluster message processing loop, and client request handling all ran on the same Tokio async runtime. Cluster traffic stole CPU cycles from database operations.
 
 The message type distribution makes the imbalance concrete. Node 1 (the Raft leader with 2 bridges) processed 13,393 Write messages (replication to replicas), 23,094 Ack messages (acknowledgments from replicas), 3,618 heartbeats, and 1,216 Raft messages during the benchmark run. Node 3 (0 bridges) processed only 28 Write messages, 10,825 Acks, 1,465 heartbeats, and 1,426 Raft messages. The leader's bridge connections deliver a flood of acknowledgments and replication traffic that the bridge-free node never sees.
 
@@ -127,12 +112,12 @@ Queue depth measurements confirmed this diagnosis. Average queue depth across al
 
 The architecture at fault:
 
-```
-MQTT Bridge:  Node 1 → MQTT PUBLISH → Node 2 broker → event loop → inbox
-                                        ↑ competes with client DB traffic
+```mermaid
+flowchart LR
+    N1[Node 1] -->|MQTT PUBLISH| B["Node 2 broker\n⚠ competes with\nclient DB traffic"] --> EL[event loop] --> IN[inbox]
 ```
 
-Every cluster message arrives as an MQTT publish, enters the broker's message router, gets dispatched through subscription callbacks, and only then reaches the cluster inbox. The broker's event loop processes both cluster and client traffic in the same thread pool. More bridges mean more cluster traffic flowing through the shared broker, leaving less CPU for the operations users actually care about.
+Every cluster message arrived as an MQTT publish, entered the broker's message router, got dispatched through subscription callbacks, and only then reached the cluster inbox. The broker's event loop processed both cluster and client traffic in the same thread pool. More bridges meant more cluster traffic flowing through the shared broker, leaving less CPU for the operations users actually cared about.
 
 Four alternative hypotheses were evaluated and rejected based on the profiling data:
 
@@ -182,19 +167,28 @@ A `ClusterTransportKind` enum wraps both implementations:
 
 ```rust
 pub enum ClusterTransportKind {
-    Mqtt(MqttTransport),    // deprecated
+    Mqtt(MqttTransport),    // deprecated, but mentioned due to emotional attachment
     Quic(QuicDirectTransport),
 }
 ```
 
 This enum implements `ClusterTransport` by delegating to whichever variant is active. Every caller — the Raft coordinator, the replication pipeline, the heartbeat manager, the event loop — uses `ClusterTransport` methods. Swapping MQTT for QUIC required zero changes to any caller.
 
+## Intermission
+
+A lot of work was done with MQTT bridges as the cluster's main communication method. Too much work, really — the profiling data had been clear for weeks before I accepted what it meant. The reader is right to think I should have moved on sooner.
+
+The truth is, I got attached. I had spent weeks wrestling with bridge topologies, loop prevention, and echo suppression. I racked my brains trying every alternative — split the lock, batch messages, defer processing — anything to avoid admitting that the architecture itself was the problem. When QUIC finally entered the picture, I told myself it was exciting because I would get to play with streams. But the MQTT broker already ran on QUIC for client connections, so I was merely fooling myself with a new justification for a decision the data had already made.
+
+I'm glad we did it. QUIC is faster, more predictable, and made topology choice irrelevant. But the lesson that sticks is not about transport protocols — it's about recognizing when attachment to your own work prevents you from seeing what the work needs. Code is not the product. It's the vehicle. Sometimes the best thing you can do for a project is to let go of the part you built.
+
 ## 7.5 Direct QUIC Transport
 
 The replacement bypasses the MQTT broker entirely:
 
-```
-Direct QUIC:  Node 1 → QUIC stream → Node 2 listener → inbox (bypasses broker)
+```mermaid
+flowchart LR
+    N1[Node 1] -->|QUIC stream| L[Node 2 listener] -->|bypasses broker| IN[inbox]
 ```
 
 Each node runs a QUIC server on a dedicated cluster port, offset 100 from the MQTT bind port (e.g., MQTT on 1883, cluster on 1983). The offset is configurable but defaults to 100. This second endpoint serves only cluster traffic — heartbeats, Raft messages, replication writes, forwarded publishes. Client MQTT connections never touch it.
@@ -225,7 +219,7 @@ The connection lifecycle has three phases:
 
 **Binding.** `bind()` creates the QUIC endpoint and spawns an `acceptor_task()` that listens for incoming connections from peer nodes. When a peer connects, the acceptor reads a 2-byte node ID header from the incoming stream, registers the peer in the connection map, and spawns a `receiver_task()` for that connection.
 
-**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, which suffices for the message rates involved. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
+**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, as it provides extra freedom when when writing code. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
 
 **Messaging.** `send_to_peer()` serializes the message and writes it to the peer's send stream with length-prefixed framing:
 
@@ -238,15 +232,15 @@ The connection lifecycle has three phases:
 
 The receiver task reads the 4-byte length prefix, allocates a buffer of that size, reads the payload, and parses it into an `InboundMessage` using the same `ClusterMessage::decode_from_wire()` method that the MQTT transport uses. The binary protocol is identical between both transports — only the delivery mechanism differs.
 
-The receiver task pushes parsed messages into a bounded `flume` channel (capacity: 16,384 messages) and notifies the event loop via a `tokio::sync::Notify`. If the inbox is full, the message is dropped with a warning log that includes the message type — back-pressure rather than unbounded growth.
+The receiver task pushes parsed messages into a bounded `flume` channel and notifies the event loop via a `tokio::sync::Notify`. If the inbox is full, the message is dropped with a warning log that includes the message type — back-pressure rather than unbounded growth.
 
 Key constants from the implementation:
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `SEND_TIMEOUT_MS` | 5,000 ms | Per-write timeout for stream writes |
-| `INBOX_CHANNEL_CAPACITY` | 16,384 | Bounded inbox size |
-| `MAX_MESSAGE_SIZE` | 10 MB | Reject oversized messages on receive |
+| Constant                 | Value    | Purpose                              |
+| ------------------------ | -------- | ------------------------------------ |
+| `SEND_TIMEOUT_MS`        | 5,000 ms | Per-write timeout for stream writes  |
+| `INBOX_CHANNEL_CAPACITY` | 16,384   | Bounded inbox size                   |
+| `MAX_MESSAGE_SIZE`       | 10 MB    | Reject oversized messages on receive |
 
 The 5-second send timeout prevents a slow or disconnected peer from blocking the sender indefinitely. The length prefix is written first, then the payload, each with an independent timeout. If either write times out, the send fails with a `TransportError::SendFailed` and the caller (typically the broadcast loop) logs a warning and continues to the next peer.
 
@@ -256,70 +250,72 @@ Broadcasting iterates all peers sequentially, sending to each. A failure to reac
 
 Cluster nodes authenticate each other using mutual TLS. The QUIC protocol mandates TLS 1.3, so encryption is always present. The question is whether nodes verify each other's identity.
 
-Each node has two QUIC endpoints that share the same certificate files but serve different purposes:
+Each node exposes two QUIC endpoints on different ports, but both use the same certificate files (`--quic-cert` and `--quic-key`):
 
-| Endpoint | Port | Purpose | Authentication |
-|----------|------|---------|----------------|
-| MQTT broker QUIC listener | `--bind` port (e.g., 1883) | MQTT clients over QUIC | MQTT-level auth (password, SCRAM, JWT) |
-| Cluster transport | `--bind` + 100 (e.g., 1983) | Heartbeats, Raft, replication | mTLS (when `--quic-ca` provided) |
+| Endpoint                  | Port                        | Purpose                       | Authentication                         |
+| ------------------------- | --------------------------- | ----------------------------- | -------------------------------------- |
+| MQTT broker QUIC listener | `--bind` port (e.g., 1883)  | MQTT clients over QUIC        | MQTT-level auth (password, SCRAM, JWT) |
+| Cluster transport         | `--bind` + 100 (e.g., 1983) | Heartbeats, Raft, replication | mTLS (when `--quic-ca` provided)       |
+
+The two endpoints share cert files but differ in how they authenticate the other side. The MQTT broker listener relies on application-level authentication — clients prove their identity through MQTT username/password, SCRAM-SHA-256, or JWT tokens after the TLS handshake completes. It does not require or verify client certificates. The cluster transport, by contrast, authenticates at the TLS level itself.
 
 When `--quic-ca` is provided, mTLS is enabled on the cluster endpoint:
 
-- **Server side**: a `WebPkiClientVerifier` built from the CA certificate requires every connecting node to present a client certificate signed by that CA. Connections without valid client certificates are rejected at the TLS handshake.
+- **Server side**: a `WebPkiClientVerifier` built from the CA certificate requires every connecting node to present a client certificate signed by that CA. Connections without valid client certificates are rejected at the TLS handshake — before any application data is exchanged.
 - **Client side**: the connecting node presents its own `--quic-cert`/`--quic-key` as client identity via `with_client_auth_cert()`. The same certificate that identifies the node as a server also serves as its client identity.
 
-The same certificate serves both roles. It must carry both `serverAuth` and `clientAuth` Extended Key Usage (EKU) extensions. The project's `generate_test_certs.sh` script produces certificates with both EKUs for this dual-role usage.
+The certificate must carry both `serverAuth` and `clientAuth` Extended Key Usage (EKU) extensions for this dual role. The project's `generate_test_certs.sh` script produces certificates with both EKUs.
 
 When `--quic-ca` is omitted, the cluster transport falls back to one-way TLS: the server presents its certificate, the client verifies it, but the server does not verify the client. A warning is logged. This mode is acceptable for development (where all nodes run on localhost) but insufficient for production, where an unauthorized node could join the cluster and receive replicated data.
 
-Production deployments should use a dedicated CA for cluster certificates, separate from any CA used for external client TLS. This prevents an external client with a valid TLS certificate from being mistakenly accepted as a cluster peer.
+The security of the cluster endpoint depends entirely on who controls the CA specified in `--quic-ca`. Only certificates signed by that CA can pass the mTLS handshake. If the CA is a private one that the operator controls, only deliberately signed certificates can join the cluster. If it were a public CA (like Let's Encrypt), anyone with a certificate from that CA could potentially connect to the cluster port and receive replicated data. Production deployments should use a private CA dedicated to cluster operations.
 
 ## 7.7 Performance Results
 
 Async insert throughput by topology (3-node cluster):
 
-| Topology | Transport | N1 | N2 | N3 | Mean | Variance |
-|----------|-----------|------|------|------|------|----------|
-| Partial | MQTT | 9,084 | 1,414 | 0* | 3,499 | — |
-| Partial | QUIC | 8,472 | 8,457 | 8,531 | 8,487 | 1.009x |
-| Upper | MQTT | 2,128 | 1,872 | 7,415 | 3,805 | — |
-| Upper | QUIC | 8,664 | 8,525 | 8,480 | 8,556 | 1.022x |
-| Full | MQTT | 2,116 | 1,196 | 1,757 | 1,690 | — |
-| Full | QUIC | 8,579 | 8,621 | 8,354 | 8,518 | 1.032x |
+| Topology | Transport | N1    | N2    | N3    | Mean  | Variance |
+| -------- | --------- | ----- | ----- | ----- | ----- | -------- |
+| Partial  | MQTT      | 9,084 | 1,414 | 0\*   | 3,499 | —        |
+| Partial  | QUIC      | 8,472 | 8,457 | 8,531 | 8,487 | 1.009x   |
+| Upper    | MQTT      | 2,128 | 1,872 | 7,415 | 3,805 | —        |
+| Upper    | QUIC      | 8,664 | 8,525 | 8,480 | 8,556 | 1.022x   |
+| Full     | MQTT      | 2,116 | 1,196 | 1,757 | 1,690 | —        |
+| Full     | QUIC      | 8,579 | 8,621 | 8,354 | 8,518 | 1.032x   |
 
-*N3 Partial MQTT had connectivity issues
+\*N3 Partial MQTT had connectivity issues
 
 The data tells the story along two axes: absolute throughput and variance between nodes.
 
-**MQTT variance between nodes** ranges from moderate to extreme. In partial topology, node 1 (0 bridges) achieves 9,084 ops/s while node 2 (1 bridge) manages 1,414 — a 6.4x gap. For async updates, the worst case is full mesh: the fastest node achieves 584 ops/s and the slowest 542. The MQTT update variance across all topologies spans from 542 to 9,800 ops/s — an 18x spread.
+**MQTT variance between nodes** ranged from moderate to extreme. In partial topology, node 1 (0 bridges) achieved 9,084 ops/s while node 2 (1 bridge) managed 1,414 — a 6.4x gap. For async updates, the worst case was full mesh: the fastest node achieved 584 ops/s and the slowest 542. The MQTT update variance across all topologies spanned from 542 to 9,800 ops/s — an 18x spread.
 
 **QUIC variance between nodes** is negligible. The maximum spread is 1.032x (full mesh insert), meaning the fastest node in the cluster is only 3.2% faster than the slowest. Across all topologies and operation types, QUIC variance stays between 1.009x and 1.123x.
 
-The per-operation improvements for bridged nodes are dramatic:
+The per-operation improvements for bridged nodes were dramatic:
 
-| Operation | MQTT Range (all nodes) | QUIC Mean | Improvement for Bridged Nodes |
-|-----------|----------------------|-----------|-------------------------------|
-| Async Insert | 0–9,084 ops/s | ~8,500 ops/s | 4-6x |
-| Async Get | 977–15,548 ops/s | ~16,600 ops/s | 12-14x |
-| Async Update | 542–9,800 ops/s | ~9,300 ops/s | 16x (full mesh) |
+| Operation    | MQTT Range (all nodes) | QUIC Mean     | Improvement for Bridged Nodes |
+| ------------ | ---------------------- | ------------- | ----------------------------- |
+| Async Insert | 0–9,084 ops/s          | ~8,500 ops/s  | 4-6x                          |
+| Async Get    | 977–15,548 ops/s       | ~16,600 ops/s | 12-14x                        |
+| Async Update | 542–9,800 ops/s        | ~9,300 ops/s  | 16x (full mesh)               |
 
 The topology comparison at the mean level:
 
 | Topology | MQTT Mean | QUIC Mean | QUIC Advantage |
-|----------|-----------|-----------|----------------|
-| Partial | 3,499 | 8,487 | 2.4x |
-| Upper | 3,805 | 8,556 | 2.2x |
-| Full | 1,690 | 8,518 | 5.0x |
+| -------- | --------- | --------- | -------------- |
+| Partial  | 3,499     | 8,487     | 2.4x           |
+| Upper    | 3,805     | 8,556     | 2.2x           |
+| Full     | 1,690     | 8,518     | 5.0x           |
 
-QUIC's advantage increases with mesh density because MQTT bridge overhead compounds. In partial topology (1.3 bridges per node on average), QUIC is 2.4x faster. In full mesh (2 bridges per node), QUIC is 5x faster. The pattern holds across operation types — for gets, QUIC achieves a uniform ~16,500 ops/s while MQTT bridged nodes drop to 1,200-1,300; for updates, QUIC maintains ~9,300 ops/s while MQTT full mesh collapses to 569.
+QUIC's advantage increased with mesh density because MQTT bridge overhead compounded. In partial topology (1.3 bridges per node on average), QUIC was 2.4x faster. In full mesh (2 bridges per node), QUIC was 5x faster. The pattern held across operation types — for gets, QUIC achieved a uniform ~16,500 ops/s while MQTT bridged nodes dropped to 1,200-1,300; for updates, QUIC maintained ~9,300 ops/s while MQTT full mesh collapsed to 569.
 
-The most consequential result is that topology choice becomes irrelevant with QUIC. Partial, upper, and full mesh all achieve essentially identical throughput (~8,500 insert ops/s mean). Full mesh is now viable — it was unusable with MQTT bridges because the bridge overhead triggered Raft election flapping (Issue 11.16). With two bridges consuming CPU on every node, heartbeat processing slowed enough to trigger election timeouts, causing the leader to cycle between nodes in a continuous loop. The cluster never stabilized long enough to serve client traffic reliably. With QUIC, the same full mesh topology achieves 8,518 insert ops/s — indistinguishable from partial mesh at 8,487.
+The most consequential result is that topology choice becomes irrelevant with QUIC. Partial, upper, and full mesh all achieve essentially identical throughput (~8,500 insert ops/s mean). Full mesh is now viable — it was unusable with MQTT bridges because the bridge overhead triggered Raft election flapping. With two bridges consuming CPU on every node, heartbeat processing slowed enough to trigger election timeouts, causing the leader to cycle between nodes in a continuous loop. The cluster never stabilized long enough to serve client traffic reliably. With QUIC, the same full mesh topology achieves 8,518 insert ops/s — indistinguishable from partial mesh at 8,487.
 
 The uniformity is the real achievement. In a distributed database, unpredictable per-node performance makes capacity planning impossible. If node 2 serves 1,414 ops/s while node 1 serves 9,084, the cluster's effective throughput is constrained by the slowest node that clients happen to connect to. With QUIC, every node in the cluster delivers the same throughput regardless of its position in the topology. A load balancer that distributes connections randomly will achieve aggregate throughput proportional to node count, which is the baseline expectation for horizontal scaling.
 
 ## 7.8 What Went Wrong: The Fire-and-Forget Bug
 
-Issue 11.7. When starting a node with multiple `--peers`, connections failed with "Invalid packet type: 0" errors. Nodes configured with a single peer worked fine.
+When starting a node with multiple `--peers`, connections failed with "Invalid packet type: 0" errors. Nodes configured with a single peer worked fine.
 
 The original transport code used `tokio::spawn()` to fire-and-forget transport operations. When the node needed to connect to peers and begin sending messages, each operation was spawned as an independent task:
 
@@ -343,7 +339,7 @@ transport.send(peer_id, message).await?;
 
 No more background spawning for send operations. The caller controls the execution, and sequential sends to different peers are naturally serialized. The RPITIT approach means these async methods return `impl Future` without heap allocation — no `Box<dyn Future>`, no trait object overhead. The ergonomics improved alongside the correctness fix.
 
-The lesson generalizes beyond MQTT. Fire-and-forget `spawn()` for I/O operations on shared resources (connections, file handles, channels) creates implicit concurrency that the resource may not tolerate. An MQTT client, like a TCP connection, expects sequential writes. Spawning concurrent tasks that write to the same client violates that expectation. The RPITIT refactor made the sequencing explicit by keeping send operations in the caller's async context instead of detaching them into the runtime's task pool.
+The lesson generalizes beyond MQTT. Fire-and-forget `spawn()` for I/O operations on shared resources (connections, file handles, channels) creates implicit concurrency that the resource may not tolerate. An MQTT client, like a TCP connection, expects sequential writes. Spawning concurrent tasks that write to the same client violates that expectation. The refactor made the sequencing explicit by keeping send operations in the caller's async context instead of detaching them into the runtime's task pool.
 
 This bug also motivated the per-peer `tokio::sync::Mutex<SendStream>` in the QUIC transport design. Even though callers now `await` send operations sequentially, the mutex provides defense in depth — if two different parts of the system happen to send to the same peer concurrently (for example, a heartbeat broadcast overlapping with a directed Raft response), the mutex serializes the writes at the stream level. The cost is negligible: the mutex is uncontended in the common case, and the protection against stream corruption is worth the occasional nanosecond of synchronization overhead.
 

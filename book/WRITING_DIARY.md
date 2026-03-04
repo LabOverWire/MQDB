@@ -7,8 +7,8 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | Part | Chapters | Pages (est.) | Status |
 |------|----------|-------------|--------|
 | I: The Design Thesis | 1-3 | ~70 | Complete |
-| II: Distributing the System | 4-9 | ~150 | In progress |
-| III: Cluster Lifecycle | 10-14 | ~100 | Not started |
+| II: Distributing the System | 4-9 | ~150 | Complete |
+| III: Cluster Lifecycle | 10-14 | ~100 | In progress |
 | IV: Advanced Patterns | 15-18 | ~80 | Not started |
 | V: Operating and Extending | 19-20 | ~50 | Not started |
 | Appendices | A-D | ~30 | Not started |
@@ -24,10 +24,10 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 5 | Replication | First draft | 2026-02-21 | | 3,899 |
 | 6 | Consensus with Raft | First draft | 2026-02-23 | | 4,213 |
 | 7 | Transport Layer Evolution | First draft | 2026-02-25 | | 4,474 |
-| 8 | Cross-Node Pub/Sub Routing | Not started | | | |
-| 9 | Query Coordination | Not started | | | |
-| 10 | Failure Detection and Recovery | Not started | | | |
-| 11 | Rebalancing | Not started | | | |
+| 8 | Cross-Node Pub/Sub Routing | First draft | 2026-03-01 | | 4,351 |
+| 9 | Query Coordination | First draft | 2026-03-01 | | 3,369 |
+| 10 | Failure Detection and Recovery | First draft | 2026-03-01 | | 3,568 |
+| 11 | Rebalancing | First draft | 2026-03-03 | | 5,048 |
 | 12 | Session Management | Not started | | | |
 | 13 | The Message Processor Pipeline | Not started | | | |
 | 14 | The Wire Protocol | Not started | | | |
@@ -235,6 +235,10 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - When writing about architecture with multiple interacting components (internal clients, auth providers, topic protection), the "why not the simpler approach?" question generates the most insight — explaining why separate topic prefixes were rejected is more instructive than just describing the chosen design
 - Count enum variants and match arms carefully — discrepancies between the code and the prose are easy to introduce when summarizing (AdminOperation has 25 variants total, not "22" as the plan estimated)
 - Always verify prefix/namespace counts against actual code constants, not session notes — Session 5 expanded to "9 prefixes" including `fkref/`, but `fkref/` was never implemented. The code has 8 prefixes.
+- When multiple bugs share the same root cause pattern, combine them into a single narrative section — 11.9 and 11.14 are structurally identical (time-blind dedup) and telling them together strengthens the lesson. Telling them separately would be repetitive.
+- Minimize code in the book when abstract representations (flow diagrams, field tables, trie ASCII art) can convey the same information — code is a testament to openness, not a tutorial. Use it sparingly and purposefully.
+- Documentation (DISTRIBUTED_DESIGN.md) can describe the dedup cache as "LRU" when it's actually FIFO (HashSet+VecDeque). Always verify implementation details against the code, not just the docs.
+- When a chapter covers multiple interacting components (three broadcast stores + router + dedup), organize by concern (subscribe flow, publish flow, protocol) rather than by file — readers follow the data flow, not the module structure.
 
 ### Session 8 — 2026-02-21
 
@@ -301,6 +305,138 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Did NOT include detailed `InboundMessage::parse_from_payload` implementation — the wire format diagram suffices.
 - Did NOT include the `build_server_config` / `build_client_config_secure` implementations — the description of mTLS behavior is sufficient without showing the rustls API calls.
 - Forward reference to Chapter 8 (Cross-Node Pub/Sub) at the closing.
+
+### Session 11 — 2026-03-01
+
+**Work done:**
+- Wrote Chapter 8 first draft (`ch08-cross-node-pubsub.md`, 4,351 words)
+- Sections: The Routing Problem, Three Broadcast Stores, The Subscribe Flow, Wildcard Routing, The Publish Routing Flow, The Forwarded Publish Protocol, What Went Wrong (3 sections: ClientLocationStore, time-blind dedup, missing broadcast), Lessons
+- Read all primary source files before writing: `topic_index.rs` (TopicIndex HashMap, SubscriberLocation, TopicIndexEntry, subscribe/unsubscribe_with_data, apply_replicated), `topic_trie.rs` (TrieNode with literal/+/# edges, match_recursive algorithm, $-topic protection, WildcardSubscriber), `publish_router.rs` (PublishRouter, route_targets, route_with_wildcards, effective_qos, RoutingTarget, PublishRouteResult), `client_location.rs` (ClientLocationEntry with version 2 timestamp, ClientLocationStore HashMap<String,NodeId>), `wildcard_store.rs` (WildcardStore wrapping TopicTrie with RwLock, match_topic converting WildcardSubscriber→SubscriberLocation), `event_handler/routing.rs` (route_and_forward_publish, resolve_connected_node two-tier lookup, handle_topic_subscribe, handle_wildcard_subscribe, resp/ topic filtering), `event_handler/broker_events.rs` (on_client_subscribe, on_client_publish, on_client_connect/disconnect, internal client filtering), `protocol/broadcast.rs` (WildcardBroadcast type 60, TopicSubscriptionBroadcast type 61, both version 2 with timestamp_ms), `protocol/publish.rs` (ForwardedPublish version 2 wire format, ForwardTarget), `protocol/types.rs` (MessageType enum, ForwardedPublish=30), `transport.rs` (ClusterMessage variants for broadcast types 60/61), `message_processor.rs` (FORWARD_DEDUP_CAPACITY=1000, forward_fingerprint hashing origin+timestamp+topic+payload, HashSet+VecDeque FIFO eviction)
+- Verified message type codes: ForwardedPublish=30, WildcardBroadcast=60, TopicSubscriptionBroadcast=61
+- Verified both broadcast structs use version 2 with timestamp_ms field
+- Verified dedup fingerprint hashes 4 fields: origin_node, timestamp_ms, topic, payload (NOT qos, retain, targets)
+- Verified dedup cache is HashSet<u64> + VecDeque<u64> with FIFO eviction, capacity 1000 — not a true LRU
+- Verified response topic detection: `topic.starts_with("resp/") || topic.contains("/resp/")`
+- Verified internal client filter: `client_id.starts_with("mqdb-")` and forward client filter: `client_id.starts_with("mqdb-forward-")`
+- Verified $-topic protection in trie: `match_topic` returns empty vec for topics starting with '$'
+- Cross-referenced all four bugs (11.8, 11.9, 11.11, 11.14) against DISTRIBUTED_DESIGN.md and HISTORICAL_SESSIONS.md
+
+**Key decisions:**
+- 4,351 words, consistent with Ch5 (3,899), Ch6 (4,213), Ch7 (4,474). Chapter has substantial tables and diagrams that carry narrative weight beyond word count.
+- Minimized code usage per user guidance — used flow diagrams, tables, and trie ASCII art instead of code blocks. Only one code block (the subscribe flow diagram) uses pseudo-structure rather than actual Rust.
+- Three "What Went Wrong" sections: 11.8 (missing ClientLocationStore), 11.9+11.14 (combined as "time-blind dedup"), 11.11 (missing broadcast for exact topics). Combined 11.9 and 11.14 because they share the identical root cause and fix pattern.
+- Included the trie data structure explanation with ASCII visualization — readers need to understand how wildcard matching avoids full table scans.
+- Included the response topic (`resp/`) optimization — shows pragmatic engineering (not broadcasting ephemeral subscriptions).
+- Included the subscription cost comparison table (exact vs wildcard) — quantifies the broadcast overhead difference.
+- Did NOT include actual Rust code from the source files — used abstract representations (tables, diagrams, field lists) per user guidance.
+- Did NOT include the WildcardEntry or TopicIndexEntry binary serialization details — covered sufficiently by the field tables.
+- Did NOT include the snapshot export/import mechanisms — those belong in Chapter 10 (Failure Detection and Recovery).
+- Forward reference to Chapter 9 (Query Coordination) at the closing.
+- Chapter picks up directly from Chapter 7's closing paragraph about TopicIndex and ClientLocationStore.
+
+**Verification notes:**
+- The subscribe flow diagram accurately reflects the code paths in broker_events.rs and routing.rs
+- The ForwardedPublish wire format table matches protocol/publish.rs:to_bytes() exactly
+- The dedup description matches message_processor.rs (HashSet+VecDeque FIFO, not LRU as some docs incorrectly state)
+- The three propagation mechanisms table matches DISTRIBUTED_DESIGN.md A1.3
+
+### Session 12 — 2026-03-01
+
+**Work done:**
+- Wrote Chapter 9 first draft (`ch09-query-coordination.md`, 3,369 words)
+- Sections: The Scatter-Gather Pattern (with Two Query Paths), Partition Pruning, Merge and Sort, Field Projection, Pagination, Retained Message Queries, Three Layers of Retained Dedup, What Went Wrong (naive fan-out), Lessons
+- Read all primary source files before writing: `query_coordinator.rs` (QueryCoordinator with start_query, receive_response, check_timeouts, prune_partitions, build_result), `cursor.rs` (PartitionCursor with partition/sequence/last_key, ScatterCursor with Vec<PartitionCursor>, binary encoding), `protocol/query.rs` (QueryRequest type 50, QueryResponse type 51, BatchReadRequest type 52, BatchReadResponse type 53), `node_controller/query.rs` (handle_query_request, start_scatter_list_query, handle_scatter_list_response, sort_scatter_results, apply_list_projection), `node_controller/retained.rs` (start_async_retained_query, start_async_retained_wildcard_query with queried_nodes HashSet, sync_retained_to_broker with TTL cache), `db_handler/helpers.rs` (parse_projection, validate_projection_against_schema), `db_handler/json_ops.rs` (list handler with filter/projection), `database/query.rs` (project_fields, validate_list_fields, list_core with pagination), `event_handler/broker_events.rs:249` (wildcard retained query call site), `db/partition.rs` (data_partition and topic_partition hash functions), `store_manager/query.rs` (query_entity dispatching), `node_controller/mod.rs` (PendingScatterRequest struct, handle_query_response_received)
+- Verified partition hash is `CRC32(entity + "/" + id) % 256`
+- Verified binary vs JSON path split: QueryCoordinator for internal entities, PendingScatterRequest for JSON DB
+- Verified merge pipeline order: dedup (HashSet<String> by ID) → filter → sort (multi-field, coordinator-side) → truncate → project
+- Verified PartitionCursor binary encoding: 12 bytes + key length; ScatterCursor: 2 bytes (count) + sum of partition cursors
+- Verified three retained dedup layers: per-node query dedup (HashSet<NodeId>), local store filtering, TTL-based write filtering (5-second cache)
+- Discovered DISTRIBUTED_DESIGN.md line 339 incorrectly claims wildcard retained queries are NOT implemented — code at broker_events.rs:249 confirms they ARE implemented
+
+**Key decisions:**
+- 3,369 words, the shortest chapter so far (Ch1: 3,522, Ch5: 3,899). The chapter is table-heavy and diagram-driven; tables carry significant narrative weight that word count undercounts.
+- Included the two query paths (binary vs JSON) as a subsection rather than a separate section — the split is an implementation detail, not a design decision worth its own heading.
+- Included the partition pruning table showing query patterns and partition counts — makes the 256x optimization concrete.
+- Included the merge pipeline in strict order (dedup → filter → sort → truncate → project) with rationale for each ordering constraint — this is the intellectual core of the chapter.
+- Included pagination with both cursor levels (PartitionCursor and ScatterCursor) — keyset pagination across independent partitions is non-obvious.
+- Three sections on retained message dedup (9.6, 9.7, 9.8) form a mini-narrative: the problem, the solution's three layers, and what went wrong. This mirrors the replication factor amplification lesson from Ch5.
+- Did NOT include actual Rust code — used tables, flow diagrams, and field layouts per user guidance.
+- Did NOT include the QueryRequest/QueryResponse wire format byte layouts — already covered enough by the message type numbers and field descriptions.
+- Forward reference to Chapter 10 (Failure Detection) at the closing.
+
+**Verification notes:**
+- The partition hash formula matches `db/partition.rs` (CRC32, not xxHash or FNV)
+- The merge pipeline matches `node_controller/query.rs:sort_scatter_results` and `apply_list_projection`
+- The three dedup layers match `node_controller/retained.rs` (Layer 1: queried_nodes HashSet, Layer 2: local store check) and `event_handler/broker_events.rs` (Layer 3: synced_retained_topics TTL cache)
+- The 170x duplication figure is referenced from DISTRIBUTED_DESIGN.md Issue 11.20
+
+### Session 13 — 2026-03-01
+
+**Work done:**
+- Wrote Chapter 10 first draft (`ch10-failure-detection.md`, 3,568 words)
+- Sections: Heartbeat Protocol, The Node State Machine, Why Bitmaps in Heartbeats, The False Death Problem, Partition Failover, Snapshot Transfer, The Recovery Timeline, What Went Wrong (initialization race), Lessons
+- Read all primary source files before writing: `heartbeat.rs` (HeartbeatManager, NodeStatus enum, register_node, should_send with has_any_assignment guard, create_heartbeat, receive_heartbeat, check_timeouts with Unknown/Dead skip, handle_death_notice, update_partition_map_from_heartbeat), `protocol/heartbeat.rs` (Heartbeat struct: version u8 + node_id u16 + timestamp_ms u64 + primary_bitmap [u64;4] + replica_bitmap [u64;4], TOTAL_SIZE=75, VERSION=2, set_primary/is_primary bit operations), `transport.rs` (TransportConfig defaults: heartbeat_interval_ms=1000, heartbeat_timeout_ms=15000, ack_timeout_ms=500), `raft/coordinator/replication.rs` (handle_node_death with processed_dead_nodes dedup, reassign_partitions_for_dead_node iterating all 256 partitions, select_new_primary preferring alive replica then any alive node, handle_node_alive with pending_new_nodes queue), `snapshot.rs` (SnapshotRequest 5 bytes, SnapshotChunk 23-byte header + data with DEFAULT_CHUNK_SIZE=64KB, SnapshotComplete 12 bytes with Ok/Failed/NoData status, SnapshotBuilder with out-of-order assembly, SnapshotSender with chunked iteration), `node_controller/snapshot.rs` (handle_snapshot_request, handle_snapshot_chunk with builder assembly and store import, handle_snapshot_complete with migration phase advance, request_snapshot with dedup HashSet), `node_controller/mod.rs` (handle_node_death sending RaftEvent::NodeDead, dead_nodes_for_session_update queue, check_timeouts call in tick), `migration.rs` (MigrationPhase: Preparing→Overlapping→HandingOff→Complete, MigrationState, MigrationManager)
+- Verified heartbeat wire format: 75 bytes = 1 + 2 + 8 + 32 + 32
+- Verified suspect threshold is timeout/2 = 7500ms (computed inline, not configurable separately)
+- Verified Unknown and Dead nodes skipped in check_timeouts (line 180)
+- Verified select_new_primary: `replicas.iter().find(|r| alive_nodes.contains(r)).or_else(|| alive_nodes.first())`
+- Verified SnapshotChunk header is 23 bytes: 1 + 2 + 4 + 4 + 8 + 4
+- Cross-referenced Issues 11.3 (empty heartbeat) and 11.4 (false death) against DISTRIBUTED_DESIGN.md
+
+**Key decisions:**
+- 3,568 words, consistent with Ch1 (3,522), Ch5 (3,899), Ch9 (3,369). Chapter is diagram-heavy and table-driven.
+- Combined Issues 11.3 and 11.4 into a single "What Went Wrong" section (initialization race) since they share the root cause: treating uninitialized state as valid state.
+- Included a recovery timeline section (10.7) with concrete timestamps for both fast path (replica promotion, ~16s) and slow path (snapshot needed, ~20s). Makes the timeout cost tangible.
+- Included the snapshot transfer protocol diagram and SnapshotChunk wire format table — readers need to see the chunked transfer mechanism.
+- Included the bitmap-in-heartbeat rationale (10.3) as a separate section — the "why carry 64 extra bytes" question is non-obvious and the answer (closing the Raft replication window) is instructive.
+- Did NOT include actual Rust code — used state machine diagrams, wire format tables, flow diagrams, and pseudocode per user guidance.
+- Did NOT include the MigrationManager phases in detail — those belong in Chapter 11 (Rebalancing).
+- Did NOT include the session cleanup triggered by node death — that belongs in Chapter 12 (Session Management).
+- Forward reference to Chapter 11 (Rebalancing) at the closing.
+
+**Verification notes:**
+- The heartbeat wire format table matches `protocol/heartbeat.rs` exactly (TOTAL_SIZE=75)
+- The state machine transitions match `check_timeouts` and `receive_heartbeat` in `heartbeat.rs`
+- The timeout defaults match `TransportConfig::default()` in `transport.rs`
+- The reassignment logic matches `reassign_partitions_for_dead_node` in `replication.rs`
+- The snapshot transfer protocol matches `node_controller/snapshot.rs` handler methods
+- The SnapshotComplete is actually 12 bytes (1+2+1+8), not 11 as noted in session summary — verified against BeBytes derive
+
+### Session 14 — 2026-03-03
+
+**Work done:**
+- Wrote Chapter 11 first draft (`ch11-rebalancing.md`, 5,048 words)
+- Sections: The Rebalancing Problem, Three Algorithms (Balanced/Incremental/Removal), Leader-Only Coordination (Three Queues, Tick Loop, Backpressure Gate, Epoch Bumps), Partition Migration (4-phase state machine, Graceful Shutdown), What Went Wrong (rebalance race condition, single-node bootstrap), Lessons
+- Read all primary source files before writing: `rebalancer.rs` (compute_balanced_assignments round-robin, compute_incremental_assignments 3-phase, compute_removal_assignments with replica promotion, PartitionReassignment struct), `raft/coordinator/mod.rs` (RaftCoordinator struct with 3 pending sets + 3 processed sets + pending_partition_proposals counter, partitions_initialized), `raft/coordinator/replication.rs` (handle_node_alive with backpressure gate, handle_node_death, handle_drain_notification, trigger_rebalance_internal choosing balanced vs incremental, trigger_drain_rebalance using removal algorithm, reassign_partitions_for_dead_node per-partition loop), `raft/coordinator/election.rs` (tick() with just_became_leader path, process_pending_dead/draining/new_nodes, scan_partition_map_for_dead_primaries safety net, propose_partition_update), `migration.rs` (MigrationPhase enum: Preparing/Overlapping/HandingOff/Complete, MigrationState struct with 8 fields, MigrationManager with advance_phase rejecting invalid transitions, MigrationCheckpoint with BeBytes derive), `snapshot.rs` (SnapshotSender with DEFAULT_CHUNK_SIZE=64KB, SnapshotBuilder with indexed slots, SnapshotChunk 23-byte header), `quorum.rs` (QuorumTracker with stale_epoch_seen flag, StaleEpoch causes immediate Failed result), `replication.rs` (ReplicaRole::AwaitingSnapshot, handle_write epoch validation: stale→StaleEpoch, newer→reset sequence, AwaitingSnapshot→NotReplica), `node_controller/mod.rs` (set_draining broadcast, can_shutdown_safely 3 conditions, collect_awaiting_snapshot_requests retry logic with requested_snapshots dedup set)
+- Verified round-robin: `primary_idx = partition_num % node_count`, `replica_idx = (primary_idx + r) % node_count`
+- Verified incremental 3-phase: redistribute_primaries → add_missing_replicas → redistribute_replicas
+- Verified backpressure: `pending_partition_proposals` set to `proposed_indices.len()`, decremented by `saturating_sub(1)` in `apply_command`
+- Verified tick order: process_pending_dead_nodes → process_pending_draining_nodes → (partitions_initialized ? process_pending_new_nodes : trigger_rebalance_internal)
+- Verified scan_partition_map_for_dead_primaries runs after process_pending_dead_nodes
+- Verified can_shutdown_safely: `self.draining && self.pending.is_empty() && self.outgoing_snapshots.is_empty()`
+- Verified AwaitingSnapshot returns NotReplica on handle_write (replication.rs:101-103)
+- Verified QuorumTracker: stale_epoch_seen returns Failed immediately (quorum.rs:148-149)
+
+**Key decisions:**
+- 5,048 words, within the 5,000-6,000 target. First chapter to hit the target range squarely.
+- Included a full numeric example for incremental rebalancing (2-node→3-node transition) walking through all three phases with concrete numbers. This is the chapter's most instructive content.
+- Included the epoch invariant explanation (one epoch per replica at any time, monotonic transitions) connecting rebalancing to the replication protocol from Chapter 5.
+- Included scan_partition_map_for_dead_primaries as a "belt-and-suspenders" detail — shows defensive engineering in the leader transition path.
+- Two "What Went Wrong" sections: rebalance race condition (read-modify-write race on partition map) and single-node bootstrap (no peers means no NodeAlive trigger).
+- Four lessons: serialize state-dependent computations, bootstrap is not the normal path, incremental over global, event ordering is policy.
+- Did NOT include actual Rust code — used pseudocode, tables, Mermaid diagrams per user guidance.
+- Did NOT include the MigrationCheckpoint binary format details — just described its purpose.
+- Forward reference to Chapter 12 (Session Management) at the closing.
+
+**Verification notes:**
+- The balanced assignment pseudocode matches rebalancer.rs:35-52 exactly
+- The incremental 3-phase breakdown matches the function call chain: redistribute_primaries → add_missing_replicas → redistribute_replicas
+- The removal algorithm description matches compute_removal_assignments: promote replica or assign least-loaded, fill replicas from round-robin
+- The tick loop flowchart matches election.rs:14-47 exactly
+- The backpressure gate matches replication.rs:249 (set) and replication.rs:88 (decrement)
+- The migration state machine matches migration.rs:183-188 (valid_transition pattern match)
+- The AwaitingSnapshot rejection matches replication.rs:101 (role check in handle_write)
+- The stale epoch fast-fail matches quorum.rs:148-149 (stale_epoch_seen returns Failed)
 
 ### Memories for Future Sessions
 

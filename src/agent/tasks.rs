@@ -25,6 +25,7 @@ impl MqdbAgent {
         let backup_dir = self.backup_dir.clone();
         let ownership_config = Arc::clone(&self.ownership_config);
         let scope_config = Arc::clone(&self.scope_config);
+        let vault_key_store = Arc::clone(&self.vault_key_store);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -80,7 +81,7 @@ impl MqdbAgent {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         if let Some(message) = msg {
-                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, &scope_config, auth_providers.as_deref()).await;
+                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, &scope_config, auth_providers.as_deref(), &vault_key_store).await;
                         } else {
                             debug!("Message channel closed");
                             break;
@@ -177,12 +178,13 @@ impl MqdbAgent {
         service_username: Option<&String>,
         service_password: Option<&String>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        let http_config = self
+        let mut http_config = self
             .http_config
             .lock()
             .ok()
             .and_then(|mut guard| guard.take())?;
 
+        http_config.vault_key_store = Some(Arc::clone(&self.vault_key_store));
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
         let http_addr = resolve_connect_address(bind_addr);

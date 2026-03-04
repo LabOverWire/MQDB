@@ -39,8 +39,9 @@ reqwest = { version = "0.13", features = ["form", "json"], optional = true }
 ring = { version = "0.17", optional = true }
 base64 = { version = "0.22", optional = true }
 lru = { version = "0.16", optional = true }
-jsonwebtoken = { version = "10.3", optional = true }
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"], optional = true }
 rustls-pki-types = { version = "1.14.0", features = ["std"], optional = true }
+zeroize = "1.8.2"
 
 [features]
 default = ["native"]

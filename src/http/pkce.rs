@@ -7,7 +7,7 @@ use std::time::Instant;
 const TTL_SECS: u64 = 300;
 
 pub struct PkceCache {
-    entries: HashMap<String, (String, Instant)>,
+    entries: HashMap<String, (String, String, Instant)>,
 }
 
 impl PkceCache {
@@ -17,20 +17,23 @@ impl PkceCache {
         }
     }
 
-    pub fn insert(&mut self, state: String, code_verifier: String) {
+    pub fn insert(&mut self, state: String, code_verifier: String, provider: String) {
         self.cleanup();
-        self.entries.insert(state, (code_verifier, Instant::now()));
+        self.entries
+            .insert(state, (code_verifier, provider, Instant::now()));
     }
 
-    pub fn take(&mut self, state: &str) -> Option<String> {
+    pub fn take(&mut self, state: &str) -> Option<(String, String)> {
         self.cleanup();
-        self.entries.remove(state).map(|(verifier, _)| verifier)
+        self.entries
+            .remove(state)
+            .map(|(verifier, provider, _)| (verifier, provider))
     }
 
     fn cleanup(&mut self) {
         let cutoff = Instant::now()
             .checked_sub(std::time::Duration::from_secs(TTL_SECS))
-            .unwrap();
-        self.entries.retain(|_, (_, created)| *created > cutoff);
+            .unwrap_or_else(Instant::now);
+        self.entries.retain(|_, (_, _, created)| *created > cutoff);
     }
 }

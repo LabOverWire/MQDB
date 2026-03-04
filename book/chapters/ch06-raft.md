@@ -75,11 +75,11 @@ Raft elections are tick-driven, not interrupt-driven. The Raft task calls `tick(
 
 Three timing constants control the protocol:
 
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| Election timeout | 3000-5000ms | How long a follower waits before starting an election (randomized per attempt) |
-| Heartbeat interval | 500ms | How often the leader sends `AppendEntries` to peers |
-| Startup grace period | 10000ms | How long a single node waits before self-electing |
+| Constant             | Value       | Purpose                                                                        |
+| -------------------- | ----------- | ------------------------------------------------------------------------------ |
+| Election timeout     | 3000-5000ms | How long a follower waits before starting an election (randomized per attempt) |
+| Heartbeat interval   | 500ms       | How often the leader sends `AppendEntries` to peers                            |
+| Startup grace period | 10000ms     | How long a single node waits before self-electing                              |
 
 The election timeout is randomized on each attempt: a linear congruential generator seeded from the node ID produces a value between 3000 and 5000 milliseconds. The wide range (2 seconds) and long minimum (3 seconds) reflect MQDB's operating environment. Unlike academic Raft implementations that use 150-300ms timeouts, MQDB runs over real networks with QUIC transport. A 3-second minimum means a brief network hiccup does not trigger an unnecessary election.
 
@@ -158,7 +158,7 @@ When a second node joins later, `handle_node_alive()` adds it as both a cluster 
 
 ## 6.6 What Went Wrong: The Batch Flush Bug
 
-Issue 11.5. When a follower node joined an existing cluster, the Raft leader sent it all current log entries — including 256 `UpdatePartition` entries from the initial bootstrap. The follower had to persist these entries before acknowledging them, because Raft requires durable storage of log entries before responding to `AppendEntries`.
+When a follower node joined an existing cluster, the Raft leader sent it all current log entries — including 256 `UpdatePartition` entries from the initial bootstrap. The follower had to persist these entries before acknowledging them, because Raft requires durable storage of log entries before responding to `AppendEntries`.
 
 The original implementation persisted entries one at a time. Each call to `append_log_entry` inserted a key-value pair into the storage backend and called `flush()`:
 

@@ -147,7 +147,7 @@ Read operations (get, list) also check partition ownership. For a single-record 
 
 Serving reads from replicas means a client might receive data that is behind the primary. In a request-response system, this would be a real concern — the client has no way to know whether the value it received is current or stale without polling again. But MQDB is reactive first. A client that reads a record and subscribes to its change events will receive the current value from the replica, and then receive an update within milliseconds if the primary had a newer version. The subscription closes the consistency gap automatically. Eventual consistency is a meaningful guarantee only when the system actively pushes updates to interested clients. Without subscriptions, "eventual" means "whenever you decide to ask again." With subscriptions, "eventual" means "the next change event, which is already on its way."
 
-List operations are more complex because they must aggregate results across all partitions. A list of all users requires scanning every partition's data store. In cluster mode, this becomes a scatter-gather operation: the coordinating node sends a list request to every node, each node scans its primary partitions and returns matching records, and the coordinator merges the results. Chapter 8 covers this in detail.
+List operations are more complex because they must aggregate results across all partitions. A list of all users requires scanning every partition's data store. In cluster mode, this becomes a scatter-gather operation: the coordinating node sends a list request to every node, each node scans its primary partitions and returns matching records, and the coordinator merges the results. Chapter 9 covers this in detail.
 
 ## 4.5 Two Classes of Entities
 
@@ -158,6 +158,7 @@ Not all data follows the partition-and-forward pattern. MQDB divides its entitie
 Most entities are partitioned. A record hashes to a partition, the partition has a primary, and writes go to that primary. This is the standard model described in the previous sections.
 
 Partitioned entities include:
+
 - **Sessions** — client connection state, partitioned by client ID
 - **Subscriptions** — topic subscriptions per client, partitioned by client ID
 - **Retained messages** — messages stored for future subscribers, partitioned by topic
@@ -174,6 +175,7 @@ When a message is published on Node 1, the broker must immediately determine whi
 The solution is to keep a complete copy of the subscriber map on every node. When a client on Node 2 subscribes to `sensors/temperature`, every node learns about it. When a message is published to `sensors/temperature` on Node 1, Node 1 looks up the subscribers in its local copy of the topic index, discovers that a client on Node 2 is subscribed, and forwards the message to Node 2. The lookup is local. The forwarding is a single network hop to a known destination.
 
 Broadcast entities include:
+
 - **Topic index** — maps exact topics to the set of subscribing clients and their connected nodes
 - **Wildcard store** — maps wildcard patterns (e.g., `sensors/+/temperature`) to subscribers
 - **Client locations** — maps client IDs to the node they are currently connected to

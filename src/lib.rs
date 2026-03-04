@@ -48,6 +48,7 @@ pub mod topic_protection;
 #[cfg(feature = "agent")]
 pub mod topic_rules;
 pub mod transport;
+pub mod vault_keys;
 
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use error::{Error, Result};
@@ -95,3 +96,4 @@ pub use protocol::{
 pub use cluster::{
     Epoch, NUM_PARTITIONS, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole,
 };
+pub use vault_keys::VaultKeyStore;

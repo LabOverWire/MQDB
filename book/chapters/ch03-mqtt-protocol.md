@@ -22,15 +22,15 @@ MQTT 5.0 — the version MQDB uses — added features that made it possible, for
 
 The MQDB broker runs with these defaults:
 
-| Setting | Value |
-|---------|-------|
-| Max clients | 10,000 |
-| Max packet size | 10 MB |
-| Maximum QoS | 2 |
-| Topic alias maximum | 100 |
-| Retain available | true |
-| Shared subscriptions | true |
-| Session expiry | 3,600 seconds |
+| Setting              | Value         |
+| -------------------- | ------------- |
+| Max clients          | 10,000        |
+| Max packet size      | 10 MB         |
+| Maximum QoS          | 2             |
+| Topic alias maximum  | 100           |
+| Retain available     | true          |
+| Shared subscriptions | true          |
+| Session expiry       | 3,600 seconds |
 
 These are not aspirational settings. The 10 MB packet size accommodates large JSON documents — list responses with thousands of records, backup payloads, bulk operations. The 10,000 client limit reflects the intended deployment: IoT gateways with hundreds of devices, not a million-connection CDN. Both values are tuneable at startup, but the defaults reflect the system's target workload.
 
@@ -185,11 +185,11 @@ These topics are invisible to external clients because the topic protection laye
 
 The topic protection layer wraps every other auth provider as a decorator. It intercepts publish and subscribe authorization calls and applies three protection tiers:
 
-| Tier | Effect | Topics |
-|------|--------|--------|
-| BlockAll | No publish, no subscribe, even for admin | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` |
-| ReadOnly | Subscribe allowed, publish blocked | `$DB/+/events/#`, `$SYS/#` |
-| AdminRequired | Publish and subscribe require admin role | `$DB/_admin/#`, `$DB/_oauth_tokens/#` |
+| Tier          | Effect                                   | Topics                                                                            |
+| ------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
+| BlockAll      | No publish, no subscribe, even for admin | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` |
+| ReadOnly      | Subscribe allowed, publish blocked       | `$DB/+/events/#`, `$SYS/#`                                                        |
+| AdminRequired | Publish and subscribe require admin role | `$DB/_admin/#`, `$DB/_oauth_tokens/#`                                             |
 
 A catch-all rule blocks non-admin users from any `$DB/` topic where the entity starts with `_` (like `$DB/_sessions/list`), except `$DB/_health`.
 
@@ -207,10 +207,10 @@ MQTT 5.0 user properties are arbitrary key-value string pairs attached to any pa
 
 ### Inbound: On Client Requests
 
-| Property | Purpose |
-|----------|---------|
-| `x-mqtt-sender` | Authenticated user identity |
-| `x-mqtt-client-id` | MQTT client ID |
+| Property           | Purpose                     |
+| ------------------ | --------------------------- |
+| `x-mqtt-sender`    | Authenticated user identity |
+| `x-mqtt-client-id` | MQTT client ID              |
 
 These are set by the broker when it relays the PUBLISH to the internal handler. The broker knows the authenticated user from the CONNECT packet and the client ID from the session. It attaches them as per-message metadata — user properties that travel with each individual message.
 
@@ -232,8 +232,8 @@ Both are passed to the database execution path, where the sender identity enable
 
 ### Outbound: On Change Events
 
-| Property | Purpose |
-|----------|---------|
+| Property             | Purpose                                     |
+| -------------------- | ------------------------------------------- |
 | `x-origin-client-id` | Identifies which client caused the mutation |
 
 Set by the event publisher when publishing change events:
