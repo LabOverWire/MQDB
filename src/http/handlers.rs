@@ -2009,17 +2009,11 @@ async fn resume_pending_migration(
         "decrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Decrypt).await,
         "re_encrypt" => {
             let Some(old_salt_b64) = identity.get("vault_old_salt").and_then(|v| v.as_str()) else {
-                warn!(
-                    canonical_id,
-                    "vault re_encrypt resume failed: old salt missing from identity"
-                );
+                warn!("vault re_encrypt resume failed: old salt missing from identity");
                 return None;
             };
             let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
-                warn!(
-                    canonical_id,
-                    "vault re_encrypt resume failed: old salt decode error"
-                );
+                warn!("vault re_encrypt resume failed: old salt decode error");
                 return None;
             };
             let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
