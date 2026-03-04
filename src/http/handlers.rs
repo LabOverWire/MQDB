@@ -1567,7 +1567,12 @@ pub async fn handle_vault_unlock(
     let resume_result =
         resume_pending_migration(state, canonical_id, &crypto, &identity, passphrase).await;
 
-    let mut body = json!({"status": "unlocked"});
+    let status = if resume_result.as_ref().is_some_and(|r| r.mode == "decrypt") {
+        "vault_disabled"
+    } else {
+        "unlocked"
+    };
+    let mut body = json!({"status": status});
     if let Some(migration) = resume_result {
         body["migration_resumed"] = json!(migration.mode);
         body["records_processed"] = json!(migration.succeeded);
@@ -2003,8 +2008,20 @@ async fn resume_pending_migration(
         "encrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Encrypt).await,
         "decrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Decrypt).await,
         "re_encrypt" => {
-            let old_salt_b64 = identity.get("vault_old_salt").and_then(|v| v.as_str())?;
-            let old_salt = BASE64.decode(old_salt_b64).ok()?;
+            let Some(old_salt_b64) = identity.get("vault_old_salt").and_then(|v| v.as_str()) else {
+                warn!(
+                    canonical_id,
+                    "vault re_encrypt resume failed: old salt missing from identity"
+                );
+                return None;
+            };
+            let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
+                warn!(
+                    canonical_id,
+                    "vault re_encrypt resume failed: old salt decode error"
+                );
+                return None;
+            };
             let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
             batch_vault_re_encrypt(state, canonical_id, &old_crypto, crypto).await
         }
