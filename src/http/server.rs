@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct HttpServerConfig {
     pub bind_address: SocketAddr,
@@ -86,6 +86,8 @@ impl HttpServer {
             ownership_config: self.config.ownership_config,
             vault_key_store,
         });
+
+        initialize_identity_constraints(&state).await;
 
         loop {
             tokio::select! {
@@ -244,4 +246,23 @@ async fn handle_request(
     };
 
     Ok(response)
+}
+
+async fn initialize_identity_constraints(state: &ServerState) {
+    let unique_field = if state.identity_crypto.is_some() {
+        "email_hash"
+    } else {
+        "primary_email"
+    };
+    let payload = serde_json::json!({
+        "type": "unique",
+        "fields": [unique_field],
+    });
+    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    let topic = "$DB/_admin/constraint/_identities/add";
+    if let Err(e) = state.mqtt_client.publish(topic, payload_bytes).await {
+        warn!(error = %e, "failed to initialize _identities unique constraint");
+    } else {
+        info!(field = unique_field, "initialized unique constraint on _identities");
+    }
 }
