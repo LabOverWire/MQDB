@@ -111,21 +111,59 @@ impl ClusteredAgent {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        let auth_cfg = self.build_auth_setup_config();
+        let mut temp_auth_config = mqtt5::broker::config::AuthConfig::default();
+        let auth_result =
+            crate::auth_config::configure_broker_auth(&auth_cfg, &mut temp_auth_config)
+                .await
+                .map_err(|e| format!("auth setup failed: {e}"))?;
+
+        let ownership = if let Some(ref svc) = auth_result.service_username {
+            let mut oc = (*self.ownership).clone();
+            oc.add_admin_user(svc.clone());
+            Arc::new(oc)
+        } else {
+            Arc::clone(&self.ownership)
+        };
+
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
-                .with_ownership(Arc::clone(&self.ownership))
+                .with_ownership(ownership)
                 .with_scope_config(Arc::clone(&self.scope_config)),
         );
-        self.configure_broker(event_handler, bridge_configs, use_external_bridge_manager)
-            .await
+        self.configure_broker_with_auth(
+            event_handler,
+            bridge_configs,
+            use_external_bridge_manager,
+            temp_auth_config,
+            auth_result,
+        )
+        .await
+    }
+
+    fn build_auth_setup_config(&self) -> crate::auth_config::AuthSetupConfig {
+        crate::auth_config::AuthSetupConfig {
+            password_file: self.password_file.clone(),
+            acl_file: self.acl_file.clone(),
+            allow_anonymous: self.password_file.is_none(),
+            scram_file: self.auth_setup.scram_file.clone(),
+            jwt_config: self.auth_setup.jwt_config.clone(),
+            federated_jwt_config: self.auth_setup.federated_jwt_config.clone(),
+            cert_auth_file: self.auth_setup.cert_auth_file.clone(),
+            rate_limit: self.auth_setup.rate_limit.clone(),
+            no_rate_limit: self.auth_setup.no_rate_limit,
+            admin_users: self.auth_setup.admin_users.clone(),
+        }
     }
 
     #[allow(clippy::type_complexity)]
-    async fn configure_broker(
+    async fn configure_broker_with_auth(
         &self,
         event_handler: Arc<ClusterEventHandler<ClusterTransportKind>>,
         bridge_configs: &[BridgeConfig],
         use_external_bridge_manager: bool,
+        auth_config: mqtt5::broker::config::AuthConfig,
+        auth_result: crate::auth_config::AuthSetupResult,
     ) -> Result<
         (
             BrokerConfig,
@@ -142,7 +180,7 @@ impl ClusteredAgent {
             ..Default::default()
         };
 
-        let broker_config = BrokerConfig {
+        let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
             max_packet_size: BROKER_MAX_PACKET_SIZE,
@@ -167,23 +205,7 @@ impl ClusteredAgent {
         .with_storage(storage_config)
         .with_event_handler(event_handler);
 
-        let auth_cfg = crate::auth_config::AuthSetupConfig {
-            password_file: self.password_file.clone(),
-            acl_file: self.acl_file.clone(),
-            allow_anonymous: self.password_file.is_none(),
-            scram_file: self.auth_setup.scram_file.clone(),
-            jwt_config: self.auth_setup.jwt_config.clone(),
-            federated_jwt_config: self.auth_setup.federated_jwt_config.clone(),
-            cert_auth_file: self.auth_setup.cert_auth_file.clone(),
-            rate_limit: self.auth_setup.rate_limit.clone(),
-            no_rate_limit: self.auth_setup.no_rate_limit,
-            admin_users: self.auth_setup.admin_users.clone(),
-        };
-        let mut config = broker_config;
-        let auth_result =
-            crate::auth_config::configure_broker_auth(&auth_cfg, &mut config.auth_config)
-                .await
-                .map_err(|e| format!("auth setup failed: {e}"))?;
+        config.auth_config = auth_config;
 
         Ok((
             config,

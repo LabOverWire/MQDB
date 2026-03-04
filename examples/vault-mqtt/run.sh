@@ -8,7 +8,7 @@ TEST_DIR="/tmp/vault-e2e-test"
 AGENT_PID=""
 PASS=0
 FAIL=0
-TOTAL=24
+TOTAL=36
 
 cleanup() {
     if [[ -n "$AGENT_PID" ]]; then
@@ -289,6 +289,82 @@ RESP=$(curl -s -X POST http://127.0.0.1:13000/vault/unlock \
     -d "{\"passphrase\":\"anything\"}")
 echo "  Response: $RESP"
 assert_eq "no-session vault unlock rejected" "$(json_field "$RESP" "error")" "no session"
+
+NEW_PASSPHRASE="changed-vault-pass"
+
+echo ""
+echo "--- Test 15: vault status (enabled + unlocked) ---"
+RESP=$(curl -s -b "$COOKIE_JAR" http://127.0.0.1:13000/vault/status \
+    -H "Origin: http://localhost:8080")
+echo "  Response: $RESP"
+assert_eq "vault_enabled is true" "$(json_field "$RESP" "vault_enabled")" "True"
+assert_eq "unlocked is true" "$(json_field "$RESP" "unlocked")" "True"
+
+echo ""
+echo "--- Test 16: migration status complete after enable ---"
+RESP=$("$MQDB_BIN" read _identities "$CANONICAL_ID" --broker 127.0.0.1:18830 --user "$OBSERVER_USER" --pass "$OBSERVER_PASS" 2>/dev/null)
+echo "  Response (truncated): $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({k:d['data'][k] for k in ['vault_enabled','vault_migration_status'] if k in d.get('data',{})}))" 2>/dev/null)"
+assert_eq "migration_status is complete" "$(json_field "$RESP" "data.vault_migration_status")" "complete"
+
+echo ""
+echo "--- Test 17: vault change passphrase ---"
+RESP=$(curl -s -b "$COOKIE_JAR" -X POST http://127.0.0.1:13000/vault/change \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"old_passphrase\":\"$PASSPHRASE\",\"new_passphrase\":\"$NEW_PASSPHRASE\"}")
+echo "  Response: $RESP"
+assert_eq "passphrase changed" "$(json_field "$RESP" "status")" "changed"
+
+echo ""
+echo "--- Test 18: old passphrase rejected after change ---"
+RESP=$(curl -s -b "$COOKIE_JAR" -X POST http://127.0.0.1:13000/vault/lock \
+    -H "Origin: http://localhost:8080")
+echo "  Lock response: $RESP"
+assert_eq "vault locked" "$(json_field "$RESP" "status")" "locked"
+RESP=$(curl -s -b "$COOKIE_JAR" -X POST http://127.0.0.1:13000/vault/unlock \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"passphrase\":\"$PASSPHRASE\"}")
+echo "  Unlock with old passphrase: $RESP"
+assert_eq "old passphrase rejected" "$(json_field "$RESP" "error")" "incorrect passphrase"
+
+echo ""
+echo "--- Test 19: new passphrase unlocks vault ---"
+RESP=$(curl -s -b "$COOKIE_JAR" -X POST http://127.0.0.1:13000/vault/unlock \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"passphrase\":\"$NEW_PASSPHRASE\"}")
+echo "  Response: $RESP"
+assert_eq "new passphrase unlocks" "$(json_field "$RESP" "status")" "unlocked"
+
+echo ""
+echo "--- Test 20: read note after passphrase change returns plaintext ---"
+RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:18830 --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "read status ok" "$(json_field "$RESP" "status")" "ok"
+assert_eq "title still decrypts" "$(json_field "$RESP" "data.title")" "Secret"
+
+echo ""
+echo "--- Test 21: vault disable with new passphrase ---"
+RESP=$(curl -s -b "$COOKIE_JAR" -X POST http://127.0.0.1:13000/vault/disable \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"passphrase\":\"$NEW_PASSPHRASE\"}")
+echo "  Response: $RESP"
+assert_eq "vault disabled" "$(json_field "$RESP" "status")" "disabled"
+
+echo ""
+echo "--- Test 22: read after disable returns plaintext ---"
+RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:18830 --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "plaintext after disable" "$(json_field "$RESP" "data.title")" "Secret"
+
+echo ""
+echo "--- Test 23: vault status shows disabled ---"
+RESP=$(curl -s -b "$COOKIE_JAR" http://127.0.0.1:13000/vault/status \
+    -H "Origin: http://localhost:8080")
+echo "  Response: $RESP"
+assert_eq "vault_enabled is false" "$(json_field "$RESP" "vault_enabled")" "False"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

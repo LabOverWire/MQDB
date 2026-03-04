@@ -36,6 +36,7 @@ pub struct HttpServerConfig {
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
+    pub vault_unlock_rate_limit: u32,
 }
 
 pub struct HttpServer {
@@ -79,7 +80,7 @@ impl HttpServer {
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
-            vault_unlock_limiter: RateLimiter::new(5),
+            vault_unlock_limiter: RateLimiter::new(self.config.vault_unlock_rate_limit),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
