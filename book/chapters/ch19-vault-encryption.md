@@ -29,7 +29,19 @@ The separation matters because the threat models differ. Vault encryption protec
 
 The vault's cryptographic foundation is AES-256-GCM with PBKDF2 key derivation. A user provides a passphrase; MQDB derives a 256-bit key; that key encrypts and decrypts individual field values within JSON records.
 
-**Key derivation** uses PBKDF2-HMAC-SHA256 with 600,000 iterations and a 32-byte random salt generated per user. The iteration count is deliberately high — at 600K rounds, a single derivation takes roughly 200ms on modern hardware, making brute-force attacks against stolen ciphertexts computationally expensive. The salt ensures that two users with the same passphrase produce different keys.
+The choice of algorithms was driven by WebAssembly compatibility. MQDB's database layer compiles to WASM for browser and edge deployments (Chapter 21), and the vault must work identically in both environments. AES-256-GCM and PBKDF2-HMAC-SHA256 are available in the Web Crypto API — the standard cryptographic interface exposed by all major browsers. Algorithms with better brute-force resistance, like Argon2 or scrypt, are memory-hard and rely on platform-specific memory allocation patterns that do not translate cleanly to WASM's linear memory model. PBKDF2 is purely computational (no memory hardness), which makes it portable at the cost of being more GPU-friendly for attackers. The tradeoff is acceptable: the 600,000 iteration count compensates with raw computational cost, and the algorithm works identically whether the caller is a native Rust binary or a WASM module running in a browser. Argon2 — the preferred memory-hard alternative — exists in a draft W3C community group specification for modern Web Crypto algorithms (February 2026), and is available in Node.js, but has not yet shipped in any browser's native Web Crypto API. When browser support lands, the derivation function can be swapped without changing the encryption layer — the key derivation and field encryption are independent stages connected only by a 32-byte key.
+
+**Key derivation** uses PBKDF2-HMAC-SHA256 with 600,000 iterations and a 32-byte random salt generated per user. The iteration count follows OWASP's 2023 recommendation for PBKDF2-HMAC-SHA256. Each derivation takes roughly 200ms on a modern CPU core, which means an attacker who steals the encrypted database can try approximately 5 passphrases per second per core. A dictionary of 10 million common passphrases would take ~23 days on a single core, or ~33 minutes on a 1,000-core GPU cluster. The iteration count does not make brute force impossible — it makes each guess expensive enough that weak passphrases become the bottleneck. The security of the vault ultimately rests on passphrase entropy, not on the derivation function. At 5 guesses per second per core:
+
+| Passphrase type | Search space | Single core | 1,000-core cluster |
+|----------------|-------------|-------------|-------------------|
+| 4-digit PIN | 10,000 | 33 minutes | 2 seconds |
+| Common English word | ~170,000 | 9 hours | 34 seconds |
+| Two random words | ~29 billion | 184 years | 67 days |
+| 4 random words (diceware) | ~1.7 × 10^{17} | heat death | 1 billion years |
+| 20-character random | ~10^{26} | heat death | heat death |
+
+Operators deploying MQDB with vault encryption should enforce minimum passphrase requirements — a floor of 4 random words (diceware-style) or 16 random characters provides a comfortable margin against GPU-accelerated attacks for the foreseeable future. Any passphrase that a human can memorize after seeing it once is too short. The per-user salt ensures that two users with the same passphrase produce different keys, preventing precomputation attacks (rainbow tables) and forcing the attacker to run the full 600K iterations independently for each user.
 
 **Encryption** operates at the field level, not the record level. Given a JSON record like `{"id": "rec-1", "name": "Alice", "email": "alice@example.com", "age": 30}`, the vault encrypts each string field independently. Non-string values (numbers, booleans, null) pass through unchanged — AES-256-GCM operates on byte sequences, and encrypting a number would require serializing it to bytes, encrypting, base64-encoding, and storing as a string, losing type information in the process.
 
@@ -53,19 +65,13 @@ The nonce is generated randomly for each field encryption using the system's cry
 
 The vault has five operations, each represented as an HTTP endpoint. The lifecycle forms a state machine with two axes: *enabled* (whether encryption is configured) and *unlocked* (whether the key is in memory).
 
-```
-                   ┌─────────────────────────────────────┐
-                   │                                     │
-                   ▼                                     │
- ┌──────────┐  enable  ┌──────────────────┐  disable  ┌─┴────────────────┐
- │ Disabled │ ───────► │ Enabled+Unlocked │ ────────► │     Disabled     │
- └──────────┘          └──────────────────┘           └──────────────────┘
-                          │           ▲
-                    lock  │           │  unlock
-                          ▼           │
-                       ┌──────────────┴──┐
-                       │ Enabled+Locked  │
-                       └─────────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    Disabled --> Enabled_Unlocked : enable
+    Enabled_Unlocked --> Disabled : disable
+    Enabled_Unlocked --> Enabled_Locked : lock
+    Enabled_Locked --> Enabled_Unlocked : unlock
 ```
 
 **Enable** (`POST /vault/enable`): The user provides a passphrase. The server generates a random 32-byte salt, derives the AES-256-GCM key using PBKDF2, creates a check token, then encrypts every record the user owns across all entities. The salt, check token, and vault-enabled flag are stored on the user's identity record. The derived key is stored in the in-memory key store. After enable, the vault is both enabled and unlocked.
@@ -162,11 +168,13 @@ These records contain personally identifiable information (email addresses, name
 
 **Key architecture.** Identity encryption uses a three-layer key hierarchy:
 
-1. A 32-byte *identity key* is generated randomly at first startup
-2. A *wrapping key* is derived from a fixed salt using PBKDF2 (600K iterations), using a constant info string as the "passphrase"
+1. A 32-byte *identity key* is generated randomly at first startup (256 bits of entropy — far beyond brute-force range)
+2. A *wrapping key* is derived from a fixed salt using PBKDF2 (600K iterations), using a constant string hardcoded in the binary (`b"mqdb-identity-encryption-seed-v1"`) as the "passphrase"
 3. The identity key is encrypted (wrapped) with the wrapping key and stored in the database alongside the salt
 
 On subsequent startups, the server reads the salt and wrapped key from storage, derives the wrapping key, and unwraps the identity key. The wrapping layer means the identity key never appears in plaintext in storage — only the wrapped form is persisted.
+
+The honest limitation: the wrapping key's "passphrase" is a 32-byte constant compiled into the binary. An attacker who has both the database files and the MQDB binary (or its source code) can derive the wrapping key, unwrap the identity key, and decrypt all identity records. The 600K PBKDF2 iterations add ~200ms of computation — trivial when the input is known. The wrapping protects against casual exposure (a stolen database dump without the binary) but not against a determined attacker with access to both. This is the fundamental difference from vault encryption, where the passphrase lives in the user's head, not in the source code. A future improvement could derive the wrapping key from an operator-provided secret (an environment variable or key file), moving the trust anchor from "the binary is secret" to "the deployment environment is secure."
 
 From the identity key, two purpose-specific keys are derived using HKDF-SHA256:
 
