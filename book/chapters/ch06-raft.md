@@ -158,7 +158,7 @@ When a second node joins later, `handle_node_alive()` adds it as both a cluster 
 
 ## 6.6 What Went Wrong: The Batch Flush Bug
 
-Issue 11.5. When a follower node joined an existing cluster, the Raft leader sent it all current log entries — including 256 `UpdatePartition` entries from the initial bootstrap. The follower had to persist these entries before acknowledging them, because Raft requires durable storage of log entries before responding to `AppendEntries`.
+When a follower node joined an existing cluster, the Raft leader sent it all current log entries — including 256 `UpdatePartition` entries from the initial bootstrap. The follower had to persist these entries before acknowledging them, because Raft requires durable storage of log entries before responding to `AppendEntries`.
 
 The original implementation persisted entries one at a time. Each call to `append_log_entry` inserted a key-value pair into the storage backend and called `flush()`:
 

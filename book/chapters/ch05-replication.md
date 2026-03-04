@@ -249,6 +249,57 @@ Every `apply_replicated` implementation must handle being called with the same d
 
 The stores handle this by treating the operation and ID as a natural key. Inserting a record that already exists with the same ID overwrites it. Deleting a record that does not exist is a no-op. This means the replication pipeline does not need to track which writes each store has seen — it simply replays writes, and the stores converge to the correct state regardless of ordering or duplication.
 
+## 5.8 The Cluster CRUD Path
+
+The previous sections described how writes are replicated from primary to replica. But what happens before replication — how does a client's database request reach the primary in the first place?
+
+In agent mode, the path is direct. A client publishes to `$DB/users/create`, the broker's internal request handler processes it, the database executes the operation, and the response is published to the client's response topic. One node, one hop.
+
+In cluster mode, the client connects to whichever node is available. That node may or may not be the primary for the partition that owns the record. The cluster must route the request to the correct primary, execute it there, and route the response back — all transparently, without the client knowing which node did the work.
+
+### Write Path
+
+A database create request follows this path:
+
+```mermaid
+flowchart LR
+    C([Client]) -->|"1. MQTT PUBLISH\n$DB/users/create"| N2
+    N2["Node 2\n(connected)"] -->|"2. compute partition\nnot primary → forward\nJsonDbRequest"| N1
+    N1["Node 1\n(primary)"] -->|"3. validate schema/constraints\napply write\nreplicate to replicas"| N1
+    N1 -->|"4. JsonDbResponse"| N2
+    N2 -->|"5. publish to\nresponse topic"| C
+```
+
+**Step 1: Receive and route.** The event handler receives the MQTT publish on `$DB/users/create`. It computes the target partition from the entity name and record ID using the same `CRC32(entity + "/" + id) % 256` hash from Chapter 4. If the client provided an ID in the payload, that ID is used. If not, the node assigns one.
+
+**Step 2: Check ownership.** The node checks its partition map. If it is the primary for this partition, the operation executes locally (skip to step 4). If not, it proceeds to step 3.
+
+**Step 3: Forward.** The node packages the request into a `JsonDbRequest` — a cluster-internal message carrying the operation type, entity, payload, and critically, the client's MQTT response topic and correlation data. It sends this to the partition's primary via the cluster transport. From the node's perspective, the operation is now in flight.
+
+**Step 4: Execute on primary.** The primary node receives the `JsonDbRequest`, validates the payload against the entity's schema, checks constraints (unique, foreign key, not-null), and if everything passes, creates the record. The store produces both the domain object and a `ReplicationWrite`. The primary replicates the write to its replicas using the async path from Section 5.3.
+
+**Step 5: Respond.** The primary builds a `JsonDbResponse` containing the result, the original response topic, and the original correlation data. It sends this back to the originating node via the cluster transport.
+
+**Step 6: Deliver.** The originating node receives the `JsonDbResponse`, extracts the response topic, and publishes the response locally on its MQTT broker. The client receives the response on the topic it subscribed to, with the correlation data it sent. From the client's perspective, this is indistinguishable from a local operation.
+
+Update and delete follow the same path. The only difference is the operation type in the `JsonDbRequest` and which store method the primary calls.
+
+### Read Path
+
+Single-record reads are simpler. The node computes the target partition and checks whether it holds any copy — primary or replica. If it does, it serves the read locally from its in-memory store. No forwarding, no network hop. If it holds no copy, it forwards to the primary using the same `JsonDbRequest` mechanism.
+
+Serving reads from replicas means a client might see data that lags behind the primary by a few milliseconds — the replication window from Section 5.3. Chapter 4 explained why this is acceptable in a reactive system: the client subscribes to change events and receives corrections automatically.
+
+### Constraint Coordination
+
+Schema validation and not-null checks are straightforward — the primary has the schema in its local broadcast store and validates before applying the write. But unique constraints and foreign keys can span partitions.
+
+A unique constraint on `users.email` means no two records across any partition can share the same email. The unique field's value hashes to its own partition, which may live on a different node than the record's partition. Before the primary can commit the create, it must reserve the unique value on every partition that owns a unique constraint field. If any reservation fails (the value already exists), the entire operation is rejected.
+
+This reservation requires network round trips to remote nodes. While waiting for responses, the node cannot hold its write lock — that would block all other operations on the node. The solution is the lock drop/reacquire pattern: send the reservation requests, drop the lock, await the responses, reacquire the lock, and either commit or abort based on the results. Foreign key existence checks follow the same pattern.
+
+The constraint coordination machinery is covered in detail in Chapter 15. For now, the key point is that a single database create can involve multiple network hops beyond the primary forwarding — one for each unique field whose partition lives on a different node.
+
 ## What Went Wrong: The Catchup Flooding Bug
 
 The initial catchup implementation had no "give up" state. When a replica fell behind, it would buffer out-of-order writes up to the 1,000-entry gap limit, then reject further writes with `SequenceGap` acknowledgments. Each `SequenceGap` triggered a catchup request to the primary. If the write log had already evicted the missing entries, the primary would respond with an empty `CatchupResponse`. The replica would receive the empty response, still have a gap, and the cycle would repeat.

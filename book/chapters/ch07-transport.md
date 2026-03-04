@@ -112,9 +112,9 @@ Queue depth measurements confirmed this diagnosis. Average queue depth across al
 
 The architecture at fault:
 
-```
-MQTT Bridge:  Node 1 → MQTT PUBLISH → Node 2 broker → event loop → inbox
-                                        ↑ competes with client DB traffic
+```mermaid
+flowchart LR
+    N1[Node 1] -->|MQTT PUBLISH| B["Node 2 broker\n⚠ competes with\nclient DB traffic"] --> EL[event loop] --> IN[inbox]
 ```
 
 Every cluster message arrived as an MQTT publish, entered the broker's message router, got dispatched through subscription callbacks, and only then reached the cluster inbox. The broker's event loop processed both cluster and client traffic in the same thread pool. More bridges meant more cluster traffic flowing through the shared broker, leaving less CPU for the operations users actually cared about.
@@ -186,8 +186,9 @@ I'm glad we did it. QUIC is faster, more predictable, and made topology choice i
 
 The replacement bypasses the MQTT broker entirely:
 
-```
-Direct QUIC:  Node 1 → QUIC stream → Node 2 listener → inbox (bypasses broker)
+```mermaid
+flowchart LR
+    N1[Node 1] -->|QUIC stream| L[Node 2 listener] -->|bypasses broker| IN[inbox]
 ```
 
 Each node runs a QUIC server on a dedicated cluster port, offset 100 from the MQTT bind port (e.g., MQTT on 1883, cluster on 1983). The offset is configurable but defaults to 100. This second endpoint serves only cluster traffic — heartbeats, Raft messages, replication writes, forwarded publishes. Client MQTT connections never touch it.
@@ -308,13 +309,13 @@ The topology comparison at the mean level:
 
 QUIC's advantage increased with mesh density because MQTT bridge overhead compounded. In partial topology (1.3 bridges per node on average), QUIC was 2.4x faster. In full mesh (2 bridges per node), QUIC was 5x faster. The pattern held across operation types — for gets, QUIC achieved a uniform ~16,500 ops/s while MQTT bridged nodes dropped to 1,200-1,300; for updates, QUIC maintained ~9,300 ops/s while MQTT full mesh collapsed to 569.
 
-The most consequential result is that topology choice becomes irrelevant with QUIC. Partial, upper, and full mesh all achieve essentially identical throughput (~8,500 insert ops/s mean). Full mesh is now viable — it was unusable with MQTT bridges because the bridge overhead triggered Raft election flapping (Issue 11.16). With two bridges consuming CPU on every node, heartbeat processing slowed enough to trigger election timeouts, causing the leader to cycle between nodes in a continuous loop. The cluster never stabilized long enough to serve client traffic reliably. With QUIC, the same full mesh topology achieves 8,518 insert ops/s — indistinguishable from partial mesh at 8,487.
+The most consequential result is that topology choice becomes irrelevant with QUIC. Partial, upper, and full mesh all achieve essentially identical throughput (~8,500 insert ops/s mean). Full mesh is now viable — it was unusable with MQTT bridges because the bridge overhead triggered Raft election flapping. With two bridges consuming CPU on every node, heartbeat processing slowed enough to trigger election timeouts, causing the leader to cycle between nodes in a continuous loop. The cluster never stabilized long enough to serve client traffic reliably. With QUIC, the same full mesh topology achieves 8,518 insert ops/s — indistinguishable from partial mesh at 8,487.
 
 The uniformity is the real achievement. In a distributed database, unpredictable per-node performance makes capacity planning impossible. If node 2 serves 1,414 ops/s while node 1 serves 9,084, the cluster's effective throughput is constrained by the slowest node that clients happen to connect to. With QUIC, every node in the cluster delivers the same throughput regardless of its position in the topology. A load balancer that distributes connections randomly will achieve aggregate throughput proportional to node count, which is the baseline expectation for horizontal scaling.
 
 ## 7.8 What Went Wrong: The Fire-and-Forget Bug
 
-Issue 11.7. When starting a node with multiple `--peers`, connections failed with "Invalid packet type: 0" errors. Nodes configured with a single peer worked fine.
+When starting a node with multiple `--peers`, connections failed with "Invalid packet type: 0" errors. Nodes configured with a single peer worked fine.
 
 The original transport code used `tokio::spawn()` to fire-and-forget transport operations. When the node needed to connect to peers and begin sending messages, each operation was spawned as an independent task:
 

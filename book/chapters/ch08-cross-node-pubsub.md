@@ -4,10 +4,6 @@ Chapter 7 established a transport layer that delivers messages between nodes wit
 
 The problem is deceptively simple to state. A client on Node 1 publishes to `sensors/temp`. A client on Node 3 subscribes to `sensors/temp`. The message must arrive at Node 3. In a single-node broker this is a hash map lookup. In a cluster, it becomes a distributed systems problem: Node 1 must know that Node 3 has a subscriber, and it must know this without asking Node 3 on every publish.
 
-MQDB's answer is to replicate the subscriber metadata to every node. Three broadcast stores — the TopicIndex, the WildcardStore, and the ClientLocationStore — ensure that every node holds a complete, locally queryable picture of who subscribes to what and where each subscriber is connected. The publish path never crosses the network for routing decisions. It crosses the network only for the final delivery: forwarding the message to nodes that have local subscribers.
-
-This chapter traces the architecture of these three stores, the routing algorithm that combines them, the wire protocol for forwarded publishes, and the four bugs that exposed how difficult it is to get broadcast semantics right.
-
 ## 8.1 The Routing Problem
 
 In a single-node MQTT broker, publish routing is straightforward. The broker maintains a map from topic strings to subscriber lists. When a message arrives on a topic, the broker looks up the subscribers and delivers the message to each one. The entire operation is a local memory access — no I/O, no coordination.
@@ -64,7 +60,7 @@ The ClientLocationStore maps each connected client's ID to the node it is connec
 
 The in-memory representation is minimal: a hash map from client ID strings to node IDs. The wire format that travels between nodes carries additional fields — a version byte and a millisecond timestamp — but the store strips these to the essential mapping.
 
-Internal clients (those whose IDs start with `mqdb-`) are excluded from the location store. These are the broker's own internal MQTT clients — the request handler, the response publisher, the event publisher — and they should never appear in cross-node routing decisions.
+Internal clients (those whose IDs start with `mqdb-`) are excluded from the location store. These are the broker's own internal MQTT clients — the request handler, the response publisher, the event publisher — and every node has its own identical set. Broadcasting their locations would add noise without information: no node ever needs to forward a message to another node's request handler.
 
 ### Three Propagation Mechanisms
 
@@ -86,20 +82,18 @@ The ClientLocationStore routes through `write_or_forward`, the same path used fo
 
 When a client subscribes to a topic on any node, the event handler classifies the subscription and takes different paths for exact topics and wildcard patterns.
 
-```
-Client subscribes to "sensors/temp" on Node 2
-  │
-  ├─ Is it a wildcard pattern? (contains + or #)
-  │   ├─ Yes → insert into local WildcardStore trie
-  │   │        broadcast WildcardBroadcast (type 60) to all nodes
-  │   │
-  │   └─ No  → insert into local TopicIndex hash map
-  │            is it a response topic? (starts with "resp/")
-  │              ├─ Yes → skip broadcast (node-local only)
-  │              └─ No  → broadcast TopicSubscriptionBroadcast (type 61) to all nodes
-  │
-  └─ In both cases: persist the subscription in the session store
-                     (replicated to the session's partition primary)
+```mermaid
+flowchart TD
+    S["Client subscribes to topic on Node 2"] --> W{"Wildcard pattern?\n(contains + or #)"}
+    W -->|Yes| WT["Insert into local\nWildcardStore trie"]
+    WT --> WB["Broadcast WildcardBroadcast\n(type 60) to all nodes"]
+    WB --> P
+    W -->|No| TI["Insert into local\nTopicIndex hash map"]
+    TI --> R{"Response topic?\n(starts with resp/)"}
+    R -->|Yes| SK["Skip broadcast\n(node-local only)"]
+    R -->|No| TB["Broadcast TopicSubscriptionBroadcast\n(type 61) to all nodes"]
+    SK --> P["Persist subscription in session store\n(replicated to session's partition primary)"]
+    TB --> P
 ```
 
 Response topics deserve special attention. MQTT 5.0 request-response patterns use a response topic that the requesting client subscribes to for receiving replies. These topics typically start with `resp/` and are ephemeral — they exist only for the duration of a single request-response exchange. Broadcasting them to all nodes would be wasteful: the publisher and subscriber of a request-response exchange are always on the same node (the broker publishes the response locally). The event handler detects response topics and suppresses the cluster broadcast, keeping them node-local.
@@ -122,33 +116,45 @@ Each node in the trie has three types of edges:
 
 Subscribers are stored only at terminal nodes — the node corresponding to the last segment of their subscription pattern.
 
-For the subscriptions `sensors/+/temperature`, `sensors/#`, and `sensors/building1/temperature`, the trie looks like:
+Consider a building monitoring system with three clients:
 
-```
-root
- └─ "sensors" (literal)
-     ├─ + (single-wildcard)
-     │   └─ "temperature" (literal)
-     │       └─ subscribers: [client-A, qos=1]
-     │
-     ├─ # (multi-wildcard)
-     │   └─ subscribers: [client-B, qos=0]
-     │
-     └─ "building1" (literal)
-         └─ "temperature" (literal)
-             └─ subscribers: [client-C, qos=1]
+| Client   | Subscription                    | Meaning                                 |
+| -------- | ------------------------------- | --------------------------------------- |
+| client-A | `sensors/+/temperature`         | Temperature from any building           |
+| client-B | `sensors/#`                     | All sensor data from all buildings      |
+| client-C | `sensors/building1/temperature` | Temperature from building1 specifically |
+
+These three subscriptions produce the following trie:
+
+```mermaid
+flowchart TD
+    ROOT((root)) --> SENS["sensors\n(literal)"]
+    SENS --> PLUS["+\n(single-wildcard)"]
+    SENS --> HASH["#\n(multi-wildcard)\n👤 client-B"]
+    SENS --> B1["building1\n(literal)"]
+    PLUS --> TEMP1["temperature\n(literal)\n👤 client-A"]
+    B1 --> TEMP2["temperature\n(literal)\n👤 client-C"]
 ```
 
 ### Matching Algorithm
 
-When a message is published to `sensors/building1/temperature`, the matching algorithm walks the trie, exploring all three edge types at every level:
+A sensor publishes a reading to `sensors/building1/temperature`. Which of the three clients should receive it? The matching algorithm walks the trie level by level, splitting into parallel branches at every wildcard edge.
 
-1. At the root, check for `#` subscribers (would match everything). Follow `"sensors"` literal and `+` wildcard edges.
-2. At `"sensors"`, check for `#` subscribers — finds client-B. Follow `"building1"` literal and `+` wildcard edges.
-3. At `+` (from step 2), follow `"temperature"` literal edge. At `"building1"`, follow `"temperature"` literal edge.
-4. At terminal nodes, collect subscribers: client-A (via `sensors/+/temperature`) and client-C (via `sensors/building1/temperature`).
+**Level 0 — root.** The published topic has segments `["sensors", "building1", "temperature"]`. The algorithm takes the first segment, `"sensors"`, and checks three things at the root node: is there a `#` edge (no), is there a `+` edge (no), is there a literal `"sensors"` edge (yes). It follows the literal edge to the `"sensors"` node.
 
-Result: three subscribers — client-A, client-B, and client-C. The algorithm explores all matching branches simultaneously. Its cost is proportional to the number of matching patterns, not the total number of patterns in the trie.
+**Level 1 — `"sensors"`.** The next segment is `"building1"`. Again, three checks:
+
+- `#` edge? Yes — `#` matches everything from this point onward, so client-B is collected immediately. This branch terminates.
+- `+` edge? Yes — `+` matches any single segment, so `"building1"` qualifies. The algorithm follows the `+` edge with the remaining segments `["temperature"]`.
+- Literal `"building1"` edge? Yes. The algorithm follows it with the remaining segments `["temperature"]`.
+
+The search has now split into two active branches: one at the `+` node, one at the `"building1"` node.
+
+**Level 2a — `+` → `"temperature"`.** The remaining segment is `"temperature"`. The `+` node has a literal `"temperature"` child. Follow it. This is the last segment, so check for subscribers: client-A is collected.
+
+**Level 2b — `"building1"` → `"temperature"`.** Same remaining segment, `"temperature"`. The `"building1"` node has a literal `"temperature"` child. Follow it. Last segment, check for subscribers: client-C is collected.
+
+**Result:** all three clients match. Client-A matched through the `+` wildcard, client-B matched through the `#` wildcard at the `"sensors"` level, and client-C matched through the exact literal path. The algorithm explored all matching branches without scanning non-matching subscriptions. Its cost is proportional to the number of matching patterns, not the total number of patterns in the trie.
 
 ### System Topic Protection
 
@@ -162,32 +168,20 @@ Each subscriber in the trie carries four fields: client ID, client partition (th
 
 When a client publishes a message, the event handler orchestrates a multi-step routing flow that combines the three broadcast stores into a forwarding decision:
 
-```
-Client publishes to "sensors/building1/temperature" on Node 1
-  │
-  1. Query WildcardStore: trie.match_topic("sensors/building1/temperature")
-  │   → returns wildcard-matching subscribers across all nodes
-  │
-  2. Query TopicIndex: topics.get_subscribers("sensors/building1/temperature")
-  │   → returns exact-match subscribers across all nodes
-  │
-  3. Merge and deduplicate by client_id (keep max QoS if both match)
-  │   → produces unified target list: [(client_id, partition, qos), ...]
-  │
-  4. For each target, resolve node:
-  │   ClientLocationStore.get(client_id) → NodeId
-  │   Fallback: SessionStore.get(client_id) where connected==1
-  │
-  5. Partition targets into local vs. remote:
-  │   ├─ Local targets: skip (broker delivers directly)
-  │   └─ Remote targets: group by destination node
-  │
-  6. For each destination node, construct ForwardedPublish:
-  │   (origin_node, topic, qos, retain, payload, targets[], timestamp)
-  │   Send via cluster transport
+```mermaid
+flowchart TD
+    PUB["Client publishes to\nsensors/building1/temperature\non Node 1"] --> Q1
+    Q1["1. Query WildcardStore\ntrie.match_topic()\n→ wildcard-matching subscribers"] --> Q2
+    Q2["2. Query TopicIndex\ntopics.get_subscribers()\n→ exact-match subscribers"] --> M
+    M["3. Merge & deduplicate by client_id\n→ unified target list"] --> R
+    R["4. Resolve node per target\nClientLocationStore → NodeId\nFallback: SessionStore"] --> P
+    P{"5. Partition targets"}
+    P -->|"Local targets"| SK["Skip\n(broker delivers directly)"]
+    P -->|"Remote targets"| GR["Group by destination node"]
+    GR --> FP["6. Construct ForwardedPublish\nper destination node\nSend via cluster transport"]
 ```
 
-Step 3 handles the case where a client subscribes to both an exact topic and a matching wildcard pattern. If client-A subscribes to `sensors/temp` and also to `sensors/+`, a publish to `sensors/temp` would find client-A in both the TopicIndex and the WildcardStore. Without deduplication, client-A would receive the message twice. The merge uses the client ID as a deduplication key, keeping the higher QoS of the two subscriptions.
+Step 3 deduplicates by client ID because a client can appear in both result sets — once from an exact subscription and once from a wildcard subscription to the same topic. When both match, the router keeps the higher subscription QoS. The effective delivery QoS is determined later as the minimum of the publish QoS and the subscription QoS.
 
 Step 4 uses a two-tier lookup. The ClientLocationStore is the primary source — a direct hash map lookup. If no entry exists (the location broadcast hasn't propagated yet, or the client connected before the location store existed), the fallback checks the session store for a session marked as connected. This fallback covers the startup race condition where a client connects before the location broadcast has been received by all nodes.
 
@@ -233,7 +227,7 @@ The `timestamp_ms` field was added in version 2 of the protocol, and the story o
 
 ## 8.7 What Went Wrong: The Missing ClientLocationStore
 
-Issue 11.8. In a 3-node cluster, messages published on Node 1 reached subscribers on Node 2 but not Node 3.
+In a 3-node cluster, messages published on Node 1 reached subscribers on Node 2 but not Node 3.
 
 The original design stored subscribers in the TopicIndex with their client partition — the partition derived from the CRC32 hash of the client ID. The routing code used this partition to look up the client's session and find which node the client was connected to. Sessions are partitioned entities with replication factor 2, meaning each node holds session data for about two-thirds of the partitions.
 
@@ -249,9 +243,9 @@ The architectural lesson is that broadcast entities must cover the complete chai
 
 ## 8.8 What Went Wrong: Time-Blind Deduplication
 
-Two separate bugs — Issues 11.9 and 11.14 — shared the same root cause: deduplication keys that lacked a temporal component.
+Two separate bugs shared the same root cause: deduplication keys that lacked a temporal component.
 
-### The ForwardedPublish Bug (Issue 11.9)
+### The ForwardedPublish Bug
 
 Cross-node pub/sub worked on the first run of a test but failed on subsequent runs with the same client IDs.
 
@@ -259,13 +253,15 @@ The original deduplication fingerprint hashed three fields: origin node, topic, 
 
 The fix was adding `timestamp_ms` to the `ForwardedPublish` struct. Each publish captures `SystemTime::now()` at construction, producing a unique fingerprint even for identical content. The wire protocol version was bumped from 1 to 2.
 
-### The ClientLocationEntry Bug (Issue 11.14)
+### The ClientLocationEntry Bug
 
 Cross-node pub/sub with multiple topics failed on the second run of a test.
 
 The `ClientLocationEntry` originally used only the client ID as its identity. When the same client disconnected and reconnected, the new location entry was byte-identical to the old one (same client ID, same node). The replication pipeline's deduplication treated the reconnection as a duplicate of the original connection and silently rejected it. The stale location data meant the publish router could target the wrong node or no node at all.
 
-The fix mirrored Issue 11.9: adding `timestamp_ms` to the `ClientLocationEntry`. Each connection event produces an entry with a unique timestamp, preventing the replication pipeline from treating reconnections as duplicates. The entry version was bumped to 2.
+The fix: adding `timestamp_ms` to the `ClientLocationEntry`. Each connection event produces an entry with a unique timestamp, preventing the replication pipeline from treating reconnections as duplicates. The entry version was bumped to 2.
+
+Bumping wire protocol versions for a single-field addition during development may seem excessive. The version machinery — parsers that handle both v1 and v2 formats, version fields in every serialized message — existed precisely to be exercised. A wire format that has never changed is a wire format whose upgrade path has never been tested.
 
 ### The Shared Lesson
 
@@ -275,13 +271,13 @@ The fix in both cases was minimal — adding one 8-byte field to the wire format
 
 ## 8.9 What Went Wrong: The Missing Broadcast
 
-Issue 11.11. Subscribing to exact topics (non-wildcard) on Node 2 produced no messages when publishers published on Node 1. Wildcard subscriptions worked.
+Subscribing to exact topics (non-wildcard) on Node 2 produced no messages when publishers published on Node 1. Wildcard subscriptions worked.
 
 The original implementation had a `WildcardBroadcast` message (type 60) that propagated wildcard subscriptions to all nodes. When a client subscribed to `sensors/+/temp` on Node 2, every node learned about it via the broadcast, and publishes on Node 1 to `sensors/building1/temp` were correctly forwarded.
 
 But exact topic subscriptions — `sensors/temp`, `home/lights`, any topic without `+` or `#` — were only stored in the local node's TopicIndex. No broadcast was sent. When a client on Node 2 subscribed to `sensors/temp`, only Node 2 knew about it. Node 1's TopicIndex had no entry for that subscription, so publishes to `sensors/temp` on Node 1 found no subscribers and were never forwarded.
 
-The asymmetry was hidden during development because wildcard-based tests (which were more common in the test suite) passed. Only tests that used exact topic subscriptions across nodes exposed the gap.
+The asymmetry was hidden during development because wildcard-based tests passed. Only tests that used exact topic subscriptions across nodes exposed the gap. This was pure lapse of attention type bug.
 
 The fix was a new message type: `TopicSubscriptionBroadcast` (type 61), mirroring the `WildcardBroadcast` for exact topics. The subscribe and unsubscribe paths in the event handler were updated to broadcast exact topic subscriptions to all nodes, using the same pattern: apply locally first, then send to every alive node.
 
@@ -298,11 +294,11 @@ The architectural lesson: when a category of data is classified as a broadcast e
 
 Three lessons emerge from the cross-node pub/sub routing design.
 
-**Broadcast trades storage for latency.** Every node holds a complete copy of every subscription and every client location. In a cluster with 10,000 connected clients and 50,000 subscriptions, each node stores all 50,000 subscription entries and all 10,000 location mappings. The memory cost is real but bounded. The benefit is that publish routing — the hot path, executing on every published message — is a purely local operation. No network round-trip, no cross-node query, no coordination. For a message broker where publish latency matters, this tradeoff is correct. A database might choose differently, but a message broker cannot afford a network round-trip on every publish.
+**Broadcast trades storage for latency.** Every node holds a complete copy of every subscription and every client location. In a cluster with 10,000 connected clients and 50,000 subscriptions, each node stores all 50,000 subscription entries and all 10,000 location mappings. The memory cost is real but bounded. The benefit is that publish routing — the hot path, executing on every published message — is a purely local operation.
 
-**Deduplication needs time.** The twin bugs (11.9 and 11.14) demonstrate that content-based deduplication silently drops legitimate repeated operations. Any dedup key in a system where events repeat over time must include a temporal component. This applies broadly: idempotency keys, cache fingerprints, replication dedup — whenever the same logical content can legitimately appear twice, time must be part of the identity.
+**Deduplication needs time.** The twin bugs demonstrate that content-based deduplication silently drops legitimate repeated operations. Any dedup key in a system where events repeat over time must include a temporal component. This applies broadly: idempotency keys, cache fingerprints, replication dedup — whenever the same logical content can legitimately appear twice, time should be part of the identity.
 
-**Broadcast is all or nothing.** Issue 11.11 showed that partial broadcast — wildcards yes, exact topics no — creates invisible routing failures. The subscribe event handler had two code paths (wildcard and exact), and only one included the broadcast step. The fix was mechanical (add the broadcast to the exact path), but finding the bug required tracing through the routing flow and discovering that exact subscriptions were invisible cross-node. The principle generalizes: when a data category is designated as broadcast, every mutation path for that category must broadcast. Skipping one creates a gap that only manifests under specific workload patterns — exactly the kind of bug that survives testing but fails in production.
+**Broadcast is all or nothing.** Showed that partial broadcast — wildcards yes, exact topics no — creates invisible routing failures. The subscribe event handler had two code paths (wildcard and exact), and only one included the broadcast step. The fix was mechanical (add the broadcast to the exact path), but finding the bug required tracing through the routing flow and discovering that exact subscriptions were invisible cross-node. The principle generalizes: when a data category is designated as broadcast, every mutation path for that category must broadcast. Skipping one creates a gap that only manifests under specific workload patterns — exactly the kind of bug that survives testing but fails in production.
 
 ## What Comes Next
 

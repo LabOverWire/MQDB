@@ -147,7 +147,7 @@ Read operations (get, list) also check partition ownership. For a single-record 
 
 Serving reads from replicas means a client might receive data that is behind the primary. In a request-response system, this would be a real concern — the client has no way to know whether the value it received is current or stale without polling again. But MQDB is reactive first. A client that reads a record and subscribes to its change events will receive the current value from the replica, and then receive an update within milliseconds if the primary had a newer version. The subscription closes the consistency gap automatically. Eventual consistency is a meaningful guarantee only when the system actively pushes updates to interested clients. Without subscriptions, "eventual" means "whenever you decide to ask again." With subscriptions, "eventual" means "the next change event, which is already on its way."
 
-List operations are more complex because they must aggregate results across all partitions. A list of all users requires scanning every partition's data store. In cluster mode, this becomes a scatter-gather operation: the coordinating node sends a list request to every node, each node scans its primary partitions and returns matching records, and the coordinator merges the results. Chapter 8 covers this in detail.
+List operations are more complex because they must aggregate results across all partitions. A list of all users requires scanning every partition's data store. In cluster mode, this becomes a scatter-gather operation: the coordinating node sends a list request to every node, each node scans its primary partitions and returns matching records, and the coordinator merges the results. Chapter 9 covers this in detail.
 
 ## 4.5 Two Classes of Entities
 
