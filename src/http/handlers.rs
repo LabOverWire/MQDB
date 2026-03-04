@@ -1560,10 +1560,12 @@ pub async fn handle_vault_unlock(
         );
     }
 
+    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
     state.vault_key_store.set(canonical_id, key_bytes);
     state.session_store.set_vault_unlocked(&session_id, true);
 
-    let resume_result = resume_pending_migration(state, canonical_id, &crypto, &identity).await;
+    let resume_result =
+        resume_pending_migration(state, canonical_id, &crypto, &identity, passphrase).await;
 
     let mut body = json!({"status": "unlocked"});
     if let Some(migration) = resume_result {
@@ -1810,12 +1812,14 @@ pub async fn handle_vault_change(
     state.vault_key_store.set(canonical_id, new_key_bytes);
 
     let new_salt_b64 = BASE64.encode(new_salt);
+    let old_salt_b64 = BASE64.encode(&old_salt);
     let migration_start = json!({
         "vault_salt": new_salt_b64,
         "vault_check": new_check,
         "vault_migration_status": "pending",
         "vault_migration_mode": "re_encrypt",
         "vault_old_check": check_token,
+        "vault_old_salt": old_salt_b64,
     });
     update_entity(
         &state.mqtt_client,
@@ -1831,6 +1835,7 @@ pub async fn handle_vault_change(
         "vault_migration_status": "complete",
         "vault_migration_mode": null,
         "vault_old_check": null,
+        "vault_old_salt": null,
     });
     update_entity(
         &state.mqtt_client,
@@ -1982,6 +1987,7 @@ async fn resume_pending_migration(
     canonical_id: &str,
     crypto: &VaultCrypto,
     identity: &serde_json::Value,
+    passphrase: &str,
 ) -> Option<MigrationResumeResult> {
     let status = identity
         .get("vault_migration_status")
@@ -1993,13 +1999,14 @@ async fn resume_pending_migration(
         .get("vault_migration_mode")
         .and_then(|v| v.as_str())?;
 
-    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
-
     let batch = match mode {
         "encrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Encrypt).await,
         "decrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Decrypt).await,
         "re_encrypt" => {
-            batch_vault_operation(state, canonical_id, crypto, VaultMode::Encrypt).await
+            let old_salt_b64 = identity.get("vault_old_salt").and_then(|v| v.as_str())?;
+            let old_salt = BASE64.decode(old_salt_b64).ok()?;
+            let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
+            batch_vault_re_encrypt(state, canonical_id, &old_crypto, crypto).await
         }
         _ => return None,
     };
@@ -2008,6 +2015,7 @@ async fn resume_pending_migration(
         "vault_migration_status": "complete",
         "vault_migration_mode": null,
         "vault_old_check": null,
+        "vault_old_salt": null,
     });
     update_entity(
         &state.mqtt_client,

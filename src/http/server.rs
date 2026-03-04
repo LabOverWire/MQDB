@@ -260,9 +260,66 @@ async fn initialize_identity_constraints(state: &ServerState) {
     });
     let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
     let topic = "$DB/_admin/constraint/_identities/add";
-    if let Err(e) = state.mqtt_client.publish(topic, payload_bytes).await {
-        warn!(error = %e, "failed to initialize _identities unique constraint");
-    } else {
-        info!(field = unique_field, "initialized unique constraint on _identities");
+    let response_topic = format!("$DB/_identities/_resp/{}", std::process::id());
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if state
+        .mqtt_client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        warn!("failed to subscribe for constraint init response");
+        return;
+    }
+
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if state
+        .mqtt_client
+        .publish_with_options(topic, payload_bytes, options)
+        .await
+        .is_err()
+    {
+        warn!("failed to publish _identities unique constraint");
+        let _ = state.mqtt_client.unsubscribe(&response_topic).await;
+        return;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = state.mqtt_client.unsubscribe(&response_topic).await;
+
+    match result {
+        Ok(Ok(payload)) => {
+            if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if status == "ok" || status == "error" {
+                    info!(
+                        field = unique_field,
+                        "initialized unique constraint on _identities"
+                    );
+                } else {
+                    warn!(response = %resp, "unexpected constraint init response");
+                }
+            }
+        }
+        _ => {
+            warn!("timeout waiting for _identities constraint init response");
+        }
     }
 }
