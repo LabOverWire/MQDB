@@ -59,12 +59,12 @@ The startup sequence proceeds in strict order:
 1. Build the broker configuration with all MQTT 5.0 settings.
 2. Add optional QUIC and WebSocket listeners.
 3. Chain auth providers and wrap the final result in the topic protection layer.
-4. The handler client connects, subscribes to `$DB/#`, enters the message loop.
-5. The event publisher connects, enters the change event broadcast loop.
-6. Optional HTTP/OAuth gateway starts.
-7. The MQTT accept loop starts.
+4. Spawn the handler task, event publisher task, and optional HTTP/OAuth task (all sleeping, not yet connected).
+5. Start the MQTT accept loop.
+6. After 100ms, the handler client connects, subscribes to `$DB/#`, enters the message loop.
+7. After 200ms, the event publisher connects, enters the change event broadcast loop.
 
-The handler and event tasks sleep briefly before connecting (100ms and 200ms respectively) to ensure the broker's accept loop is ready. This is a practical sequencing mechanism — the broker must be accepting connections before internal clients try to connect.
+The sleep delays ensure the broker's accept loop is ready before internal clients try to connect. This is a practical sequencing mechanism — the tasks are spawned before the accept loop starts, but they wait for it.
 
 The bounded channel (256 slots) provides backpressure. Under QoS 0, if the handler cannot keep up, the non-blocking send drops messages silently — the channel is full, the callback returns, and the message is lost. Under QoS 1, the broker's own flow control prevents this: the PUBACK mechanism means the sending client waits for acknowledgment before sending the next message, naturally throttling the rate to what the handler can process.
 
@@ -155,7 +155,7 @@ Three namespaces under `$DB/` handle non-CRUD operations:
 
 **`$DB/_sub/`** handles subscription management for the database's reactive subscription system (distinct from MQTT subscriptions): `subscribe`, `{id}/heartbeat`, `{id}/unsubscribe`.
 
-**`$DB/_admin/`** contains 21 operations organized into subnamespaces: `schema/{entity}/set` and `schema/{entity}/get` for schema management; `constraint/{entity}/add` and `constraint/{entity}/list` for constraints; `backup`, `backup/list`, `restore` for backup management; `consumer-groups` and `consumer-groups/{name}` for consumer group inspection; `users/add`, `users/delete`, `users/list` for runtime user management; and nine ACL operations under `acl/rules/`, `acl/roles/`, and `acl/assignments/` for access control.
+**`$DB/_admin/`** contains 22 operations organized into subnamespaces: `schema/{entity}/set` and `schema/{entity}/get` for schema management; `constraint/{entity}/add` and `constraint/{entity}/list` for constraints; `index/{entity}/add` for secondary index management; `backup`, `backup/list`, `restore` for backup management; `consumer-groups` and `consumer-groups/{name}` for consumer group inspection; `users/add`, `users/delete`, `users/list` for runtime user management; and nine ACL operations under `acl/rules/`, `acl/roles/`, and `acl/assignments/` for access control.
 
 ### Event Topics
 
@@ -189,7 +189,7 @@ The topic protection layer wraps every other auth provider as a decorator. It in
 | ------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
 | BlockAll      | No publish, no subscribe, even for admin | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` |
 | ReadOnly      | Subscribe allowed, publish blocked       | `$DB/+/events/#`, `$SYS/#`                                                        |
-| AdminRequired | Publish and subscribe require admin role | `$DB/_admin/#`, `$DB/_oauth_tokens/#`                                             |
+| AdminRequired | Publish and subscribe require admin role | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` |
 
 A catch-all rule blocks non-admin users from any `$DB/` topic where the entity starts with `_` (like `$DB/_sessions/list`), except `$DB/_health`.
 

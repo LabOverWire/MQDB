@@ -59,15 +59,14 @@ Bridge direction interacted with topology in a non-obvious way. Asymmetric topol
 
 Full mesh with `Both` direction was tested. The result: channel overflow within seconds, cluster unresponsive. The problem was message amplification. Node 1 published a heartbeat. Its bridge forwarded it to node 2. Node 2's bridge, configured for bidirectional forwarding, forwarded it to node 3. Node 3's bridge forwarded it back to node 1. The heartbeat circulated forever, multiplying with each cycle.
 
-Bridge loop prevention addressed this for normal operation. Bridge clients used predictable IDs like `mqdb-node-1-to-node-2`. The broker's router detected this pattern and skipped forwarding messages that originated from bridge clients to other bridges. Without this check, messages would amplify exponentially even in asymmetric topologies:
+Bridge loop prevention addressed this for normal operation through two mechanisms. First, messages received from a remote broker via a bridge were delivered locally using `route_message_local_only()` — a routing path that delivers to local subscribers but explicitly skips forwarding to other bridges. Second, the bridge manager maintained a content-based fingerprint cache (SHA-256 of topic, payload, QoS, and retain flag) with a TTL window. When a message's fingerprint matched a recently-seen entry, the bridge manager blocked it from outgoing bridge forwarding. Together, these mechanisms broke the amplification chain:
 
 1. Node 1 publishes heartbeat
-2. Bridge delivers to Node 2 (as client `node-1-to-node-2`)
-3. Without loop prevention, Node 2's router forwards to Node 3's bridge
-4. Node 3's router forwards back to Node 1's bridge
-5. Infinite loop
+2. Bridge delivers to Node 2
+3. Node 2's broker calls `route_message_local_only()` — local subscribers receive it, but bridge forwarding is skipped
+4. Chain broken
 
-The loop prevention filter broke this chain by recognizing bridge-origin messages and excluding them from further bridge forwarding. But this filter could not save full mesh with `Both` direction — the symmetric bidirectional bridges created forwarding paths that the router's pattern matching could not distinguish from legitimate new messages.
+The local-only routing prevented immediate bridge-to-bridge loops. But this mechanism could not save full mesh with `Both` direction. Bidirectional bridges subscribe to local topics and forward matching publishes to the remote. When `route_message_local_only()` delivered a message to local subscribers, the bridge's own local subscription picked it up and forwarded it outward through the next bridge hop. The content fingerprint dedup could not help either — each heartbeat carried a unique timestamp in its payload, producing a distinct fingerprint every time. Unique messages circulated through the mesh indefinitely, each one a fresh entry in the fingerprint cache.
 
 ## 7.3 The Bridge Overhead Problem
 
@@ -219,7 +218,7 @@ The connection lifecycle has three phases:
 
 **Binding.** `bind()` creates the QUIC endpoint and spawns an `acceptor_task()` that listens for incoming connections from peer nodes. When a peer connects, the acceptor reads a 2-byte node ID header from the incoming stream, registers the peer in the connection map, and spawns a `receiver_task()` for that connection.
 
-**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, as it provides extra freedom when when writing code. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
+**Connecting.** `connect_to_peer()` opens a bidirectional QUIC stream to a peer's cluster port. QUIC streams are multiplexed within a single connection, so multiple logical streams can coexist without head-of-line blocking — but MQDB uses one bidirectional stream per peer, as it provides extra freedom when writing code. The connecting node sends its own 2-byte node ID as a header, then stores the send half of the stream in the peer connection map. A `receiver_task()` is spawned for the receive half. The result is symmetric: whether node A initiated the connection to node B or vice versa, both nodes end up with a send stream and a receiver task for each peer.
 
 **Messaging.** `send_to_peer()` serializes the message and writes it to the peer's send stream with length-prefixed framing:
 

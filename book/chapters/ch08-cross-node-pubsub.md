@@ -84,16 +84,14 @@ When a client subscribes to a topic on any node, the event handler classifies th
 
 ```mermaid
 flowchart TD
-    S["Client subscribes to topic on Node 2"] --> W{"Wildcard pattern?<br/>(contains + or #)"}
+    S["Client subscribes to topic on Node 2"] --> P["Persist subscription in session store<br/>(replicated to session's partition primary)"]
+    P --> W{"Wildcard pattern?<br/>(contains + or #)"}
     W -->|Yes| WT["Insert into local<br/>WildcardStore trie"]
     WT --> WB["Broadcast WildcardBroadcast<br/>(type 60) to all nodes"]
-    WB --> P
     W -->|No| TI["Insert into local<br/>TopicIndex hash map"]
     TI --> R{"Response topic?<br/>(starts with resp/)"}
     R -->|Yes| SK["Skip broadcast<br/>(node-local only)"]
     R -->|No| TB["Broadcast TopicSubscriptionBroadcast<br/>(type 61) to all nodes"]
-    SK --> P["Persist subscription in session store<br/>(replicated to session's partition primary)"]
-    TB --> P
 ```
 
 Response topics deserve special attention. MQTT 5.0 request-response patterns use a response topic that the requesting client subscribes to for receiving replies. These topics typically start with `resp/` and are ephemeral — they exist only for the duration of a single request-response exchange. Broadcasting them to all nodes would be wasteful: the publisher and subscriber of a request-response exchange are always on the same node (the broker publishes the response locally). The event handler detects response topics and suppresses the cluster broadcast, keeping them node-local.

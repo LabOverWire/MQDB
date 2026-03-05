@@ -65,7 +65,7 @@ fn encode_i64_sortable(val: i64) -> [u8; 8] {
 }
 ```
 
-Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort _after_ all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives now sort before positives in byte order. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FE`, with every value in between landing at the correct position for byte comparison.
+Two's complement big-endian already sorts positive integers correctly — `1` produces smaller bytes than `1000`. The problem is the sign bit: in two's complement, negative numbers have the high bit set, so they sort _after_ all positive numbers in raw byte order. Flipping the sign bit with XOR 0x80 inverts this relationship: negatives now sort before positives in byte order. The result is that `i64::MIN` encodes to `0x00_00_00_00_00_00_00_00` and `i64::MAX` to `0xFF_FF_FF_FF_FF_FF_FF_FF`, with every value in between landing at the correct position for byte comparison.
 
 Floats use the same sign-bit idea on IEEE 754 bits, but negative floats need all bits flipped because IEEE 754 reverses the magnitude ordering for negative values — a more negative float has a larger binary representation:
 

@@ -133,7 +133,7 @@ Not all data behaves the same way. MQDB distinguishes between two classes:
 
 **Partitioned entities** follow standard hash-based distribution. A database record with key `users/user-42` hashes to partition `hash("users/user-42") % 256`. Only the node that owns that partition stores the primary copy. Sessions, subscriptions, QoS state, retained messages, and user-defined database records are all partitioned entities.
 
-**Broadcast entities** must exist on every node. When a message arrives on Node A, the node must immediately determine which clients — potentially connected to Node B or Node C — subscribe to that topic. Cross-node queries on every publish destroys throughput (believe me, we tried). So MQDB replicates certain entities to all nodes: the topic-to-subscriber index, the wildcard subscription trie, and the client-to-node location map.
+**Broadcast entities** must exist on every node. When a message arrives on Node A, the node must immediately determine which clients — potentially connected to Node B or Node C — subscribe to that topic. Cross-node queries on every publish destroys throughput (believe me, we tried). So MQDB replicates certain entities to all nodes: the topic-to-subscriber index, the wildcard subscription trie, the client-to-node location map, and schema and constraint definitions.
 
 Chapter 4 covers partitioning in detail. Chapter 8 explains why broadcast entities are necessary for cross-node pub/sub routing.
 
@@ -212,12 +212,12 @@ Inter-node communication uses direct QUIC streams with mTLS authentication. Each
 
 These three layers map to three deployment modes:
 
-**Library.** Import the crate and use the database API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for WASM, and an async backend for network-attached storage. This mode suits embedded applications, WASM deployments, and unit testing.
+**Library.** Import the crate and use the database API directly. No network, no broker, no cluster. The database runs in-process with pluggable storage backends: an LSM-tree (Fjall) for production, an in-memory backend for tests and WASM, and an encrypted backend for at-rest encryption. This mode suits embedded applications, WASM deployments, and unit testing.
 
 ```rust
 let db = Database::open("./data/mydb").await?;
 let user = json!({"name": "Alice", "email": "alice@example.com"});
-let created = db.create("users".into(), user).await?;
+let created = db.create("users".into(), user, None, None, &ScopeConfig::default()).await?;
 ```
 
 **Standalone Agent.** A single-node process running the MQTT broker with the embedded database. Clients connect via MQTT and perform database operations through the `$DB/` topic namespace. Authentication, ACLs, and topic protection are available. This mode suits single-server deployments where MQTT integration is needed but distribution is not.
