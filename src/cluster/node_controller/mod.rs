@@ -38,6 +38,7 @@ use super::store_manager::StoreManager;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
+use crate::VaultKeyStore;
 use crate::storage::StorageBackend;
 use crate::types::{MAX_LIST_RESULTS, OwnershipConfig};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -74,6 +75,8 @@ pub struct PendingScatterRequest {
     pub filters: Vec<crate::Filter>,
     pub sorts: Vec<crate::SortOrder>,
     pub projection: Option<Vec<String>>,
+    pub entity: String,
+    pub vault_sender: Option<String>,
 }
 
 struct UniqueReservationParams<'a> {
@@ -316,6 +319,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
+    pub(super) vault_key_store: Arc<VaultKeyStore>,
 }
 
 impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
@@ -381,11 +385,16 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_scatter_requests: HashMap::new(),
             pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
+            vault_key_store: Arc::new(VaultKeyStore::new()),
         }
     }
 
     pub fn set_ownership(&mut self, ownership: Arc<OwnershipConfig>) {
         self.ownership = ownership;
+    }
+
+    pub fn set_vault_key_store(&mut self, store: Arc<VaultKeyStore>) {
+        self.vault_key_store = store;
     }
 
     pub fn set_synced_retained_topics(

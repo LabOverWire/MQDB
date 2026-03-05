@@ -129,7 +129,8 @@ impl ClusteredAgent {
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
                 .with_ownership(ownership)
-                .with_scope_config(Arc::clone(&self.scope_config)),
+                .with_scope_config(Arc::clone(&self.scope_config))
+                .with_vault_key_store(Arc::clone(&self.vault_key_store)),
         );
         self.configure_broker_with_auth(
             event_handler,
@@ -156,7 +157,7 @@ impl ClusteredAgent {
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::unused_async)]
     async fn configure_broker_with_auth(
         &self,
         event_handler: Arc<ClusterEventHandler<ClusterTransportKind>>,
@@ -540,7 +541,8 @@ impl ClusteredAgent {
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
                 .with_ownership(Arc::clone(&self.ownership))
-                .with_scope_config(Arc::clone(&self.scope_config)),
+                .with_scope_config(Arc::clone(&self.scope_config))
+                .with_vault_key_store(Arc::clone(&self.vault_key_store)),
         );
         let synced_retained_topics = event_handler.synced_retained_topics();
 

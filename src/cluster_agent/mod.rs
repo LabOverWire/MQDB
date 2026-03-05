@@ -10,6 +10,7 @@ mod transport;
 
 pub use transport::ClusterTransportKind;
 
+use crate::VaultKeyStore;
 use crate::cluster::raft::RaftCoordinator;
 use crate::cluster::{
     DedicatedExecutor, InboundMessage, NodeController, NodeId, PartitionMap, ProcessingBatch,
@@ -156,6 +157,7 @@ pub struct ClusteredAgent {
     ownership: Arc<crate::types::OwnershipConfig>,
     scope_config: Arc<crate::types::ScopeConfig>,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
+    vault_key_store: Arc<VaultKeyStore>,
 }
 
 impl ClusteredAgent {

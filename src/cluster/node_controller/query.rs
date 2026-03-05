@@ -66,7 +66,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.query_coordinator.check_timeouts(now)
     }
 
-    #[allow(clippy::missing_panics_doc)]
+    #[allow(clippy::missing_panics_doc, clippy::too_many_arguments)]
     pub async fn start_scatter_list_query(
         &mut self,
         entity: &str,
@@ -75,6 +75,7 @@ impl<T: ClusterTransport> NodeController<T> {
         filters: Vec<crate::Filter>,
         sorts: Vec<crate::SortOrder>,
         projection: Option<Vec<String>>,
+        sender: Option<&str>,
     ) -> bool {
         let alive_nodes = self.heartbeat.alive_nodes();
         let remote_nodes: Vec<NodeId> = alive_nodes
@@ -111,6 +112,8 @@ impl<T: ClusterTransport> NodeController<T> {
             filters,
             sorts,
             projection,
+            entity: entity.to_string(),
+            vault_sender: sender.map(str::to_string),
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
@@ -195,7 +198,32 @@ impl<T: ClusterTransport> NodeController<T> {
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
             filtered.truncate(MAX_LIST_RESULTS);
 
-            let projected = Self::apply_list_projection(filtered, completed.projection.as_deref());
+            let mut projected =
+                Self::apply_list_projection(filtered, completed.projection.as_deref());
+
+            if let Some(ref vault_sender) = completed.vault_sender
+                && crate::vault_transform::is_vault_eligible(&completed.entity, &self.ownership)
+                && let Some(key_bytes) = self.vault_key_store.get(vault_sender)
+                && let Some(crypto) = crate::http::VaultCrypto::from_key_bytes(&key_bytes)
+            {
+                let skip = crate::vault_transform::build_vault_skip_fields(
+                    &completed.entity,
+                    &self.ownership,
+                );
+                for item in &mut projected {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
+                        && let Some(data) = item.get_mut("data")
+                    {
+                        crate::vault_transform::vault_decrypt_fields(
+                            &crypto,
+                            &completed.entity,
+                            &id,
+                            data,
+                            &skip,
+                        );
+                    }
+                }
+            }
 
             let result = serde_json::json!({
                 "status": "ok",

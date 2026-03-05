@@ -8,6 +8,7 @@ use super::db_handler::DbRequestHandler;
 use super::node_controller::NodeController;
 use super::transport::{ClusterMessage, ClusterTransport};
 use super::{ForwardTarget, LwtPublisher, NodeId, TopicSubscriptionBroadcast, WildcardBroadcast};
+use crate::VaultKeyStore;
 use mqtt5::QoS;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     controller: Arc<RwLock<NodeController<T>>>,
     synced_retained_topics: Arc<RwLock<HashMap<String, Instant>>>,
     db_handler: DbRequestHandler,
+    vault_key_store: Arc<VaultKeyStore>,
 }
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
@@ -36,6 +38,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             controller,
             synced_retained_topics: Arc::new(RwLock::new(HashMap::new())),
             db_handler: DbRequestHandler::new(node_id),
+            vault_key_store: Arc::new(VaultKeyStore::new()),
         }
     }
 
@@ -54,6 +57,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         scope_config: std::sync::Arc<crate::types::ScopeConfig>,
     ) -> Self {
         self.db_handler = self.db_handler.with_scope_config(scope_config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_vault_key_store(mut self, store: Arc<VaultKeyStore>) -> Self {
+        self.db_handler = self.db_handler.with_vault_key_store(Arc::clone(&store));
+        self.vault_key_store = store;
         self
     }
 

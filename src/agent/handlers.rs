@@ -4,6 +4,10 @@
 use crate::http::VaultCrypto;
 use crate::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::{OwnershipConfig, ScopeConfig};
+use crate::vault_transform::{
+    build_vault_skip_fields, ensure_id, is_vault_eligible, vault_decrypt_fields,
+    vault_encrypt_fields,
+};
 use crate::{Database, Request, Response, VaultKeyStore};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
@@ -154,22 +158,6 @@ pub(super) async fn handle_message(
     }
 }
 
-fn is_vault_eligible(entity: &str, ownership: &OwnershipConfig) -> bool {
-    !entity.starts_with('_') && ownership.entity_owner_fields.contains_key(entity)
-}
-
-fn build_vault_skip_fields(entity: &str, ownership: &OwnershipConfig) -> Vec<String> {
-    let mut skip = vec!["id".to_string()];
-    if let Some(owner_field) = ownership.entity_owner_fields.get(entity) {
-        skip.push(owner_field.clone());
-    }
-    skip
-}
-
-fn should_skip_field(key: &str, skip_fields: &[String]) -> bool {
-    key.starts_with('_') || skip_fields.iter().any(|s| s == key)
-}
-
 async fn vault_transform_request(
     db: &Database,
     crypto: &VaultCrypto,
@@ -199,71 +187,6 @@ async fn vault_transform_request(
             Ok(encrypted_request)
         }
         other => Ok(other),
-    }
-}
-
-fn ensure_id(data: &mut Value) -> String {
-    if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-        return id.to_string();
-    }
-    let id = uuid_v7();
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(id.clone()));
-    }
-    id
-}
-
-fn vault_encrypt_fields(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    data: &mut Value,
-    skip_fields: &[String],
-) {
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    let keys: Vec<String> = obj.keys().cloned().collect();
-    for key in keys {
-        if should_skip_field(&key, skip_fields) {
-            continue;
-        }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Ok(encrypted) = encrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(encrypted));
-        }
-    }
-}
-
-fn encrypt_string(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    plaintext: &str,
-) -> Result<String, String> {
-    let mut wrapper = serde_json::json!({ "v": plaintext });
-    crypto.encrypt_record(entity, id, &mut wrapper, &[]);
-    wrapper
-        .get("v")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .ok_or_else(|| "encrypt failed".to_string())
-}
-
-fn decrypt_string(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    ciphertext: &str,
-) -> Option<String> {
-    let mut wrapper = serde_json::json!({ "v": ciphertext });
-    crypto.decrypt_record(entity, id, &mut wrapper, &[]);
-    let decrypted = wrapper.get("v")?.as_str()?;
-    if decrypted == ciphertext {
-        None
-    } else {
-        Some(decrypted.to_string())
     }
 }
 
@@ -324,29 +247,6 @@ async fn vault_pre_update(
     })
 }
 
-fn vault_decrypt_fields(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    data: &mut Value,
-    skip_fields: &[String],
-) {
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    let keys: Vec<String> = obj.keys().cloned().collect();
-    for key in keys {
-        if should_skip_field(&key, skip_fields) {
-            continue;
-        }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Some(decrypted) = decrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(decrypted));
-        }
-    }
-}
-
 fn vault_decrypt_response(
     crypto: &VaultCrypto,
     entity: &str,
@@ -377,49 +277,6 @@ fn vault_decrypt_response(
         }
         DbOp::Delete => {}
     }
-}
-
-fn uuid_v7() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis());
-
-    let mut bytes = [0u8; 16];
-    bytes[0] = ((ts >> 40) & 0xFF) as u8;
-    bytes[1] = ((ts >> 32) & 0xFF) as u8;
-    bytes[2] = ((ts >> 24) & 0xFF) as u8;
-    bytes[3] = ((ts >> 16) & 0xFF) as u8;
-    bytes[4] = ((ts >> 8) & 0xFF) as u8;
-    bytes[5] = (ts & 0xFF) as u8;
-
-    let rng = SystemRandom::new();
-    rng.fill(&mut bytes[6..])
-        .expect("system RNG unavailable — OS CSPRNG failure");
-
-    bytes[6] = (bytes[6] & 0x0F) | 0x70;
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 async fn handle_admin_operation(

@@ -49,6 +49,8 @@ pub mod topic_protection;
 pub mod topic_rules;
 pub mod transport;
 pub mod vault_keys;
+#[cfg(feature = "http-api")]
+pub mod vault_transform;
 
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use error::{Error, Result};

@@ -90,16 +90,23 @@ impl DbRequestHandler {
     ) -> JsonOpResult {
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
-                self.handle_json_create(
-                    controller,
-                    entity,
-                    payload,
-                    response_topic,
-                    correlation_data,
-                    sender,
-                    client_id,
-                )
-                .await
+                let result = self
+                    .handle_json_create(
+                        controller,
+                        entity,
+                        payload,
+                        response_topic,
+                        correlation_data,
+                        sender,
+                        client_id,
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => JsonOpResult::Response(
+                        self.vault_decrypt_response_payload(payload, entity, "create", sender),
+                    ),
+                    other => other,
+                }
             }
             DbTopicOperation::JsonRead { entity, id } => {
                 if let Some(uid) = sender
@@ -139,13 +146,15 @@ impl DbRequestHandler {
                 };
                 let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
+                    let forward_payload =
+                        self.vault_encrypt_update_delta(entity, id, effective_payload, sender);
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
                             JsonDbOp::Update,
                             entity,
                             Some(id),
-                            effective_payload,
+                            &forward_payload,
                             response_topic,
                             correlation_data,
                             sender,
@@ -160,17 +169,24 @@ impl DbRequestHandler {
                         ))
                     };
                 }
-                self.handle_json_update(
-                    controller,
-                    entity,
-                    id,
-                    effective_payload,
-                    sender,
-                    client_id,
-                    response_topic,
-                    correlation_data,
-                )
-                .await
+                let result = self
+                    .handle_json_update(
+                        controller,
+                        entity,
+                        id,
+                        effective_payload,
+                        sender,
+                        client_id,
+                        response_topic,
+                        correlation_data,
+                    )
+                    .await;
+                match result {
+                    JsonOpResult::Response(payload) => JsonOpResult::Response(
+                        self.vault_decrypt_response_payload(payload, entity, "update", sender),
+                    ),
+                    other => other,
+                }
             }
             DbTopicOperation::JsonDelete { entity, id } => {
                 if let Some(uid) = sender
@@ -289,13 +305,23 @@ impl DbRequestHandler {
             (p, self.generate_id_for_partition(entity, p, payload))
         };
 
+        if let Some(crypto) = self.resolve_vault_crypto(entity, sender) {
+            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            if !data.as_object().is_some_and(|o| o.contains_key("id")) {
+                data.as_object_mut()
+                    .map(|o| o.insert("id".to_string(), Value::String(id.clone())));
+            }
+            crate::vault_transform::vault_encrypt_fields(&crypto, entity, &id, &mut data, &skip);
+        }
+
         if !controller.is_primary_for_partition(partition) {
+            let encrypted_payload = serde_json::to_vec(&data).unwrap_or_default();
             return match self
                 .try_forward_create(
                     controller,
                     partition,
                     entity,
-                    payload,
+                    &encrypted_payload,
                     response_topic,
                     correlation_data,
                     sender,
@@ -566,7 +592,15 @@ impl DbRequestHandler {
 
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
-                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                let mut data: Value =
+                    serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                if let Some(crypto) = self.resolve_vault_crypto(entity, sender) {
+                    let skip =
+                        crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+                    crate::vault_transform::vault_decrypt_fields(
+                        &crypto, entity, id, &mut data, &skip,
+                    );
+                }
                 let data = if let Some(ref fields) = projection {
                     crate::Database::project_fields(data, fields)
                 } else {
@@ -639,15 +673,36 @@ impl DbRequestHandler {
         if let Some(obj) = updates.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
-        let (old_data, merged_data) =
-            match self.merge_with_existing(controller, entity, id, updates) {
-                Ok(pair) => pair,
-                Err(response) => return JsonOpResult::Response(response),
-            };
+        let vault_crypto = self.resolve_vault_crypto(entity, sender);
+        let (old_data, merged_data) = match self.vault_merge_with_existing(
+            controller,
+            entity,
+            id,
+            updates,
+            vault_crypto.as_ref(),
+        ) {
+            Ok(pair) => pair,
+            Err(response) => return JsonOpResult::Response(response),
+        };
 
         if let Some(err) = Self::validate_against_schema(controller, entity, &merged_data) {
             return JsonOpResult::Response(err);
         }
+
+        let merged_data = if let Some(ref crypto) = vault_crypto {
+            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            let mut to_encrypt = merged_data;
+            crate::vault_transform::vault_encrypt_fields(
+                crypto,
+                entity,
+                id,
+                &mut to_encrypt,
+                &skip,
+            );
+            to_encrypt
+        } else {
+            merged_data
+        };
 
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -1065,6 +1120,7 @@ impl DbRequestHandler {
                     filters.clone(),
                     sorts,
                     projection.clone(),
+                    sender,
                 )
                 .await;
 
@@ -1073,11 +1129,25 @@ impl DbRequestHandler {
             }
         }
 
+        let vault_crypto = self.resolve_vault_crypto(entity, sender);
+        let vault_skip = vault_crypto
+            .as_ref()
+            .map(|_| crate::vault_transform::build_vault_skip_fields(entity, &self.ownership));
+
         let entities = controller.db_list(entity);
         let mut items: Vec<Value> = entities
             .iter()
             .filter_map(|e| {
-                let data: Value = serde_json::from_slice(&e.data).ok()?;
+                let mut data: Value = serde_json::from_slice(&e.data).ok()?;
+                if let (Some(crypto), Some(skip)) = (&vault_crypto, &vault_skip) {
+                    crate::vault_transform::vault_decrypt_fields(
+                        crypto,
+                        entity,
+                        e.id_str(),
+                        &mut data,
+                        skip,
+                    );
+                }
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
@@ -1127,6 +1197,7 @@ impl DbRequestHandler {
                 correlation_data,
                 ..
             } => {
+                let vault_sender = sender.clone();
                 let response_payload = match remote_results {
                     Err((conflict_field, confirmed)) => {
                         controller
@@ -1211,6 +1282,12 @@ impl DbRequestHandler {
                         }
                     }
                 };
+                let response_payload = self.vault_decrypt_response_payload(
+                    response_payload,
+                    &entity,
+                    "create",
+                    vault_sender.as_deref(),
+                );
                 Some(super::DbPublishResponse {
                     topic: response_topic,
                     payload: response_payload,
@@ -1232,6 +1309,7 @@ impl DbRequestHandler {
                 correlation_data,
                 ..
             } => {
+                let vault_sender = sender.clone();
                 let response_payload = match remote_results {
                     Err((conflict_field, confirmed)) => {
                         controller
@@ -1324,6 +1402,12 @@ impl DbRequestHandler {
                         }
                     }
                 };
+                let response_payload = self.vault_decrypt_response_payload(
+                    response_payload,
+                    &entity,
+                    "update",
+                    vault_sender.as_deref(),
+                );
                 Some(super::DbPublishResponse {
                     topic: response_topic,
                     payload: response_payload,
@@ -1455,6 +1539,12 @@ impl DbRequestHandler {
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => {
+                        let payload = self.vault_decrypt_response_payload(
+                            payload,
+                            &entity,
+                            "create",
+                            sender.as_deref(),
+                        );
                         FkCheckCompletion::Done(Some(super::DbPublishResponse {
                             topic: response_topic,
                             payload,
@@ -1503,6 +1593,12 @@ impl DbRequestHandler {
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => {
+                        let payload = self.vault_decrypt_response_payload(
+                            payload,
+                            &entity,
+                            "update",
+                            sender.as_deref(),
+                        );
                         FkCheckCompletion::Done(Some(super::DbPublishResponse {
                             topic: response_topic,
                             payload,
@@ -1524,6 +1620,71 @@ impl DbRequestHandler {
                 FkCheckCompletion::Done(None)
             }
         }
+    }
+
+    fn vault_merge_with_existing<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        entity: &str,
+        id: &str,
+        updates: Value,
+        vault_crypto: Option<&crate::http::VaultCrypto>,
+    ) -> Result<(Value, Value), Vec<u8>> {
+        if let Some(crypto) = vault_crypto {
+            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            let Some(existing) = controller.db_get(entity, id) else {
+                return Err(Self::json_error(
+                    404,
+                    &format!("entity not found: {entity} id={id}"),
+                ));
+            };
+            let mut existing_data: Value = serde_json::from_slice(&existing.data)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            crate::vault_transform::vault_decrypt_fields(
+                crypto,
+                entity,
+                id,
+                &mut existing_data,
+                &skip,
+            );
+            let old_data = existing_data.clone();
+            if let (Value::Object(base), Value::Object(patch)) = (&mut existing_data, updates) {
+                for (key, value) in patch {
+                    base.insert(key, value);
+                }
+            }
+            let existing_version = old_data
+                .get("_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if let Value::Object(ref mut obj) = existing_data {
+                obj.insert(
+                    "_version".to_string(),
+                    Value::Number((existing_version + 1).into()),
+                );
+            }
+            Ok((old_data, existing_data))
+        } else {
+            self.merge_with_existing(controller, entity, id, updates)
+        }
+    }
+
+    fn vault_encrypt_update_delta(
+        &self,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+        sender: Option<&str>,
+    ) -> Vec<u8> {
+        let Some(crypto) = self.resolve_vault_crypto(entity, sender) else {
+            return payload.to_vec();
+        };
+        let Ok(mut delta) = serde_json::from_slice::<Value>(payload) else {
+            return payload.to_vec();
+        };
+        let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+        crate::vault_transform::vault_encrypt_fields(&crypto, entity, id, &mut delta, &skip);
+        serde_json::to_vec(&delta).unwrap_or_else(|_| payload.to_vec())
     }
 
     fn build_outbox(event: &ChangeEvent) -> crate::cluster::store_manager::outbox::OutboxPayload {
