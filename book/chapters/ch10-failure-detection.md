@@ -47,14 +47,14 @@ The timeout check runs every tick of the event loop. It iterates over all known 
 
 ```mermaid
 flowchart TD
-    START[For each tracked peer] --> CHK{"Status is\nDead or Unknown?"}
+    START[For each tracked peer] --> CHK{"Status is<br/>Dead or Unknown?"}
     CHK -->|Yes| SKIP[Skip]
     SKIP --> START
     CHK -->|No| ELAPSED["elapsed = now − last_heartbeat"]
     ELAPSED --> T{"elapsed > timeout?"}
-    T -->|Yes| DEAD["Mark Dead\nAdd to dead list"]
+    T -->|Yes| DEAD["Mark Dead<br/>Add to dead list"]
     DEAD --> START
-    T -->|No| H{"elapsed > timeout/2\nAND status is Alive?"}
+    T -->|No| H{"elapsed > timeout/2<br/>AND status is Alive?"}
     H -->|Yes| SUSP[Mark Suspected]
     H -->|No| NXT[Next peer]
     SUSP --> START
@@ -94,7 +94,7 @@ This bug illustrates a general principle: any timestamp initialized to zero is a
 
 A related issue affected the other direction: a node sending heartbeats before it had partition assignments. The heartbeat would contain an empty primary bitmap, telling peers that this node owns nothing. Since the heartbeat was valid (correctly formatted, real timestamp), the peer would mark the sender as Alive. But the empty bitmap provided no routing information, and the peer might skip the sender in partition assignment decisions because it appeared to be a node with no work.
 
-The fix was a guard in `should_send`: heartbeats are only sent when the local partition map has at least one assignment for the local node, or when the node has at least one registered peer. The first condition prevents empty-bitmap heartbeats during the startup window before Raft assigns partitions. The second condition ensures that a fresh node with peers but no partitions still sends heartbeats to establish liveness — the bitmaps will be empty, but the "I'm alive" signal is still valuable for the peer's timeout tracking.
+The fix was a guard in `should_send`: heartbeats are suppressed only when the node has neither partition assignments nor registered peers. A node with partitions but no peers has nobody to send to. A node with peers but no partitions still sends heartbeats — the bitmaps will be empty, but the "I'm alive" signal is valuable for the peer's timeout tracking. Only a node with nothing (no partitions, no peers) stays silent, which is the correct behavior during the brief window before the cluster has formed.
 
 ## 10.5 Partition Failover
 
@@ -110,7 +110,7 @@ The Raft leader's `handle_node_death` function does the real work. It first remo
 
 **Dead node was primary.** The leader calls `select_new_primary`, which first checks the partition's replica list for an alive node. If a replica is alive, it becomes the new primary — this is the fast path, because the replica already has the data. If no replica is alive, any alive node in the cluster is chosen as a fallback — this is the slow path, because the new primary will need a snapshot transfer to obtain the data it does not yet have. The leader then proposes a Raft command that sets the new primary, removes the dead node from the replica list, and increments the partition's epoch.
 
-**Dead node was replica.** The leader proposes a simpler update: keep the existing primary, remove the dead node from the replica list, increment the epoch. No primary change is needed, but the epoch bump ensures that any in-flight replication writes from the dead replica are rejected by their stale epoch.
+**Dead node was replica.** The leader proposes a simpler update: keep the existing primary, remove the dead node from the replica list, increment the epoch. No primary change is needed. The epoch bump serves the same purpose as in the primary case: it versions the partition assignment so that any node still operating under the old assignment — for instance, a primary that was about to send replication writes to the now-dead replica — observes the new epoch and updates its replica list accordingly.
 
 Each reassignment is a separate Raft proposal. For a node that owned many partitions — say, 85 primaries and 85 replicas in a balanced 3-node cluster — this means up to 170 Raft proposals. The Raft log batches these efficiently (the batch flush fix from Chapter 6 is essential here), but they are still individual proposals that must be committed and applied by all nodes.
 
@@ -167,9 +167,9 @@ Putting the pieces together, the timeline from node failure to full recovery loo
 ```mermaid
 block-beta
     columns 5
-    A["t=0s\nNode 2 crashes"]:1 space B["t=1s\nNo action"]:1 space C["t=7.5s\nSuspected"]:1
+    A["t=0s<br/>Node 2 crashes"]:1 space B["t=1s<br/>No action"]:1 space C["t=7.5s<br/>Suspected"]:1
     space:5
-    F["t=16s\nCluster operational"]:1 space E["t=15.x\nReplicas promoted"]:1 space D["t=15s\nDead, Raft notified"]:1
+    F["t=16s<br/>Cluster operational"]:1 space E["t=15.x<br/>Replicas promoted"]:1 space D["t=15s<br/>Dead, Raft notified"]:1
     A --> B
     B --> C
     C --> D
@@ -190,9 +190,9 @@ For the slow path (no replica available, snapshot needed):
 ```mermaid
 block-beta
     columns 5
-    A["t=0s\nNode 2 crashes"]:1 space B["t=15s\nDead, failover begins"]:1 space C["t=15.x\nSnapshot requested"]:1
+    A["t=0s<br/>Node 2 crashes"]:1 space B["t=15s<br/>Dead, failover begins"]:1 space C["t=15.x<br/>Snapshot requested"]:1
     space:5
-    space:1 space:1 E["t=16-20s\nSnapshot imported"]:1 space D["t=15.x+\nSnapshot transfer"]:1
+    space:1 space:1 E["t=16-20s<br/>Snapshot imported"]:1 space D["t=15.x+<br/>Snapshot transfer"]:1
     A --> B
     B --> C
     C --> D

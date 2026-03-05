@@ -114,7 +114,7 @@ The architecture at fault:
 
 ```mermaid
 flowchart LR
-    N1[Node 1] -->|MQTT PUBLISH| B["Node 2 broker\n⚠ competes with\nclient DB traffic"] --> EL[event loop] --> IN[inbox]
+    N1[Node 1] -->|MQTT PUBLISH| B["Node 2 broker<br/>competes with<br/>client DB traffic"] --> EL[event loop] --> IN[inbox]
 ```
 
 Every cluster message arrived as an MQTT publish, entered the broker's message router, got dispatched through subscription callbacks, and only then reached the cluster inbox. The broker's event loop processed both cluster and client traffic in the same thread pool. More bridges meant more cluster traffic flowing through the shared broker, leaving less CPU for the operations users actually cared about.

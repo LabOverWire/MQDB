@@ -8,7 +8,7 @@ TEST_DIR="/tmp/vault-e2e-test"
 AGENT_PID=""
 PASS=0
 FAIL=0
-TOTAL=36
+TOTAL=40
 
 cleanup() {
     if [[ -n "$AGENT_PID" ]]; then
@@ -99,6 +99,23 @@ assert_min_length() {
         echo "  FAIL: $label"
         echo "    expected length >= $min_len, got $actual_len"
         echo "    value: $value"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+assert_gte() {
+    local label="$1" actual="$2" min="$3"
+    if [[ "$actual" == "__PARSE_ERROR__" ]]; then
+        echo "  FAIL: $label (JSON parse error)"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+    if [[ "$actual" -ge "$min" ]] 2>/dev/null; then
+        echo "  PASS: $label ($actual >= $min)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: $label"
+        echo "    expected >= $min, got: $actual"
         FAIL=$((FAIL + 1))
     fi
 }
@@ -365,6 +382,125 @@ RESP=$(curl -s -b "$COOKIE_JAR" http://127.0.0.1:13000/vault/status \
     -H "Origin: http://localhost:8080")
 echo "  Response: $RESP"
 assert_eq "vault_enabled is false" "$(json_field "$RESP" "vault_enabled")" "False"
+
+echo ""
+echo "--- Test 24: concurrent identity race condition ---"
+curl -s -c "$TEST_DIR/race1.txt" -X POST http://127.0.0.1:13000/auth/dev-login \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d '{"email":"race@example.com","name":"Racer 1"}' > "$TEST_DIR/race1_resp.txt" &
+RACE1_PID=$!
+curl -s -c "$TEST_DIR/race2.txt" -X POST http://127.0.0.1:13000/auth/dev-login \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d '{"email":"race@example.com","name":"Racer 2"}' > "$TEST_DIR/race2_resp.txt" &
+RACE2_PID=$!
+wait $RACE1_PID
+wait $RACE2_PID
+sleep 1
+RESP=$("$MQDB_BIN" list _identities --filter 'primary_email=race@example.com' \
+    --broker 127.0.0.1:18830 --user "$OBSERVER_USER" --pass "$OBSERVER_PASS" 2>/dev/null)
+RACE_COUNT=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    items = d.get('data', [])
+    print(len(items))
+except:
+    print('__PARSE_ERROR__')
+" "$RESP" 2>/dev/null)
+echo "  Identities with race@example.com: $RACE_COUNT"
+assert_eq "only one identity for concurrent email" "$RACE_COUNT" "1"
+
+echo ""
+echo "--- Tests 25-28: migration_pending observation during batch ---"
+BULK_COUNT=200
+echo "  Creating $BULK_COUNT notes for batch window..."
+CREATE_PIDS=()
+for i in $(seq 1 $BULK_COUNT); do
+    "$MQDB_BIN" create notes --broker 127.0.0.1:18830 --user "$CANONICAL_ID" --pass "$MQTT_PASS" \
+        -d "{\"title\":\"bulk-$i\",\"body\":\"data-$i\",\"userId\":\"$CANONICAL_ID\"}" > /dev/null 2>&1 &
+    CREATE_PIDS+=($!)
+    if (( i % 10 == 0 )); then
+        for pid in "${CREATE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+        CREATE_PIDS=()
+    fi
+done
+for pid in "${CREATE_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+sleep 1
+
+COOKIE_JAR2="$TEST_DIR/cookies2.txt"
+curl -s -c "$COOKIE_JAR2" -X POST http://127.0.0.1:13000/auth/dev-login \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"email\":\"test@example.com\",\"canonical_id\":\"$CANONICAL_ID\"}" > /dev/null
+
+ENABLE2_PASSPHRASE="observe-pass"
+
+SESSION_COOKIE1=$(grep mqdb_session "$COOKIE_JAR" | awk '{print $NF}')
+SESSION_COOKIE2=$(grep mqdb_session "$COOKIE_JAR2" | awk '{print $NF}')
+
+python3 << 'PYEOF' - "$SESSION_COOKIE1" "$SESSION_COOKIE2" "$ENABLE2_PASSPHRASE" "$TEST_DIR"
+import http.client, json, sys, threading, time
+
+session1 = sys.argv[1]
+session2 = sys.argv[2]
+passphrase = sys.argv[3]
+test_dir = sys.argv[4]
+
+host = '127.0.0.1'
+port = 13000
+origin = 'http://localhost:8080'
+
+def do_enable():
+    conn = http.client.HTTPConnection(host, port)
+    conn.request('POST', '/vault/enable',
+                 json.dumps({'passphrase': passphrase}),
+                 {'Content-Type': 'application/json',
+                  'Cookie': f'mqdb_session={session1}',
+                  'Origin': origin})
+    resp = conn.getresponse()
+    body = resp.read().decode()
+    with open(f'{test_dir}/enable2.txt', 'w') as f:
+        f.write(body)
+    conn.close()
+
+t = threading.Thread(target=do_enable)
+t.start()
+
+seen = False
+for i in range(2000):
+    try:
+        conn = http.client.HTTPConnection(host, port)
+        conn.request('GET', '/vault/status',
+                     headers={'Cookie': f'mqdb_session={session2}',
+                              'Origin': origin})
+        resp = conn.getresponse()
+        data = json.loads(resp.read().decode())
+        conn.close()
+        if data.get('migration_pending'):
+            print(f'  migration_pending observed on poll {i+1}')
+            seen = True
+            break
+    except:
+        pass
+    if not t.is_alive():
+        print('  vault enable completed before migration_pending observed')
+        break
+
+t.join()
+with open(f'{test_dir}/migration_seen.txt', 'w') as f:
+    f.write('true' if seen else 'false')
+PYEOF
+
+MIGRATION_SEEN=$(cat "$TEST_DIR/migration_seen.txt" 2>/dev/null || echo "false")
+
+assert_eq "migration_pending observed" "$MIGRATION_SEEN" "true"
+ENABLE2_RESP=$(cat "$TEST_DIR/enable2.txt")
+echo "  Enable response: $ENABLE2_RESP"
+assert_eq "vault re-enabled" "$(json_field "$ENABLE2_RESP" "status")" "enabled"
+ENCRYPTED_COUNT=$(json_field "$ENABLE2_RESP" "records_encrypted")
+assert_gte "records_encrypted >= $BULK_COUNT" "$ENCRYPTED_COUNT" "$BULK_COUNT"
 
 echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="

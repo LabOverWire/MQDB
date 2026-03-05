@@ -263,11 +263,11 @@ A database create request follows this path:
 
 ```mermaid
 flowchart LR
-    C([Client]) -->|"1. MQTT PUBLISH\n$DB/users/create"| N2
-    N2["Node 2\n(connected)"] -->|"2. compute partition\nnot primary → forward\nJsonDbRequest"| N1
-    N1["Node 1\n(primary)"] -->|"3. validate schema/constraints\napply write\nreplicate to replicas"| N1
+    C([Client]) -->|"1. MQTT PUBLISH<br/>$DB/users/create"| N2
+    N2["Node 2<br/>(connected)"] -->|"2. compute partition<br/>not primary → forward<br/>JsonDbRequest"| N1
+    N1["Node 1<br/>(primary)"] -->|"3. validate schema/constraints<br/>apply write<br/>replicate to replicas"| N1
     N1 -->|"4. JsonDbResponse"| N2
-    N2 -->|"5. publish to\nresponse topic"| C
+    N2 -->|"5. publish to<br/>response topic"| C
 ```
 
 **Step 1: Receive and route.** The event handler receives the MQTT publish on `$DB/users/create`. It computes the target partition from the entity name and record ID using the same `CRC32(entity + "/" + id) % 256` hash from Chapter 4. If the client provided an ID in the payload, that ID is used. If not, the node assigns one.

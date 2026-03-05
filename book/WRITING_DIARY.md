@@ -38,6 +38,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | 2026-03-03 | 4,068 |
 | 20 | Operating MQDB | Not started | | | |
 | 21 | The WASM Frontier | Not started | | | |
+| Preface | Preface | First draft | 2026-03-03 | | 1,055 |
 | A | Wire Protocol Reference | Not started | | | |
 | B | Entity Type Reference | Not started | | | |
 | C | Configuration Reference | Not started | | | |
@@ -475,6 +476,21 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Updated unlock description in Section 19.3 to reflect fence-before-key ordering
 - Trimmed "What Comes Next" to reflect only remaining planned work
 - Word count: 3,514 → 4,068
+
+### Session 16 — 2026-03-03
+
+**Work done:**
+- Wrote Preface first draft (`preface.md`, 1,055 words)
+- Five "surprise" features that fell out of the MQTT constraint: change events, ownership, vault encryption, distributed routing, access control
+- Closing thesis: architectural constraints as force multipliers, 5:1 ratio of emergent to engineered features
+- Updated OUTLINE.md with Preface section before Part I
+- Target was 1,000-1,500 words; landed at 1,055
+
+**Key decisions:**
+- Placed as preface, not a chapter section — this is authorial perspective on the discovery process, not technical architecture
+- Each "surprise" grounded in specific code paths verified by Explore agent: events.rs publish, agent/handlers.rs x-mqtt-sender extraction, vault_transform_request interception, db/partition.rs topic-to-hash, topic_rules.rs protection tiers
+- No code in the preface — pure narrative. Code comes in the chapters.
+- The "5:1 ratio" claim: 5 emergent features (events, ownership, vault, routing, ACL) vs 5 hard problems (unique constraints, Raft, migration, sessions, query coordination) — honest about what was hard
 
 ### Memories for Future Sessions
 

@@ -35,6 +35,10 @@ Senior backend engineers and system designers who:
 
 ---
 
+## Preface (~4 pages)
+
+The discovery narrative: how MQTT's constraints produced features that were never planned. Change events as a free side effect of pub/sub, ownership from authenticated connections, vault encryption from the publish handler interception point, distributed routing from topic structure, access control from MQTT ACLs. The thesis: when you choose the right foundational abstraction, features compound; when you choose the wrong one, they fight.
+
 ## Part I: The Design Thesis (Chapters 1-3, ~70 pages)
 
 ### Chapter 1: Why Unify Messaging and Storage?
