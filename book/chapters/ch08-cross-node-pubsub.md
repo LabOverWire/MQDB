@@ -84,15 +84,15 @@ When a client subscribes to a topic on any node, the event handler classifies th
 
 ```mermaid
 flowchart TD
-    S["Client subscribes to topic on Node 2"] --> W{"Wildcard pattern?\n(contains + or #)"}
-    W -->|Yes| WT["Insert into local\nWildcardStore trie"]
-    WT --> WB["Broadcast WildcardBroadcast\n(type 60) to all nodes"]
+    S["Client subscribes to topic on Node 2"] --> W{"Wildcard pattern?<br/>(contains + or #)"}
+    W -->|Yes| WT["Insert into local<br/>WildcardStore trie"]
+    WT --> WB["Broadcast WildcardBroadcast<br/>(type 60) to all nodes"]
     WB --> P
-    W -->|No| TI["Insert into local\nTopicIndex hash map"]
-    TI --> R{"Response topic?\n(starts with resp/)"}
-    R -->|Yes| SK["Skip broadcast\n(node-local only)"]
-    R -->|No| TB["Broadcast TopicSubscriptionBroadcast\n(type 61) to all nodes"]
-    SK --> P["Persist subscription in session store\n(replicated to session's partition primary)"]
+    W -->|No| TI["Insert into local<br/>TopicIndex hash map"]
+    TI --> R{"Response topic?<br/>(starts with resp/)"}
+    R -->|Yes| SK["Skip broadcast<br/>(node-local only)"]
+    R -->|No| TB["Broadcast TopicSubscriptionBroadcast<br/>(type 61) to all nodes"]
+    SK --> P["Persist subscription in session store<br/>(replicated to session's partition primary)"]
     TB --> P
 ```
 
@@ -128,12 +128,12 @@ These three subscriptions produce the following trie:
 
 ```mermaid
 flowchart TD
-    ROOT((root)) --> SENS["sensors\n(literal)"]
-    SENS --> PLUS["+\n(single-wildcard)"]
-    SENS --> HASH["#\n(multi-wildcard)\n👤 client-B"]
-    SENS --> B1["building1\n(literal)"]
-    PLUS --> TEMP1["temperature\n(literal)\n👤 client-A"]
-    B1 --> TEMP2["temperature\n(literal)\n👤 client-C"]
+    ROOT((root)) --> SENS["sensors<br/>(literal)"]
+    SENS --> PLUS["+<br/>(single-wildcard)"]
+    SENS --> HASH["#<br/>(multi-wildcard)<br/>client-B"]
+    SENS --> B1["building1<br/>(literal)"]
+    PLUS --> TEMP1["temperature<br/>(literal)<br/>client-A"]
+    B1 --> TEMP2["temperature<br/>(literal)<br/>client-C"]
 ```
 
 ### Matching Algorithm
@@ -170,15 +170,15 @@ When a client publishes a message, the event handler orchestrates a multi-step r
 
 ```mermaid
 flowchart TD
-    PUB["Client publishes to\nsensors/building1/temperature\non Node 1"] --> Q1
-    Q1["1. Query WildcardStore\ntrie.match_topic()\n→ wildcard-matching subscribers"] --> Q2
-    Q2["2. Query TopicIndex\ntopics.get_subscribers()\n→ exact-match subscribers"] --> M
-    M["3. Merge & deduplicate by client_id\n→ unified target list"] --> R
-    R["4. Resolve node per target\nClientLocationStore → NodeId\nFallback: SessionStore"] --> P
+    PUB["Client publishes to<br/>sensors/building1/temperature<br/>on Node 1"] --> Q1
+    Q1["1. Query WildcardStore<br/>trie.match_topic()<br/>→ wildcard-matching subscribers"] --> Q2
+    Q2["2. Query TopicIndex<br/>topics.get_subscribers()<br/>→ exact-match subscribers"] --> M
+    M["3. Merge and deduplicate by client_id<br/>→ unified target list"] --> R
+    R["4. Resolve node per target<br/>ClientLocationStore → NodeId<br/>Fallback: SessionStore"] --> P
     P{"5. Partition targets"}
-    P -->|"Local targets"| SK["Skip\n(broker delivers directly)"]
+    P -->|"Local targets"| SK["Skip<br/>(broker delivers directly)"]
     P -->|"Remote targets"| GR["Group by destination node"]
-    GR --> FP["6. Construct ForwardedPublish\nper destination node\nSend via cluster transport"]
+    GR --> FP["6. Construct ForwardedPublish<br/>per destination node<br/>Send via cluster transport"]
 ```
 
 Step 3 deduplicates by client ID because a client can appear in both result sets — once from an exact subscription and once from a wildcard subscription to the same topic. When both match, the router keeps the higher subscription QoS. The effective delivery QoS is determined later as the minimum of the publish QoS and the subscription QoS.

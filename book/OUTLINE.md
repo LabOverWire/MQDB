@@ -31,9 +31,13 @@ Senior backend engineers and system designers who:
 
 ## Estimated Length
 
-~400-500 pages across 20 chapters in 5 parts. Each chapter ~20-25 pages.
+~420-520 pages across 21 chapters in 5 parts. Each chapter ~20-25 pages.
 
 ---
+
+## Preface (~4 pages)
+
+The discovery narrative: how MQTT's constraints produced features that were never planned. Change events as a free side effect of pub/sub, ownership from authenticated connections, vault encryption from the publish handler interception point, distributed routing from topic structure, access control from MQTT ACLs. The thesis: when you choose the right foundational abstraction, features compound; when you choose the wrong one, they fight.
 
 ## Part I: The Design Thesis (Chapters 1-3, ~70 pages)
 
@@ -204,7 +208,7 @@ Binary protocol design for distributed system communication.
 
 ---
 
-## Part IV: Advanced Patterns (Chapters 15-18, ~80 pages)
+## Part IV: Advanced Patterns (Chapters 15-19, ~100 pages)
 
 ### Chapter 15: Constraints in a Distributed System
 
@@ -253,29 +257,41 @@ Who can do what with which data — from connection-time authentication through 
 - **18.8 HTTP Gateway and OAuth Integration** — OAuth 2.0 authorization code grant with PKCE, session management with tickets, JWT signing for MQTT credentials, CORS support, rate limiting for ticket generation. How web clients authenticate via HTTP and then connect via MQTT with the issued JWT. Google OAuth as the reference implementation.
 - **18.9 Error Sanitization** — Internal error details never leak to clients. Sanitized MQTT reason strings. Why `"permission denied"` is the right error message even when the real cause is more specific.
 
+### Chapter 19: Vault Encryption and Data Protection
+
+How MQDB protects data at rest with two encryption systems: user-controlled vault encryption and server-managed identity encryption.
+
+- **19.1 Two Threat Models** — Authentication controls access; encryption controls exposure. Why MQDB needs two separate encryption systems for user data and OAuth infrastructure.
+- **19.2 Vault Crypto Primitives** — AES-256-GCM with PBKDF2 key derivation (600K iterations, 32-byte salt). Field-level encryption with entity:id AAD. Skip fields, check tokens, nonce management.
+- **19.3 The Vault Lifecycle** — Enable (derive key, batch encrypt), Lock (remove key from memory), Unlock (re-derive key, verify check token), Disable (batch decrypt), Change (re-encrypt with new key). Rate limiting on passphrase attempts.
+- **19.4 In-Memory Key Management** — VaultKeyStore with zeroized keys. Volatile storage (lost on restart). Write fences for batch/MQTT concurrency control.
+- **19.5 Transparent Encryption in the MQTT Data Path** — Request interception (encrypt on create/update), response decryption (decrypt on read/list). The update problem: partial updates require read-decrypt-merge-encrypt-write cycle.
+- **19.6 Identity Encryption** — Server-generated key with HKDF-derived dual keys (encryption + HMAC). Key wrapping with PBKDF2. Blind indexing for searchable encrypted fields.
+- **19.7 What Went Wrong** — Batch atomicity (crash leaves mixed encrypted/plaintext state), TOCTOU in vault pre-update, identity race condition needing unique constraints. *(Ongoing — chapter will expand as vault implementation matures.)*
+
 ---
 
-## Part V: Operating and Extending (Chapters 19-20, ~50 pages)
+## Part V: Operating and Extending (Chapters 20-21, ~50 pages)
 
-### Chapter 19: Operating MQDB
+### Chapter 20: Operating MQDB
 
 From development to production deployment.
 
-- **19.1 Deployment Modes** — Library (embedded in Rust application), standalone agent (single-node), cluster (multi-node). When to use each.
-- **19.2 Cluster Sizing** — Partition count is fixed at 256. Replication factor is 2. How many nodes for your workload? Why 3-node clusters are the sweet spot for most use cases.
-- **19.3 Monitoring** — Health endpoint (`$DB/_health`), cluster status (`$SYS/mqdb/cluster/status`), partition distribution verification. What to alert on.
-- **19.4 Backup and Restore** — The backup/restore protocol via `$DB/_admin/backup`. Consistent snapshots, point-in-time recovery considerations.
-- **19.5 Capacity Planning** — Using benchmark data for capacity planning. Agent mode throughput vs. cluster mode throughput. Network bandwidth requirements for replication.
-- **19.6 The CLI** — Command structure: `mqdb agent`, `mqdb cluster`, `mqdb dev`, CRUD verbs (`create`, `read`, `update`, `delete`, `list`, `watch`), admin commands (`schema set`, `constraint add`, `acl`), benchmarking (`mqdb bench`). How CLI commands translate to MQTT request/response under the hood. Output formatting and `--projection` support. The `mqdb dev` toolkit: `start-cluster`, `ps`, `logs`, `test`, `kill` for local development workflows.
+- **20.1 Deployment Modes** — Library (embedded in Rust application), standalone agent (single-node), cluster (multi-node). When to use each.
+- **20.2 Cluster Sizing** — Partition count is fixed at 256. Replication factor is 2. How many nodes for your workload? Why 3-node clusters are the sweet spot for most use cases.
+- **20.3 Monitoring** — Health endpoint (`$DB/_health`), cluster status (`$SYS/mqdb/cluster/status`), partition distribution verification. What to alert on.
+- **20.4 Backup and Restore** — The backup/restore protocol via `$DB/_admin/backup`. Consistent snapshots, point-in-time recovery considerations.
+- **20.5 Capacity Planning** — Using benchmark data for capacity planning. Agent mode throughput vs. cluster mode throughput. Network bandwidth requirements for replication.
+- **20.6 The CLI** — Command structure: `mqdb agent`, `mqdb cluster`, `mqdb dev`, CRUD verbs (`create`, `read`, `update`, `delete`, `list`, `watch`), admin commands (`schema set`, `constraint add`, `acl`), benchmarking (`mqdb bench`). How CLI commands translate to MQTT request/response under the hood. Output formatting and `--projection` support. The `mqdb dev` toolkit: `start-cluster`, `ps`, `logs`, `test`, `kill` for local development workflows.
 
-### Chapter 20: The WASM Frontier
+### Chapter 21: The WASM Frontier
 
 Running a database in the browser and at the edge.
 
-- **20.1 Why WASM?** — Edge computing, offline-first applications, reducing server round trips. The same database API in the browser as on the server.
-- **20.2 The Memory Backend** — In-memory storage for WASM targets. Same interface as Fjall, different performance characteristics.
-- **20.3 Feature Flags and Conditional Compilation** — Native vs. WASM feature flags. How conditional compilation enables a single codebase for multiple targets.
-- **20.4 Async Runtime Differences** — Tokio on native, browser-compatible futures on WASM. The runtime abstraction layer that hides the difference.
+- **21.1 Why WASM?** — Edge computing, offline-first applications, reducing server round trips. The same database API in the browser as on the server.
+- **21.2 The Memory Backend** — In-memory storage for WASM targets. Same interface as Fjall, different performance characteristics.
+- **21.3 Feature Flags and Conditional Compilation** — Native vs. WASM feature flags. How conditional compilation enables a single codebase for multiple targets.
+- **21.4 Async Runtime Differences** — Tokio on native, browser-compatible futures on WASM. The runtime abstraction layer that hides the difference.
 
 ---
 
@@ -328,7 +344,7 @@ Ch1 (Thesis) ──→ Ch2 (Storage) ──→ Ch3 (MQTT Protocol)
        Ch15 (Constraints) ──→ Ch16 (Consumer Groups)
               │
               ▼
-       Ch17 (Perf) ──→ Ch18 (Security) ──→ Ch19 (Operations) ──→ Ch20 (WASM)
+       Ch17 (Perf) ──→ Ch18 (Security) ──→ Ch19 (Vault) ──→ Ch20 (Operations) ──→ Ch21 (WASM)
 ```
 
 Readers can skip Parts IV-V on first reading. Parts I-III form the core narrative.

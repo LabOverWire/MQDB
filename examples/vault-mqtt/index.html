@@ -70,6 +70,12 @@
       <button class="btn-secondary" onclick="vaultStatus()">Status</button>
     </div>
     <div id="vault-status" class="status status-off">Unknown</div>
+    <h2 style="margin-top:12px">Change Passphrase</h2>
+    <label>New Passphrase</label>
+    <input id="new_passphrase" type="password" placeholder="Enter new passphrase">
+    <div>
+      <button class="btn-warning" onclick="vaultChange()">Change Passphrase</button>
+    </div>
   </div>
 
   <div class="panel">
@@ -222,14 +228,32 @@ async function vaultDisable() {
   } catch (e) { log('Vault disable failed: ' + e.message, 'log-err'); }
 }
 
+async function vaultChange() {
+  try {
+    const data = await httpPost('/vault/change', {
+      old_passphrase: document.getElementById('passphrase').value,
+      new_passphrase: document.getElementById('new_passphrase').value,
+    });
+    logJson('Vault Change:', data);
+    if (data.status === 'changed') {
+      document.getElementById('passphrase').value = document.getElementById('new_passphrase').value;
+      document.getElementById('new_passphrase').value = '';
+      log('Passphrase field updated to new value', 'log-ok');
+    }
+    updateVaultBadge(data);
+  } catch (e) { log('Vault change failed: ' + e.message, 'log-err'); }
+}
+
 async function vaultStatus() {
   try {
     const data = await httpGet('/vault/status');
     logJson('Vault Status:', data);
     const el = document.getElementById('vault-status');
     if (data.vault_enabled) {
+      let label = data.unlocked ? 'Enabled + Unlocked' : 'Enabled + Locked';
+      if (data.migration_pending) { label += ' (migration pending)'; }
       el.className = data.unlocked ? 'status status-on' : 'status status-off';
-      el.textContent = data.unlocked ? 'Enabled + Unlocked' : 'Enabled + Locked';
+      el.textContent = label;
     } else {
       el.className = 'status status-off';
       el.textContent = 'Disabled';
@@ -239,13 +263,13 @@ async function vaultStatus() {
 
 function updateVaultBadge(data) {
   const el = document.getElementById('vault-status');
-  if (data.status === 'enabled' || data.status === 'unlocked') {
+  if (data.status === 'enabled' || data.status === 'unlocked' || data.status === 'changed') {
     el.className = 'status status-on';
     el.textContent = 'Enabled + Unlocked';
   } else if (data.status === 'locked') {
     el.className = 'status status-off';
     el.textContent = 'Locked';
-  } else if (data.status === 'disabled') {
+  } else if (data.status === 'disabled' || data.status === 'vault_disabled') {
     el.className = 'status status-off';
     el.textContent = 'Disabled';
   }

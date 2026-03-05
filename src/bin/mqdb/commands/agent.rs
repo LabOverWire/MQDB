@@ -281,6 +281,7 @@ pub(crate) fn build_http_config(
         identity_crypto,
         ownership_config,
         vault_key_store: None,
+        vault_unlock_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
     })
 }
 

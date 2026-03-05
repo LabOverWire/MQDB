@@ -62,11 +62,11 @@ The replication factor is capped at the number of available nodes. A single-node
 
 A concrete example: consider a 2-node cluster where Nodes 1 and 2 each hold 128 primaries and 128 replicas. Node 3 joins. The ideal primary count per node is 256/3 = 85. The maximum allowed per node is 86. Both Node 1 and Node 2 have 128, which exceeds 86. Node 3 has 0, which is below 85.
 
-Phase 1 scans the partitions. For each partition where the current primary has more than 86 primaries, it checks whether Node 3 (the least-loaded node, with 0) has fewer than 85. The condition is met, so the partition moves. After each move, the algorithm decrements the source node's count and increments Node 3's count. This continues until the source nodes drop to 86 or below and Node 3 reaches 85 or above. The result: approximately 85 partitions move from Nodes 1 and 2 to Node 3. When a primary moves, the old primary is added to the new replica list — so Node 1 becomes a replica for the partitions it gave to Node 3, preserving the data without requiring an immediate snapshot transfer.
+Phase 1 scans the partitions. For each partition where the current primary has more than 86 primaries, it checks whether Node 3 (the least-loaded node, with 0) has fewer than 85. The condition is met, so the partition moves. After each move, the algorithm decrements the source node's count and increments Node 3's count. This continues until the source nodes drop to 86 or below and Node 3 reaches 85 or above. The result: approximately 85 partitions move from Nodes 1 and 2 to Node 3. The algorithm attempts to add the old primary as a replica for the moved partition, but with RF=2 the single replica slot is already occupied by the other original node — a partition moving from Node 1 to Node 3 retains Node 2 as its replica, and Node 1 drops out entirely. Node 3 will need a snapshot transfer from the old primary to obtain the data.
 
-Phase 2 scans the 256 - 85 = 171 partitions that were not touched in Phase 1. Before Node 3 joined, each partition had one primary and one replica, both on Nodes 1 and 2. The partitions that stayed on their original primaries still have their original replicas — no gaps. But the partitions that moved in Phase 1 now have the old primary as a replica, which is correct. Phase 2 finds no missing replicas in this scenario.
+Phase 2 scans the 256 - 85 = 171 partitions that were not touched in Phase 1. Before Node 3 joined, each partition had one primary and one replica, both on Nodes 1 and 2. The partitions that stayed on their original primaries still have their original replicas — no gaps. The partitions that moved in Phase 1 retained their original replica (the non-source node), so they also have one replica — the correct count for RF=2. Phase 2 finds no missing replicas in this scenario.
 
-Phase 3 checks replica distribution. Node 3 received ~85 primaries in Phase 1, and ~85 of those primaries had their old primary demoted to replica. But Node 3 is not yet a replica for any partition it does not own as primary. The ideal replica count per node is 256/3 = 85. Node 3 has 0 replicas. Nodes 1 and 2 each have roughly 170 replicas (128 original + ~42 from Phase 1 demotions). Phase 3 identifies Node 3 as underweight and Nodes 1 and 2 as overloaded, and moves replicas until Node 3 has approximately 85.
+Phase 3 checks replica distribution. Node 3 received ~85 primaries in Phase 1 but is not a replica for any partition. The ideal replica count per node is 256/3 = 85. Node 3 has 0 replicas. Nodes 1 and 2 each still have 128 replicas — unchanged from before, because Phase 1 only moved primaries and the old primary was not added as replica (no room with RF=2). Phase 3 identifies Node 3 as underweight and Nodes 1 and 2 as overloaded, and moves replicas until Node 3 has approximately 85.
 
 The total number of reassignments: ~85 (Phase 1) + 0 (Phase 2) + ~85 (Phase 3) = ~170 partition changes. This is fewer than the 256 a full rewrite would require, and the changes are targeted — only the partitions that need to move are touched.
 
@@ -106,19 +106,19 @@ On a follower, these sets just accumulate. The follower cannot propose Raft comm
 
 ```mermaid
 flowchart TD
-    TICK["tick()"] --> RAFT["Run Raft tick,\nprocess outputs"]
-    RAFT --> JBL{"Just became\nleader?"}
-    JBL -->|Yes| DEAD["Process pending\ndead nodes"]
-    DEAD --> DRAIN["Process pending\ndraining nodes"]
-    DRAIN --> INIT{"Partitions\ninitialized?"}
-    INIT -->|Yes| NEWJBL["Process pending\nnew nodes"]
-    INIT -->|No| BOOTSTRAP["Initialize\npartitions"]
+    TICK["tick()"] --> RAFT["Run Raft tick,<br/>process outputs"]
+    RAFT --> JBL{"Just became<br/>leader?"}
+    JBL -->|Yes| DEAD["Process pending<br/>dead nodes"]
+    DEAD --> DRAIN["Process pending<br/>draining nodes"]
+    DRAIN --> INIT{"Partitions<br/>initialized?"}
+    INIT -->|Yes| NEWJBL["Process pending<br/>new nodes"]
+    INIT -->|No| BOOTSTRAP["Initialize<br/>partitions"]
     NEWJBL --> RET[Return]
     BOOTSTRAP --> RET
     JBL -->|No| LEADER{"Is leader?"}
     LEADER -->|No| RET
-    LEADER -->|Yes| PEND{"pending_partition\n_proposals == 0\nAND pending\nnew nodes?"}
-    PEND -->|Yes| NEW["Process pending\nnew nodes"]
+    LEADER -->|Yes| PEND{"pending_partition<br/>_proposals == 0<br/>AND pending<br/>new nodes?"}
+    PEND -->|Yes| NEW["Process pending<br/>new nodes"]
     PEND -->|No| RET
     NEW --> RET
 ```
@@ -147,7 +147,7 @@ This is a form of barrier synchronization. The computation that produces proposa
 
 Every `PartitionReassignment` increments the partition's epoch. The epoch serves as a logical clock for ownership changes. When a partition moves from Node 1 to Node 2, the epoch goes from (say) 3 to 4. Node 2 starts accepting writes at epoch 4. Any write arriving at a replica with epoch 3 is rejected as stale.
 
-The quorum tracker uses epochs to fail fast. When a replica responds with `StaleEpoch`, the tracker marks the write as failed immediately rather than waiting for additional responses or a timeout. The `stale_epoch_seen` flag causes `current_result()` to return `Failed` regardless of how many acks have been received. This is correct behavior — a stale epoch means the partition has moved, and the primary sending the write no longer owns it.
+The quorum tracker uses epochs to fail fast. When a replica responds with `StaleEpoch`, the tracker sets a `stale_epoch_seen` flag. In `current_result()`, the tracker first checks whether enough acks have arrived to satisfy quorum — if so, it returns `Success`. Only if quorum has not been reached does the stale epoch flag cause an immediate `Failed` result, short-circuiting the wait for additional responses or a timeout. The priority order (quorum check before stale epoch check) means a write that already achieved quorum is not retroactively failed by a late stale-epoch response from a different replica.
 
 The replica's `handle_write` function enforces epoch ordering. A write arriving with an epoch lower than the replica's current epoch receives a `StaleEpoch` response. A write with a higher epoch causes the replica to accept the new epoch, reset its sequence counter to zero, and clear any buffered out-of-order writes — the new epoch represents a new primary, and the old sequence space is irrelevant. A write with a matching epoch is processed normally through the sequence-gap detection and reordering logic described in Chapter 5.
 
@@ -162,32 +162,34 @@ The migration follows a four-phase state machine:
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing : start_migration()
-    Preparing --> Overlapping : snapshot transfer begins
-    Overlapping --> HandingOff : snapshot imported, catching up
-    HandingOff --> Complete : catchup done, migration finished
+    Preparing --> Overlapping : snapshot transfer complete
+    Overlapping --> HandingOff : catchup complete
+    HandingOff --> Complete : migration finished
     Complete --> [*] : complete_migration()
 
-    note right of Preparing : New primary enters\nAwaitingSnapshot state.\nSends SnapshotRequest\nto old primary.
-    note right of Overlapping : Snapshot chunks transfer\nin 64KB pieces.\nBoth nodes accept writes.
-    note right of HandingOff : New primary catches up\non writes received during\ntransfer. Old primary\nstops accepting new writes.
-    note right of Complete : Migration entry removed.\nOld primary's replica\nstate updated.
+    note right of Preparing : New primary enters AwaitingSnapshot. SnapshotRequest sent, chunks transfer in 64KB pieces.
+    note right of Overlapping : Snapshot imported. New primary transitions to Replica role and accepts replication writes.
+    note right of HandingOff : New primary catches up on writes received during transfer. Old primary stops accepting new writes.
+    note right of Complete : Migration entry removed. Old primary replica state updated.
 ```
 
 Invalid transitions are rejected — skipping from Preparing to HandingOff, or going backward from Overlapping to Preparing, returns `InvalidPhaseTransition`.
 
-**Preparing.** The migration starts. The new primary's replica state for this partition is set to `AwaitingSnapshot` — a fourth replica role alongside None, Primary, and Replica. A replica in `AwaitingSnapshot` rejects all replication writes with a `NotReplica` response. This is intentional: applying writes to a partition with no base data would corrupt the state. The writes are not lost — the primary tracks them, and they will be replayed during the catchup phase after the snapshot arrives.
+**Preparing.** The migration starts. The new primary's replica state for this partition is set to `AwaitingSnapshot` — a fourth replica role alongside None, Primary, and Replica. A replica in `AwaitingSnapshot` rejects all replication writes with a `NotReplica` response. This is intentional: applying writes to a partition with no base data would corrupt the state.
 
 The new primary sends a `SnapshotRequest` to the old primary, asking for the partition's complete dataset. The request is 5 bytes: a version byte, the partition ID, and the requester's node ID. If the request doesn't get through (network issue, old primary busy), the periodic tick retries it: the node controller scans for replicas in `AwaitingSnapshot` state and re-sends snapshot requests for any that don't already have an outstanding request or an in-progress transfer. A deduplication set (`requested_snapshots`) prevents flooding the source with redundant requests.
 
-**Overlapping.** The old primary exports its partition data, records the current sequence number, and creates a `SnapshotSender` that splits the data into 64KB chunks. Each chunk carries a 23-byte header: version (1 byte), partition ID (2 bytes), chunk index (4 bytes), total chunks (4 bytes), sequence at snapshot (8 bytes), and data length (4 bytes), followed by the chunk data. The chunk size is fixed at 64KB (`DEFAULT_CHUNK_SIZE`), which bounds memory pressure on both sides — neither the sender nor receiver needs to hold the entire partition in memory simultaneously, though the sender does serialize the partition data before chunking.
+The old primary receives the request and immediately begins the transfer. It exports its partition data, records the current sequence number, and creates a `SnapshotSender` that splits the data into 64KB chunks. Each chunk carries a 23-byte header: version (1 byte), partition ID (2 bytes), chunk index (4 bytes), total chunks (4 bytes), sequence at snapshot (8 bytes), and data length (4 bytes), followed by the chunk data. The chunk size is fixed at 64KB (`DEFAULT_CHUNK_SIZE`), which bounds memory pressure on both sides — neither the sender nor receiver needs to hold the entire partition in memory simultaneously, though the sender does serialize the partition data before chunking.
 
 The `SnapshotBuilder` on the receiving side pre-allocates a vector of `Option<Vec<u8>>` slots — one per expected chunk. Chunks can arrive in any order; the builder slots them by index and tracks how many have arrived. When all chunks are present, `assemble()` concatenates them in order and returns the complete dataset. Out-of-order arrival is handled naturally by the indexed slot design — chunk 5 can arrive before chunk 2, and both will be placed correctly.
 
-Both nodes can accept writes for this partition during this phase — the old primary continues serving as it always has, and the new primary, once its snapshot is imported, will catch up on any writes that arrived during the transfer.
+When all chunks arrive and the snapshot is successfully imported, the new primary transitions from `AwaitingSnapshot` to `Replica` role at the current epoch, with its sequence set to the snapshot's sequence number. It sends a `SnapshotComplete` message back to the old primary, which advances the migration to the Overlapping phase.
 
-**HandingOff.** The snapshot is fully received and imported. The new primary sets its replica sequence to `sequence_at_snapshot` — the sequence number recorded at the moment the old primary began the export. This ensures that subsequent replication writes pick up exactly where the snapshot left off. If the old primary processed writes 1 through 500 before exporting, and writes 501 through 520 arrived during the transfer, the new primary's sequence starts at 500 and the replication pipeline delivers 501 through 520 in order.
+**Overlapping.** The snapshot has been imported. The new primary is now in `Replica` role and accepts replication writes. The old primary continues serving as it always has. Both nodes can accept writes for this partition during this phase — the old primary as the authoritative source, and the new primary catching up on any writes that arrived during the Preparing phase's snapshot transfer.
 
-The `catchup_sequence` field in the migration state tracks how far the catchup has progressed. The old primary stops accepting new writes for this partition and begins redirecting clients to the new primary.
+The new primary's sequence starts at `sequence_at_snapshot` — the sequence number recorded at the moment the old primary began the export. This ensures that subsequent replication writes pick up exactly where the snapshot left off. If the old primary processed writes 1 through 500 before exporting, and writes 501 through 520 arrived during the transfer, the new primary's sequence starts at 500 and the replication pipeline delivers 501 through 520 in order.
+
+**HandingOff.** The new primary has caught up on all writes that occurred during the transfer. The `catchup_sequence` field in the migration state tracks how far the catchup has progressed. The old primary stops accepting new writes for this partition and begins redirecting clients to the new primary.
 
 **Complete.** Catchup is done. The new primary is fully current. The `MigrationManager` removes the entry for this partition. The old primary's replica state for this partition is updated to reflect its new role (typically becoming a replica of the partition it used to own as primary).
 

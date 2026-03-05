@@ -35,8 +35,10 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 16 | Consumer Groups and Event Routing | Not started | | | |
 | 17 | Performance Analysis and Benchmarking | Not started | | | |
 | 18 | Access Control, Ownership, and Scopes | Not started | | | |
-| 19 | Operating MQDB | Not started | | | |
-| 20 | The WASM Frontier | Not started | | | |
+| 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | 2026-03-03 | 4,068 |
+| 20 | Operating MQDB | Not started | | | |
+| 21 | The WASM Frontier | Not started | | | |
+| Preface | Preface | First draft | 2026-03-03 | | 1,055 |
 | A | Wire Protocol Reference | Not started | | | |
 | B | Entity Type Reference | Not started | | | |
 | C | Configuration Reference | Not started | | | |
@@ -214,8 +216,9 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 16 | src/consumer_group.rs, src/dispatcher.rs |
 | 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, DISTRIBUTED_DESIGN.md (A6.4, A6.5 benchmarks) |
 | 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, src/types.rs (OwnershipConfig, ScopeConfig), src/transport.rs (execute_with_sender), src/agent/broker.rs, src/agent/handlers.rs, src/bin/mqdb/commands/auth.rs, src/bin/mqdb/commands/acl.rs, src/http/oauth.rs |
-| 19 | CLI_TESTING_GUIDE.md, src/bin/mqdb/ |
-| 20 | src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
+| 19 | src/http/vault_crypto.rs, src/http/identity_crypto.rs, src/vault_keys.rs, src/http/handlers.rs (vault endpoints, batch ops), src/agent/handlers.rs (vault MQTT data path), src/http/session_store.rs, src/http/server.rs (vault routes), docs/OAUTH_VAULT_FUTURE_WORK.md |
+| 20 | CLI_TESTING_GUIDE.md, src/bin/mqdb/ |
+| 21 | src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
 
 ### Learnings
 
@@ -437,6 +440,57 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - The migration state machine matches migration.rs:183-188 (valid_transition pattern match)
 - The AwaitingSnapshot rejection matches replication.rs:101 (role check in handle_write)
 - The stale epoch fast-fail matches quorum.rs:148-149 (stale_epoch_seen returns Failed)
+
+### Session 15 — 2026-03-03
+
+**Work done:**
+- Wrote Chapter 19 placeholder draft (`ch19-vault-encryption.md`, 3,514 words)
+- Sections: Two Threat Models, Vault Crypto Primitives, Vault Lifecycle, In-Memory Key Management, Transparent MQTT Data Path, Identity Encryption, What Went Wrong, Lessons
+- Updated OUTLINE.md: inserted Chapter 19 in Part IV, renumbered existing Ch19 (Operations) → Ch20, Ch20 (WASM) → Ch21, updated dependency graph and page estimate
+- Read all primary source files before writing: `vault_crypto.rs` (VaultCrypto, PBKDF2, AES-256-GCM, field-level encrypt/decrypt), `identity_crypto.rs` (IdentityCrypto, HKDF dual keys, blind indexing, key wrapping), `vault_keys.rs` (VaultKeyStore, zeroized keys, write fences), `handlers.rs` (vault HTTP endpoints: enable/unlock/lock/disable/change/status, batch_vault_operation, batch_vault_re_encrypt), `agent/handlers.rs` (vault_transform_request, vault_pre_update, vault_decrypt_response, is_vault_eligible), `session_store.rs` (Session.vault_unlocked, set_vault_unlocked_by_canonical_id), `server.rs` (vault route definitions, vault_unlock_limiter), `docs/OAUTH_VAULT_FUTURE_WORK.md` (batch atomicity, TOCTOU, identity race condition, schema initialization)
+- Verified PBKDF2 iterations: 600,000 (vault_crypto.rs:16 and identity_crypto.rs:18)
+- Verified nonce: 12 bytes, salt: 32 bytes, key: 32 bytes, tag: 16 bytes
+- Verified AAD format: `"{entity}:{id}"` for vault, `"{entity}"` for identity
+- Verified check token plaintext: `b"mqdb-vault-check-v1"`
+- Verified rate limiter: 5 attempts per user (server.rs:82)
+- Verified vault eligibility: `!entity.starts_with('_') && ownership.entity_owner_fields.contains_key(entity)`
+- Verified write fence blocks read_fence during batch operations
+- Verified blind index format: `HMAC-SHA256(key, "{entity}:{value}")` hex-encoded
+
+**Key decisions:**
+- 3,514 words, below the 5,000-6,000 target. Appropriate for a placeholder chapter on an incomplete feature — the chapter documents what exists and marks what is planned.
+- Placed as Chapter 19 in Part IV (Advanced Patterns), after Chapter 18 (Access Control). The vault depends on OAuth sessions and ownership, both covered in Ch18.
+- Included both vault and identity encryption in a single chapter — they share crypto primitives (AES-256-GCM, PBKDF2) but serve different threat models. Splitting into two chapters would create a very short identity-only chapter.
+- Three "What Went Wrong" sections: batch atomicity (crash recovery), TOCTOU (vault state change during update), identity race condition (missing unique constraint). All documented in `OAUTH_VAULT_FUTURE_WORK.md`.
+- Marked planned work with *(planned)* tags throughout — matches user's request for placeholder that acknowledges incompleteness.
+- Did NOT include code — used tables, state diagrams, and narrative descriptions.
+- Forward reference to Chapter 20 (Operations) at the closing.
+
+### Session 15b — 2026-03-03
+
+**Work done:**
+- Updated Chapter 19 to reflect three vault fixes pushed by user (commit 341e6d5)
+- Rewrote "What Went Wrong" section: replaced three *(planned)* items with three bug narratives (re-encryption resume losing old key, fence-key ordering race, fire-and-forget constraint init) plus one remaining *(planned)* item (update TOCTOU)
+- Added migration status tracking description to Section 19.3 (vault lifecycle)
+- Added old salt persistence for re-encryption resume to Section 19.3 (change passphrase)
+- Updated unlock description in Section 19.3 to reflect fence-before-key ordering
+- Trimmed "What Comes Next" to reflect only remaining planned work
+- Word count: 3,514 → 4,068
+
+### Session 16 — 2026-03-03
+
+**Work done:**
+- Wrote Preface first draft (`preface.md`, 1,055 words)
+- Five "surprise" features that fell out of the MQTT constraint: change events, ownership, vault encryption, distributed routing, access control
+- Closing thesis: architectural constraints as force multipliers, 5:1 ratio of emergent to engineered features
+- Updated OUTLINE.md with Preface section before Part I
+- Target was 1,000-1,500 words; landed at 1,055
+
+**Key decisions:**
+- Placed as preface, not a chapter section — this is authorial perspective on the discovery process, not technical architecture
+- Each "surprise" grounded in specific code paths verified by Explore agent: events.rs publish, agent/handlers.rs x-mqtt-sender extraction, vault_transform_request interception, db/partition.rs topic-to-hash, topic_rules.rs protection tiers
+- No code in the preface — pure narrative. Code comes in the chapters.
+- The "5:1 ratio" claim: 5 emergent features (events, ownership, vault, routing, ACL) vs 5 hard problems (unique constraints, Raft, migration, sessions, query coordination) — honest about what was hard
 
 ### Memories for Future Sessions
 

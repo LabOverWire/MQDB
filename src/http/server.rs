@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 pub struct HttpServerConfig {
     pub bind_address: SocketAddr,
@@ -36,6 +36,7 @@ pub struct HttpServerConfig {
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
+    pub vault_unlock_rate_limit: u32,
 }
 
 pub struct HttpServer {
@@ -79,13 +80,15 @@ impl HttpServer {
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
-            vault_unlock_limiter: RateLimiter::new(5),
+            vault_unlock_limiter: RateLimiter::new(self.config.vault_unlock_rate_limit),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,
             vault_key_store,
         });
+
+        initialize_identity_constraints(&state).await;
 
         loop {
             tokio::select! {
@@ -244,4 +247,80 @@ async fn handle_request(
     };
 
     Ok(response)
+}
+
+async fn initialize_identity_constraints(state: &ServerState) {
+    let unique_field = if state.identity_crypto.is_some() {
+        "email_hash"
+    } else {
+        "primary_email"
+    };
+    let payload = serde_json::json!({
+        "type": "unique",
+        "fields": [unique_field],
+    });
+    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    let topic = "$DB/_admin/constraint/_identities/add";
+    let response_topic = format!("$DB/_identities/_resp/{}", std::process::id());
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if state
+        .mqtt_client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        warn!("failed to subscribe for constraint init response");
+        return;
+    }
+
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if state
+        .mqtt_client
+        .publish_with_options(topic, payload_bytes, options)
+        .await
+        .is_err()
+    {
+        warn!("failed to publish _identities unique constraint");
+        let _ = state.mqtt_client.unsubscribe(&response_topic).await;
+        return;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = state.mqtt_client.unsubscribe(&response_topic).await;
+
+    match result {
+        Ok(Ok(payload)) => {
+            if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&payload) {
+                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if status == "ok" || status == "error" {
+                    info!(
+                        field = unique_field,
+                        "initialized unique constraint on _identities"
+                    );
+                } else {
+                    warn!(response = %resp, "unexpected constraint init response");
+                }
+            }
+        }
+        _ => {
+            warn!("timeout waiting for _identities constraint init response");
+        }
+    }
 }

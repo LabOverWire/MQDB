@@ -411,10 +411,15 @@ async fn resolve_or_create_identity(
     if !create_identity(state, &canonical_id, identity).await {
         if identity.email_verified
             && let Some(ref email) = identity.email
-            && let Some(existing_cid) = find_canonical_id_by_email(state, email).await
         {
-            create_identity_link(state, link_key, &existing_cid, identity).await;
-            return Ok(existing_cid);
+            if let Some(existing_cid) = find_canonical_id_by_email(state, email).await {
+                create_identity_link(state, link_key, &existing_cid, identity).await;
+                return Ok(existing_cid);
+            }
+            if let Some(existing_cid) = find_identity_by_email(state, email).await {
+                create_identity_link(state, link_key, &existing_cid, identity).await;
+                return Ok(existing_cid);
+            }
         }
         return Err("failed to create or find identity".to_string());
     }
@@ -435,6 +440,10 @@ async fn create_identity(
         "vault_enabled": false,
     });
     if let Some(ref crypto) = state.identity_crypto {
+        if let Some(ref email) = identity.email {
+            data["email_hash"] =
+                serde_json::Value::String(crypto.blind_index("_identities", email));
+        }
         crypto.encrypt_json_fields("_identities", &mut data, &["primary_email", "display_name"]);
     }
     let Some(response) =
@@ -556,6 +565,24 @@ async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<
     items
         .first()?
         .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+async fn find_identity_by_email(state: &ServerState, email: &str) -> Option<String> {
+    let filter = if let Some(ref crypto) = state.identity_crypto {
+        let hash = crypto.blind_index("_identities", email);
+        format!("email_hash={hash}")
+    } else {
+        if !is_safe_filter_value(email) {
+            return None;
+        }
+        format!("primary_email={email}")
+    };
+    let records = list_entities(&state.mqtt_client, "_identities", &filter).await?;
+    records
+        .first()?
+        .get("id")
         .and_then(|v| v.as_str())
         .map(String::from)
 }
@@ -1415,18 +1442,32 @@ pub async fn handle_vault_enable(
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
     state.vault_key_store.set(canonical_id, key_bytes);
 
-    let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
-
-    let identity_update = json!({
+    let salt_b64 = BASE64.encode(salt);
+    let migration_start = json!({
         "vault_enabled": true,
-        "vault_salt": BASE64.encode(salt),
+        "vault_salt": salt_b64,
         "vault_check": check_token,
+        "vault_migration_status": "pending",
+        "vault_migration_mode": "encrypt",
     });
     update_entity(
         &state.mqtt_client,
         "_identities",
         canonical_id,
-        &identity_update,
+        &migration_start,
+    )
+    .await;
+
+    let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Encrypt).await;
+
+    let migration_done = json!({
+        "vault_migration_status": "complete",
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &migration_done,
     )
     .await;
 
@@ -1519,10 +1560,27 @@ pub async fn handle_vault_unlock(
         );
     }
 
+    let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
     state.vault_key_store.set(canonical_id, key_bytes);
     state.session_store.set_vault_unlocked(&session_id, true);
 
-    json_response_with_credentials(200, &json!({"status": "unlocked"}), cors)
+    let resume_result =
+        resume_pending_migration(state, canonical_id, &crypto, &identity, passphrase).await;
+
+    let status = if resume_result.as_ref().is_some_and(|r| r.mode == "decrypt") {
+        "vault_disabled"
+    } else {
+        "unlocked"
+    };
+    let mut body = json!({"status": status});
+    if let Some(migration) = resume_result {
+        body["migration_resumed"] = json!(migration.mode);
+        body["records_processed"] = json!(migration.succeeded);
+        if migration.failed > 0 {
+            body["migration_failed"] = json!(migration.failed);
+        }
+    }
+    json_response_with_credentials(200, &body, cors)
 }
 
 pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
@@ -1618,12 +1676,26 @@ pub async fn handle_vault_disable(
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
     state.vault_key_store.remove(canonical_id);
 
+    let migration_start = json!({
+        "vault_migration_status": "pending",
+        "vault_migration_mode": "decrypt",
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &migration_start,
+    )
+    .await;
+
     let batch = batch_vault_operation(state, canonical_id, &crypto, VaultMode::Decrypt).await;
 
     let identity_update = json!({
         "vault_enabled": false,
         "vault_salt": null,
         "vault_check": null,
+        "vault_migration_status": "complete",
+        "vault_migration_mode": null,
     });
     update_entity(
         &state.mqtt_client,
@@ -1744,17 +1816,37 @@ pub async fn handle_vault_change(
     let _fence = state.vault_key_store.acquire_fence(canonical_id).await;
     state.vault_key_store.set(canonical_id, new_key_bytes);
 
-    let batch = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
-
-    let identity_update = json!({
-        "vault_salt": BASE64.encode(new_salt),
+    let new_salt_b64 = BASE64.encode(new_salt);
+    let old_salt_b64 = BASE64.encode(&old_salt);
+    let migration_start = json!({
+        "vault_salt": new_salt_b64,
         "vault_check": new_check,
+        "vault_migration_status": "pending",
+        "vault_migration_mode": "re_encrypt",
+        "vault_old_check": check_token,
+        "vault_old_salt": old_salt_b64,
     });
     update_entity(
         &state.mqtt_client,
         "_identities",
         canonical_id,
-        &identity_update,
+        &migration_start,
+    )
+    .await;
+
+    let batch = batch_vault_re_encrypt(state, canonical_id, &old_crypto, &new_crypto).await;
+
+    let migration_done = json!({
+        "vault_migration_status": "complete",
+        "vault_migration_mode": null,
+        "vault_old_check": null,
+        "vault_old_salt": null,
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &migration_done,
     )
     .await;
 
@@ -1779,24 +1871,25 @@ pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> Ht
     };
 
     let canonical_id = &session.canonical_id;
-    let vault_enabled = if let Some(identity) =
-        read_entity(&state.mqtt_client, "_identities", canonical_id).await
-    {
-        identity
-            .get("vault_enabled")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let identity = read_entity(&state.mqtt_client, "_identities", canonical_id).await;
+    let vault_enabled = identity
+        .as_ref()
+        .and_then(|i| i.get("vault_enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let migration_pending = identity
+        .as_ref()
+        .and_then(|i| i.get("vault_migration_status"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == "pending");
 
     let unlocked = session.vault_unlocked;
 
-    json_response_with_credentials(
-        200,
-        &json!({"vault_enabled": vault_enabled, "unlocked": unlocked}),
-        cors,
-    )
+    let mut body = json!({"vault_enabled": vault_enabled, "unlocked": unlocked});
+    if migration_pending {
+        body["migration_pending"] = json!(true);
+    }
+    json_response_with_credentials(200, &body, cors)
 }
 
 enum VaultMode {
@@ -1886,6 +1979,87 @@ async fn batch_vault_re_encrypt(
         }
     }
     result
+}
+
+struct MigrationResumeResult {
+    mode: String,
+    succeeded: usize,
+    failed: usize,
+}
+
+async fn resume_pending_migration(
+    state: &ServerState,
+    canonical_id: &str,
+    crypto: &VaultCrypto,
+    identity: &serde_json::Value,
+    passphrase: &str,
+) -> Option<MigrationResumeResult> {
+    let status = identity
+        .get("vault_migration_status")
+        .and_then(|v| v.as_str())?;
+    if status != "pending" {
+        return None;
+    }
+    let mode = identity
+        .get("vault_migration_mode")
+        .and_then(|v| v.as_str())?;
+
+    let batch = match mode {
+        "encrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Encrypt).await,
+        "decrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Decrypt).await,
+        "re_encrypt" => {
+            let Some(old_salt_b64) = identity.get("vault_old_salt").and_then(|v| v.as_str()) else {
+                warn!("vault re_encrypt resume failed: old salt missing from identity");
+                return None;
+            };
+            let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
+                warn!("vault re_encrypt resume failed: old salt decode error");
+                return None;
+            };
+            let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
+            batch_vault_re_encrypt(state, canonical_id, &old_crypto, crypto).await
+        }
+        _ => return None,
+    };
+
+    let migration_done = json!({
+        "vault_migration_status": "complete",
+        "vault_migration_mode": null,
+        "vault_old_check": null,
+        "vault_old_salt": null,
+    });
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &migration_done,
+    )
+    .await;
+
+    if mode == "decrypt" {
+        let disable_vault = json!({
+            "vault_enabled": false,
+            "vault_salt": null,
+            "vault_check": null,
+        });
+        update_entity(
+            &state.mqtt_client,
+            "_identities",
+            canonical_id,
+            &disable_vault,
+        )
+        .await;
+        state
+            .session_store
+            .set_vault_unlocked_by_canonical_id(canonical_id, false);
+        state.vault_key_store.remove(canonical_id);
+    }
+
+    Some(MigrationResumeResult {
+        mode: mode.to_string(),
+        succeeded: batch.succeeded,
+        failed: batch.failed,
+    })
 }
 
 #[cfg(feature = "dev-insecure")]

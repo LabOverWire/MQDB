@@ -23,7 +23,13 @@ impl MqdbAgent {
         let db = Arc::clone(&self.db);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let backup_dir = self.backup_dir.clone();
-        let ownership_config = Arc::clone(&self.ownership_config);
+        let ownership_config = if let Some(ref svc_user) = handler_username {
+            let mut oc = (*self.ownership_config).clone();
+            oc.add_admin_user(svc_user.clone());
+            Arc::new(oc)
+        } else {
+            Arc::clone(&self.ownership_config)
+        };
         let scope_config = Arc::clone(&self.scope_config);
         let vault_key_store = Arc::clone(&self.vault_key_store);
 

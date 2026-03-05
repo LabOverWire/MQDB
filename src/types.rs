@@ -116,6 +116,10 @@ impl OwnershipConfig {
         self
     }
 
+    pub fn add_admin_user(&mut self, user: String) {
+        self.admin_users.insert(user);
+    }
+
     #[must_use]
     pub fn owner_field(&self, entity: &str) -> Option<&str> {
         self.entity_owner_fields.get(entity).map(String::as_str)
