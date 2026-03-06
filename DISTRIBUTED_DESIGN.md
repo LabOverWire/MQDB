@@ -381,6 +381,8 @@ Five topic namespaces structure MQDB communication:
 | `_mqdb/cluster/` | Control messages, heartbeats, Raft | 1 | Yes |
 | `_mqdb/repl/` | Partition replication | 1 | Yes |
 | `_mqdb/forward/` | Message forwarding to subscribers | 1 | Yes |
+| `_mqdb/scatter/` | Distributed query scatter responses | 1 | Yes |
+| `_mqdb/http_resp/` | HTTP handler request-response | 1 | No (local) |
 | `$DB/` | Database operations | 2 | Yes |
 | `$SYS/` | Admin operations (rebalance, status) | 1 | No (local) |
 
@@ -393,6 +395,8 @@ Five topic namespaces structure MQDB communication:
 | `_mqdb/cluster/heartbeat/{node_id}` | Node heartbeat from specific node |
 | `_mqdb/repl/p{partition}/seq{sequence}` | Replication write for partition at sequence |
 | `_mqdb/forward/{partition}` | Forward publish to clients on partition's node |
+| `_mqdb/scatter/{node_id}/{request_id}` | Distributed query scatter response to originator |
+| `_mqdb/http_resp/{uuid}` | HTTP handler MQTT request-response callback |
 
 **$DB/ topic patterns** - Two modes exist:
 
@@ -442,7 +446,7 @@ Five topic namespaces structure MQDB communication:
 | `$DB/_admin/restore` | Restore from backup |
 | `$DB/_admin/consumer-groups` | List consumer groups |
 | `$DB/_admin/consumer-groups/{name}` | Get consumer group |
-| `$DB/_resp/{client_id}` | Response routing |
+| `_mqdb/http_resp/{uuid}` | HTTP handler response routing |
 
 ### A6.3 QUIC as Preferred Transport
 

@@ -4,7 +4,7 @@ Chapter 18 covered how MQDB authenticates users and authorizes their actions —
 
 This chapter covers MQDB's two encryption-at-rest systems: the *vault*, which gives users control over their own data's encryption with a passphrase only they know, and *identity encryption*, which protects OAuth credentials with a server-managed key. Both use AES-256-GCM authenticated encryption, but they serve different threat models and operate at different layers of the system.
 
-> **Note**: The vault system is under active development. This chapter describes the functionality that exists in the codebase as of writing. Sections marked with *(planned)* describe known gaps and future work.
+> **Note**: The vault system covers both agent and cluster modes. This chapter describes the functionality that exists in the codebase as of writing. Sections marked with *(planned)* describe known gaps and future work.
 
 ## 19.1 Two Threat Models
 
@@ -239,6 +239,8 @@ The window is extremely narrow: it requires a vault disable (which acquires the 
 
 ## What Comes Next
 
-*(This chapter will be expanded as the vault implementation matures. The planned additions include: vault generation counters for TOCTOU prevention and cluster-mode vault key synchronization.)*
+Cluster-mode vault is implemented: when a client on node 2 reads a record whose partition primary is node 1, the request is forwarded via QUIC, node 1 decrypts using the vault key, and returns plaintext transparently. Vault unlock on any node propagates the derived key to other nodes that hold partitions with the user's data. The E2E test suite (`examples/vault-cluster/run.sh`) covers cross-node create, read, list, passphrase change, and disable operations across a 3-node cluster.
+
+*(Planned: vault generation counters for TOCTOU prevention on the update path.)*
 
 Chapter 20 covers operating MQDB in production — deployment modes, cluster sizing, monitoring, backup, and the CLI tools that tie the system together.

@@ -406,7 +406,7 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
-| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#` | Requires admin user |
+| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
 
 Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exception: `$DB/_health` is always accessible.
 
@@ -472,6 +472,38 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
     --federated-jwt-config jwt_providers.json --acl acl.txt
 ```
+
+## Vault Encryption
+
+Per-user transparent encryption at rest. Each user derives an AES-256-GCM key from a passphrase. When the vault is unlocked, MQTT reads and writes transparently decrypt and encrypt owned entity fields. When locked, raw ciphertext is returned. Users without the vault key always see ciphertext, proving data is encrypted at rest.
+
+Vault encryption requires the `--ownership` flag on at least one entity and an HTTP server for the vault API.
+
+### Vault HTTP API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/vault/enable` | Derive key from passphrase, encrypt all owned records |
+| POST | `/vault/unlock` | Re-derive key, resume transparent decryption |
+| POST | `/vault/lock` | Remove key from memory (reads return ciphertext) |
+| POST | `/vault/change` | Change passphrase (re-encrypts all records with new key) |
+| POST | `/vault/disable` | Decrypt all records and remove vault key permanently |
+| GET | `/vault/status` | Check vault state (`vault_enabled`, `unlocked`) |
+
+All vault endpoints require an authenticated HTTP session (cookie-based). Enable/unlock/change/disable require a JSON body with `passphrase` (and `old_passphrase`/`new_passphrase` for change).
+
+Vault works in both agent and cluster modes. In cluster mode, vault decrypt operations are forwarded to the node that owns the partition, with responses routed back transparently.
+
+### Example
+
+```bash
+mqdb agent start --db /tmp/vault-demo/db --bind 127.0.0.1:1883 \
+    --http-bind 127.0.0.1:3000 --ws-bind 127.0.0.1:8083 \
+    --passwd passwd.txt --jwt-algorithm hs256 --jwt-key jwt.key \
+    --ownership notes=userId --no-rate-limit
+```
+
+See `examples/vault-mqtt/` for a single-node demo and `examples/vault-cluster/` for a multi-node E2E test.
 
 ## Distributed Clustering
 
