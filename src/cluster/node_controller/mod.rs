@@ -67,6 +67,13 @@ pub struct TickOutput {
     pub local_publishes: Vec<(String, Vec<u8>)>,
 }
 
+pub struct PendingVaultDecrypt {
+    pub entity: String,
+    pub sender: String,
+    pub op: String,
+    pub created_at_ms: u64,
+}
+
 pub struct PendingScatterRequest {
     pub expected_count: usize,
     pub received: Vec<serde_json::Value>,
@@ -317,6 +324,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashMap<String, Instant>>>>,
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
+    pub(super) pending_vault_decrypts: HashMap<u64, PendingVaultDecrypt>,
     pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
@@ -383,6 +391,7 @@ impl<T: ClusterTransport> NodeController<T> {
             synced_retained_topics: None,
             pending_retained_queries: HashMap::new(),
             pending_scatter_requests: HashMap::new(),
+            pending_vault_decrypts: HashMap::new(),
             pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
@@ -551,6 +560,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.collect_catchup_requests(now, &mut output);
         self.collect_stale_scatter_responses(now, &mut output);
+        self.collect_stale_vault_decrypts(now);
 
         let elapsed = start.elapsed();
         if elapsed.as_micros() > 1000 {
@@ -634,6 +644,30 @@ impl<T: ClusterTransport> NodeController<T> {
                 output
                     .local_publishes
                     .push((pending.client_response_topic, payload));
+            }
+        }
+    }
+
+    fn collect_stale_vault_decrypts(&mut self, now: u64) {
+        const VAULT_DECRYPT_TIMEOUT_MS: u64 = 30_000;
+        let stale_threshold = now.saturating_sub(VAULT_DECRYPT_TIMEOUT_MS);
+
+        let stale_ids: Vec<u64> = self
+            .pending_vault_decrypts
+            .iter()
+            .filter(|(_, pending)| pending.created_at_ms < stale_threshold)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in stale_ids {
+            if let Some(pending) = self.pending_vault_decrypts.remove(&id) {
+                tracing::warn!(
+                    request_id = id,
+                    entity = %pending.entity,
+                    sender = %pending.sender,
+                    op = %pending.op,
+                    "vault decrypt request timed out, removing stale entry"
+                );
             }
         }
     }

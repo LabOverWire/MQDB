@@ -483,7 +483,7 @@ async fn create_identity_link(
             &["provider_sub", "email", "name", "picture"],
         );
     }
-    publish_entity(&state.mqtt_client, "_identity_links", &data).await;
+    let _ = create_entity_with_response(&state.mqtt_client, "_identity_links", &data).await;
 }
 
 async fn update_identity_link(state: &ServerState, link_key: &str, identity: &ProviderIdentity) {
@@ -1152,14 +1152,6 @@ async fn read_entity(client: &MqttClient, entity: &str, id: &str) -> Option<serd
     response.get("data").cloned()
 }
 
-async fn publish_entity(client: &MqttClient, entity: &str, data: &serde_json::Value) {
-    let topic = format!("$DB/{entity}/create");
-    let payload = serde_json::to_vec(data).unwrap_or_default();
-    if let Err(e) = client.publish(&topic, payload).await {
-        warn!(error = %e, entity = entity, "failed to publish entity");
-    }
-}
-
 async fn create_entity_with_response(
     client: &MqttClient,
     entity: &str,
@@ -1345,8 +1337,47 @@ async fn update_entity(
     data: &serde_json::Value,
 ) -> bool {
     let topic = format!("$DB/{entity}/{id}/update");
+    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
     let payload = serde_json::to_vec(data).unwrap_or_default();
-    client.publish(&topic, payload).await.is_ok()
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    if client
+        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(tx) = tx.lock().await.take() {
+                    let _ = tx.send(msg.payload.clone());
+                }
+            });
+        })
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    let props = mqtt5::types::PublishProperties {
+        response_topic: Some(response_topic.clone()),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        properties: props,
+        ..Default::default()
+    };
+    if client
+        .publish_with_options(&topic, payload, options)
+        .await
+        .is_err()
+    {
+        let _ = client.unsubscribe(&response_topic).await;
+        return false;
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    let _ = client.unsubscribe(&response_topic).await;
+    result.is_ok()
 }
 
 fn require_session<'a>(
@@ -2096,7 +2127,7 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
             "created_at": chrono_now_iso(),
             "vault_enabled": false,
         });
-        publish_entity(&state.mqtt_client, "_identities", &data).await;
+        let _ = create_entity_with_response(&state.mqtt_client, "_identities", &data).await;
     }
 
     let Some(session_id) = state.session_store.create(
