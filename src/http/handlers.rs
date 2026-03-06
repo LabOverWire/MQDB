@@ -518,7 +518,7 @@ async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<
     };
     let client = &state.mqtt_client;
     let topic = "$DB/_identity_links/list".to_string();
-    let response_topic = format!("$DB/_identity_links/_resp/{}", uuid_v4());
+    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -1107,7 +1107,7 @@ pub async fn handle_unlink(state: &ServerState, headers: &HeaderMap, body: &[u8]
 
 async fn read_entity(client: &MqttClient, entity: &str, id: &str) -> Option<serde_json::Value> {
     let topic = format!("$DB/{entity}/{id}");
-    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -1158,7 +1158,7 @@ async fn create_entity_with_response(
     data: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let topic = format!("$DB/{entity}/create");
-    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -1284,7 +1284,7 @@ async fn list_entities(
     filter: &str,
 ) -> Option<Vec<serde_json::Value>> {
     let topic = format!("$DB/{entity}/list");
-    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -1337,7 +1337,7 @@ async fn update_entity(
     data: &serde_json::Value,
 ) -> bool {
     let topic = format!("$DB/{entity}/{id}/update");
-    let response_topic = format!("$DB/{entity}/_resp/{}", uuid_v4());
+    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
     let payload = serde_json::to_vec(data).unwrap_or_default();
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();

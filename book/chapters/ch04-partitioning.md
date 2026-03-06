@@ -56,7 +56,7 @@ The choice of hash key determines which data lands together. A client's session,
 
 This echoes the storage engine's batch semantics from Chapter 2. In agent mode, a single batch writes the session update and subscription cleanup atomically. In cluster mode, the same writes go to the same partition primary, so they can still be batched.
 
-Database records use a different key: `entity/id`. This means records from the same entity are distributed across partitions (different IDs hash to different partitions), which is the desired behavior for balanced load. If all records in an entity hashed to the same partition, a popular entity would create a hot partition. The entity name is included in the key so that records from different entities with the same ID hash to different partitions — `users/abc` and `orders/abc` land on different nodes.
+Database records use a different key: `entity/id`. This means records from the same entity are distributed across partitions — different IDs hash to different partitions. If all records in an entity hashed to the same partition, a popular entity would create a hot partition. The entity name is included in the key so that records from different entities with the same ID hash to different partitions — `users/abc` and `orders/abc` land on different nodes.
 
 ## 4.3 The Partition Map
 

@@ -94,7 +94,7 @@ This bug illustrates a general principle: any timestamp initialized to zero is a
 
 A related issue affected the other direction: a node sending heartbeats before it had partition assignments. The heartbeat would contain an empty primary bitmap, telling peers that this node owns nothing. Since the heartbeat was valid (correctly formatted, real timestamp), the peer would mark the sender as Alive. But the empty bitmap provided no routing information, and the peer might skip the sender in partition assignment decisions because it appeared to be a node with no work.
 
-The fix was a guard in `should_send`: heartbeats are suppressed only when the node has neither partition assignments nor registered peers. A node with partitions but no peers has nobody to send to. A node with peers but no partitions still sends heartbeats — the bitmaps will be empty, but the "I'm alive" signal is valuable for the peer's timeout tracking. Only a node with nothing (no partitions, no peers) stays silent, which is the correct behavior during the brief window before the cluster has formed.
+The fix was a guard in `should_send`: heartbeats are suppressed only when the node has neither partition assignments nor registered peers. A node with partitions but no peers has nobody to send to. A node with peers but no partitions still sends heartbeats — the bitmaps will be empty, but the "I'm alive" signal is valuable for the peer's timeout tracking. Only a node with nothing (no partitions, no peers) stays silent — during the brief window before the cluster has formed, there is nobody to talk to and nothing to report.
 
 ## 10.5 Partition Failover
 

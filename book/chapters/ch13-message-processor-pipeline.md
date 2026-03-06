@@ -11,24 +11,24 @@ The pipeline has three stages, each running on its own task or runtime, connecte
 ```mermaid
 flowchart LR
     subgraph "Stage 1: QUIC Transport"
-        RT["receiver_task\n(one per peer)"]
+        RT["receiver_task<br>(one per peer)"]
     end
     subgraph "Stage 2: MessageProcessor"
-        MP["MessageProcessor\n(DedicatedExecutor,\n2 worker threads)"]
+        MP["MessageProcessor<br>(DedicatedExecutor,<br>2 worker threads)"]
     end
     subgraph "Stage 3: Event Loop"
-        EL["run_event_loop()\n(main Tokio runtime)"]
+        EL["run_event_loop()<br>(main Tokio runtime)"]
     end
     subgraph Handlers
         NC["NodeController"]
         RAFT["RaftTask"]
     end
 
-    RT -->|"inbox\n16,384"| MP
-    MP -->|"raft_messages\n4,096"| RAFT
-    MP -->|"main_queue\n4,096"| EL
-    MP -->|"batch\n16"| EL
-    EL -->|"tick\n1"| MP
+    RT -->|"inbox<br>16,384"| MP
+    MP -->|"raft_messages<br>4,096"| RAFT
+    MP -->|"main_queue<br>4,096"| EL
+    MP -->|"batch<br>16"| EL
+    EL -->|"tick<br>1"| MP
     EL --> NC
 ```
 
@@ -53,7 +53,7 @@ The full channel topology:
 | batch | 16 | MessageProcessor → Event Loop | Accumulated heartbeat updates, dead nodes |
 | tick | 1 | Event Loop → MessageProcessor | Clock signal for heartbeat timing |
 
-The capacity choices reflect the traffic profiles. The inbox is the widest at 16,384 because QUIC receivers produce messages at wire speed and any dropped message is lost — there is no TCP-level retransmission within the cluster protocol. The Raft and main queue channels are smaller at 4,096 because their consumers (the Raft task and event loop) process messages in tight loops. The batch channel is 16 because it carries aggregated state, not individual messages — one batch per tick. The tick channel is 1 and uses `try_send`, meaning ticks are dropped rather than queued when the processor is busy. A dropped tick means the heartbeat check runs on the next cycle instead; no state is lost.
+The capacity choices reflect the traffic profiles. The inbox is the widest at 16,384 because QUIC receivers produce messages at wire speed and any message dropped at the inbox boundary is permanently lost — the cluster protocol has no application-level retransmission for discarded messages. The Raft and main queue channels are smaller at 4,096 because their consumers (the Raft task and event loop) process messages in tight loops. The batch channel is 16 because it carries aggregated state, not individual messages — one batch per tick. The tick channel is 1 and uses `try_send`, meaning ticks are dropped rather than queued when the processor is busy. A dropped tick means the heartbeat check runs on the next cycle instead; no state is lost.
 
 ## 13.2 Message Classification
 
@@ -62,25 +62,25 @@ The `MessageProcessor`'s `process_message()` function is the routing core of the
 ```mermaid
 flowchart TD
     MSG["InboundMessage"] --> CHECK{Message Type?}
-    CHECK -->|Heartbeat| HB["HeartbeatManager\n(process locally)"]
-    HB --> ACC["Accumulate\nHeartbeatUpdate"]
-    HB --> RAFT_EV["Send RaftEvent::NodeAlive\n(if node status is Alive)"]
-    CHECK -->|"RequestVote\nRequestVoteResponse\nAppendEntries\nAppendEntriesResponse"| RAFT["tx_raft_messages"]
+    CHECK -->|Heartbeat| HB["HeartbeatManager<br>(process locally)"]
+    HB --> ACC["Accumulate<br>HeartbeatUpdate"]
+    HB --> RAFT_EV["Send RaftEvent::NodeAlive<br>(if node status is Alive)"]
+    CHECK -->|"RequestVote<br>RequestVoteResponse<br>AppendEntries<br>AppendEntriesResponse"| RAFT["tx_raft_messages"]
     CHECK -->|ForwardedPublish| DEDUP{"Dedup Check"}
     DEDUP -->|New| MQ["tx_main_queue"]
     DEDUP -->|Duplicate| DROP["Drop"]
-    CHECK -->|"Everything Else\n(Write, Ack, Catchup,\nSnapshot, Query, JsonDb,\nWildcard, Topic, Partition,\nUnique, Fk, Death, Drain)"| MQ
+    CHECK -->|"Everything Else<br>(Write, Ack, Catchup,<br>Snapshot, Query, JsonDb,<br>Wildcard, Topic, Partition,<br>Unique, Fk, Death, Drain)"| MQ
 ```
 
 The classification logic groups messages into three urgency tiers:
 
-**Immediate: Heartbeats.** Heartbeats are never queued in any channel. The processor calls `HeartbeatManager::receive_heartbeat()` inline, updates the node's liveness state, and if the node is now `Alive`, sends a `RaftEvent::NodeAlive` notification to the Raft task. The heartbeat data is accumulated into a `Vec<HeartbeatUpdate>` and drained into the next `ProcessingBatch` on the next tick. Processing heartbeats inline is essential — if heartbeats sat in the main queue behind a hundred snapshot chunks, the `HeartbeatManager` would not update its timestamps, and the next timeout check would declare nodes dead that are perfectly alive.
+**Immediate: Heartbeats.** Heartbeats are never queued in any channel. The processor calls `HeartbeatManager::receive_heartbeat()` inline, updates the node's liveness state, and if the node is now `Alive`, sends a `RaftEvent::NodeAlive` notification to the Raft task. The heartbeat data is accumulated into a `Vec<HeartbeatUpdate>` and drained into the next `ProcessingBatch` on the next tick. Processing heartbeats inline is essential — queuing them behind data-plane messages would delay timestamp updates and risk false death declarations.
 
 **Time-sensitive: Raft messages.** The four Raft message types — `RequestVote`, `RequestVoteResponse`, `AppendEntries`, and `AppendEntriesResponse` — are forwarded to a dedicated channel consumed by the `RaftTask`. Raft has its own timing constraints (election timeouts, heartbeat intervals) and runs on the main Tokio runtime. Separating Raft from the main queue means that a slow database operation holding the `NodeController` lock does not delay vote responses, which would cause unnecessary leader elections.
 
 **Best-effort: Everything else.** The remaining 30 message types — replication writes and acks, catchup requests and responses, forwarded publishes (after dedup), snapshot transfers, query requests and responses, JSON DB operations, wildcard and topic subscription broadcasts, partition updates, unique and foreign key constraint messages, death notices, and drain notifications — all flow to the main queue. They are processed in arrival order by the event loop, which acquires the `NodeController` write lock for each batch.
 
-The classification is by urgency profile, not by semantic domain. A replication write and a foreign key check response have nothing in common semantically, but they share the same urgency characteristic: they can wait for the `NodeController` lock without causing cascading timing failures. Heartbeats and Raft messages cannot wait.
+The classification is by urgency profile, not by semantic domain. A replication write and a foreign key check response share nothing semantically, but both can wait for the `NodeController` lock without causing timing failures. Heartbeats and Raft messages cannot.
 
 ## 13.3 Deduplication
 
@@ -104,7 +104,7 @@ The system has two dedup layers. The first sits in the `MessageProcessor`, befor
 
 ## 13.4 The Dedicated Executor
 
-The `DedicatedExecutor` is a separate Tokio runtime that runs the `MessageProcessor` in isolation from the main application runtime. It is 82 lines of code that solve one of the subtlest problems in the cluster architecture.
+The `DedicatedExecutor` is a separate Tokio runtime that runs the `MessageProcessor` in isolation from the main application runtime. It is 81 lines of code that solve one of the subtlest problems in the cluster architecture.
 
 The constructor creates a multi-threaded Tokio runtime with `worker_threads.clamp(2, 8)` — always at least 2 threads, never more than 8. It spawns a dedicated OS thread that blocks on a shutdown signal, keeping the runtime alive until explicitly dropped. The executor exposes a `Handle` for spawning tasks on its runtime and implements `Drop` to send the shutdown signal automatically.
 
@@ -116,17 +116,11 @@ executor = DedicatedExecutor::new("msg-processor", 2)
 
 The processor is spawned on this executor's handle, and the executor itself is stored in the `ClusteredAgent` struct for the lifetime of the cluster node.
 
-Why does heartbeat processing need its own runtime? The `HeartbeatManager` detects node deaths by comparing the current time against the last-received heartbeat timestamp. If the gap exceeds the timeout (15 seconds by default), the node is declared dead. But this comparison only happens when `check_timeouts()` is called — which happens during `process_tick()`, which is triggered by the tick channel from the event loop.
+Why does heartbeat processing need its own runtime? The `HeartbeatManager` detects node deaths by comparing the current time against the last-received heartbeat timestamp. If the gap exceeds the timeout (15 seconds by default), the node is declared dead. But this comparison only runs during `process_tick()`, which requires the processor to get CPU time. If the processor shares a runtime with the event loop and QUIC transport, heavy application load can starve it — the failure mode described in this chapter's What Went Wrong section. The dedicated executor prevents this by reserving 2 worker threads exclusively for heartbeat processing and message classification, independent of the main runtime's load.
 
-If the `MessageProcessor` ran on the main Tokio runtime, it would share worker threads with everything else: the event loop processing main queue messages, the `NodeController` performing database operations, the QUIC transport sending outbound messages, and the broker handling MQTT client connections. Under heavy load — say, during a rebalancing operation that migrates 85 partitions with full snapshot transfers — the main runtime's worker threads are saturated. The `MessageProcessor`'s `run()` method would be starved of CPU time. Heartbeats arriving on the inbox channel would sit unprocessed. The tick handler would not run. The `HeartbeatManager` would not update its timestamps.
+The `MessageProcessor`'s `run()` method is itself a biased `tokio::select!` loop with two branches: the tick channel and the inbox channel. The tick branch has priority (checked first due to `biased`), ensuring that heartbeat timing is evaluated before new messages are processed. The inbox branch drains messages in batches — after receiving one message via `recv_async()`, it loops on `try_recv()` to consume all available messages without yielding. Every 64 messages, it calls `tokio::task::yield_now()` to give the tick branch a chance to fire.
 
-The failure mode is insidious. It is not that the remote node stopped sending heartbeats — the heartbeats are sitting in the inbox channel, waiting to be consumed. It is that the local processor cannot consume them fast enough because the runtime is busy with snapshot chunks and replication writes. When the tick finally fires and `check_timeouts()` runs, it sees timestamps that are 15+ seconds old and declares the remote nodes dead. This triggers partition failover via Raft, which generates more rebalancing work, which further saturates the runtime, which causes more false deaths — a cascade.
-
-The dedicated executor breaks this cycle. The `MessageProcessor`'s 2 worker threads are reserved exclusively for heartbeat processing and message classification. Even when the main runtime is fully loaded, the processor's threads continue to run, consuming heartbeats from the inbox and accumulating them into batches. The tick channel uses `try_send` with capacity 1, so a tick that cannot be delivered is simply dropped — the next tick will trigger the timeout check.
-
-The `MessageProcessor`'s `run()` method is itself a biased `tokio::select!` loop with two branches: the tick channel and the inbox channel. The tick branch has priority (checked first due to `biased`), ensuring that heartbeat timing is evaluated before new messages are processed. The inbox branch drains messages in batches — after receiving one message via `recv_async()`, it loops on `try_recv()` to consume all available messages without yielding. Every 64 messages, it calls `tokio::task::yield_now()` to give the tick branch a chance to fire. This batch-then-yield pattern is a recurring motif throughout the pipeline: consume everything available, but periodically surrender the thread so that higher-priority work can run.
-
-The initialization sequence in `spawn_message_processor()` wires the processor into the channel topology. It creates the `MessageProcessor` with all six channel endpoints, registers each configured peer with the `HeartbeatManager` (so that it knows which nodes to expect heartbeats from), creates the `DedicatedExecutor` with 2 workers, and spawns the processor's `run()` method on the executor's handle. The executor is returned and stored in the `ClusteredAgent`, ensuring its `Drop` implementation fires on shutdown.
+The initialization sequence in `spawn_message_processor()` wires the processor into the channel topology. It creates the `MessageProcessor` with five of the six channel endpoints (the Raft, main queue, inbox, and tick channels), registers each configured peer with the processor (which internally registers with the `HeartbeatManager`, so that it knows which nodes to expect heartbeats from), creates the `DedicatedExecutor` with 2 workers, and spawns the processor's `run()` method on the executor's handle — passing the sixth channel (`tx_batch`) as an argument to `run()` rather than to the constructor. The executor is returned and stored in the `ClusteredAgent`, ensuring its `Drop` implementation fires on shutdown.
 
 ## 13.5 Processing Batches
 
@@ -143,7 +137,7 @@ The batch is produced by `process_tick()`, called whenever a tick arrives on `rx
 
 The event loop's `handle_processing_batch()` consumes the batch in three steps. First, if the batch contains an outgoing heartbeat, it acquires a read lock on the `NodeController` and broadcasts the heartbeat via the transport — this only requires a read lock because broadcasting does not mutate partition state. Second, if the batch contains heartbeat updates, it acquires a write lock and calls `apply_heartbeat_updates()` on the `NodeController`, updating each peer's liveness state. Third, if the batch contains dead nodes, it acquires a write lock and calls `apply_dead_nodes()`, which triggers the full death handling cascade: marking the `HeartbeatManager` state, logging the death, sending `RaftEvent::NodeDead`, and queuing the dead node for session cleanup. The session cleanup loop then iterates through all sessions connected to the dead node, marks them disconnected, and generates replicated writes — yielding to the runtime every 8 sessions to prevent starvation of other event loop branches.
 
-The batch channel has a capacity of 16. This is small because batches carry aggregated state, not individual messages. One batch can carry updates from dozens of heartbeats received between ticks. The small capacity also means that if the event loop falls behind on batch processing (because it is busy with the main queue), the `MessageProcessor` blocks on the batch send — which is the correct behavior, because heartbeat updates that are not applied to the `NodeController` cannot influence routing decisions.
+The small batch channel capacity also means that if the event loop falls behind, the `MessageProcessor` blocks on the batch send. Heartbeat updates not yet applied to the `NodeController` cannot influence routing decisions, so blocking until the event loop catches up loses nothing.
 
 ## 13.6 Event Loop Dispatch
 
@@ -176,7 +170,7 @@ The `handle_main_queue_message()` function contains three optimizations that red
 
 **Cooperative yielding.** After every 8 messages (`BATCH_SIZE = 8`), the function calls `tokio::task::yield_now()`. This prevents long batches from starving other `select!` branches — particularly the tick and batch branches that need to run at regular intervals. The yield point also appears in the `MessageProcessor`'s inbox draining loop (every 64 messages) and in the dead node session cleanup loop (every 8 sessions).
 
-When `handle_filtered_message()` returns a `PendingConstraintWork` — indicating that a create or update operation triggered unique or foreign key constraint checks that require remote responses — the event loop drops the `NodeController` write lock and spawns a completion task. This task awaits the constraint check responses (which arrive as messages on the main queue and are resolved via the `PendingConstraintState`), then reacquires the write lock and completes the operation. This lock-drop-reacquire pattern, described in earlier chapters for retained queries and unique constraints, is essential here: holding the write lock while awaiting a remote response would deadlock the system, because the response itself needs to be processed by the event loop, which needs the write lock to dispatch it.
+When `handle_filtered_message()` returns `Some(PendingConstraintWork)` — indicating that a create or update operation triggered unique or foreign key constraint checks that require remote responses — the event loop drops the `NodeController` write lock and spawns a completion task. This task awaits the constraint check responses (which arrive as messages on the main queue and are resolved via the `PendingConstraintState`), then reacquires the write lock and completes the operation. This lock-drop-reacquire pattern, described in earlier chapters for retained queries and unique constraints, is essential here: holding the write lock while awaiting a remote response would deadlock the system, because the response itself needs to be processed by the event loop, which needs the write lock to dispatch it.
 
 The `handle_filtered_message()` dispatch covers all non-Raft, non-heartbeat message types. Its structure mirrors the classification in the `MessageProcessor`, but at a finer granularity:
 
@@ -184,18 +178,20 @@ The `handle_filtered_message()` dispatch covers all non-Raft, non-heartbeat mess
 |-------------|---------|------------------|
 | Write, WriteRequest | `handle_write()`, `handle_write_request()` | Chapter 5 (Replication) |
 | Ack | `handle_ack()` | Chapter 5 (Replication) |
-| DeathNotice, DrainNotification | `handle_node_death()` | Chapter 10 (Failure Detection) |
+| DeathNotice | `handle_node_death()` | Chapter 10 (Failure Detection) |
+| DrainNotification | sends `RaftEvent::DrainNotification` | Chapter 11 (Rebalancing) |
 | CatchupRequest, CatchupResponse | `handle_catchup_request()`, `handle_catchup_response()` | Chapter 5 (Replication) |
 | ForwardedPublish | `handle_forwarded_publish_no_dedup()` | Chapter 8 (Cross-Node Pub/Sub) |
 | SnapshotRequest, SnapshotChunk, SnapshotComplete | `handle_snapshot_*()` | Chapter 10 (Failure Detection) |
 | QueryRequest, QueryResponse | `handle_query_*()` | Chapter 9 (Query Coordination) |
-| BatchReadRequest, BatchReadResponse | `handle_batch_read_*()` | Chapter 9 (Query Coordination) |
+| BatchReadRequest | `handle_batch_read_and_respond()` | Chapter 9 (Query Coordination) |
 | WildcardBroadcast | `handle_wildcard_broadcast()` | Chapter 8 (Cross-Node Pub/Sub) |
 | TopicSubscriptionBroadcast | `handle_topic_subscription_broadcast()` | Chapter 8 (Cross-Node Pub/Sub) |
 | PartitionUpdate | `handle_partition_update_received()` | Chapter 11 (Rebalancing) |
 | JsonDbRequest, JsonDbResponse | `handle_json_db_*()` | Chapter 2 (Storage Foundation) |
-| UniqueReserve*, UniqueCommit*, UniqueRelease* | `handle_unique_*()` | Chapter 15 (Constraints) |
-| FkCheck*, FkReverseLookup* | `handle_fk_*()` | Chapter 15 (Constraints) |
+| UniqueReserveRequest, UniqueCommitRequest, UniqueReleaseRequest | `handle_unique_*_request()` | Chapter 15 (Constraints) |
+| FkCheckRequest, FkReverseLookupRequest | `handle_fk_*_request()` | Chapter 15 (Constraints) |
+| UniqueReserveResponse, FkCheckResponse, FkReverseLookupResponse | `pending_constraints.resolve_*()` | Chapter 15 (Constraints) |
 
 The dispatch is a `match` statement on the `ClusterMessage` enum, which has 35 variants. The `handle_filtered_message()` method explicitly ignores Heartbeat and the four Raft message types (they should never arrive on the main queue), handles the common data-plane types directly, and delegates the remaining types to `dispatch_data_plane_message()`. This two-level dispatch keeps the hot path (writes, acks, forwards) in the first match and the less frequent types (snapshots, constraints, queries) in a secondary function.
 
@@ -223,11 +219,11 @@ Switching to bounded channels (4,096 for the main queue) created backpressure. W
 
 **Separate what you measure from what you run.** Heartbeat-based failure detection is a measurement system. It measures whether remote nodes are alive by comparing timestamps against thresholds. Database operations, snapshot transfers, and Raft coordination are workload systems. When measurement and workload share the same compute resources, the measurement becomes unreliable under the exact conditions where reliability matters most — high load. The `DedicatedExecutor` is a concrete application of this principle: give the measurement system its own resources so that it produces accurate readings regardless of the workload's behavior.
 
-**Classify by urgency, not by type.** The pipeline does not group messages by their semantic domain (all replication messages together, all query messages together, all constraint messages together). Instead, it groups them by urgency profile: heartbeats are immediate, Raft is time-sensitive, everything else is best-effort. A `UniqueReserveResponse` and a `SnapshotChunk` have nothing in common semantically, but they share the same urgency characteristic — they can wait for the `NodeController` lock without causing timing failures. Urgency-based classification produces fewer channels and simpler routing logic than domain-based classification, and it correctly handles the failure modes that matter.
+**Classify by urgency, not by type.** Domain-based grouping — all replication together, all queries together — seems natural but produces more channels without improving failure handling. Urgency-based classification produces fewer channels, simpler routing, and correctly prioritizes the failure modes that matter: timing-sensitive work gets dedicated paths, everything else shares a single queue.
 
-**Bounded channels are backpressure, not throttling.** The instinct when a queue overflows is to make it bigger. The bounded channels in this pipeline are not arbitrary limits — they are a feedback mechanism. When the main queue fills to 4,096, the `MessageProcessor` blocks, which causes the inbox to fill to 16,384, which causes the QUIC receivers to drop messages. This cascade of backpressure communicates load information from the slowest consumer (the event loop) back to the fastest producer (the network). Unbounded queues defer the problem by converting it from "dropped messages" to "unbounded memory growth and latency spikes" — which is strictly worse, because at least dropped messages have well-defined recovery paths (retransmission, catchup requests, snapshot re-requests).
+**Bounded channels are backpressure, not throttling.** The instinct when a queue overflows is to make it bigger. Bounded channels are not arbitrary limits — they are a feedback mechanism that communicates load information from the slowest consumer back to the fastest producer. Unbounded queues defer the problem by converting it from "dropped messages" to "unbounded memory growth and latency spikes" — which is strictly worse, because dropped messages have well-defined recovery paths while latency walls do not.
 
-**Yield early, yield often.** A cooperative multitasking runtime like Tokio requires tasks to voluntarily yield the thread. A tight loop that processes 10,000 messages without yielding holds a worker thread hostage, preventing other tasks from making progress. The pipeline uses yield points at three granularities: every 64 messages in the `MessageProcessor`, every 8 messages in the event loop, and every 8 sessions in the dead node cleanup loop. These are not arbitrary — they reflect the cost of the work done between yields. Message classification (64) is cheap per message. Event loop dispatch (8) involves write lock acquisition and handler execution. Session cleanup (8) generates replicated writes. The yield interval is inversely proportional to the per-item cost. Choosing wrong in either direction has visible consequences: too few yields causes starvation of timer-driven branches; too many yields adds scheduling overhead that shows up as throughput loss in benchmarks.
+**Yield early, yield often.** A cooperative runtime requires tasks to voluntarily yield the thread. The right yield interval depends on per-item cost: cheap work like message classification tolerates longer batches between yields, while expensive work like handler dispatch or replicated writes needs shorter ones. The interval is inversely proportional to the per-item cost. Choosing wrong in either direction has visible consequences: too few yields starves timer-driven branches; too many yields adds scheduling overhead that shows up as throughput loss in benchmarks.
 
 ## What Comes Next
 
