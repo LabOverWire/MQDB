@@ -144,6 +144,7 @@ impl ClusteredAgent {
         let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
         let ownership_arc = Arc::new(config.ownership.clone());
+        let vault_key_store = Arc::new(crate::VaultKeyStore::new());
         let mut controller = NodeController::new_with_storage(
             node_id,
             transport.clone(),
@@ -153,6 +154,7 @@ impl ClusteredAgent {
             tx_raft_events.clone(),
         );
         controller.set_ownership(Arc::clone(&ownership_arc));
+        controller.set_vault_key_store(Arc::clone(&vault_key_store));
 
         if controller.stores().has_persistence() {
             match controller.stores().recover() {
@@ -233,6 +235,7 @@ impl ClusteredAgent {
             ownership: ownership_arc,
             scope_config: Arc::new(config.scope_config),
             auth_providers: None,
+            vault_key_store,
         })
     }
 
@@ -298,7 +301,8 @@ impl ClusteredAgent {
         service_username: Option<&String>,
         service_password: Option<&String>,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        let http_config = self.http_config.take()?;
+        let mut http_config = self.http_config.take()?;
+        http_config.vault_key_store = Some(Arc::clone(&self.vault_key_store));
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
 

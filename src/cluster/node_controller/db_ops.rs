@@ -464,9 +464,68 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
+        let payload =
+            if let Some(pending) = self.pending_vault_decrypts.remove(&response.request_id) {
+                self.vault_decrypt_forwarded_response(
+                    response.payload.clone(),
+                    &pending.entity,
+                    &pending.op,
+                    &pending.sender,
+                )
+            } else {
+                response.payload.clone()
+            };
+
         self.transport
-            .queue_local_publish(response.response_topic.clone(), response.payload.clone(), 0)
+            .queue_local_publish(response.response_topic.clone(), payload, 0)
             .await;
+    }
+
+    fn vault_decrypt_forwarded_response(
+        &self,
+        payload: Vec<u8>,
+        entity: &str,
+        op: &str,
+        sender: &str,
+    ) -> Vec<u8> {
+        let Some(key_bytes) = self.vault_key_store.get(sender) else {
+            return payload;
+        };
+        let Some(crypto) = crate::http::VaultCrypto::from_key_bytes(&key_bytes) else {
+            return payload;
+        };
+        let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+        let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+            return payload;
+        };
+
+        match op {
+            "create" | "read" | "update" => {
+                let id = parsed.get("id").and_then(|v| v.as_str()).map(String::from);
+                if let Some(id) = id
+                    && let Some(data) = parsed.get_mut("data")
+                {
+                    crate::vault_transform::vault_decrypt_fields(&crypto, entity, &id, data, &skip);
+                }
+            }
+            "list" => {
+                if let Some(data) = parsed.get_mut("data")
+                    && let Some(items) = data.as_array_mut()
+                {
+                    for item in items {
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
+                            && let Some(item_data) = item.get_mut("data")
+                        {
+                            crate::vault_transform::vault_decrypt_fields(
+                                &crypto, entity, &id, item_data, &skip,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        serde_json::to_vec(&parsed).unwrap_or(payload)
     }
 
     fn check_forwarded_ownership(&self, request: &JsonDbRequest) -> Option<Vec<u8>> {
@@ -1994,7 +2053,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
     pub async fn forward_json_db_request(
-        &self,
+        &mut self,
         partition: PartitionId,
         op: JsonDbOp,
         entity: &str,
@@ -2021,6 +2080,28 @@ impl<T: ClusterTransport> NodeController<T> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
 
+        if let Some(sender_id) = sender
+            && crate::vault_transform::is_vault_eligible(entity, &self.ownership)
+            && self.vault_key_store.get(sender_id).is_some()
+        {
+            let op_str = match op {
+                JsonDbOp::Create => "create",
+                JsonDbOp::Read => "read",
+                JsonDbOp::Update => "update",
+                JsonDbOp::List => "list",
+                JsonDbOp::Delete => "delete",
+            };
+            self.pending_vault_decrypts.insert(
+                request_id,
+                super::PendingVaultDecrypt {
+                    entity: entity.to_string(),
+                    sender: sender_id.to_string(),
+                    op: op_str.to_string(),
+                    created_at_ms: request_id / 1_000_000,
+                },
+            );
+        }
+
         let request = JsonDbRequest::new(
             request_id,
             op,
@@ -2034,6 +2115,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let msg = ClusterMessage::JsonDbRequest { partition, request };
         if let Err(e) = self.transport.send(primary, msg).await {
+            self.pending_vault_decrypts.remove(&request_id);
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),

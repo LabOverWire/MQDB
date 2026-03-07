@@ -20,7 +20,14 @@ async fn test_not_null_constraint_create_with_null() {
 
     let user = json!({"name": "Alice", "email": null});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(matches!(result, Err(Error::NotNullViolation { .. })));
@@ -37,7 +44,14 @@ async fn test_not_null_constraint_create_missing_field() {
 
     let user = json!({"name": "Alice"});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(matches!(result, Err(Error::NotNullViolation { .. })));
@@ -54,7 +68,14 @@ async fn test_not_null_constraint_create_success() {
 
     let user = json!({"name": "Alice", "email": "alice@example.com"});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(result.is_ok());
@@ -67,7 +88,14 @@ async fn test_not_null_constraint_update_to_null() {
 
     let user = json!({"name": "Alice", "email": "alice@example.com"});
     let created = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -81,6 +109,7 @@ async fn test_not_null_constraint_update_to_null() {
             "users".into(),
             id,
             json!({"email": null}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -100,13 +129,27 @@ async fn test_unique_constraint_violation() {
         .unwrap();
 
     let user1 = json!({"name": "Alice", "email": "alice@example.com"});
-    db.create("users".into(), user1, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "users".into(),
+        user1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let user2 = json!({"name": "Bob", "email": "alice@example.com"});
     let result = db
-        .create("users".into(), user2, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(matches!(result, Err(Error::UniqueViolation { .. })));
@@ -122,13 +165,27 @@ async fn test_unique_constraint_different_values() {
         .unwrap();
 
     let user1 = json!({"name": "Alice", "email": "alice@example.com"});
-    db.create("users".into(), user1, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "users".into(),
+        user1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let user2 = json!({"name": "Bob", "email": "bob@example.com"});
     let result = db
-        .create("users".into(), user2, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(result.is_ok());
@@ -144,13 +201,27 @@ async fn test_unique_constraint_update_to_duplicate() {
         .unwrap();
 
     let user1 = json!({"name": "Alice", "email": "alice@example.com"});
-    db.create("users".into(), user1, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "users".into(),
+        user1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let user2 = json!({"name": "Bob", "email": "bob@example.com"});
     let created = db
-        .create("users".into(), user2, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -160,6 +231,7 @@ async fn test_unique_constraint_update_to_duplicate() {
             "users".into(),
             id,
             json!({"email": "alice@example.com"}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -180,7 +252,14 @@ async fn test_unique_constraint_update_same_value() {
 
     let user = json!({"name": "Alice", "email": "alice@example.com"});
     let created = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -190,6 +269,7 @@ async fn test_unique_constraint_update_same_value() {
             "users".into(),
             id,
             json!({"name": "Alice Updated", "email": "alice@example.com"}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -213,14 +293,28 @@ async fn test_unique_constraint_concurrent_create() {
 
     let handle1 = tokio::spawn(async move {
         let user = json!({"name": "Alice", "email": "same@example.com"});
-        db1.create("users".into(), user, None, None, &ScopeConfig::default())
-            .await
+        db1.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
     });
 
     let handle2 = tokio::spawn(async move {
         let user = json!({"name": "Bob", "email": "same@example.com"});
-        db2.create("users".into(), user, None, None, &ScopeConfig::default())
-            .await
+        db2.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
     });
 
     let result1 = handle1.await.unwrap();
@@ -241,7 +335,14 @@ async fn test_foreign_key_valid_reference() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -258,7 +359,14 @@ async fn test_foreign_key_valid_reference() {
 
     let post = json!({"title": "Hello", "author_id": user_id});
     let result = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(result.is_ok());
@@ -281,7 +389,14 @@ async fn test_foreign_key_invalid_reference() {
 
     let post = json!({"title": "Hello", "author_id": "nonexistent"});
     let result = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(matches!(result, Err(Error::ForeignKeyViolation { .. })));
@@ -304,7 +419,14 @@ async fn test_foreign_key_null_allowed() {
 
     let post = json!({"title": "Hello", "author_id": null});
     let result = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(result.is_ok());
@@ -317,7 +439,14 @@ async fn test_foreign_key_update_to_invalid() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -334,7 +463,14 @@ async fn test_foreign_key_update_to_invalid() {
 
     let post = json!({"title": "Hello", "author_id": user_id});
     let created = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let post_id = created["id"].as_str().unwrap().to_string();
@@ -344,6 +480,7 @@ async fn test_foreign_key_update_to_invalid() {
             "posts".into(),
             post_id,
             json!({"author_id": "nonexistent"}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -360,7 +497,14 @@ async fn test_foreign_key_restrict_delete() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -376,9 +520,16 @@ async fn test_foreign_key_restrict_delete() {
     .unwrap();
 
     let post = json!({"title": "Hello", "author_id": user_id.clone()});
-    db.create("posts".into(), post, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "posts".into(),
+        post,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let result = db
         .delete("users".into(), user_id, None, None, &ScopeConfig::default())
@@ -394,7 +545,14 @@ async fn test_foreign_key_cascade_delete_simple() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -416,6 +574,7 @@ async fn test_foreign_key_cascade_delete_simple() {
         post_entry1,
         None,
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await
@@ -423,6 +582,7 @@ async fn test_foreign_key_cascade_delete_simple() {
     db.create(
         "posts".into(),
         post_entry2,
+        None,
         None,
         None,
         &ScopeConfig::default(),
@@ -449,7 +609,14 @@ async fn test_foreign_key_cascade_delete_multilevel() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -466,7 +633,14 @@ async fn test_foreign_key_cascade_delete_multilevel() {
 
     let post = json!({"title": "Post 1", "author_id": user_id.clone()});
     let created_post = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let post_id = created_post["id"].as_str().unwrap().to_string();
@@ -488,6 +662,7 @@ async fn test_foreign_key_cascade_delete_multilevel() {
         comment_entry1,
         None,
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await
@@ -495,6 +670,7 @@ async fn test_foreign_key_cascade_delete_multilevel() {
     db.create(
         "comments".into(),
         comment_entry2,
+        None,
         None,
         None,
         &ScopeConfig::default(),
@@ -531,7 +707,14 @@ async fn test_foreign_key_set_null() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -548,12 +731,26 @@ async fn test_foreign_key_set_null() {
 
     let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
     let post2 = json!({"title": "Post 2", "author_id": user_id.clone()});
-    db.create("posts".into(), post1, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
-    db.create("posts".into(), post2, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "posts".into(),
+        post1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+    db.create(
+        "posts".into(),
+        post2,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let result = db
         .delete("users".into(), user_id, None, None, &ScopeConfig::default())
@@ -589,6 +786,7 @@ async fn test_schema_type_validation() {
             valid_user,
             None,
             None,
+            None,
             &ScopeConfig::default()
         )
         .await
@@ -600,6 +798,7 @@ async fn test_schema_type_validation() {
         .create(
             "users".into(),
             invalid_user,
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -626,6 +825,7 @@ async fn test_schema_required_fields() {
             invalid_user,
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await;
@@ -636,6 +836,7 @@ async fn test_schema_required_fields() {
         db.create(
             "users".into(),
             valid_user,
+            None,
             None,
             None,
             &ScopeConfig::default()
@@ -658,7 +859,14 @@ async fn test_schema_default_values() {
 
     let user = json!({"name": "Alice"});
     let created = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
 
@@ -678,9 +886,16 @@ async fn test_constraint_persistence_unique() {
             .unwrap();
 
         let user = json!({"name": "Alice", "email": "alice@example.com"});
-        db.create("users".into(), user, None, None, &ScopeConfig::default())
-            .await
-            .unwrap();
+        db.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let db = Database::open_without_background_tasks(tmp.path())
@@ -689,7 +904,14 @@ async fn test_constraint_persistence_unique() {
 
     let user = json!({"name": "Bob", "email": "alice@example.com"});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(
@@ -717,7 +939,14 @@ async fn test_constraint_persistence_not_null() {
 
     let user = json!({"name": "Alice"});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(
@@ -751,7 +980,14 @@ async fn test_constraint_persistence_foreign_key() {
 
     let post = json!({"title": "Hello", "author_id": "nonexistent"});
     let result = db
-        .create("posts".into(), post, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(
@@ -779,7 +1015,14 @@ async fn test_schema_persistence() {
 
     let user = json!({"age": 30});
     let result = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
 
     assert!(
@@ -808,20 +1051,41 @@ async fn test_combined_schema_and_constraints() {
 
     let user1 = json!({"name": "Alice", "email": "alice@example.com"});
     let created = db
-        .create("users".into(), user1, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user1,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     assert_eq!(created["status"], "active");
 
     let user2 = json!({"name": "Bob", "email": "alice@example.com"});
     let result = db
-        .create("users".into(), user2, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
     assert!(matches!(result, Err(Error::UniqueViolation { .. })));
 
     let user3 = json!({"name": "Charlie"});
     let result = db
-        .create("users".into(), user3, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user3,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await;
     assert!(matches!(result, Err(Error::SchemaViolation { .. })));
 }
@@ -834,7 +1098,14 @@ async fn test_cascade_delete_emits_change_events() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -851,7 +1122,14 @@ async fn test_cascade_delete_emits_change_events() {
 
     let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
     let created_post = db
-        .create("posts".into(), post1, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post1,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let post_id = created_post["id"].as_str().unwrap().to_string();
@@ -889,7 +1167,14 @@ async fn test_set_null_emits_update_change_events() {
 
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let user_id = created_user["id"].as_str().unwrap().to_string();
@@ -907,11 +1192,25 @@ async fn test_set_null_emits_update_change_events() {
     let post1 = json!({"title": "Post 1", "author_id": user_id.clone()});
     let post2 = json!({"title": "Post 2", "author_id": user_id.clone()});
     let created_p1 = db
-        .create("posts".into(), post1, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post1,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let created_p2 = db
-        .create("posts".into(), post2, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let p1_id = created_p1["id"].as_str().unwrap().to_string();

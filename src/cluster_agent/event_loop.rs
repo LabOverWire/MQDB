@@ -184,7 +184,23 @@ impl ClusteredAgent {
                             became_primary = true;
                         }
                     } else if is_replica {
-                        ctrl.become_replica(partition, new_assignment.epoch, 0);
+                        let role = ctrl.role(partition);
+                        let had_data = matches!(
+                            role,
+                            crate::cluster::ReplicaRole::Primary
+                                | crate::cluster::ReplicaRole::Replica
+                        );
+                        if had_data {
+                            let seq = ctrl.sequence(partition).unwrap_or(0);
+                            ctrl.become_replica(partition, new_assignment.epoch, seq);
+                        } else if let Some(primary) = new_assignment.primary {
+                            ctrl.become_replica_with_snapshot(
+                                partition,
+                                new_assignment.epoch,
+                                primary,
+                            )
+                            .await;
+                        }
                     }
                     changes += 1;
                     if changes.is_multiple_of(8) {

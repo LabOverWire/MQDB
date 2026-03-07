@@ -49,7 +49,7 @@ pub struct RaftState {
 
 **`current_term`** and **`voted_for`** are the only two values that must survive a restart (along with the log). They are persisted to disk as a 10-byte record — 8 bytes for the term, 2 bytes for the voted-for node ID — stored at key `_raft/state`. Raft has its own dedicated Fjall LSM-tree instance, separate from the data stores. The node's database directory contains two subdirectories: `raft/` for Raft persistence and `stores/` for everything else (database records, sessions, indexes). The Raft instance is always configured with immediate durability — every write is fsynced — because losing a term or vote after a crash can violate Raft's safety guarantees. The data store's durability is configurable.
 
-**`log`** is the in-memory Raft log. Each `LogEntry` carries an index (u64), a term (u64), a 2-byte length prefix, and the command bytes. A `Noop` entry is 19 bytes on the wire. A `PartitionUpdate` entry is 29 bytes — 18 bytes of log header plus 11 bytes of partition data (1 byte for the partition number, 2 bytes each for primary and two replica slots, 4 bytes for the epoch).
+**`log`** is the in-memory Raft log. Each `LogEntry` carries an index (u64), a term (u64), a 2-byte length prefix, and the command bytes. A `Noop` entry is 19 bytes on the wire: 18 bytes of log header plus 1 byte for the command type discriminant. A `PartitionUpdate` entry is 30 bytes — 18 bytes of log header plus 12 bytes of command data (1 byte for the command type discriminant, 1 byte for the partition number, 2 bytes each for primary and two replica slots, 4 bytes for the epoch).
 
 **`log_base_index`** enables log compaction. After old entries are trimmed from the front of the log (Section 6.8), `log_base_index` records where the trimmed log starts. A `log_position()` function translates absolute log indices to positions in the in-memory vector by subtracting the base offset. An index that has been compacted away returns `None`.
 
@@ -144,17 +144,17 @@ This backoff mechanism means a new node that joins with an empty log will receiv
 
 A cluster of one faces a bootstrapping problem: no partition assignments exist yet, and the rebalancer needs a leader to propose them through Raft, but there is no leader because no election has happened.
 
-The bootstrap sequence, driven by `raft_task.rs`:
+The bootstrap sequence:
 
 1. The single node starts. It has no peers. The startup grace period (10 seconds) prevents immediate self-election.
 2. After 10 seconds with no peers appearing, `can_start_election` returns true. The node becomes a candidate with quorum size 1. Its self-vote satisfies quorum immediately. It becomes leader.
-3. The Raft task detects that it is leader and `partitions_initialized` is false. It calls `initialize_partitions()`.
-4. The function sorts the cluster members (just one node), then iterates all 256 partitions. For each partition, it computes the primary as `partition_num % node_count` and the replica as `(partition_num + 1) % node_count`. With one node, every partition gets the same primary (node 1) and no replicas (there is only one node, and primary and replica would be the same).
-5. Each assignment is proposed as a `RaftCommand::UpdatePartition` through Raft. Every 8 proposals, the function calls `tick()` and yields to the async runtime. The yielding prevents 256 proposals from monopolizing the event loop. Each interleaved `tick()` advances commit indices and applies committed entries, so partitions become available incrementally rather than all at once after a long pause.
-
-6. After all 256 proposals, the task sets `pending_partition_proposals` to 256 and marks `partitions_initialized = true`.
+3. On the next coordinator tick, the `just_became_leader` flag fires. The coordinator checks `partitions_initialized()` — which scans the partition map for any assigned primary. The map is empty, so it calls `trigger_rebalance_internal()`.
+4. The rebalancer calls `compute_balanced_assignments()`, which sorts the cluster members (just one node) and iterates all 256 partitions. For each partition, it computes the primary as `partition_num % node_count` and the replica as `(partition_num + 1) % node_count`. With one node, every partition gets the same primary (node 1) and no replicas (there is only one node, and primary and replica would be the same).
+5. Each assignment is proposed as a `RaftCommand::UpdatePartition` through Raft. After all 256 proposals, the coordinator sets `pending_partition_proposals` to 256, gating further rebalancing until all proposals are committed.
 
 When a second node joins later, `handle_node_alive()` adds it as both a cluster member and a Raft peer, then triggers rebalancing. The rebalancer computes incremental reassignments — moving roughly half the partitions to the new node and establishing replication.
+
+For multi-node clusters where all expected nodes are known at startup, a separate `initialize_partitions()` function in `raft_task.rs` handles bootstrap. It performs the same round-robin assignment but interleaves `tick()` calls and async yields every 8 proposals, preventing 256 proposals from monopolizing the event loop. Partitions become available incrementally rather than all at once after a long pause.
 
 ## 6.6 What Went Wrong: The Batch Flush Bug
 
@@ -237,7 +237,7 @@ Three things are persisted in the dedicated Raft Fjall instance:
 
 **Log entries** at keys `_raft/log/{index}`. Each key is the log prefix followed by the 8-byte big-endian index, which ensures lexicographic ordering matches index ordering. The value is the `BeBytes`-serialized `LogEntry`. On startup, a prefix scan of `_raft/log/` loads and sorts the entries by index to reconstruct the log.
 
-The Raft store is tiny — roughly 260 keys at peak (1 state key plus ~256 log entries before compaction trims them). Fjall pre-allocates a 64 MB journal file on creation, which looks alarming on disk, but it is a sparse file: actual disk usage is under 100 KB. The in-memory compaction from Section 6.8 trims the `Vec<LogEntry>` in memory but does not delete the corresponding keys from Fjall. In practice this does not matter — the data volume is so small that the Fjall memtable never fills up, no SSTable flushes are triggered, and disk usage stays negligible. If a cluster ran long enough with enough rebalancing events to accumulate thousands of persisted log entries, Fjall's own leveled compaction would handle the LSM-tree maintenance automatically.
+The Raft store is tiny — roughly 260 keys at peak (1 state key plus ~256 log entries before compaction trims them). The in-memory compaction from Section 6.8 trims the `Vec<LogEntry>` in memory but does not delete the corresponding keys from Fjall. In practice this does not matter — the data volume is so small that the Fjall memtable never fills up, no SSTable flushes are triggered, and disk usage stays negligible. If a cluster ran long enough with enough rebalancing events to accumulate thousands of persisted log entries, Fjall's own leveled compaction would handle the LSM-tree maintenance automatically.
 
 **Recovery** loads the persisted state and log, then reconstructs the `RaftState`. The node starts as a follower with no known leader and no peers. `commit_index` and `last_applied` start at 0, which means the node will re-apply all log entries as they are committed after it reconnects to the cluster. Since applying the same partition assignment twice has no effect, this replay is safe.
 
@@ -245,4 +245,4 @@ The peers list is empty because peer discovery happens through heartbeats, not t
 
 ## What Comes Next
 
-The Raft messages described in this chapter — `RequestVote`, `AppendEntries`, and their responses — must travel between nodes somehow. So must the replication writes from Chapter 5, the heartbeats, the forwarded publishes, and every other cluster message. Chapter 7 covers the transport layer: how MQDB started with MQTT bridges, discovered they degraded performance 8-30x on follower nodes, and replaced them with direct QUIC connections.
+The Raft messages described in this chapter — `RequestVote`, `AppendEntries`, and their responses — must travel between nodes somehow. So must the replication writes from Chapter 5, the heartbeats, the forwarded publishes, and every other cluster message. Chapter 7 covers the transport layer: how MQDB started with MQTT bridges, discovered they degraded performance 5-10x on nodes with bridges, and replaced them with direct QUIC connections.

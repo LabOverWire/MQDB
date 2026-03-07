@@ -859,21 +859,33 @@ async fn rebalancer_assigns_partitions_to_node_with_zero_primaries() {
 
     let all_nodes = vec![node1, node2, node3];
     let config = RebalanceConfig::default();
-    let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
 
+    let step1 = compute_incremental_assignments(&map, &all_nodes, &config);
     assert!(
-        !reassignments.is_empty(),
+        !step1.is_empty(),
         "rebalancer must propose changes when node has zero partitions"
     );
 
-    let expected_per_node = NUM_PARTITIONS as usize / 3;
-    let node3_primaries = reassignments
-        .iter()
-        .filter(|r| r.new_primary == node3)
-        .count();
+    let mut map2 = map.clone();
+    for r in &step1 {
+        map2.set(r.partition, r.to_assignment());
+    }
     assert!(
-        node3_primaries >= expected_per_node,
-        "node3 should receive at least {expected_per_node} primaries (got {node3_primaries})"
+        map2.replica_count(node3) > 0,
+        "node3 should have replicas after step 1"
+    );
+
+    let step2 = compute_incremental_assignments(&map2, &all_nodes, &config);
+    let mut map3 = map2.clone();
+    for r in &step2 {
+        map3.set(r.partition, r.to_assignment());
+    }
+
+    let expected_per_node = NUM_PARTITIONS as usize / 3;
+    assert!(
+        map3.primary_count(node3) >= expected_per_node,
+        "node3 should receive at least {expected_per_node} primaries (got {})",
+        map3.primary_count(node3)
     );
 }
 

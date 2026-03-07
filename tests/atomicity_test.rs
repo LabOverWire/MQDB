@@ -16,7 +16,14 @@ async fn test_concurrent_updates_last_write_wins() {
         "value": "initial",
     });
     let created = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -31,6 +38,7 @@ async fn test_concurrent_updates_last_write_wins() {
                     "users".into(),
                     id_clone,
                     json!({"value": format!("update-{}", i)}),
+                    None,
                     None,
                     None,
                     &ScopeConfig::default(),
@@ -62,7 +70,14 @@ async fn test_no_torn_writes() {
         "status": "active",
     });
     let created = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
@@ -75,6 +90,7 @@ async fn test_no_torn_writes() {
             "users".into(),
             id1,
             json!({"status": "suspended"}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -111,15 +127,36 @@ async fn test_create_updates_data_and_index() {
     let user2 = json!({"name": "User2", "group": "A"});
     let user3 = json!({"name": "User3", "group": "A"});
 
-    db.create("users".into(), user1, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
-    db.create("users".into(), user2, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
-    db.create("users".into(), user3, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.create(
+        "users".into(),
+        user1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+    db.create(
+        "users".into(),
+        user2,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+    db.create(
+        "users".into(),
+        user3,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let all_users = db
         .list("users".into(), vec![], vec![], None, vec![], None)
@@ -156,6 +193,7 @@ async fn test_concurrent_updates_to_different_entities() {
             json!({"name": "User1", "count": 0}),
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await
@@ -164,6 +202,7 @@ async fn test_concurrent_updates_to_different_entities() {
         .create(
             "users".into(),
             json!({"name": "User2", "count": 0}),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -187,6 +226,7 @@ async fn test_concurrent_updates_to_different_entities() {
                     json!({"count": i}),
                     None,
                     None,
+                    None,
                     &ScopeConfig::default(),
                 )
                 .await
@@ -203,6 +243,7 @@ async fn test_concurrent_updates_to_different_entities() {
                     "users".into(),
                     id2_clone,
                     json!({"count": i + 100}),
+                    None,
                     None,
                     None,
                     &ScopeConfig::default(),
@@ -243,6 +284,7 @@ async fn test_create_operations_are_atomic() {
                         "name": format!("User{}", i),
                         "email": format!("user{}@example.com", i),
                     }),
+                    None,
                     None,
                     None,
                     &ScopeConfig::default(),
@@ -294,6 +336,7 @@ async fn test_delete_operations_are_atomic() {
                     "name": format!("User{}", i),
                     "status": "active",
                 }),
+                None,
                 None,
                 None,
                 &ScopeConfig::default(),

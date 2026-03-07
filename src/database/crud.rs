@@ -12,10 +12,12 @@ use serde_json::Value;
 impl Database {
     /// # Errors
     /// Returns an error if validation, constraint checks, or storage fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         entity_name: String,
         mut data: Value,
+        constraint_data: Option<Value>,
         sender: Option<&str>,
         client_id: Option<&str>,
         scope_config: &ScopeConfig,
@@ -55,18 +57,34 @@ impl Database {
         schema_registry.validate_entity(&entity_name, &data)?;
         drop(schema_registry);
 
-        let entity = Entity::new(entity_name.clone(), id, data.clone());
+        let entity = Entity::new(entity_name.clone(), id.clone(), data.clone());
+
+        let constraint_entity = if let Some(mut cd) = constraint_data {
+            let schema_registry = self.schema_registry.read().await;
+            let _ = schema_registry.apply_defaults(&entity_name, &mut cd);
+            drop(schema_registry);
+            if let Value::Object(ref mut obj) = cd {
+                if !obj.contains_key("id") {
+                    obj.insert("id".to_string(), Value::String(id.clone()));
+                }
+                obj.remove("_version");
+                obj.insert("_version".to_string(), Value::Number(1.into()));
+            }
+            Entity::new(entity_name.clone(), id, cd)
+        } else {
+            entity.clone()
+        };
 
         let mut batch = self.storage.batch();
 
         let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.validate_create(&entity, &mut batch, &self.storage)?;
+        constraint_manager.validate_create(&constraint_entity, &mut batch, &self.storage)?;
         drop(constraint_manager);
 
         batch.insert(entity.key(), entity.serialize()?);
 
         let index_manager = self.index_manager.read().await;
-        index_manager.update_indexes(&mut batch, &entity, None);
+        index_manager.update_indexes(&mut batch, &constraint_entity, None);
 
         let scope = scope_config.resolve_scope(&entity_name, &data);
         let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
@@ -123,11 +141,13 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found, validation fails, or storage fails.
+    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         entity_name: String,
         id: String,
         fields: Value,
+        update_constraint_data: Option<(Value, Value)>,
         sender: Option<&str>,
         client_id: Option<&str>,
         scope_config: &ScopeConfig,
@@ -166,12 +186,29 @@ impl Database {
 
         let updated_entity = Entity::new(entity_name.clone(), id.clone(), updated_data);
 
+        let (constraint_new, constraint_old) =
+            if let Some((mut plaintext_merged, plaintext_existing)) = update_constraint_data {
+                if let Value::Object(ref mut obj) = plaintext_merged {
+                    obj.remove("_version");
+                    obj.insert(
+                        "_version".to_string(),
+                        Value::Number((existing_version + 1).into()),
+                    );
+                }
+                (
+                    Entity::new(entity_name.clone(), id.clone(), plaintext_merged),
+                    Entity::new(entity_name.clone(), id.clone(), plaintext_existing),
+                )
+            } else {
+                (updated_entity.clone(), existing_entity.clone())
+            };
+
         let mut batch = self.storage.batch();
 
         let constraint_manager = self.constraint_manager.read().await;
         constraint_manager.validate_update(
-            &updated_entity,
-            &existing_entity,
+            &constraint_new,
+            &constraint_old,
             &mut batch,
             &self.storage,
         )?;
@@ -181,7 +218,7 @@ impl Database {
         batch.insert(updated_entity.key(), updated_entity.serialize()?);
 
         let index_manager = self.index_manager.read().await;
-        index_manager.update_indexes(&mut batch, &updated_entity, Some(&existing_entity));
+        index_manager.update_indexes(&mut batch, &constraint_new, Some(&constraint_old));
 
         let scope = scope_config.resolve_scope(&entity_name, &updated_entity.data);
         let event = ChangeEvent::update(

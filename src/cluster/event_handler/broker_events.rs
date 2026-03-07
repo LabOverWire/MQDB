@@ -393,6 +393,9 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             }
 
             if event.topic.starts_with("$DB/") {
+                if let Some(uid) = event.user_id.as_deref() {
+                    self.vault_key_store.read_fence(uid).await;
+                }
                 self.handle_db_publish(node_id, &event).await;
                 return;
             }

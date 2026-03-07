@@ -159,6 +159,7 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
             }),
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -175,6 +176,7 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
             }),
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -187,6 +189,7 @@ async fn backend_setup() -> Result<Arc<Database>, Box<dyn std::error::Error>> {
             "vehicle_type": "small",
             "owner_name": "Alice Johnson"
         }),
+        None,
         None,
         None,
         &ScopeConfig::default(),
@@ -314,6 +317,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
             }),
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -348,6 +352,7 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
         "spots".into(),
         spot_id.clone(),
         json!({"status": "reserved"}),
+        None,
         None,
         None,
         &ScopeConfig::default(),
@@ -476,6 +481,7 @@ async fn gate_camera_client(
             }),
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -497,6 +503,7 @@ async fn gate_camera_client(
         "spots".into(),
         spot_id,
         json!({"status": "occupied"}),
+        None,
         None,
         None,
         &ScopeConfig::default(),
@@ -585,6 +592,7 @@ async fn payment_booth_client(
                 "payment_status": "completed",
                 "paid_at": now_timestamp()
             }),
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -712,6 +720,7 @@ async fn exit_gate_client(
         }),
         None,
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
@@ -729,6 +738,7 @@ async fn exit_gate_client(
         "spots".into(),
         spot_id.to_string(),
         json!({"status": "available"}),
+        None,
         None,
         None,
         &ScopeConfig::default(),

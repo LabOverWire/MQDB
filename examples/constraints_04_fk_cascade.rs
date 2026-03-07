@@ -31,7 +31,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating user...");
     let user = json!({"name": "Alice"});
     let created_user = db
-        .create("users".into(), user, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     let user_id = created_user["id"].as_str().unwrap();
     println!("✓ Created user: {user_id}\n");
@@ -39,13 +46,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Creating 2 posts by this user...");
     let post1 = json!({"title": "First Post", "author_id": user_id});
     let created_post1 = db
-        .create("posts".into(), post1, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post1,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     let post1_id = created_post1["id"].as_str().unwrap();
 
     let post2 = json!({"title": "Second Post", "author_id": user_id});
     let created_post2 = db
-        .create("posts".into(), post2, None, None, &ScopeConfig::default())
+        .create(
+            "posts".into(),
+            post2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     let post2_id = created_post2["id"].as_str().unwrap();
     println!("✓ Created posts: {post1_id}, {post2_id}\n");
@@ -56,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"text": "Nice!", "post_id": post1_id}),
         None,
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
@@ -64,12 +86,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"text": "Great!", "post_id": post1_id}),
         None,
         None,
+        None,
         &ScopeConfig::default(),
     )
     .await?;
     db.create(
         "comments".into(),
         json!({"text": "Awesome!", "post_id": post2_id}),
+        None,
         None,
         None,
         &ScopeConfig::default(),

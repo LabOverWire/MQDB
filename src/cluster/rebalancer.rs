@@ -98,10 +98,14 @@ fn redistribute_primaries(
 
         let current_count = *primary_counts.get(&current_primary).unwrap_or(&0);
 
-        let target_node = all_nodes
+        let target_node = assignment
+            .replicas
             .iter()
-            .filter(|&&n| n != current_primary)
-            .min_by_key(|n| primary_counts.get(n).unwrap_or(&0))
+            .filter(|&&r| {
+                let count = *primary_counts.get(&r).unwrap_or(&0);
+                count < ideal_per_node || (current_count > max_per_node && count < current_count)
+            })
+            .min_by_key(|r| primary_counts.get(r).unwrap_or(&0))
             .copied();
 
         let Some(target) = target_node else {
@@ -509,19 +513,29 @@ mod tests {
         assert_eq!(map.primary_count(node(3)), 0);
 
         let all_nodes = vec![node(1), node(2), node(3)];
-        let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
+
+        let step1 = compute_incremental_assignments(&map, &all_nodes, &config);
+        assert!(!step1.is_empty());
+
+        let mut map2 = map.clone();
+        for r in &step1 {
+            map2.set(r.partition, r.to_assignment());
+        }
+        assert_eq!(map2.primary_count(node(3)), 0);
+        assert!(map2.replica_count(node(3)) > 0);
+
+        let step2 = compute_incremental_assignments(&map2, &all_nodes, &config);
+        let mut map3 = map2.clone();
+        for r in &step2 {
+            map3.set(r.partition, r.to_assignment());
+        }
 
         let expected_per_node = NUM_PARTITIONS as usize / 3;
-        assert!(!reassignments.is_empty());
-        assert!(reassignments.len() >= expected_per_node);
-
-        let mut new_node3_count = 0;
-        for r in &reassignments {
-            if r.new_primary == node(3) {
-                new_node3_count += 1;
-            }
-        }
-        assert!(new_node3_count >= expected_per_node);
+        assert!(
+            map3.primary_count(node(3)) >= expected_per_node,
+            "expected ~{expected_per_node} primaries, got {}",
+            map3.primary_count(node(3))
+        );
     }
 
     #[test]
@@ -550,21 +564,12 @@ mod tests {
             .iter()
             .filter(|r| r.new_primary != r.old_primary.unwrap())
             .collect();
-        assert_eq!(primary_moves.len(), NUM_PARTITIONS as usize / 2);
-
-        let replica_adds: Vec<_> = reassignments
-            .iter()
-            .filter(|r| {
-                r.new_primary == r.old_primary.unwrap() && r.new_replicas.contains(&node(2))
-            })
-            .collect();
-        assert_eq!(replica_adds.len(), NUM_PARTITIONS as usize / 2);
+        assert_eq!(primary_moves.len(), 0);
 
         for r in &reassignments {
-            let has_node2 = r.new_primary == node(2) || r.new_replicas.contains(&node(2));
             assert!(
-                has_node2,
-                "partition {} should have node 2",
+                r.new_replicas.contains(&node(2)),
+                "partition {} should have node 2 as replica",
                 r.partition.get()
             );
         }
@@ -584,31 +589,41 @@ mod tests {
         assert_eq!(map.replica_count(node(3)), 0);
 
         let all_nodes = vec![node(1), node(2), node(3)];
-        let reassignments = compute_incremental_assignments(&map, &all_nodes, &config);
 
-        let mut node3_primaries = 0;
-        let mut node3_replicas = 0;
-        let mut temp_map = map.clone();
-        for r in &reassignments {
-            temp_map.set(r.partition, r.to_assignment());
+        let step1 = compute_incremental_assignments(&map, &all_nodes, &config);
+        let mut map2 = map.clone();
+        for r in &step1 {
+            map2.set(r.partition, r.to_assignment());
         }
-        for p in PartitionId::all() {
-            if temp_map.primary(p) == Some(node(3)) {
-                node3_primaries += 1;
-            }
-            if temp_map.replicas(p).contains(&node(3)) {
-                node3_replicas += 1;
-            }
+        assert_eq!(map2.primary_count(node(3)), 0);
+        assert!(
+            map2.replica_count(node(3)) > 0,
+            "node 3 should have replicas after step 1"
+        );
+
+        let step2 = compute_incremental_assignments(&map2, &all_nodes, &config);
+        let mut map3 = map2.clone();
+        for r in &step2 {
+            map3.set(r.partition, r.to_assignment());
         }
 
         let expected_per_node = NUM_PARTITIONS as usize / 3;
         assert!(
-            node3_primaries >= expected_per_node,
-            "expected ~{expected_per_node} primaries, got {node3_primaries}"
+            map3.primary_count(node(3)) >= expected_per_node,
+            "expected ~{expected_per_node} primaries, got {}",
+            map3.primary_count(node(3))
         );
+
+        let step3 = compute_incremental_assignments(&map3, &all_nodes, &config);
+        let mut map4 = map3.clone();
+        for r in &step3 {
+            map4.set(r.partition, r.to_assignment());
+        }
+
         assert!(
-            node3_replicas >= expected_per_node,
-            "expected ~{expected_per_node} replicas, got {node3_replicas}"
+            map4.replica_count(node(3)) >= expected_per_node,
+            "expected ~{expected_per_node} replicas after 3 steps, got {}",
+            map4.replica_count(node(3))
         );
     }
 }

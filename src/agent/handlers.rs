@@ -4,6 +4,10 @@
 use crate::http::VaultCrypto;
 use crate::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::{OwnershipConfig, ScopeConfig};
+use crate::vault_transform::{
+    build_vault_skip_fields, ensure_id, is_vault_eligible, vault_decrypt_fields,
+    vault_encrypt_fields,
+};
 use crate::{Database, Request, Response, VaultKeyStore};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
@@ -45,7 +49,7 @@ pub(super) async fn handle_message(
         return;
     };
 
-    let request = match build_request(op.clone(), &message.payload) {
+    let mut request = match build_request(op.clone(), &message.payload) {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to build request from {}: {}", topic, e);
@@ -86,10 +90,21 @@ pub(super) async fn handle_message(
         .and_then(|uid| vault_key_store.get(uid))
         .and_then(|key_bytes| VaultCrypto::from_key_bytes(&key_bytes));
 
-    let request = if let Some(ref crypto) = vault_crypto {
+    let create_constraint_data = if vault_crypto.is_some() {
+        if let Request::Create { ref mut data, .. } = request {
+            ensure_id(data);
+            Some(data.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (request, update_constraint_data) = if let Some(ref crypto) = vault_crypto {
         match vault_transform_request(db, crypto, &op.entity, ownership, request, sender_uid).await
         {
-            Ok(r) => r,
+            Ok((r, ucd)) => (r, ucd),
             Err(err_response) => {
                 if let Some(response_topic) = &message.properties.response_topic
                     && let Ok(payload) = serde_json::to_vec(&err_response)
@@ -100,7 +115,7 @@ pub(super) async fn handle_message(
             }
         }
     } else {
-        request
+        (request, None)
     };
 
     let span = info_span!(
@@ -131,8 +146,22 @@ pub(super) async fn handle_message(
         span
     };
 
+    let vault_constraint = if let Some(cd) = create_constraint_data {
+        Some(crate::VaultConstraintData::Create(cd))
+    } else {
+        update_constraint_data
+            .map(|(new_data, old_data)| crate::VaultConstraintData::Update(new_data, old_data))
+    };
+
     let mut response = db
-        .execute_with_sender(request, sender_uid, mqtt_client_id, ownership, scope_config)
+        .execute_with_sender(
+            request,
+            sender_uid,
+            mqtt_client_id,
+            ownership,
+            scope_config,
+            vault_constraint,
+        )
         .instrument(span)
         .await;
 
@@ -154,22 +183,6 @@ pub(super) async fn handle_message(
     }
 }
 
-fn is_vault_eligible(entity: &str, ownership: &OwnershipConfig) -> bool {
-    !entity.starts_with('_') && ownership.entity_owner_fields.contains_key(entity)
-}
-
-fn build_vault_skip_fields(entity: &str, ownership: &OwnershipConfig) -> Vec<String> {
-    let mut skip = vec!["id".to_string()];
-    if let Some(owner_field) = ownership.entity_owner_fields.get(entity) {
-        skip.push(owner_field.clone());
-    }
-    skip
-}
-
-fn should_skip_field(key: &str, skip_fields: &[String]) -> bool {
-    key.starts_with('_') || skip_fields.iter().any(|s| s == key)
-}
-
 async fn vault_transform_request(
     db: &Database,
     crypto: &VaultCrypto,
@@ -177,93 +190,28 @@ async fn vault_transform_request(
     ownership: &OwnershipConfig,
     request: Request,
     sender_uid: Option<&str>,
-) -> Result<Request, Response> {
+) -> Result<(Request, Option<(Value, Value)>), Response> {
     let skip = build_vault_skip_fields(entity, ownership);
     match request {
         Request::Create { entity, mut data } => {
             let id = ensure_id(&mut data);
             vault_encrypt_fields(crypto, &entity, &id, &mut data, &skip);
             debug!(entity = %entity, id = %id, "vault-encrypted create");
-            Ok(Request::Create { entity, data })
+            Ok((Request::Create { entity, data }, None))
         }
         Request::Update {
             entity,
             id,
             fields: delta,
         } => {
-            let encrypted_request = vault_pre_update(
+            let (encrypted_request, constraint_data) = vault_pre_update(
                 db, crypto, &entity, &id, delta, &skip, sender_uid, ownership,
             )
             .await?;
             debug!(entity = %entity, id = %id, "vault-encrypted update");
-            Ok(encrypted_request)
+            Ok((encrypted_request, constraint_data))
         }
-        other => Ok(other),
-    }
-}
-
-fn ensure_id(data: &mut Value) -> String {
-    if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-        return id.to_string();
-    }
-    let id = uuid_v7();
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(id.clone()));
-    }
-    id
-}
-
-fn vault_encrypt_fields(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    data: &mut Value,
-    skip_fields: &[String],
-) {
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    let keys: Vec<String> = obj.keys().cloned().collect();
-    for key in keys {
-        if should_skip_field(&key, skip_fields) {
-            continue;
-        }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Ok(encrypted) = encrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(encrypted));
-        }
-    }
-}
-
-fn encrypt_string(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    plaintext: &str,
-) -> Result<String, String> {
-    let mut wrapper = serde_json::json!({ "v": plaintext });
-    crypto.encrypt_record(entity, id, &mut wrapper, &[]);
-    wrapper
-        .get("v")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .ok_or_else(|| "encrypt failed".to_string())
-}
-
-fn decrypt_string(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    ciphertext: &str,
-) -> Option<String> {
-    let mut wrapper = serde_json::json!({ "v": ciphertext });
-    crypto.decrypt_record(entity, id, &mut wrapper, &[]);
-    let decrypted = wrapper.get("v")?.as_str()?;
-    if decrypted == ciphertext {
-        None
-    } else {
-        Some(decrypted.to_string())
+        other => Ok((other, None)),
     }
 }
 
@@ -277,7 +225,7 @@ async fn vault_pre_update(
     skip_fields: &[String],
     sender_uid: Option<&str>,
     ownership: &OwnershipConfig,
-) -> Result<Request, Response> {
+) -> Result<(Request, Option<(Value, Value)>), Response> {
     if let Some(uid) = sender_uid
         && !ownership.is_admin(uid)
         && let Some(owner_field) = ownership.entity_owner_fields.get(entity)
@@ -290,20 +238,27 @@ async fn vault_pre_update(
         .read(entity.to_string(), id.to_string(), vec![], None)
         .await
     else {
-        return Ok(Request::Update {
-            entity: entity.to_string(),
-            id: id.to_string(),
-            fields: delta,
-        });
+        return Ok((
+            Request::Update {
+                entity: entity.to_string(),
+                id: id.to_string(),
+                fields: delta,
+            },
+            None,
+        ));
     };
 
     vault_decrypt_fields(crypto, entity, id, &mut decrypted_existing, skip_fields);
+
+    let plaintext_existing = decrypted_existing.clone();
 
     if let (Some(base), Some(patch)) = (decrypted_existing.as_object_mut(), delta.as_object()) {
         for (k, v) in patch {
             base.insert(k.clone(), v.clone());
         }
     }
+
+    let plaintext_merged = decrypted_existing.clone();
 
     if let Some(obj) = decrypted_existing.as_object_mut() {
         obj.remove("id");
@@ -317,34 +272,14 @@ async fn vault_pre_update(
     let mut merged = decrypted_existing;
     vault_encrypt_fields(crypto, entity, id, &mut merged, skip_fields);
 
-    Ok(Request::Update {
-        entity: entity.to_string(),
-        id: id.to_string(),
-        fields: merged,
-    })
-}
-
-fn vault_decrypt_fields(
-    crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
-    data: &mut Value,
-    skip_fields: &[String],
-) {
-    let Some(obj) = data.as_object_mut() else {
-        return;
-    };
-    let keys: Vec<String> = obj.keys().cloned().collect();
-    for key in keys {
-        if should_skip_field(&key, skip_fields) {
-            continue;
-        }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Some(decrypted) = decrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(decrypted));
-        }
-    }
+    Ok((
+        Request::Update {
+            entity: entity.to_string(),
+            id: id.to_string(),
+            fields: merged,
+        },
+        Some((plaintext_merged, plaintext_existing)),
+    ))
 }
 
 fn vault_decrypt_response(
@@ -377,49 +312,6 @@ fn vault_decrypt_response(
         }
         DbOp::Delete => {}
     }
-}
-
-fn uuid_v7() -> String {
-    use ring::rand::{SecureRandom, SystemRandom};
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis());
-
-    let mut bytes = [0u8; 16];
-    bytes[0] = ((ts >> 40) & 0xFF) as u8;
-    bytes[1] = ((ts >> 32) & 0xFF) as u8;
-    bytes[2] = ((ts >> 24) & 0xFF) as u8;
-    bytes[3] = ((ts >> 16) & 0xFF) as u8;
-    bytes[4] = ((ts >> 8) & 0xFF) as u8;
-    bytes[5] = (ts & 0xFF) as u8;
-
-    let rng = SystemRandom::new();
-    rng.fill(&mut bytes[6..])
-        .expect("system RNG unavailable — OS CSPRNG failure");
-
-    bytes[6] = (bytes[6] & 0x0F) | 0x70;
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 async fn handle_admin_operation(

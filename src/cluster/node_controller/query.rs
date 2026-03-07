@@ -66,7 +66,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.query_coordinator.check_timeouts(now)
     }
 
-    #[allow(clippy::missing_panics_doc)]
+    #[allow(clippy::missing_panics_doc, clippy::too_many_arguments)]
     pub async fn start_scatter_list_query(
         &mut self,
         entity: &str,
@@ -75,6 +75,7 @@ impl<T: ClusterTransport> NodeController<T> {
         filters: Vec<crate::Filter>,
         sorts: Vec<crate::SortOrder>,
         projection: Option<Vec<String>>,
+        sender: Option<&str>,
     ) -> bool {
         let alive_nodes = self.heartbeat.alive_nodes();
         let remote_nodes: Vec<NodeId> = alive_nodes
@@ -91,7 +92,10 @@ impl<T: ClusterTransport> NodeController<T> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
 
-        let local_results = self.handle_json_list_local(entity, payload);
+        let vault_eligible = crate::vault_transform::is_vault_eligible(entity, &self.ownership);
+        let scatter_payload: &[u8] = if vault_eligible { b"" } else { payload };
+
+        let local_results = self.handle_json_list_local(entity, scatter_payload);
         let local_items: Vec<serde_json::Value> =
             if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&local_results) {
                 parsed
@@ -111,6 +115,8 @@ impl<T: ClusterTransport> NodeController<T> {
             filters,
             sorts,
             projection,
+            entity: entity.to_string(),
+            vault_sender: sender.map(str::to_string),
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
@@ -122,7 +128,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 JsonDbOp::List,
                 entity.to_string(),
                 None,
-                payload.to_vec(),
+                scatter_payload.to_vec(),
                 scatter_response_topic.clone(),
                 None,
                 None,
@@ -169,7 +175,7 @@ impl<T: ClusterTransport> NodeController<T> {
             && let Some(completed) = self.pending_scatter_requests.remove(&request_id)
         {
             let mut seen_ids = std::collections::HashSet::new();
-            let deduped: Vec<serde_json::Value> = completed
+            let mut deduped: Vec<serde_json::Value> = completed
                 .received
                 .into_iter()
                 .filter(|item| {
@@ -180,6 +186,29 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 })
                 .collect();
+            if let Some(ref vault_sender) = completed.vault_sender
+                && crate::vault_transform::is_vault_eligible(&completed.entity, &self.ownership)
+                && let Some(key_bytes) = self.vault_key_store.get(vault_sender)
+                && let Some(crypto) = crate::http::VaultCrypto::from_key_bytes(&key_bytes)
+            {
+                let skip = crate::vault_transform::build_vault_skip_fields(
+                    &completed.entity,
+                    &self.ownership,
+                );
+                for item in &mut deduped {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
+                        && let Some(data) = item.get_mut("data")
+                    {
+                        crate::vault_transform::vault_decrypt_fields(
+                            &crypto,
+                            &completed.entity,
+                            &id,
+                            data,
+                            &skip,
+                        );
+                    }
+                }
+            }
 
             let mut filtered: Vec<serde_json::Value> = deduped
                 .into_iter()

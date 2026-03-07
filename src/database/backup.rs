@@ -156,6 +156,7 @@ impl Database {
                 entity_data,
                 None,
                 None,
+                None,
                 &crate::types::ScopeConfig::default(),
             )
             .await?;

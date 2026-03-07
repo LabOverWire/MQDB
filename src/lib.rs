@@ -49,6 +49,8 @@ pub mod topic_protection;
 pub mod topic_rules;
 pub mod transport;
 pub mod vault_keys;
+#[cfg(feature = "http-api")]
+pub mod vault_transform;
 
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use error::{Error, Result};
@@ -86,7 +88,7 @@ pub use session::{ClientSession, EventRouter, SessionManager};
 #[cfg(feature = "agent")]
 pub use subscription::SubscriptionRegistry;
 pub use subscription::{Subscription, SubscriptionMode, match_pattern, match_wildcard};
-pub use transport::{ErrorCode, ErrorResponse, Request, Response};
+pub use transport::{ErrorCode, ErrorResponse, Request, Response, VaultConstraintData};
 
 pub use protocol::{
     AdminOperation, DbOp, DbOperation, ProtocolError, build_request, parse_admin_topic,

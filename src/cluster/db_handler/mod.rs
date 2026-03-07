@@ -13,6 +13,7 @@ use super::node_controller::{
     NodeController, PendingFkDeleteWork, PendingFkWork, PendingUniqueWork,
 };
 use super::transport::ClusterTransport;
+use crate::VaultKeyStore;
 use crate::types::{OwnershipConfig, ScopeConfig};
 use std::sync::Arc;
 
@@ -62,6 +63,7 @@ pub struct DbRequestHandler {
     node_id: NodeId,
     ownership: Arc<OwnershipConfig>,
     scope_config: Arc<ScopeConfig>,
+    vault_key_store: Arc<VaultKeyStore>,
 }
 
 #[allow(clippy::unused_self)]
@@ -72,6 +74,7 @@ impl DbRequestHandler {
             node_id,
             ownership: Arc::new(OwnershipConfig::default()),
             scope_config: Arc::new(ScopeConfig::default()),
+            vault_key_store: Arc::new(VaultKeyStore::new()),
         }
     }
 
@@ -84,6 +87,12 @@ impl DbRequestHandler {
     #[must_use]
     pub fn with_scope_config(mut self, scope_config: Arc<ScopeConfig>) -> Self {
         self.scope_config = scope_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_vault_key_store(mut self, store: Arc<VaultKeyStore>) -> Self {
+        self.vault_key_store = store;
         self
     }
 
@@ -158,12 +167,83 @@ impl DbRequestHandler {
     }
 }
 
+impl DbRequestHandler {
+    fn resolve_vault_crypto(
+        &self,
+        entity: &str,
+        sender: Option<&str>,
+    ) -> Option<crate::http::VaultCrypto> {
+        let uid = sender
+            .filter(|_| crate::vault_transform::is_vault_eligible(entity, &self.ownership))?;
+        let key_bytes = self.vault_key_store.get(uid)?;
+        crate::http::VaultCrypto::from_key_bytes(&key_bytes)
+    }
+
+    fn vault_encrypt_if_needed(
+        &self,
+        vault_crypto: Option<&crate::http::VaultCrypto>,
+        entity: &str,
+        id: &str,
+        mut data: serde_json::Value,
+    ) -> serde_json::Value {
+        if let Some(crypto) = vault_crypto {
+            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            crate::vault_transform::vault_encrypt_fields(crypto, entity, id, &mut data, &skip);
+        }
+        data
+    }
+
+    fn vault_decrypt_response_payload(
+        &self,
+        payload: Vec<u8>,
+        entity: &str,
+        op: &str,
+        sender: Option<&str>,
+    ) -> Vec<u8> {
+        let Some(crypto) = self.resolve_vault_crypto(entity, sender) else {
+            return payload;
+        };
+        let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+        let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+            return payload;
+        };
+
+        match op {
+            "create" | "read" | "update" => {
+                let id = parsed.get("id").and_then(|v| v.as_str()).map(String::from);
+                if let Some(id) = id
+                    && let Some(data) = parsed.get_mut("data")
+                {
+                    crate::vault_transform::vault_decrypt_fields(&crypto, entity, &id, data, &skip);
+                }
+            }
+            "list" => {
+                if let Some(data) = parsed.get_mut("data")
+                    && let Some(items) = data.as_array_mut()
+                {
+                    for item in items {
+                        if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
+                            && let Some(item_data) = item.get_mut("data")
+                        {
+                            crate::vault_transform::vault_decrypt_fields(
+                                &crypto, entity, &id, item_data, &skip,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        serde_json::to_vec(&parsed).unwrap_or(payload)
+    }
+}
+
 impl std::fmt::Debug for DbRequestHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DbRequestHandler")
             .field("node_id", &self.node_id)
             .field("ownership", &self.ownership)
             .field("scope_config", &self.scope_config)
-            .finish()
+            .finish_non_exhaustive()
     }
 }

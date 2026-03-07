@@ -63,7 +63,7 @@ MQDB actually has two replication functions that reflect different tradeoffs wit
 
 The first, `replicate_write`, creates a `QuorumTracker` that monitors acknowledgments from replicas. The caller sends the write to the replicas, registers the tracker, and can wait for a specified number of ACKs before considering the write durable. This is used for session creation, where the broker needs to know the session exists on at least one replica before proceeding with the client connection.
 
-The second, `replicate_write_async`, applies the write locally, appends it to the write log, sends it to all replicas, and returns immediately. No tracker, no waiting for ACKs. This is the path for the vast majority of writes: database CRUD, subscription changes, retained messages, inflight state, QoS2 tracking, and all broker state mutations that flow through the `write_or_forward` path.
+The second, `replicate_write_async`, appends the write to the write log, applies it to local storage, sends it to all replicas, and returns immediately. No tracker, no waiting for ACKs. This is the path for the vast majority of writes: database CRUD, subscription changes, retained messages, inflight state, QoS2 tracking, and all broker state mutations that flow through the `write_or_forward` path.
 
 Both functions share the same core sequence: advance the partition's sequence counter, build the `ReplicationWrite` with the new sequence number, append to the write log, apply to local storage, send to replicas. The difference is only whether the caller waits for confirmation.
 

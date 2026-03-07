@@ -261,7 +261,7 @@ async fn initialize_identity_constraints(state: &ServerState) {
     });
     let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
     let topic = "$DB/_admin/constraint/_identities/add";
-    let response_topic = format!("$DB/_identities/_resp/{}", std::process::id());
+    let response_topic = format!("_mqdb/http_resp/{}", std::process::id());
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));

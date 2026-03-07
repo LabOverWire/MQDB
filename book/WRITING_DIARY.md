@@ -27,9 +27,9 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 8 | Cross-Node Pub/Sub Routing | First draft | 2026-03-01 | | 4,351 |
 | 9 | Query Coordination | First draft | 2026-03-01 | | 3,369 |
 | 10 | Failure Detection and Recovery | First draft | 2026-03-01 | | 3,568 |
-| 11 | Rebalancing | First draft | 2026-03-03 | | 5,048 |
-| 12 | Session Management | Not started | | | |
-| 13 | The Message Processor Pipeline | Not started | | | |
+| 11 | Rebalancing | First draft | 2026-03-03 | 2026-03-05 | 5,902 |
+| 12 | Session Management | First draft | 2026-03-05 | | 5,079 |
+| 13 | The Message Processor Pipeline | First draft | 2026-03-05 | | 5,066 |
 | 14 | The Wire Protocol | Not started | | | |
 | 15 | Constraints in a Distributed System | Not started | | | |
 | 16 | Consumer Groups and Event Routing | Not started | | | |
@@ -491,6 +491,94 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Each "surprise" grounded in specific code paths verified by Explore agent: events.rs publish, agent/handlers.rs x-mqtt-sender extraction, vault_transform_request interception, db/partition.rs topic-to-hash, topic_rules.rs protection tiers
 - No code in the preface — pure narrative. Code comes in the chapters.
 - The "5:1 ratio" claim: 5 emergent features (events, ownership, vault, routing, ACL) vs 5 hard problems (unique constraints, Raft, migration, sessions, query coordination) — honest about what was hard
+
+### Session 17 — 2026-03-05
+
+**Work done:**
+- Wrote Chapter 12 first draft (`ch12-session-management.md`, 5,079 words)
+- Sections: What Lives in a Session (SessionData, four entities, ClientLocationStore), Connect/Disconnect Lifecycle (6-step connect, 5-step disconnect, write_or_forward pattern), QoS State Replication (InflightStore backoff, Qos2Store state machine, on_message_delivered handler), Last Will and Testament (double-failure problem, token-based idempotency, lock drop pattern), Session Expiry and Cleanup (cleanup cascade, ordering rationale), Node Death and Session Handling (drain_dead_nodes, yield-every-8, LWT recovery), Subscription Reconciliation (three-way comparison, became_primary trigger, 5-minute timer), Partition Migration (export/import format, four-store coordination)
+- Read all primary source files before writing: `session.rs` (SessionData, SessionStore, session_partition), `inflight_store.rs` (InflightMessage, InflightStore, backoff formula), `qos2_store.rs` (Qos2State, Qos2Phase, Qos2Direction, advance_phase), `lwt.rs` (LwtPublisher, prepare/complete/recover, generate_lwt_token), `subscription_cache.rs` (SubscriptionCache, reconcile, MqttSubscriptionSnapshot, SUBSCRIPTION_RECONCILIATION_INTERVAL_MS=300,000), `broker_events.rs` (on_client_connect/disconnect/subscribe/unsubscribe/publish/message_delivered), `event_loop.rs` (handle_session_cleanup, clear_expired_session_subscriptions, handle_processing_batch dead node path, handle_tick became_primary reconciliation), `client_location.rs` (ClientLocationEntry version 2 with timestamp_ms, ClientLocationStore), `event_handler/routing.rs` (prepare_lwt_forwarding, forward_publish_to_remotes), `event_handler/mod.rs` (LwtForwardingData struct)
+- Verified CRC32 partition function: `crc32fast::hash(client_id.as_bytes()) % 256`
+- Verified backoff formula: `base.saturating_mul(1 << attempts.min(10)).min(300_000)` with base=1000
+- Verified QoS 2 direction bytes: 0=Inbound, 1=Outbound; state bytes start at 1
+- Verified LWT three-flag state machine: has_will/lwt_token_present/lwt_published
+- Verified ClientLocationEntry version 2 with timestamp_ms field
+- Verified reconciliation interval: 300,000ms constant
+- Verified session expiry: `session_expiry_interval == 0` means never expires
+- Verified dead node session handling yields every 8 sessions
+
+**Key decisions:**
+- 5,079 words, within the 5,000-6,000 target range
+- Two Mermaid diagrams: QoS 2 state machines (inbound and outbound), connect/disconnect lifecycle flowchart
+- Two "What Went Wrong" sections: missing ClientLocationStore (round-trip cost per subscriber) and phantom disconnect (timestamp-less broadcast ordering)
+- Four lessons: state-follows-client vs state-follows-partition, idempotency tokens vs distributed locks, clean up what you replicate, co-locate related state by partition key
+- Included the on_message_delivered handler to show how QoS stores integrate with MQTT protocol events
+- Included subscription snapshot structure (MqttSubscriptionSnapshot packs all topics into one replication write)
+- Included migration coordination detail (four stores export but broadcast entities do NOT transfer)
+- Included cleanup ordering rationale (subscriptions first, then QoS state)
+- Did NOT include actual Rust code — used tables, Mermaid diagrams, binary format notation
+- Forward reference to Chapter 13 (Message Processor Pipeline) at the closing
+
+**Verification notes:**
+- The backoff formula matches inflight_store.rs:81-86 exactly
+- The QoS 2 phase mapping matches qos2_store.rs:26-34 exactly
+- The LWT state machine matches session.rs:152-159 (needs_lwt_publish and lwt_in_progress)
+- The connect flow matches broker_events.rs:29-123 exactly
+- The disconnect flow matches broker_events.rs:125-205 exactly
+- The cleanup cascade matches event_loop.rs:840-887 exactly
+- The dead node session handling matches event_loop.rs:226-256 exactly
+- The reconciliation matches event_loop.rs:197-210 (became_primary path)
+
+### Session 18 — 2026-03-05
+
+**Work done:**
+- Wrote Chapter 13 first draft (`ch13-message-processor-pipeline.md`, 5,066 words)
+- Sections: Pipeline Architecture (3-stage diagram, channel topology table), Message Classification (urgency-tier routing, Mermaid flowchart), Deduplication (fingerprint design, FIFO eviction, two-layer dedup), Dedicated Executor (separate Tokio runtime, 2 workers, run() biased select), Processing Batches (ProcessingBatch struct, tick mechanism, dead node session cleanup), Event Loop Dispatch (12-branch biased select, 3 optimizations, constraint fast-path, lock-drop-reacquire, dispatch table), What Went Wrong (shared runtime, unbounded main queue), Lessons (4 lessons)
+- Read all primary source files before writing: `message_processor.rs` (MessageProcessor, ProcessingBatch, dedup, classification), `dedicated_executor.rs` (DedicatedExecutor, separate Tokio runtime), `quic_transport.rs` (receiver_task, wire format, INBOX_CHANNEL_CAPACITY=16384, MAX_MESSAGE_SIZE=10MB), `cluster_agent/init.rs` (spawn_message_processor(), channel creation), `cluster_agent/event_loop.rs` (run_event_loop(), handle_main_queue_message(), handle_processing_batch()), `cluster_agent/mod.rs` (RAFT_CHANNEL_CAPACITY=4096, MAIN_QUEUE_CAPACITY=4096, BATCH_QUEUE_CAPACITY=16), `node_controller/mod.rs` (handle_filtered_message(), dispatch_data_plane_message()), `transport.rs` (ClusterMessage enum with 35 variants, InboundMessage::parse_from_payload)
+- Verified FORWARD_DEDUP_CAPACITY=1000 in both message_processor.rs:11 and node_controller/mod.rs:61
+- Verified ClusterMessage has 35 variants (counted from transport.rs:21-67)
+- Verified DedicatedExecutor::new uses worker_threads.clamp(2, 8) at dedicated_executor.rs:20
+- Verified spawn_message_processor creates executor with 2 workers at init.rs:122
+- Verified MessageProcessor::run() uses biased tokio::select! with rx_tick priority at message_processor.rs:79-80
+- Verified inbox batch size is 64 at message_processor.rs:91
+- Verified event loop BATCH_SIZE is 8 at event_loop.rs:282
+- Verified tick interval is 10ms at event_loop.rs:76
+- Verified handle_processing_batch yields every 8 sessions at event_loop.rs:250
+- Verified handle_tick reads rx_partition_map and applies diff at event_loop.rs:161-213
+- Verified try_resolve_constraint_response fast-path at event_loop.rs:259-275
+- Cross-referenced channel capacities against init.rs:137-184
+
+**Key decisions:**
+- 5,066 words, within the 5,000-6,000 target range
+- Two Mermaid diagrams: pipeline architecture (flowchart LR) and message classification (flowchart TD)
+- Two "What Went Wrong" sections: shared runtime problem (false death cascade during rebalancing) and unbounded main queue (ack starvation during snapshot storm)
+- Four lessons: separate measurement from workload, classify by urgency not type, bounded channels as backpressure, yield early yield often
+- Included the bidirectional delay compounding effect in the shared runtime problem — send and receive delays multiply
+- Included the tick handler's partition map synchronization role — this connects rebalancing (Ch11) to the pipeline
+- Included the constraint response fast-path optimization — connects to Ch15 (Constraints)
+- Did NOT include actual Rust code — used tables, Mermaid diagrams, pseudocode per user guidance
+- Forward reference to Chapter 14 (The Wire Protocol) at the closing
+
+**Verification notes:**
+- The channel capacity table matches init.rs:137-184 exactly
+- The message classification flowchart matches message_processor.rs:126-179 exactly
+- The dedup fingerprint fields match message_processor.rs:204-213 exactly (origin_node, timestamp_ms, topic, payload)
+- The ProcessingBatch fields match message_processor.rs:19-25 exactly
+- The event loop branch count (12) matches event_loop.rs:108-155 exactly
+- The handle_main_queue_message BATCH_SIZE=8 matches event_loop.rs:282
+- The dedicated executor worker count (2) matches init.rs:122
+
+### Session 9 — 2026-03-05 (continued)
+
+**Work done:**
+- Revised Chapter 11 (Rebalancing) to reflect the replica-only promotion fix
+- Updated Phase 1 description: now searches existing replicas instead of all nodes
+- Rewrote concrete example for two-cycle rebalance behavior (replicas first, then promotion)
+- Added periodic balance check to tick loop diagram and explanation
+- Added "The Non-Replica Promotion Problem" to What Went Wrong section
+- Added "Data must precede authority" lesson
+- Word count: 5,048 → 5,902
+- Verification pass: fixed "Two transitions" → "Three transitions", Phase 3 description referencing old behavior, snapshot completion always-Replica → role-aware
 
 ### Memories for Future Sessions
 

@@ -27,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tech,
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -39,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sports,
             None,
             None,
+            None,
             &ScopeConfig::default(),
         )
         .await?;
@@ -47,16 +49,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating posts with categories...");
     let post1 = json!({"title": "AI Trends", "category_id": tech_id});
-    db.create("posts".into(), post1, None, None, &ScopeConfig::default())
-        .await?;
+    db.create(
+        "posts".into(),
+        post1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
 
     let post2 = json!({"title": "Cloud Computing", "category_id": tech_id});
-    db.create("posts".into(), post2, None, None, &ScopeConfig::default())
-        .await?;
+    db.create(
+        "posts".into(),
+        post2,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
 
     let post3 = json!({"title": "World Cup", "category_id": sports_id});
-    db.create("posts".into(), post3, None, None, &ScopeConfig::default())
-        .await?;
+    db.create(
+        "posts".into(),
+        post3,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ Created 3 posts\n");
 
     let posts_before = db

@@ -90,6 +90,9 @@ Browser (index.html)
   |     |-- POST /vault/enable      (derive key, encrypt records)
   |     |-- POST /vault/lock        (remove key from memory)
   |     |-- POST /vault/unlock      (re-derive key)
+  |     |-- POST /vault/change      (change passphrase, re-encrypt)
+  |     |-- POST /vault/disable     (decrypt all, remove vault)
+  |     |-- GET  /vault/status      (check vault state)
   |
   |-- mqtt.js (MQTT v5 over WebSocket) --> MQTT broker (port 18083)
         |-- x-mqtt-sender injected by broker = authenticated username
