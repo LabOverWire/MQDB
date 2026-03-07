@@ -27,7 +27,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 8 | Cross-Node Pub/Sub Routing | First draft | 2026-03-01 | | 4,351 |
 | 9 | Query Coordination | First draft | 2026-03-01 | | 3,369 |
 | 10 | Failure Detection and Recovery | First draft | 2026-03-01 | | 3,568 |
-| 11 | Rebalancing | First draft | 2026-03-03 | | 5,048 |
+| 11 | Rebalancing | First draft | 2026-03-03 | 2026-03-05 | 5,902 |
 | 12 | Session Management | First draft | 2026-03-05 | | 5,079 |
 | 13 | The Message Processor Pipeline | First draft | 2026-03-05 | | 5,066 |
 | 14 | The Wire Protocol | Not started | | | |
@@ -567,6 +567,18 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - The event loop branch count (12) matches event_loop.rs:108-155 exactly
 - The handle_main_queue_message BATCH_SIZE=8 matches event_loop.rs:282
 - The dedicated executor worker count (2) matches init.rs:122
+
+### Session 9 — 2026-03-05 (continued)
+
+**Work done:**
+- Revised Chapter 11 (Rebalancing) to reflect the replica-only promotion fix
+- Updated Phase 1 description: now searches existing replicas instead of all nodes
+- Rewrote concrete example for two-cycle rebalance behavior (replicas first, then promotion)
+- Added periodic balance check to tick loop diagram and explanation
+- Added "The Non-Replica Promotion Problem" to What Went Wrong section
+- Added "Data must precede authority" lesson
+- Word count: 5,048 → 5,902
+- Verification pass: fixed "Two transitions" → "Three transitions", Phase 3 description referencing old behavior, snapshot completion always-Replica → role-aware
 
 ### Memories for Future Sessions
 

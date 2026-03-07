@@ -27,6 +27,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) processed_new_nodes: HashSet<NodeId>,
     pub(super) was_leader: bool,
     pub(super) pending_partition_proposals: usize,
+    pub(super) last_balance_check: u64,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -44,6 +45,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_new_nodes: HashSet::new(),
             was_leader: false,
             pending_partition_proposals: 0,
+            last_balance_check: 0,
         }
     }
 
@@ -70,6 +72,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_new_nodes: HashSet::new(),
             was_leader: false,
             pending_partition_proposals: 0,
+            last_balance_check: 0,
         };
 
         coordinator.rebuild_partition_map();

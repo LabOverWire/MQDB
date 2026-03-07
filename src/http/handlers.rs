@@ -1934,6 +1934,17 @@ struct BatchResult {
     entities_skipped: Vec<String>,
 }
 
+fn extract_record_data(record: &serde_json::Value) -> serde_json::Value {
+    if let Some(inner) = record.get("data").filter(|v| v.is_object()) {
+        return inner.clone();
+    }
+    let mut data = record.clone();
+    if let Some(obj) = data.as_object_mut() {
+        obj.remove("id");
+    }
+    data
+}
+
 async fn batch_vault_operation(
     state: &ServerState,
     canonical_id: &str,
@@ -1955,14 +1966,11 @@ async fn batch_vault_operation(
             let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let mut data = record.clone();
-            let skip: Vec<&str> = vec!["id", owner_field.as_str()];
+            let mut data = extract_record_data(&record);
+            let skip: Vec<&str> = vec![owner_field.as_str()];
             match mode {
                 VaultMode::Encrypt => crypto.encrypt_record(entity, id, &mut data, &skip),
                 VaultMode::Decrypt => crypto.decrypt_record(entity, id, &mut data, &skip),
-            }
-            if let Some(obj) = data.as_object_mut() {
-                obj.remove("id");
             }
             if update_entity(&state.mqtt_client, entity, id, &data).await {
                 result.succeeded += 1;
@@ -1995,13 +2003,10 @@ async fn batch_vault_re_encrypt(
             let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let mut data = record.clone();
-            let skip: Vec<&str> = vec!["id", owner_field.as_str()];
+            let mut data = extract_record_data(&record);
+            let skip: Vec<&str> = vec![owner_field.as_str()];
             old_crypto.decrypt_record(entity, id, &mut data, &skip);
             new_crypto.encrypt_record(entity, id, &mut data, &skip);
-            if let Some(obj) = data.as_object_mut() {
-                obj.remove("id");
-            }
             if update_entity(&state.mqtt_client, entity, id, &data).await {
                 result.succeeded += 1;
             } else {

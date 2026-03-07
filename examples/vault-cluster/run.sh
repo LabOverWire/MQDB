@@ -14,6 +14,7 @@ TOTAL=0
 PORT1=18831
 PORT2=18832
 PORT3=18833
+PORT4=18834
 HTTP1=13101
 HTTP2=13102
 
@@ -22,6 +23,10 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
     done
+    if [[ -n "${SAVE_LOGS:-}" ]]; then
+        mkdir -p /tmp/vault-e2e-logs
+        cp "$TEST_DIR"/*.log /tmp/vault-e2e-logs/ 2>/dev/null || true
+    fi
     rm -rf "$TEST_DIR"
 }
 trap cleanup EXIT
@@ -213,19 +218,8 @@ done
 
 echo "  Waiting for partition distribution..."
 for i in $(seq 1 45); do
-    STATUS=$(mosquitto_rr -h 127.0.0.1 -p "$PORT1" -t '$SYS/mqdb/cluster/status' -e 'r/status' -m '{}' -W 3 2>/dev/null || echo "{}")
-    NODE_COUNT=$(python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.argv[1])
-    partitions = d.get('data', {}).get('partitions', [])
-    primaries = set()
-    for p in partitions:
-        primaries.add(p.get('primary', 0))
-    print(len(primaries))
-except:
-    print('0')
-" "$STATUS" 2>/dev/null)
+    STATUS=$("$MQDB_BIN" cluster status --broker "127.0.0.1:$PORT1" --user "$OBSERVER_USER" --pass "$OBSERVER_PASS" --timeout 5 2>/dev/null || echo "")
+    NODE_COUNT=$(echo "$STATUS" | grep -c "primary" 2>/dev/null || echo "0")
     if [[ "$NODE_COUNT" -ge 3 ]]; then
         echo "  Partitions distributed across $NODE_COUNT nodes after ${i}s"
         break
@@ -613,6 +607,185 @@ echo "  Response: $RESP"
 assert_eq "vault_enabled is false" "$(json_field "$RESP" "vault_enabled")" "False"
 
 echo ""
+echo "=========================================="
+echo "=== Phase 2: Node 4 Rebalance Tests ==="
+echo "=========================================="
+echo ""
+
+echo "--- Test 30: start node 4 and wait for rebalancing ---"
+echo "  Starting node 4 (port $PORT4, no http)..."
+RUST_LOG=mqdb=debug "$MQDB_BIN" cluster start \
+    --node-id 4 --bind "127.0.0.1:$PORT4" \
+    --db "$TEST_DIR/db4" \
+    --peers "1@127.0.0.1:$PORT1" \
+    "${COMMON_AUTH_ARGS[@]}" \
+    "${COMMON_QUIC_ARGS[@]}" \
+    > "$TEST_DIR/node4.log" 2>&1 &
+NODE_PIDS+=($!)
+
+echo "  Waiting for node 4 to get primaries (2-cycle rebalance)..."
+NODE4_PRIMARIES=0
+for i in $(seq 1 90); do
+    STATUS=$("$MQDB_BIN" cluster status --broker "127.0.0.1:$PORT1" --user "$OBSERVER_USER" --pass "$OBSERVER_PASS" --timeout 5 2>/dev/null || echo "")
+    NODE4_LINE=$(echo "$STATUS" | grep "Node 4:" 2>/dev/null || echo "")
+    if [[ -n "$NODE4_LINE" ]]; then
+        NODE4_PRIMARIES=$(echo "$NODE4_LINE" | grep -o '[0-9]* primary' | grep -o '[0-9]*')
+    else
+        NODE4_PRIMARIES=0
+    fi
+    if [[ "$NODE4_PRIMARIES" -ge 30 ]]; then
+        echo "  Node 4 has $NODE4_PRIMARIES primaries after ${i}s"
+        break
+    fi
+    if [[ $((i % 15)) -eq 0 ]]; then
+        echo "  ... ${i}s elapsed, node 4 has $NODE4_PRIMARIES primaries"
+    fi
+    if [[ $i -eq 90 ]]; then
+        echo "  WARNING: Node 4 only has $NODE4_PRIMARIES primaries after 90s"
+        echo "  DEBUG: full status output:"
+        echo "$STATUS" | head -20
+    fi
+    sleep 1
+done
+
+TOTAL=$((TOTAL + 1))
+if [[ "$NODE4_PRIMARIES" -ge 30 ]]; then
+    echo "  PASS: node 4 has primaries ($NODE4_PRIMARIES >= 30)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: node 4 has primaries"
+    echo "    expected: >= 30"
+    echo "    actual:   $NODE4_PRIMARIES"
+    FAIL=$((FAIL + 1))
+fi
+
+sleep 3
+
+echo ""
+echo "--- Test 31: read existing record via node 4 ---"
+for attempt in $(seq 1 5); do
+    RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker "127.0.0.1:$PORT4" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+    if [[ "$(json_field "$RESP" "status")" == "ok" ]]; then
+        break
+    fi
+    echo "  Retry $attempt: $(json_field "$RESP" "status")"
+    sleep 2
+done
+echo "  Response: $RESP"
+assert_eq "node 4 read ok" "$(json_field "$RESP" "status")" "ok"
+assert_eq "node 4 read correct title" "$(json_field "$RESP" "data.title")" "Secret Note"
+
+echo ""
+echo "--- Test 32: list via node 4 (scatter-gather across 4 nodes) ---"
+RESP=$("$MQDB_BIN" list notes --broker "127.0.0.1:$PORT4" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+echo "  Response (truncated): $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'status':d.get('status'),'count':len(d.get('data',[]))}))" 2>/dev/null)"
+assert_eq "node 4 list ok" "$(json_field "$RESP" "status")" "ok"
+LIST4_COUNT=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    print(len(d.get('data', [])))
+except:
+    print('0')
+" "$RESP" 2>/dev/null)
+assert_eq "node 4 list returns 6 items" "$LIST4_COUNT" "6"
+
+echo ""
+echo "--- Test 33: create via node 4 ---"
+RESP=$("$MQDB_BIN" create notes --broker "127.0.0.1:$PORT4" --user "$CANONICAL_ID" --pass "$MQTT_PASS" \
+    -d "{\"title\":\"Node 4 Note\",\"body\":\"Created on node 4\",\"userId\":\"$CANONICAL_ID\"}" 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "node 4 create ok" "$(json_field "$RESP" "status")" "ok"
+assert_eq "node 4 create title" "$(json_field "$RESP" "data.title")" "Node 4 Note"
+
+NODE4_ID=$(json_field "$RESP" "id")
+if [[ -z "$NODE4_ID" || "$NODE4_ID" == "__PARSE_ERROR__" ]]; then
+    NODE4_ID=$(json_field "$RESP" "data.id")
+fi
+echo "  Node 4 record ID: $NODE4_ID"
+
+sleep 1
+
+echo ""
+echo "--- Test 34: read node-4-created record from node 1 ---"
+RESP=$("$MQDB_BIN" read notes "$NODE4_ID" --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "node 1 reads node 4 record" "$(json_field "$RESP" "status")" "ok"
+assert_eq "node 1 reads node 4 title" "$(json_field "$RESP" "data.title")" "Node 4 Note"
+
+echo ""
+echo "--- Test 35: delete via node 4 ---"
+RESP=$("$MQDB_BIN" delete notes "$NODE4_ID" --broker "127.0.0.1:$PORT4" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "node 4 delete ok" "$(json_field "$RESP" "status")" "ok"
+
+sleep 1
+
+RESP=$("$MQDB_BIN" read notes "$NODE4_ID" --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+echo "  Verify deleted: $RESP"
+assert_eq "deleted via node 4 returns 404" "$(json_field "$RESP" "code")" "404"
+
+echo ""
+echo "--- Test 36: re-enable vault with rebalanced cluster ---"
+RESP=$(curl -s -b "$COOKIE_JAR1" -X POST "http://127.0.0.1:$HTTP1/vault/enable" \
+    -H "Content-Type: application/json" \
+    -H "Origin: http://localhost:8080" \
+    -d "{\"passphrase\":\"$NEW_PASSPHRASE\"}")
+echo "  Response: $RESP"
+assert_eq "vault re-enabled" "$(json_field "$RESP" "status")" "enabled"
+
+sleep 2
+
+echo ""
+echo "--- Test 37: create encrypted note in rebalanced cluster ---"
+RESP=$("$MQDB_BIN" create notes --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" \
+    -d "{\"title\":\"Rebalanced Secret\",\"body\":\"Encrypted after rebalance\",\"userId\":\"$CANONICAL_ID\"}" 2>/dev/null)
+echo "  Response: $RESP"
+assert_eq "encrypted create ok" "$(json_field "$RESP" "status")" "ok"
+assert_eq "encrypted create plaintext title" "$(json_field "$RESP" "data.title")" "Rebalanced Secret"
+
+REBAL_ID=$(json_field "$RESP" "id")
+if [[ -z "$REBAL_ID" || "$REBAL_ID" == "__PARSE_ERROR__" ]]; then
+    REBAL_ID=$(json_field "$RESP" "data.id")
+fi
+
+echo ""
+echo "--- Test 38: list in rebalanced cluster (scatter-gather across 4 encrypted) ---"
+RESP=$("$MQDB_BIN" list notes --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 10 2>/dev/null)
+echo "  Response (truncated): $(echo "$RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps({'status':d.get('status'),'count':len(d.get('data',[]))}))" 2>/dev/null)"
+assert_eq "rebalanced list ok" "$(json_field "$RESP" "status")" "ok"
+REBAL_LIST_COUNT=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    print(len(d.get('data', [])))
+except:
+    print('0')
+" "$RESP" 2>/dev/null)
+assert_eq "rebalanced list returns 7 items" "$REBAL_LIST_COUNT" "7"
+CIPHER_IN_LIST=$(python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    count = sum(1 for item in d.get('data', [])
+                if len(item.get('data', {}).get('title', '')) >= 40)
+    print(count)
+except:
+    print('-1')
+" "$RESP" 2>/dev/null)
+assert_eq "no ciphertext in rebalanced list" "$CIPHER_IN_LIST" "0"
+
+echo ""
+echo "--- Test 39: observer sees ciphertext in rebalanced cluster ---"
+RESP=$("$MQDB_BIN" read notes "$REBAL_ID" --broker "127.0.0.1:$PORT1" --user "$OBSERVER_USER" --pass "$OBSERVER_PASS" --timeout 10 2>/dev/null)
+echo "  Response: $RESP"
+REBAL_OBSERVER_TITLE=$(json_field "$RESP" "data.title")
+assert_neq "observer sees ciphertext in rebalanced cluster" "$REBAL_OBSERVER_TITLE" "Rebalanced Secret"
+assert_min_length "rebalanced ciphertext" "$REBAL_OBSERVER_TITLE" 20
+
+SAVE_LOGS=1
+
+echo ""
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
 
 if [[ $FAIL -gt 0 ]]; then
@@ -622,6 +795,9 @@ if [[ $FAIL -gt 0 ]]; then
     echo ""
     echo "Node 2 logs (last 30 lines):"
     tail -30 "$TEST_DIR/node2.log"
+    echo ""
+    echo "Node 4 logs (last 30 lines):"
+    tail -30 "$TEST_DIR/node4.log"
     exit 1
 fi
 

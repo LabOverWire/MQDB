@@ -110,12 +110,24 @@ impl<T: ClusterTransport> NodeController<T> {
 
                     if let Some(state) = self.replicas.get_mut(&partition.get()) {
                         let current_epoch = state.epoch();
-                        state.become_replica(current_epoch, sequence);
-                        tracing::info!(
-                            ?partition,
-                            sequence,
-                            "replica now active after snapshot import"
-                        );
+                        let is_primary =
+                            self.partition_map.primary(partition) == Some(self.node_id);
+                        if is_primary {
+                            state.become_primary(current_epoch);
+                            state.set_sequence(sequence);
+                            tracing::info!(
+                                ?partition,
+                                sequence,
+                                "primary now active after snapshot import"
+                            );
+                        } else {
+                            state.become_replica(current_epoch, sequence);
+                            tracing::info!(
+                                ?partition,
+                                sequence,
+                                "replica now active after snapshot import"
+                            );
+                        }
                     }
 
                     self.requested_snapshots.remove(&partition);

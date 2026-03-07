@@ -20,6 +20,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.was_leader = is_leader;
 
         if just_became_leader {
+            self.last_balance_check = now_ms;
             tracing::info!("became Raft leader, processing pending nodes");
             let mut indices = self.process_pending_dead_nodes().await;
             indices.extend(self.process_pending_draining_nodes().await);
@@ -41,6 +42,17 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 "partition proposals complete, processing pending new nodes"
             );
             return self.process_pending_new_nodes().await;
+        }
+
+        if is_leader
+            && self.pending_partition_proposals == 0
+            && now_ms.saturating_sub(self.last_balance_check) > 30_000
+            && self.partitions_initialized()
+            && self.primaries_imbalanced()
+        {
+            self.last_balance_check = now_ms;
+            tracing::info!("periodic balance check: primaries imbalanced, triggering rebalance");
+            return self.trigger_rebalance_internal().await;
         }
 
         Vec::new()

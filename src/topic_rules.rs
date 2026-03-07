@@ -46,6 +46,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
+        pattern: "$SYS/mqdb/cluster/#",
+        tier: ProtectionTier::AdminRequired,
+    },
+    TopicRule {
         pattern: "$SYS/#",
         tier: ProtectionTier::ReadOnly,
     },
@@ -306,6 +310,26 @@ mod tests {
         assert_eq!(
             check_topic_access("$SYS/broker/uptime", true, true),
             Err(BlockReason::ReadOnlyTopic)
+        );
+    }
+
+    #[test]
+    fn check_access_sys_cluster_admin_required() {
+        assert_eq!(
+            check_topic_access("$SYS/mqdb/cluster/status", true, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$SYS/mqdb/cluster/status", true, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$SYS/mqdb/cluster/rebalance", true, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$SYS/mqdb/cluster/rebalance", true, false),
+            Err(BlockReason::AdminRequired)
         );
     }
 

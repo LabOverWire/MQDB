@@ -54,21 +54,29 @@ The replication factor is capped at the number of available nodes. A single-node
 
 `compute_incremental_assignments` handles node joins. It takes the current partition map and the full list of nodes (including the new one), then runs three phases:
 
-**Phase 1: Redistribute primaries.** The algorithm computes the ideal primary count per node (256 / node_count) and scans all 256 partitions. For each partition whose current primary has more than ideal + 1 primaries, it identifies the least-loaded node. If that node has fewer than ideal primaries, the partition is moved: the target becomes the new primary, and the old primary becomes a replica (if the replica list has room). The algorithm tracks counts as it goes, so each move updates the accounting for subsequent decisions.
+**Phase 1: Redistribute primaries.** The algorithm computes the ideal primary count per node (256 / node_count) and scans all 256 partitions. For each partition whose current primary has more than ideal + 1 primaries, it searches the partition's existing replicas for one with fewer than ideal primaries. If a suitable replica is found, it becomes the new primary and the old primary takes its place as a replica (if the replica list has room). Partitions where no existing replica qualifies are skipped — the algorithm never promotes a node that lacks data for the partition. The algorithm tracks counts as it goes, so each move updates the accounting for subsequent decisions.
 
 **Phase 2: Add missing replicas.** After moving primaries, some partitions may lack replicas — either because the cluster previously had too few nodes for the desired replication factor, or because the primary moves in Phase 1 changed the replica configuration. This phase scans all partitions that were not touched in Phase 1, finds those with fewer replicas than desired (RF - 1), and assigns new replicas from available nodes.
 
-**Phase 3: Redistribute replicas.** Even after Phases 1 and 2, replica distribution can be uneven. Some nodes may hold far more replicas than others — particularly the new node, which received primaries but few replicas. This phase identifies underweight nodes (replica count below half the ideal) and overloaded nodes (replica count above ideal), then moves replicas from overloaded to underweight by swapping the overloaded node out of a partition's replica list and substituting the underweight node.
+**Phase 3: Redistribute replicas.** Even after Phases 1 and 2, replica distribution can be uneven. Some nodes may hold far more replicas than others — particularly a new node that joined with no partitions. This phase identifies underweight nodes (replica count below half the ideal) and overloaded nodes (replica count above ideal), then moves replicas from overloaded to underweight by swapping the overloaded node out of a partition's replica list and substituting the underweight node.
 
-A concrete example: consider a 2-node cluster where Nodes 1 and 2 each hold 128 primaries and 128 replicas. Node 3 joins. The ideal primary count per node is 256/3 = 85. The maximum allowed per node is 86. Both Node 1 and Node 2 have 128, which exceeds 86. Node 3 has 0, which is below 85.
+A concrete example: consider a 2-node cluster where Nodes 1 and 2 each hold 128 primaries and 128 replicas. Node 3 joins. The rebalancer runs twice — once immediately, and once after a 30-second periodic balance check — to achieve a balanced distribution.
 
-Phase 1 scans the partitions. For each partition where the current primary has more than 86 primaries, it checks whether Node 3 (the least-loaded node, with 0) has fewer than 85. The condition is met, so the partition moves. After each move, the algorithm decrements the source node's count and increments Node 3's count. This continues until the source nodes drop to 86 or below and Node 3 reaches 85 or above. The result: approximately 85 partitions move from Nodes 1 and 2 to Node 3. The algorithm attempts to add the old primary as a replica for the moved partition, but with RF=2 the single replica slot is already occupied by the other original node — a partition moving from Node 1 to Node 3 retains Node 2 as its replica, and Node 1 drops out entirely. Node 3 will need a snapshot transfer from the old primary to obtain the data.
+**First rebalance cycle.** The ideal primary count per node is 256/3 = 85. Phase 1 scans all 256 partitions looking for moves. For each partition, it searches the existing replicas for a promotion candidate. A partition with primary Node 1 has replica Node 2, but Node 2 already holds 128 primaries — well above the ideal of 85, so it does not qualify. Node 3 is not a replica for any partition, so it is never considered. Phase 1 produces zero moves.
 
-Phase 2 scans the 256 - 85 = 171 partitions that were not touched in Phase 1. Before Node 3 joined, each partition had one primary and one replica, both on Nodes 1 and 2. The partitions that stayed on their original primaries still have their original replicas — no gaps. The partitions that moved in Phase 1 retained their original replica (the non-source node), so they also have one replica — the correct count for RF=2. Phase 2 finds no missing replicas in this scenario.
+Phase 2 checks for missing replicas. Every partition already has RF=2 (one primary, one replica, both on Nodes 1 and 2). No gaps.
 
-Phase 3 checks replica distribution. Node 3 received ~85 primaries in Phase 1 but is not a replica for any partition. The ideal replica count per node is 256/3 = 85. Node 3 has 0 replicas. Nodes 1 and 2 each still have 128 replicas — unchanged from before, because Phase 1 only moved primaries and the old primary was not added as replica (no room with RF=2). Phase 3 identifies Node 3 as underweight and Nodes 1 and 2 as overloaded, and moves replicas until Node 3 has approximately 85.
+Phase 3 checks replica distribution. Node 3 has 0 replicas. The ideal is 85. Nodes 1 and 2 each hold 128 replicas, far above ideal. Phase 3 swaps Node 3 into the replica list for approximately 85 partitions, replacing whichever of Nodes 1 or 2 was the overloaded replica.
 
-The total number of reassignments: ~85 (Phase 1) + 0 (Phase 2) + ~85 (Phase 3) = ~170 partition changes. This is fewer than the 256 a full rewrite would require, and the changes are targeted — only the partitions that need to move are touched.
+The first cycle produces ~85 reassignments, all replica changes. No primaries move. Node 3 becomes a replica for ~85 partitions and requests snapshot transfers from each partition's primary to obtain the data.
+
+**Second rebalance cycle.** Thirty seconds later, the Raft leader's periodic balance check fires (described in Section 11.3). Node 1 has 128 primaries, Node 2 has 128, Node 3 has 0 — the difference exceeds 1, so `primaries_imbalanced()` returns true and triggers another rebalance.
+
+Phase 1 scans the partitions again. Now Node 3 is a replica for ~85 partitions. For each of those, the algorithm finds Node 3 as a candidate: it has 0 primaries, below the ideal of 85. The current primary (Node 1 or 2) has 128, above the maximum of 86. The partition moves: Node 3 becomes primary, and the old primary fills the replica slot that Node 3 vacated. Approximately 85 primaries move to Node 3 — and because Node 3 already received snapshot data as a replica, it has the partition data before it starts serving as primary.
+
+Phase 2 finds no missing replicas. Phase 3 adjusts replica distribution for any remaining imbalance.
+
+The total across both cycles: ~85 (cycle 1, replicas) + ~85 (cycle 2, primaries) = ~170 partition changes, the same count as a single-cycle rebalance would produce, but split across two rounds with a 30-second gap between them. The two-cycle approach ensures that data always precedes promotion — a node becomes a replica, receives its snapshot, and only then gets promoted to primary.
 
 ### Removal Assignment
 
@@ -117,17 +125,22 @@ flowchart TD
     BOOTSTRAP --> RET
     JBL -->|No| LEADER{"Is leader?"}
     LEADER -->|No| RET
-    LEADER -->|Yes| PEND{"pending_partition<br/>_proposals == 0<br/>AND pending<br/>new nodes?"}
+    LEADER -->|Yes| PEND{"proposals == 0<br/>AND pending<br/>new nodes?"}
     PEND -->|Yes| NEW["Process pending<br/>new nodes"]
-    PEND -->|No| RET
+    PEND -->|No| BAL{"proposals == 0<br/>AND 30s elapsed<br/>AND imbalanced?"}
     NEW --> RET
+    BAL -->|Yes| REBAL["Trigger<br/>rebalance"]
+    BAL -->|No| RET
+    REBAL --> RET
 ```
 
-Two transitions are critical:
+Three transitions drive the loop:
 
 **`just_became_leader`**: When a node transitions from follower to leader, it processes all pending work in priority order — dead nodes first (most urgent, since partitions are unavailable), then draining nodes, then new nodes. If partitions have never been initialized (fresh cluster), it calls the bootstrap path instead of processing new nodes.
 
 **Steady state**: When the leader has no pending proposals (`pending_partition_proposals == 0`) and there are pending new nodes, it processes them. The condition on `pending_partition_proposals` is the backpressure gate — the leader will not start a new rebalance round while a previous round's proposals are still being committed.
+
+**Periodic balance check**: When the leader has no pending proposals, no pending new nodes, and at least 30 seconds have elapsed since the last balance check, it evaluates `primaries_imbalanced()`. This function compares the maximum and minimum primary counts across all nodes — if the difference exceeds 1, the distribution is unbalanced and a new rebalance round is triggered. This catches the case where a first rebalance cycle added replicas to a new node but could not promote any to primary (because the new node had no replicas when Phase 1 ran). The 30-second delay gives snapshot transfers time to complete, so that when the second cycle's Phase 1 runs, the new replicas have their data and are ready for promotion.
 
 ### The Backpressure Gate
 
@@ -183,7 +196,7 @@ The old primary receives the request and immediately begins the transfer. It exp
 
 The `SnapshotBuilder` on the receiving side pre-allocates a vector of `Option<Vec<u8>>` slots — one per expected chunk. Chunks can arrive in any order; the builder slots them by index and tracks how many have arrived. When all chunks are present, `assemble()` concatenates them in order and returns the complete dataset. Out-of-order arrival is handled naturally by the indexed slot design — chunk 5 can arrive before chunk 2, and both will be placed correctly.
 
-When all chunks arrive and the snapshot is successfully imported, the new primary transitions from `AwaitingSnapshot` to `Replica` role at the current epoch, with its sequence set to the snapshot's sequence number. It sends a `SnapshotComplete` message back to the old primary, which advances the migration to the Overlapping phase.
+When all chunks arrive and the snapshot is successfully imported, the receiving node checks the current partition map to determine its intended role. If the partition map assigns this node as primary, it transitions from `AwaitingSnapshot` to `Primary`; otherwise, it transitions to `Replica`. In both cases, the sequence is set to the snapshot's sequence number. The node sends a `SnapshotComplete` message back to the source, which — if a migration is active — advances the migration to the Overlapping phase.
 
 **Overlapping.** The snapshot has been imported. The new primary is now in `Replica` role and accepts replication writes. The old primary continues serving as it always has. Both nodes can accept writes for this partition during this phase — the old primary as the authoritative source, and the new primary catching up on any writes that arrived during the Preparing phase's snapshot transfer.
 
@@ -247,6 +260,16 @@ The order of processing in `tick()` on leader transition matters: dead nodes are
 
 Consider the scenario: a 3-node cluster where the leader crashes. Node 2 becomes leader. It has Node 3 in `pending_dead_nodes` (detected before the election) and uninitialized partitions (because the old leader crashed before committing the partition map). If Node 2 initializes partitions first, it assigns partitions to Nodes 2 and 3 — but Node 3 is dead. It then processes the dead node, removing Node 3 and reassigning its partitions. This works but produces two rounds of Raft proposals (initialization + removal) when one round would suffice. Processing dead nodes first removes Node 3 from the cluster membership, so the initialization assigns partitions only to Node 2 — a single round that produces the correct result.
 
+### The Non-Replica Promotion Problem
+
+The original `redistribute_primaries` algorithm selected the least-loaded node across the entire cluster as the promotion target — regardless of whether that node was already a replica for the partition. This created a dangerous gap: a node could become primary for a partition it had never seen before. Without a snapshot or replication stream, the node would accept writes to an empty partition, silently losing all previously written data.
+
+The problem required specific conditions to trigger. In a stable 2-node cluster where Node 3 joins, the algorithm would scan each partition and pick Node 3 as the target (it had zero primaries, the lowest count). Node 3 would become primary for ~85 partitions and immediately start accepting writes — to empty storage. The existing data on the old primary was not transferred, because the promotion path (`become_primary`) does not request a snapshot. The data loss was silent: clients received success responses for writes, and reads returned results from the empty store without errors.
+
+The fix inverted the selection criteria. Instead of searching all nodes for the least loaded, `redistribute_primaries` now searches only the partition's existing replicas. A replica already holds the partition's data (received through replication writes or snapshot transfer), so promoting it to primary preserves data continuity. Partitions where no existing replica qualifies for promotion are skipped entirely — a single rebalance cycle may not achieve perfect primary distribution, but the periodic balance check (Section 11.3) triggers a follow-up cycle after the node has been established as a replica and received its snapshot data.
+
+Two supporting changes complemented the rebalancer fix. First, the Raft leader's event loop — which applies partition map updates by watching a shared state channel — previously called `become_replica` without requesting a snapshot, even when the node had no data for the partition. Follower nodes already handled this correctly through `handle_partition_update_received`, which calls `become_replica_with_snapshot` for new replica assignments. The leader path now checks whether the node previously held data for the partition before choosing the transition: existing data triggers a simple role change, while a new assignment triggers a snapshot request. Second, when a snapshot import completes, the node now checks the current partition map to determine whether it should transition to primary or replica role. In the two-cycle flow, a node may receive its snapshot (requested when it became a replica) after the second rebalance cycle has already promoted it to primary in the partition map. The role-aware transition ensures the node enters the correct final state regardless of whether the snapshot completes before or after the promotion.
+
 As an additional safety net, after processing all pending dead nodes, the new leader runs `scan_partition_map_for_dead_primaries`. This iterates all 256 partitions and checks whether any primary is assigned to a node that is not in the current cluster membership and was not already in the pending or processed dead sets. If such a stale primary is found — possible if the previous leader died mid-reassignment, or if a death notification was lost during the election — the scanner adds the stale node to `processed_dead_nodes` and triggers reassignment. This is a belt-and-suspenders check: it should never find anything if the event-driven processing worked correctly, but it catches any edge case where a death was detected by one node but not propagated to the new leader before the election.
 
 ## Lessons
@@ -256,6 +279,8 @@ As an additional safety net, after processing all pending dead nodes, the new le
 **Bootstrap is not the normal path.** The first node in a cluster has no peers, no heartbeats, no `NodeAlive` events — none of the triggers that the steady-state design relies on. Every mechanism that depends on peer interaction fails silently for the bootstrap case. The fix (checking `partitions_initialized()` on leader election) was trivial, but discovering the need for it required a single-node cluster to start up and do nothing. Design trigger points for the degenerate case (single node, empty state, no external events) alongside the steady-state case (multiple nodes, ongoing events). The degenerate case is where assumptions are exposed.
 
 **Incremental over global.** The balanced assignment algorithm produces a mathematically optimal distribution but rewrites all 256 partitions. The incremental algorithm produces a near-optimal distribution — within one partition of ideal per node — by moving only the partitions that need to move. In a 3-node cluster where Node 4 joins, the incremental algorithm moves roughly 64 partitions (those that Node 4 should own) rather than rewriting all 256. The tradeoff — slightly less perfect balance, at most one partition difference per node — is worth the reduced disruption. Every partition move triggers epoch increments, potentially snapshot transfers, replication pipeline resets, and temporary unavailability. Fewer moves means fewer disruptions.
+
+**Data must precede authority.** A node should never become the authoritative primary for a partition it has no data for. The original rebalancer violated this invariant by selecting promotion targets based solely on load counts, ignoring whether the target held the partition's data. The fix — restricting promotion to existing replicas — encodes the invariant directly in the selection criteria. When an invariant cannot be expressed as a type constraint (Rust's preferred approach), encoding it in the algorithm's selection logic is the next best option: the wrong state is never constructed rather than detected and repaired after the fact.
 
 **Event ordering is policy.** When a new leader takes over, it faces a queue of pending work: dead nodes, draining nodes, new nodes, and possibly uninitialized partitions. The order in which it processes these is not arbitrary — it determines correctness and efficiency. Processing dead nodes before initialization prevents assigning partitions to dead nodes. Processing draining nodes before new nodes ensures that partitions leaving the cluster are accounted for before new partitions are assigned. The tick loop encodes this priority order explicitly: dead > draining > bootstrap/new. Changing the order would not crash the system — the partition map would eventually converge through additional rebalance rounds — but it would produce unnecessary intermediate states and wasted Raft proposals. Ordering constraints that affect efficiency but not correctness are easy to overlook and hard to test, because any order "works" in the sense that nothing crashes.
 

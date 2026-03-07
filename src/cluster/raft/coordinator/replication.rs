@@ -408,4 +408,22 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             .copied()
             .or_else(|| alive_nodes.first().copied())
     }
+
+    pub(super) fn primaries_imbalanced(&self) -> bool {
+        if self.cluster_members.len() < 2 {
+            return false;
+        }
+        let mut min = usize::MAX;
+        let mut max = 0usize;
+        for node in &self.cluster_members {
+            let count = self.partition_map.primary_count(*node);
+            if count < min {
+                min = count;
+            }
+            if count > max {
+                max = count;
+            }
+        }
+        max - min > 1
+    }
 }
