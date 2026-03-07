@@ -1377,7 +1377,13 @@ async fn update_entity(
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
     let _ = client.unsubscribe(&response_topic).await;
-    result.is_ok()
+    match result {
+        Ok(Ok(payload)) => serde_json::from_slice::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "ok"))
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn require_session<'a>(

@@ -159,3 +159,136 @@ pub fn uuid_v7() -> String {
         bytes[15]
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_crypto() -> VaultCrypto {
+        let salt = VaultCrypto::generate_salt();
+        VaultCrypto::derive("test-passphrase", &salt)
+    }
+
+    fn owned_config() -> OwnershipConfig {
+        let mut config = OwnershipConfig::default();
+        config
+            .entity_owner_fields
+            .insert("notes".to_string(), "userId".to_string());
+        config
+    }
+
+    #[test]
+    fn vault_eligible_owned_entity() {
+        let config = owned_config();
+        assert!(is_vault_eligible("notes", &config));
+    }
+
+    #[test]
+    fn vault_eligible_system_entity() {
+        let config = owned_config();
+        assert!(!is_vault_eligible("_sessions", &config));
+    }
+
+    #[test]
+    fn vault_eligible_no_ownership() {
+        let config = OwnershipConfig::default();
+        assert!(!is_vault_eligible("notes", &config));
+    }
+
+    #[test]
+    fn skip_fields_includes_owner() {
+        let config = owned_config();
+        let skip = build_vault_skip_fields("notes", &config);
+        assert_eq!(skip, vec!["id".to_string(), "userId".to_string()]);
+    }
+
+    #[test]
+    fn skip_fields_without_ownership() {
+        let config = OwnershipConfig::default();
+        let skip = build_vault_skip_fields("notes", &config);
+        assert_eq!(skip, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn should_skip_system_fields() {
+        let skip = vec!["id".to_string()];
+        assert!(should_skip_field("_version", &skip));
+        assert!(should_skip_field("_created_at", &skip));
+        assert!(should_skip_field("id", &skip));
+        assert!(!should_skip_field("title", &skip));
+        assert!(!should_skip_field("body", &skip));
+    }
+
+    #[test]
+    fn ensure_id_preserves_existing() {
+        let mut data = serde_json::json!({"id": "my-id", "title": "test"});
+        let id = ensure_id(&mut data);
+        assert_eq!(id, "my-id");
+        assert_eq!(data["id"], "my-id");
+    }
+
+    #[test]
+    fn ensure_id_generates_when_missing() {
+        let mut data = serde_json::json!({"title": "test"});
+        let id = ensure_id(&mut data);
+        assert!(!id.is_empty());
+        assert_eq!(data["id"].as_str().unwrap(), id);
+    }
+
+    #[test]
+    fn encrypt_decrypt_fields_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string(), "userId".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "userId": "user-abc",
+            "title": "Secret Title",
+            "body": "Secret Body",
+            "count": 42,
+            "active": true,
+            "tags": null,
+            "_version": 1
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["id"], "rec-1");
+        assert_eq!(data["userId"], "user-abc");
+        assert_ne!(data["title"].as_str().unwrap(), "Secret Title");
+        assert_ne!(data["body"].as_str().unwrap(), "Secret Body");
+        assert_eq!(data["count"], 42);
+        assert_eq!(data["active"], true);
+        assert!(data["tags"].is_null());
+        assert_eq!(data["_version"], 1);
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["title"], "Secret Title");
+        assert_eq!(data["body"], "Secret Body");
+    }
+
+    #[test]
+    fn encrypt_decrypt_string_roundtrip() {
+        let crypto = test_crypto();
+        let encrypted = encrypt_string(&crypto, "notes", "rec-1", "hello world").unwrap();
+        assert_ne!(encrypted, "hello world");
+        let decrypted = decrypt_string(&crypto, "notes", "rec-1", &encrypted).unwrap();
+        assert_eq!(decrypted, "hello world");
+    }
+
+    #[test]
+    fn decrypt_string_plaintext_returns_none() {
+        let crypto = test_crypto();
+        assert!(decrypt_string(&crypto, "notes", "rec-1", "not-ciphertext").is_none());
+    }
+
+    #[test]
+    fn uuid_v7_format_and_uniqueness() {
+        let id1 = uuid_v7();
+        let id2 = uuid_v7();
+        assert_ne!(id1, id2);
+        assert_eq!(id1.len(), 36);
+        assert_eq!(id1.chars().filter(|c| *c == '-').count(), 4);
+        assert_eq!(&id1[14..15], "7");
+    }
+}
