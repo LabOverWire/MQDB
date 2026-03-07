@@ -24,7 +24,14 @@ async fn test_durability_immediate_survives_reopen() {
         });
 
         let created = db
-            .create("users".into(), user, None, None, &ScopeConfig::default())
+            .create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
             .await
             .unwrap();
         id = created["id"].as_str().unwrap().to_string();
@@ -70,7 +77,14 @@ async fn test_index_consistency_after_crash_during_delete() {
         });
 
         let created = db
-            .create("users".into(), user, None, None, &ScopeConfig::default())
+            .create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
             .await
             .unwrap();
         id = created["id"].as_str().unwrap().to_string();

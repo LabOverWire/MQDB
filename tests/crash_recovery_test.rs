@@ -21,9 +21,16 @@ async fn test_recovery_after_immediate_close_during_writes() {
                 "name": format!("User {}", i),
                 "email": format!("user{}@example.com", i),
             });
-            db.create("users".into(), user, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -58,6 +65,7 @@ async fn test_recovery_with_periodic_durability() {
             db.create(
                 "products".into(),
                 product,
+                None,
                 None,
                 None,
                 &ScopeConfig::default(),
@@ -96,9 +104,16 @@ async fn test_recovery_after_many_operations() {
                 "index": i,
                 "status": "active",
             });
-            db.create("users".into(), user, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
 
         let all_users = db
@@ -115,6 +130,7 @@ async fn test_recovery_after_many_operations() {
                     "users".into(),
                     id.to_string(),
                     json!({"status": "updated"}),
+                    None,
                     None,
                     None,
                     &ScopeConfig::default(),
@@ -170,9 +186,16 @@ async fn test_recovery_with_indexes() {
                 "name": format!("User {}", i),
                 "email": format!("user{}@example.com", i),
             });
-            db.create("users".into(), user, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -216,7 +239,14 @@ async fn test_recovery_after_concurrent_writes() {
                         "value": format!("thread-{}-item-{}", thread_id, i),
                     });
                     db_clone
-                        .create("items".into(), entity, None, None, &ScopeConfig::default())
+                        .create(
+                            "items".into(),
+                            entity,
+                            None,
+                            None,
+                            None,
+                            &ScopeConfig::default(),
+                        )
                         .await
                         .unwrap();
                 }
@@ -261,6 +291,7 @@ async fn test_recovery_maintains_data_integrity() {
                 record,
                 None,
                 None,
+                None,
                 &ScopeConfig::default(),
             )
             .await
@@ -300,9 +331,16 @@ async fn test_recovery_with_ttl_entries() {
                 "name": format!("Item {}", i),
                 "permanent": i % 2 == 0,
             });
-            db.create("items".into(), item, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "items".into(),
+                item,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -356,9 +394,16 @@ async fn test_recovery_after_delete_operations() {
                 "name": format!("User {}", i),
                 "index": i,
             });
-            db.create("users".into(), user, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
 
         let users = db
@@ -423,6 +468,7 @@ async fn test_recovery_with_mixed_entity_types() {
                 json!({"name": format!("User {}", i)}),
                 None,
                 None,
+                None,
                 &ScopeConfig::default(),
             )
             .await
@@ -432,6 +478,7 @@ async fn test_recovery_with_mixed_entity_types() {
                 json!({"name": format!("Product {}", i)}),
                 None,
                 None,
+                None,
                 &ScopeConfig::default(),
             )
             .await
@@ -439,6 +486,7 @@ async fn test_recovery_with_mixed_entity_types() {
             db.create(
                 "orders".into(),
                 json!({"order_id": i}),
+                None,
                 None,
                 None,
                 &ScopeConfig::default(),
@@ -485,9 +533,16 @@ async fn test_recovery_after_update_operations() {
                 "name": format!("User {}", i),
                 "version": 1,
             });
-            db.create("users".into(), user, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
 
         let users = db
@@ -501,6 +556,7 @@ async fn test_recovery_after_update_operations() {
                     "users".into(),
                     id.to_string(),
                     json!({"version": 2, "updated": true}),
+                    None,
                     None,
                     None,
                     &ScopeConfig::default(),
@@ -542,9 +598,16 @@ async fn test_multiple_reopen_cycles() {
                 "cycle": cycle,
                 "index": i,
             });
-            db.create("items".into(), item, None, None, &ScopeConfig::default())
-                .await
-                .unwrap();
+            db.create(
+                "items".into(),
+                item,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -576,6 +639,7 @@ async fn test_recovery_preserves_checksums() {
             db.create(
                 "records".into(),
                 record,
+                None,
                 None,
                 None,
                 &ScopeConfig::default(),

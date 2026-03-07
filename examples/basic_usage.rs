@@ -34,14 +34,18 @@ async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
         "age": 35
     });
 
-    let created_alice = db.create("users".into(), alice, None, None, &scope).await?;
+    let created_alice = db
+        .create("users".into(), alice, None, None, None, &scope)
+        .await?;
     println!("Created: {created_alice}");
 
-    let created_bob = db.create("users".into(), bob, None, None, &scope).await?;
+    let created_bob = db
+        .create("users".into(), bob, None, None, None, &scope)
+        .await?;
     println!("Created: {created_bob}");
 
     let created_charlie = db
-        .create("users".into(), charlie, None, None, &scope)
+        .create("users".into(), charlie, None, None, None, &scope)
         .await?;
     println!("Created: {created_charlie}");
 
@@ -59,6 +63,7 @@ async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
             "users".into(),
             alice_id.to_string(),
             updates,
+            None,
             None,
             None,
             &scope,
@@ -113,7 +118,8 @@ async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
         "email": "david@example.com",
         "status": "active"
     });
-    db.create("users".into(), david, None, None, &scope).await?;
+    db.create("users".into(), david, None, None, None, &scope)
+        .await?;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

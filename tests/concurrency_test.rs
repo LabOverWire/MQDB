@@ -21,7 +21,14 @@ async fn test_concurrent_id_generation_no_duplicates() {
                 "email": format!("user{}@example.com", i),
             });
             db_clone
-                .create("users".into(), user, None, None, &ScopeConfig::default())
+                .create(
+                    "users".into(),
+                    user,
+                    None,
+                    None,
+                    None,
+                    &ScopeConfig::default(),
+                )
                 .await
         });
         handles.push(handle);
@@ -65,9 +72,16 @@ async fn test_concurrent_delete_and_read() {
             "name": format!("User {}", i),
             "status": "active"
         });
-        db.create("users".into(), user, None, None, &ScopeConfig::default())
-            .await
-            .unwrap();
+        db.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut handles = vec![];
@@ -180,9 +194,16 @@ async fn test_max_list_results_limit_enforcement() {
             "name": format!("User {i}"),
             "email": format!("user{i}@example.com"),
         });
-        db.create("users".into(), user, None, None, &ScopeConfig::default())
-            .await
-            .unwrap();
+        db.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let all_users = db

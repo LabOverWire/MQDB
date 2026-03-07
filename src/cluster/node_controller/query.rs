@@ -92,7 +92,10 @@ impl<T: ClusterTransport> NodeController<T> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
 
-        let local_results = self.handle_json_list_local(entity, payload);
+        let vault_eligible = crate::vault_transform::is_vault_eligible(entity, &self.ownership);
+        let scatter_payload: &[u8] = if vault_eligible { b"" } else { payload };
+
+        let local_results = self.handle_json_list_local(entity, scatter_payload);
         let local_items: Vec<serde_json::Value> =
             if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&local_results) {
                 parsed
@@ -125,7 +128,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 JsonDbOp::List,
                 entity.to_string(),
                 None,
-                payload.to_vec(),
+                scatter_payload.to_vec(),
                 scatter_response_topic.clone(),
                 None,
                 None,

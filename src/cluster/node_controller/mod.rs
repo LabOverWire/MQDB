@@ -228,6 +228,7 @@ pub enum UniqueCheckContinuation {
         entity: String,
         id: String,
         data: serde_json::Value,
+        constraint_data: serde_json::Value,
         data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,

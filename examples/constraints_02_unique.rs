@@ -19,7 +19,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "alice@example.com"
     });
     let created = db
-        .create("users".into(), user1, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user1,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     println!("✓ Created: {created}\n");
 
@@ -29,7 +36,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "email": "bob@example.com"
     });
     let created = db
-        .create("users".into(), user2, None, None, &ScopeConfig::default())
+        .create(
+            "users".into(),
+            user2,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
         .await?;
     println!("✓ Created: {created}\n");
 
@@ -42,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "users".into(),
             duplicate,
+            None,
             None,
             None,
             &ScopeConfig::default(),
@@ -63,8 +78,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello World"
     });
-    db.create("posts".into(), post1, None, None, &ScopeConfig::default())
-        .await?;
+    db.create(
+        "posts".into(),
+        post1,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ Created\n");
 
     println!("Creating post with same slug but different user_id...");
@@ -73,8 +95,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "slug": "hello",
         "title": "Hello from Bob"
     });
-    db.create("posts".into(), post2, None, None, &ScopeConfig::default())
-        .await?;
+    db.create(
+        "posts".into(),
+        post2,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await?;
     println!("✓ Created (different user_id, so allowed)\n");
 
     println!("Attempting to create duplicate (user_id=1, slug='hello')...");
@@ -87,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .create(
             "posts".into(),
             duplicate,
+            None,
             None,
             None,
             &ScopeConfig::default(),

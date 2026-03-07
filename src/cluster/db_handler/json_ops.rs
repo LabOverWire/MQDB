@@ -305,17 +305,16 @@ impl DbRequestHandler {
             (p, self.generate_id_for_partition(entity, p, payload))
         };
 
-        if let Some(crypto) = self.resolve_vault_crypto(entity, sender) {
-            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
-            if !data.as_object().is_some_and(|o| o.contains_key("id")) {
-                data.as_object_mut()
-                    .map(|o| o.insert("id".to_string(), Value::String(id.clone())));
-            }
-            crate::vault_transform::vault_encrypt_fields(&crypto, entity, &id, &mut data, &skip);
+        let vault_crypto = self.resolve_vault_crypto(entity, sender);
+        if vault_crypto.is_some() && !data.as_object().is_some_and(|o| o.contains_key("id")) {
+            data.as_object_mut()
+                .map(|o| o.insert("id".to_string(), Value::String(id.clone())));
         }
 
         if !controller.is_primary_for_partition(partition) {
-            let encrypted_payload = serde_json::to_vec(&data).unwrap_or_default();
+            let forward_data =
+                self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, &id, data);
+            let encrypted_payload = serde_json::to_vec(&forward_data).unwrap_or_default();
             return match self
                 .try_forward_create(
                     controller,
@@ -343,6 +342,7 @@ impl DbRequestHandler {
             client_id,
             response_topic,
             correlation_data,
+            vault_crypto.as_ref(),
         )
         .await
     }
@@ -393,6 +393,7 @@ impl DbRequestHandler {
         client_id: Option<&str>,
         response_topic: &str,
         correlation_data: Option<&[u8]>,
+        vault_crypto: Option<&crate::http::VaultCrypto>,
     ) -> JsonOpResult {
         let mut data = data.clone();
         if let Some(obj) = data.as_object_mut() {
@@ -437,6 +438,9 @@ impl DbRequestHandler {
             }
         };
 
+        let constraint_data = data.clone();
+        let data = self.vault_encrypt_if_needed(vault_crypto, entity, id, data);
+
         if !phase1.pending_remote.is_empty() {
             let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
@@ -445,6 +449,7 @@ impl DbRequestHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
                     data: data.clone(),
+                    constraint_data,
                     data_bytes,
                     partition,
                     request_id,
@@ -462,6 +467,7 @@ impl DbRequestHandler {
             entity,
             id,
             &data,
+            &constraint_data,
             partition,
             &request_id,
             now_ms,
@@ -478,6 +484,7 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         data: &Value,
+        constraint_data: &Value,
         partition: PartitionId,
         request_id: &str,
         now_ms: u64,
@@ -501,7 +508,14 @@ impl DbRequestHandler {
                     let outbox = Self::build_outbox(&event);
                     controller.db_commit(write, outbox.clone()).await;
                     controller
-                        .commit_unique_constraints(entity, id, data, partition, request_id, now_ms)
+                        .commit_unique_constraints(
+                            entity,
+                            id,
+                            constraint_data,
+                            partition,
+                            request_id,
+                            now_ms,
+                        )
                         .await;
                     self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                         .await;
@@ -509,13 +523,27 @@ impl DbRequestHandler {
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
                     controller
-                        .release_unique_constraints(entity, id, data, partition, request_id, now_ms)
+                        .release_unique_constraints(
+                            entity,
+                            id,
+                            constraint_data,
+                            partition,
+                            request_id,
+                            now_ms,
+                        )
                         .await;
                     Self::json_error(409, "entity already exists")
                 }
                 Err(_) => {
                     controller
-                        .release_unique_constraints(entity, id, data, partition, request_id, now_ms)
+                        .release_unique_constraints(
+                            entity,
+                            id,
+                            constraint_data,
+                            partition,
+                            request_id,
+                            now_ms,
+                        )
                         .await;
                     Self::json_error(500, "internal error")
                 }
@@ -704,7 +732,8 @@ impl DbRequestHandler {
         let (new_diff, old_diff) =
             controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
 
-        let merged_data = self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged_data);
+        let merged_data =
+            self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged_data);
 
         if !fk_result.pending_remote.is_empty() {
             return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
@@ -1174,6 +1203,7 @@ impl DbRequestHandler {
                 entity,
                 id,
                 data,
+                constraint_data,
                 partition,
                 request_id,
                 now_ms,
@@ -1229,7 +1259,7 @@ impl DbRequestHandler {
                                     .commit_unique_constraints(
                                         &entity,
                                         &id,
-                                        &data,
+                                        &constraint_data,
                                         partition,
                                         &request_id,
                                         now_ms,
@@ -1510,12 +1540,16 @@ impl DbRequestHandler {
                 ..
             } => {
                 let now_ms = Self::current_time_ms();
+                let constraint_data = data.clone();
+                let crypto = self.resolve_vault_crypto(&entity, sender.as_deref());
+                let data = self.vault_encrypt_if_needed(crypto.as_ref(), &entity, &id, data);
                 let result = self
                     .complete_create(
                         controller,
                         &entity,
                         &id,
                         &data,
+                        &constraint_data,
                         partition,
                         &request_id,
                         now_ms,

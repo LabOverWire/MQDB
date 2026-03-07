@@ -6,6 +6,11 @@ use crate::{Error, Filter, Pagination, SortOrder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub enum VaultConstraintData {
+    Create(Value),
+    Update(Value, Value),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -162,7 +167,7 @@ impl From<Error> for Response {
 
 #[cfg(feature = "agent")]
 mod execute {
-    use super::{Request, Response};
+    use super::{Request, Response, VaultConstraintData};
     use crate::Database;
     use crate::types::{OwnershipConfig, ScopeConfig};
     use serde_json::Value;
@@ -187,6 +192,7 @@ mod execute {
                 None,
                 &OwnershipConfig::default(),
                 &ScopeConfig::default(),
+                None,
             )
             .await
         }
@@ -199,11 +205,23 @@ mod execute {
             client_id: Option<&str>,
             ownership: &OwnershipConfig,
             scope_config: &ScopeConfig,
+            vault_constraint: Option<VaultConstraintData>,
         ) -> Response {
             match request {
                 Request::Create { entity, data } => {
+                    let constraint_data = match vault_constraint {
+                        Some(VaultConstraintData::Create(cd)) => Some(cd),
+                        _ => None,
+                    };
                     match self
-                        .create(entity, data, sender, client_id, scope_config)
+                        .create(
+                            entity,
+                            data,
+                            constraint_data,
+                            sender,
+                            client_id,
+                            scope_config,
+                        )
                         .await
                     {
                         Ok(v) => Response::ok(v),
@@ -244,8 +262,22 @@ mod execute {
                             map.remove(owner_field);
                         }
                     }
+                    let update_constraint = match vault_constraint {
+                        Some(VaultConstraintData::Update(new_data, old_data)) => {
+                            Some((new_data, old_data))
+                        }
+                        _ => None,
+                    };
                     match self
-                        .update(entity, id, fields, sender, client_id, scope_config)
+                        .update(
+                            entity,
+                            id,
+                            fields,
+                            update_constraint,
+                            sender,
+                            client_id,
+                            scope_config,
+                        )
                         .await
                     {
                         Ok(v) => Response::ok(v),
@@ -431,6 +463,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         match resp {
@@ -471,6 +504,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         assert!(resp.is_ok());
@@ -504,6 +538,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         match resp {
@@ -544,6 +579,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
 
@@ -586,6 +622,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         assert!(resp.is_ok());
@@ -625,6 +662,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
 
@@ -674,6 +712,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
 
@@ -762,6 +801,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         assert!(resp.is_ok());
@@ -813,6 +853,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         match resp {
@@ -832,6 +873,7 @@ mod tests {
                 None,
                 &ownership,
                 &ScopeConfig::default(),
+                None,
             )
             .await;
         assert!(resp.is_ok());
