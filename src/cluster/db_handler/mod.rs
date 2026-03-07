@@ -179,6 +179,20 @@ impl DbRequestHandler {
         crate::http::VaultCrypto::from_key_bytes(&key_bytes)
     }
 
+    fn vault_encrypt_if_needed(
+        &self,
+        vault_crypto: Option<&crate::http::VaultCrypto>,
+        entity: &str,
+        id: &str,
+        mut data: serde_json::Value,
+    ) -> serde_json::Value {
+        if let Some(crypto) = vault_crypto {
+            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            crate::vault_transform::vault_encrypt_fields(crypto, entity, id, &mut data, &skip);
+        }
+        data
+    }
+
     fn vault_decrypt_response_payload(
         &self,
         payload: Vec<u8>,

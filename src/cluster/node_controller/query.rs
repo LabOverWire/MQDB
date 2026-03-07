@@ -172,7 +172,7 @@ impl<T: ClusterTransport> NodeController<T> {
             && let Some(completed) = self.pending_scatter_requests.remove(&request_id)
         {
             let mut seen_ids = std::collections::HashSet::new();
-            let deduped: Vec<serde_json::Value> = completed
+            let mut deduped: Vec<serde_json::Value> = completed
                 .received
                 .into_iter()
                 .filter(|item| {
@@ -183,6 +183,29 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 })
                 .collect();
+            if let Some(ref vault_sender) = completed.vault_sender
+                && crate::vault_transform::is_vault_eligible(&completed.entity, &self.ownership)
+                && let Some(key_bytes) = self.vault_key_store.get(vault_sender)
+                && let Some(crypto) = crate::http::VaultCrypto::from_key_bytes(&key_bytes)
+            {
+                let skip = crate::vault_transform::build_vault_skip_fields(
+                    &completed.entity,
+                    &self.ownership,
+                );
+                for item in &mut deduped {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
+                        && let Some(data) = item.get_mut("data")
+                    {
+                        crate::vault_transform::vault_decrypt_fields(
+                            &crypto,
+                            &completed.entity,
+                            &id,
+                            data,
+                            &skip,
+                        );
+                    }
+                }
+            }
 
             let mut filtered: Vec<serde_json::Value> = deduped
                 .into_iter()
@@ -198,32 +221,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
             filtered.truncate(MAX_LIST_RESULTS);
 
-            let mut projected =
-                Self::apply_list_projection(filtered, completed.projection.as_deref());
-
-            if let Some(ref vault_sender) = completed.vault_sender
-                && crate::vault_transform::is_vault_eligible(&completed.entity, &self.ownership)
-                && let Some(key_bytes) = self.vault_key_store.get(vault_sender)
-                && let Some(crypto) = crate::http::VaultCrypto::from_key_bytes(&key_bytes)
-            {
-                let skip = crate::vault_transform::build_vault_skip_fields(
-                    &completed.entity,
-                    &self.ownership,
-                );
-                for item in &mut projected {
-                    if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
-                        && let Some(data) = item.get_mut("data")
-                    {
-                        crate::vault_transform::vault_decrypt_fields(
-                            &crypto,
-                            &completed.entity,
-                            &id,
-                            data,
-                            &skip,
-                        );
-                    }
-                }
-            }
+            let projected = Self::apply_list_projection(filtered, completed.projection.as_deref());
 
             let result = serde_json::json!({
                 "status": "ok",

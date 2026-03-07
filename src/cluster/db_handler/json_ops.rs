@@ -689,21 +689,6 @@ impl DbRequestHandler {
             return JsonOpResult::Response(err);
         }
 
-        let merged_data = if let Some(ref crypto) = vault_crypto {
-            let skip = crate::vault_transform::build_vault_skip_fields(entity, &self.ownership);
-            let mut to_encrypt = merged_data;
-            crate::vault_transform::vault_encrypt_fields(
-                crypto,
-                entity,
-                id,
-                &mut to_encrypt,
-                &skip,
-            );
-            to_encrypt
-        } else {
-            merged_data
-        };
-
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let partition = data_partition(entity, id);
@@ -716,9 +701,12 @@ impl DbRequestHandler {
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
 
+        let (new_diff, old_diff) =
+            controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
+
+        let merged_data = self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged_data);
+
         if !fk_result.pending_remote.is_empty() {
-            let (new_diff, old_diff) =
-                controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
             return JsonOpResult::PendingFkCheck(Box::new(PendingFkWork {
                 pending_checks: fk_result.pending_remote,
                 continuation: FkCheckContinuation::UpdateFromDbHandler {
@@ -738,8 +726,6 @@ impl DbRequestHandler {
             }));
         }
 
-        let (new_diff, old_diff) =
-            controller.compute_unique_field_diffs(entity, &old_data, &merged_data);
         let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
 
         if has_unique_changes {
