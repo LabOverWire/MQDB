@@ -384,7 +384,7 @@ Five topic namespaces structure MQDB communication:
 | `_mqdb/scatter/` | Distributed query scatter responses | 1 | Yes |
 | `_mqdb/http_resp/` | HTTP handler request-response | 1 | No (local) |
 | `$DB/` | Database operations | 2 | Yes |
-| `$SYS/` | Admin operations (rebalance, status) | 1 | No (local) |
+| `$SYS/` | Admin operations (rebalance, status) | 1 | No (local, AdminRequired for `$SYS/mqdb/cluster/#`) |
 
 **Detailed topic patterns** (`mqtt_transport.rs:107-163`):
 
@@ -770,7 +770,7 @@ executor.shutdown(); // graceful shutdown
 
 ### A6.8 Admin Request Handlers
 
-The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/cluster/#`:
+The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/cluster/#` (requires `AdminRequired` topic protection — only admin users can publish to these topics):
 
 | Topic | Handler | Response |
 |-------|---------|----------|
@@ -793,6 +793,40 @@ The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/clu
 mqdb cluster status --broker 127.0.0.1:1883
 mqdb cluster rebalance --broker 127.0.0.1:1883
 ```
+
+---
+
+## A6.9 Vault Encryption in Cluster Mode
+
+Per-user transparent encryption at rest works across the distributed cluster. Each user derives an AES-256-GCM key from a passphrase on the HTTP node where they authenticate. Only string-typed JSON fields are encrypted; numeric, boolean, null, array, and object values are stored as-is. Fields starting with `_` (system metadata) and the ownership field are never encrypted.
+
+**Architecture**: Vault keys stay on the node where the user logged in (never transit the wire). When a DB operation is forwarded to the partition primary on another node, the originating node handles encryption/decryption:
+
+| Operation | Originating Node | Partition Primary |
+|-----------|-----------------|-------------------|
+| **Create** | Encrypt fields before forwarding | Store encrypted data |
+| **Read** | Decrypt response fields | Return encrypted data from storage |
+| **Update** | Encrypt delta fields before forwarding | Merge encrypted delta into encrypted record |
+| **List** | Decrypt all responses, apply filters locally | Return all records (filters can't work on ciphertext) |
+
+**Key components**:
+- `vault_transform.rs` — Field-level encrypt/decrypt utilities shared across agent and cluster paths
+- `VaultKeyStore` (`vault_keys.rs`) — Per-node in-memory vault key storage, shared via `Arc<RwLock>`
+- `pending_vault_decrypts` (`node_controller/db_ops.rs`) — Tracks forwarded requests that need response decryption, with 30s stale entry cleanup
+- `read_fence` (`vault_keys.rs`) — Write fence that blocks MQTT publishes during vault enable/disable batch operations to prevent mixed encrypted/plaintext state
+
+**Scatter-list with vault**: For vault-eligible entities, scatter-list queries send an empty payload to remote nodes (no server-side filtering). All records are returned to the originating node, decrypted, then filtered locally. This is a correctness requirement since filters cannot operate on ciphertext.
+
+### A6.10 Rebalancer: Replica-Only Promotion
+
+The rebalancer's `redistribute_primaries()` only promotes nodes that are already replicas for the target partition. This ensures data must exist on a node before it becomes primary.
+
+**Two-cycle convergence** when a new node joins:
+1. First rebalance: `add_missing_replicas()` places the new node as replica (triggers snapshot transfer). No primaries move because the new node isn't a replica yet.
+2. Periodic balance check (30-second interval in coordinator `tick()`) detects primaries are still imbalanced.
+3. Second rebalance: new node IS a replica now, so `redistribute_primaries()` promotes it. Data is already present from the snapshot.
+
+The `primaries_imbalanced()` check triggers when `max_primary_count - min_primary_count > 1` across cluster members.
 
 ---
 

@@ -1,7 +1,7 @@
 # MQDB Distributed Implementation Plan
 
-> **Status: ALL MILESTONES COMPLETE (M1-M10)**
-> Last verified: January 2026
+> **Status: ALL MILESTONES COMPLETE (M1-M11)**
+> Last verified: March 2026
 
 ## Milestone Overview
 
@@ -17,6 +17,7 @@
 | M8 | QoS State Replication | Done |
 | M9 | Last Will & Testament | Done |
 | M10 | Session Migration & Cleanup | Done |
+| M11 | Vault Transparent Encryption | Done |
 
 ---
 
@@ -329,6 +330,60 @@ Handle session migration on node failure and cleanup expired sessions.
 
 ### Testing
 - `session_expiry_cleans_subscriptions` test in `cluster_integration_test.rs`
+
+---
+
+## M11: Vault Transparent Encryption (DONE)
+
+### Goal
+Per-user transparent encryption at rest for owned entities, in both agent and cluster modes.
+
+### Requirements
+1. Users derive AES-256-GCM key from passphrase via PBKDF2 (600k iterations)
+2. Vault enable encrypts all existing owned records; disable decrypts them
+3. Unlocked vault transparently encrypts on write and decrypts on read
+4. Locked vault returns raw ciphertext (proving data encrypted at rest)
+5. Works across cluster nodes — scatter-gather list decrypts results from all partitions
+6. Change passphrase re-encrypts all records atomically
+7. Only string-typed JSON fields encrypted; system fields (`_version`, etc.), ownership field, `id`, and non-string types stored as-is
+
+### Implementation
+
+**HTTP API** (`src/http/server.rs`, `src/http/handlers.rs`):
+- Six endpoints: `/vault/enable`, `/vault/unlock`, `/vault/lock`, `/vault/change`, `/vault/disable`, `/vault/status`
+- Cookie-based session authentication required
+- Rate-limited unlock attempts
+
+**Cryptography** (`src/http/vault_crypto.rs`):
+- `VaultCrypto` struct wraps AES-256-GCM key derived via PBKDF2-HMAC-SHA256
+- Per-record nonce derived from entity + record ID (deterministic, no nonce storage)
+- Field-level encryption: each string field encrypted independently
+
+**Transform layer** (`src/vault_transform.rs`):
+- `vault_encrypt_fields` / `vault_decrypt_fields` for record-level operations
+- `is_vault_eligible` gates encryption to owned, non-system entities
+- `build_vault_skip_fields` excludes `id` and ownership field from encryption
+
+**Key storage** (`src/vault_keys.rs`):
+- `VaultKeyStore` maps canonical_id → `VaultCrypto` (in-memory only)
+- Keys never persisted — user must unlock after each server restart
+
+**Cluster integration** (`src/http/handlers.rs`):
+- `batch_vault_operation` iterates all owned records via `update_entity` MQTT round-trips
+- Scatter-list results decrypted after aggregation from all partition owners
+- Constraint validation operates on plaintext (decrypt before validate, re-encrypt after)
+
+### Files
+- `src/http/vault_crypto.rs`
+- `src/http/handlers.rs`
+- `src/vault_transform.rs`
+- `src/vault_keys.rs`
+- `examples/vault-mqtt/` (single-node demo)
+- `examples/vault-cluster/` (multi-node E2E test, 70 tests)
+
+### Testing
+- Unit tests in `vault_crypto.rs` and `vault_transform.rs`
+- E2E script `examples/vault-cluster/run.sh` (70 tests covering enable, CRUD, lock/unlock, cross-node, rebalance, change passphrase, disable)
 
 ---
 
