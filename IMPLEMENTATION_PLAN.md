@@ -345,7 +345,7 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 4. Locked vault returns raw ciphertext (proving data encrypted at rest)
 5. Works across cluster nodes — scatter-gather list decrypts results from all partitions
 6. Change passphrase re-encrypts all records atomically
-7. Only string-typed JSON fields encrypted; system fields (`_version`, etc.), ownership field, `id`, and non-string types stored as-is
+7. All string leaf values encrypted at any JSON depth (nested objects, arrays); `_`-prefixed keys skipped at all depths; `id` and ownership field skipped at top level only; non-string types (number, bool, null) stored as-is
 
 ### Implementation
 
@@ -357,7 +357,7 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 **Cryptography** (`src/http/vault_crypto.rs`):
 - `VaultCrypto` struct wraps AES-256-GCM key derived via PBKDF2-HMAC-SHA256
 - Per-record nonce derived from entity + record ID (deterministic, no nonce storage)
-- Field-level encryption: each string field encrypted independently
+- Recursive field-level encryption: each string leaf value encrypted independently at any JSON depth
 
 **Transform layer** (`src/vault_transform.rs`):
 - `vault_encrypt_fields` / `vault_decrypt_fields` for record-level operations

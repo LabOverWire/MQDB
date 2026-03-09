@@ -798,7 +798,7 @@ mqdb cluster rebalance --broker 127.0.0.1:1883
 
 ## A6.9 Vault Encryption in Cluster Mode
 
-Per-user transparent encryption at rest works across the distributed cluster. Each user derives an AES-256-GCM key from a passphrase on the HTTP node where they authenticate. Only string-typed JSON fields are encrypted; numeric, boolean, null, array, and object values are stored as-is. Fields starting with `_` (system metadata) and the ownership field are never encrypted.
+Per-user transparent encryption at rest works across the distributed cluster. Each user derives an AES-256-GCM key from a passphrase on the HTTP node where they authenticate. All string leaf values at any JSON depth are encrypted, including strings inside nested objects and arrays. Numeric, boolean, and null values are stored as-is at all depths (preserving queryability). Keys starting with `_` (system metadata) are skipped at all depths; the ownership field and `id` are skipped at the top level only.
 
 **Architecture**: Vault keys stay on the node where the user logged in (never transit the wire). When a DB operation is forwarded to the partition primary on another node, the originating node handles encryption/decryption:
 

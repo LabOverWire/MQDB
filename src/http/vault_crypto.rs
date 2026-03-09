@@ -109,10 +109,8 @@ impl VaultCrypto {
             if key.starts_with('_') || skip_fields.contains(&key.as_str()) {
                 continue;
             }
-            if let Some(serde_json::Value::String(val)) = obj.get(&key)
-                && let Ok(encrypted) = self.encrypt_value(entity, id, val.as_bytes())
-            {
-                obj.insert(key, serde_json::Value::String(encrypted));
+            if let Some(val) = obj.get_mut(&key) {
+                self.encrypt_value_recursive(entity, id, val);
             }
         }
     }
@@ -132,11 +130,66 @@ impl VaultCrypto {
             if key.starts_with('_') || skip_fields.contains(&key.as_str()) {
                 continue;
             }
-            if let Some(serde_json::Value::String(val)) = obj.get(&key)
-                && let Ok(decrypted) = self.decrypt_value(entity, id, val)
-                && let Ok(s) = String::from_utf8(decrypted)
-            {
-                obj.insert(key, serde_json::Value::String(s));
+            if let Some(val) = obj.get_mut(&key) {
+                self.decrypt_value_recursive(entity, id, val);
+            }
+        }
+    }
+
+    fn encrypt_value_recursive(&self, entity: &str, id: &str, value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(s) => {
+                if let Ok(encrypted) = self.encrypt_value(entity, id, s.as_bytes()) {
+                    *s = encrypted;
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                for key in keys {
+                    if key.starts_with('_') {
+                        continue;
+                    }
+                    if let Some(child) = map.get_mut(&key) {
+                        self.encrypt_value_recursive(entity, id, child);
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for elem in arr {
+                    self.encrypt_value_recursive(entity, id, elem);
+                }
+            }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            }
+        }
+    }
+
+    fn decrypt_value_recursive(&self, entity: &str, id: &str, value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::String(s) => {
+                if let Ok(decrypted) = self.decrypt_value(entity, id, s) {
+                    if let Ok(plain) = String::from_utf8(decrypted) {
+                        *s = plain;
+                    }
+                }
+            }
+            serde_json::Value::Object(map) => {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                for key in keys {
+                    if key.starts_with('_') {
+                        continue;
+                    }
+                    if let Some(child) = map.get_mut(&key) {
+                        self.decrypt_value_recursive(entity, id, child);
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for elem in arr {
+                    self.decrypt_value_recursive(entity, id, elem);
+                }
+            }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
             }
         }
     }
@@ -254,6 +307,101 @@ mod tests {
 
         assert_eq!(data["name"], "Alice");
         assert_eq!(data["email"], "alice@example.com");
+    }
+
+    #[test]
+    fn nested_object_encrypt_decrypt() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "profile": {"name": "Alice", "city": "Paris"},
+            "score": 99
+        });
+
+        crypto.encrypt_record("people", "rec-1", &mut data, &["id"]);
+
+        assert_eq!(data["id"], "rec-1");
+        assert_ne!(data["profile"]["name"].as_str().unwrap(), "Alice");
+        assert_ne!(data["profile"]["city"].as_str().unwrap(), "Paris");
+        assert_eq!(data["score"], 99);
+
+        crypto.decrypt_record("people", "rec-1", &mut data, &["id"]);
+
+        assert_eq!(data["profile"]["name"], "Alice");
+        assert_eq!(data["profile"]["city"], "Paris");
+    }
+
+    #[test]
+    fn array_encrypt_decrypt() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "tags": ["alpha", "beta"],
+            "counts": [1, 2, 3]
+        });
+
+        crypto.encrypt_record("entity", "rec-1", &mut data, &["id"]);
+
+        assert_ne!(data["tags"][0].as_str().unwrap(), "alpha");
+        assert_ne!(data["tags"][1].as_str().unwrap(), "beta");
+        assert_eq!(data["counts"][0], 1);
+        assert_eq!(data["counts"][1], 2);
+        assert_eq!(data["counts"][2], 3);
+
+        crypto.decrypt_record("entity", "rec-1", &mut data, &["id"]);
+
+        assert_eq!(data["tags"][0], "alpha");
+        assert_eq!(data["tags"][1], "beta");
+    }
+
+    #[test]
+    fn deep_nesting_encrypt_decrypt() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "data": {
+                "items": [
+                    {"label": "X", "count": 5, "nested": {"secret": "deep"}}
+                ]
+            }
+        });
+
+        crypto.encrypt_record("entity", "rec-1", &mut data, &["id"]);
+
+        assert_ne!(data["data"]["items"][0]["label"].as_str().unwrap(), "X");
+        assert_eq!(data["data"]["items"][0]["count"], 5);
+        assert_ne!(
+            data["data"]["items"][0]["nested"]["secret"]
+                .as_str()
+                .unwrap(),
+            "deep"
+        );
+
+        crypto.decrypt_record("entity", "rec-1", &mut data, &["id"]);
+
+        assert_eq!(data["data"]["items"][0]["label"], "X");
+        assert_eq!(data["data"]["items"][0]["nested"]["secret"], "deep");
+    }
+
+    #[test]
+    fn wrong_passphrase_nested_data() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("correct", &salt);
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "profile": {"secret": "sensitive"}
+        });
+
+        crypto.encrypt_record("entity", "rec-1", &mut data, &["id"]);
+        let encrypted = data["profile"]["secret"].as_str().unwrap().to_string();
+
+        let wrong = VaultCrypto::derive("wrong", &salt);
+        wrong.decrypt_record("entity", "rec-1", &mut data, &["id"]);
+
+        assert_eq!(data["profile"]["secret"].as_str().unwrap(), encrypted);
     }
 
     #[test]

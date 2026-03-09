@@ -35,7 +35,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 | 16 | Consumer Groups and Event Routing | Not started | | | |
 | 17 | Performance Analysis and Benchmarking | Not started | | | |
 | 18 | Access Control, Ownership, and Scopes | Not started | | | |
-| 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | 2026-03-03 | 4,068 |
+| 19 | Vault Encryption and Data Protection | First draft (placeholder) | 2026-03-03 | 2026-03-08 | 4,068 |
 | 20 | Operating MQDB | Not started | | | |
 | 21 | The WASM Frontier | Not started | | | |
 | Preface | Preface | First draft | 2026-03-03 | | 1,055 |
@@ -579,6 +579,17 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Added "Data must precede authority" lesson
 - Word count: 5,048 → 5,902
 - Verification pass: fixed "Two transitions" → "Three transitions", Phase 3 description referencing old behavior, snapshot completion always-Replica → role-aware
+
+### Session 14 — 2026-03-08
+
+**Work done:**
+- Revised Ch19 to reflect recursive structural vault encryption (code changed same session)
+- Updated section 19.2: encryption example now shows nested objects and arrays, not just flat records
+- Updated skip fields description: `_`-prefixed skipped at all depths, `id`/owner skipped at top level only
+- Updated section 19.3: batch encryption description says "recursively encrypts all string leaf values"
+- Updated section 19.5: create path step 6 and read/list path description now reference recursive encryption
+- Updated Lessons section: "Field-level encryption" → "Structural encryption", example shows nested ciphertext
+- Added backward compatibility note to read/list path
 
 ### Memories for Future Sessions
 

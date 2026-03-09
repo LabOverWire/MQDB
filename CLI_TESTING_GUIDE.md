@@ -3222,7 +3222,11 @@ This runs 70 tests covering:
 - [ ] Unlock restores plaintext reads
 - [ ] Update encrypts delta fields
 - [ ] List decrypts all records
-- [ ] Non-string fields (number, bool, null) unchanged after encryption
+- [ ] Non-string fields (number, bool, null) unchanged at all depths
+- [ ] Nested object string values encrypted recursively
+- [ ] Array string elements encrypted recursively
+- [ ] `_`-prefixed keys skipped at all depths
+- [ ] `id` and ownership field skipped at top level only (encrypted when nested)
 - [ ] System fields (`_version`, etc.) never encrypted
 - [ ] Change passphrase re-encrypts all records
 - [ ] Old passphrase rejected after change (HTTP 401)

@@ -47,14 +47,39 @@ pub fn vault_encrypt_fields(
     };
     let keys: Vec<String> = obj.keys().cloned().collect();
     for key in keys {
-        if should_skip_field(&key, skip_fields) {
+        if key.starts_with('_') || skip_fields.iter().any(|s| s == &key) {
             continue;
         }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Ok(encrypted) = encrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(encrypted));
+        if let Some(val) = obj.get_mut(&key) {
+            encrypt_value_recursive(crypto, entity, id, val);
         }
+    }
+}
+
+fn encrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if let Ok(encrypted) = encrypt_string(crypto, entity, id, s) {
+                *s = encrypted;
+            }
+        }
+        Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if key.starts_with('_') {
+                    continue;
+                }
+                if let Some(child) = map.get_mut(&key) {
+                    encrypt_value_recursive(crypto, entity, id, child);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for elem in arr {
+                encrypt_value_recursive(crypto, entity, id, elem);
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
     }
 }
 
@@ -70,14 +95,39 @@ pub fn vault_decrypt_fields(
     };
     let keys: Vec<String> = obj.keys().cloned().collect();
     for key in keys {
-        if should_skip_field(&key, skip_fields) {
+        if key.starts_with('_') || skip_fields.iter().any(|s| s == &key) {
             continue;
         }
-        if let Some(Value::String(val)) = obj.get(&key)
-            && let Some(decrypted) = decrypt_string(crypto, entity, id, val)
-        {
-            obj.insert(key, Value::String(decrypted));
+        if let Some(val) = obj.get_mut(&key) {
+            decrypt_value_recursive(crypto, entity, id, val);
         }
+    }
+}
+
+fn decrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: &mut Value) {
+    match value {
+        Value::String(s) => {
+            if let Some(decrypted) = decrypt_string(crypto, entity, id, s) {
+                *s = decrypted;
+            }
+        }
+        Value::Object(map) => {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            for key in keys {
+                if key.starts_with('_') {
+                    continue;
+                }
+                if let Some(child) = map.get_mut(&key) {
+                    decrypt_value_recursive(crypto, entity, id, child);
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for elem in arr {
+                decrypt_value_recursive(crypto, entity, id, elem);
+            }
+        }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {}
     }
 }
 
@@ -265,6 +315,128 @@ mod tests {
 
         assert_eq!(data["title"], "Secret Title");
         assert_eq!(data["body"], "Secret Body");
+    }
+
+    #[test]
+    fn nested_object_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "profile": {"name": "Alice", "age": 30}
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["id"], "rec-1");
+        assert_ne!(data["profile"]["name"].as_str().unwrap(), "Alice");
+        assert_eq!(data["profile"]["age"], 30);
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["profile"]["name"], "Alice");
+        assert_eq!(data["profile"]["age"], 30);
+    }
+
+    #[test]
+    fn array_of_strings_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "tags": ["secret1", "secret2"]
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_ne!(data["tags"][0].as_str().unwrap(), "secret1");
+        assert_ne!(data["tags"][1].as_str().unwrap(), "secret2");
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["tags"][0], "secret1");
+        assert_eq!(data["tags"][1], "secret2");
+    }
+
+    #[test]
+    fn mixed_deep_nesting_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "data": {"items": [{"label": "X", "count": 5}]}
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_ne!(data["data"]["items"][0]["label"].as_str().unwrap(), "X");
+        assert_eq!(data["data"]["items"][0]["count"], 5);
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["data"]["items"][0]["label"], "X");
+        assert_eq!(data["data"]["items"][0]["count"], 5);
+    }
+
+    #[test]
+    fn underscore_keys_skipped_at_depth() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "meta": {"_internal": "skip-me", "visible": "encrypt-me"}
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["meta"]["_internal"], "skip-me");
+        assert_ne!(data["meta"]["visible"].as_str().unwrap(), "encrypt-me");
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["meta"]["_internal"], "skip-me");
+        assert_eq!(data["meta"]["visible"], "encrypt-me");
+    }
+
+    #[test]
+    fn skip_fields_only_at_top_level() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "keep-clear",
+            "nested": {"id": "encrypt-me"}
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "keep-clear", &mut data, &skip);
+
+        assert_eq!(data["id"], "keep-clear");
+        assert_ne!(data["nested"]["id"].as_str().unwrap(), "encrypt-me");
+
+        vault_decrypt_fields(&crypto, "notes", "keep-clear", &mut data, &skip);
+
+        assert_eq!(data["id"], "keep-clear");
+        assert_eq!(data["nested"]["id"], "encrypt-me");
+    }
+
+    #[test]
+    fn empty_containers_unchanged() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "rec-1",
+            "obj": {},
+            "arr": []
+        });
+
+        vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["obj"], serde_json::json!({}));
+        assert_eq!(data["arr"], serde_json::json!([]));
+
+        vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
+
+        assert_eq!(data["obj"], serde_json::json!({}));
+        assert_eq!(data["arr"], serde_json::json!([]));
     }
 
     #[test]

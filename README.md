@@ -477,7 +477,7 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 
 Per-user transparent encryption at rest. Each user derives an AES-256-GCM key from a passphrase. When the vault is unlocked, MQTT reads and writes transparently decrypt and encrypt owned entity fields. When locked, raw ciphertext is returned. Users without the vault key always see ciphertext, proving data is encrypted at rest.
 
-Only string-typed JSON fields are encrypted. Numeric, boolean, null, array, and nested object values are stored as-is. Fields starting with `_` (system metadata) and the ownership field are never encrypted.
+All string leaf values at any JSON depth are encrypted, including strings inside nested objects and arrays. Numeric, boolean, and null values are stored as-is at all depths (preserving queryability). Keys starting with `_` (system metadata) are skipped at all depths; the ownership field and `id` are skipped at the top level only.
 
 Vault encryption requires the `--ownership` flag on at least one entity and an HTTP server for the vault API.
 
