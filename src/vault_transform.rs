@@ -63,6 +63,12 @@ fn encrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: 
                 *s = encrypted;
             }
         }
+        Value::Number(_) | Value::Bool(_) | Value::Null => {
+            let text = format!("\x01{value}");
+            if let Ok(encrypted) = encrypt_string(crypto, entity, id, &text) {
+                *value = Value::String(encrypted);
+            }
+        }
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
@@ -79,7 +85,6 @@ fn encrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: 
                 encrypt_value_recursive(crypto, entity, id, elem);
             }
         }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {}
     }
 }
 
@@ -105,12 +110,19 @@ pub fn vault_decrypt_fields(
 }
 
 fn decrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: &mut Value) {
-    match value {
-        Value::String(s) => {
-            if let Some(decrypted) = decrypt_string(crypto, entity, id, s) {
-                *s = decrypted;
+    if let Value::String(s) = &*value {
+        let mut wrapper = serde_json::json!({ "v": s.as_str() });
+        crypto.decrypt_record(entity, id, &mut wrapper, &[]);
+        if let Some(decrypted) = wrapper.get("v") {
+            if decrypted.as_str().is_some_and(|d| d == s) {
+                return;
             }
+            *value = decrypted.clone();
         }
+        return;
+    }
+
+    match value {
         Value::Object(map) => {
             let keys: Vec<String> = map.keys().cloned().collect();
             for key in keys {
@@ -127,7 +139,7 @@ fn decrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: 
                 decrypt_value_recursive(crypto, entity, id, elem);
             }
         }
-        Value::Number(_) | Value::Bool(_) | Value::Null => {}
+        _ => {}
     }
 }
 
@@ -306,15 +318,18 @@ mod tests {
         assert_eq!(data["userId"], "user-abc");
         assert_ne!(data["title"].as_str().unwrap(), "Secret Title");
         assert_ne!(data["body"].as_str().unwrap(), "Secret Body");
-        assert_eq!(data["count"], 42);
-        assert_eq!(data["active"], true);
-        assert!(data["tags"].is_null());
+        assert!(data["count"].is_string(), "number should encrypt to string");
+        assert!(data["active"].is_string(), "bool should encrypt to string");
+        assert!(data["tags"].is_string(), "null should encrypt to string");
         assert_eq!(data["_version"], 1);
 
         vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
 
         assert_eq!(data["title"], "Secret Title");
         assert_eq!(data["body"], "Secret Body");
+        assert_eq!(data["count"], 42);
+        assert_eq!(data["active"], true);
+        assert!(data["tags"].is_null());
     }
 
     #[test]
@@ -330,7 +345,7 @@ mod tests {
 
         assert_eq!(data["id"], "rec-1");
         assert_ne!(data["profile"]["name"].as_str().unwrap(), "Alice");
-        assert_eq!(data["profile"]["age"], 30);
+        assert!(data["profile"]["age"].is_string());
 
         vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
 
@@ -370,7 +385,7 @@ mod tests {
         vault_encrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
 
         assert_ne!(data["data"]["items"][0]["label"].as_str().unwrap(), "X");
-        assert_eq!(data["data"]["items"][0]["count"], 5);
+        assert!(data["data"]["items"][0]["count"].is_string());
 
         vault_decrypt_fields(&crypto, "notes", "rec-1", &mut data, &skip);
 
@@ -452,6 +467,52 @@ mod tests {
     fn decrypt_string_plaintext_returns_none() {
         let crypto = test_crypto();
         assert!(decrypt_string(&crypto, "notes", "rec-1", "not-ciphertext").is_none());
+    }
+
+    #[test]
+    fn bool_and_null_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "r1",
+            "flag": true,
+            "off": false,
+            "empty": null
+        });
+
+        vault_encrypt_fields(&crypto, "e", "r1", &mut data, &skip);
+        assert!(data["flag"].is_string());
+        assert!(data["off"].is_string());
+        assert!(data["empty"].is_string());
+
+        vault_decrypt_fields(&crypto, "e", "r1", &mut data, &skip);
+        assert_eq!(data["flag"], true);
+        assert_eq!(data["off"], false);
+        assert!(data["empty"].is_null());
+    }
+
+    #[test]
+    fn mixed_array_all_types_roundtrip() {
+        let crypto = test_crypto();
+        let skip = vec!["id".to_string()];
+        let mut data = serde_json::json!({
+            "id": "r1",
+            "mix": ["text", 42, true, null]
+        });
+
+        vault_encrypt_fields(&crypto, "e", "r1", &mut data, &skip);
+        for i in 0..4 {
+            assert!(
+                data["mix"][i].is_string(),
+                "element {i} should be encrypted to string"
+            );
+        }
+
+        vault_decrypt_fields(&crypto, "e", "r1", &mut data, &skip);
+        assert_eq!(data["mix"][0], "text");
+        assert_eq!(data["mix"][1], 42);
+        assert_eq!(data["mix"][2], true);
+        assert!(data["mix"][3].is_null());
     }
 
     #[test]
