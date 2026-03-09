@@ -1,5 +1,6 @@
 use crate::panels;
 use crate::state::{ActivePanel, AppState, Command, ConnectionStatus, StatusMessage, UiEvent};
+use crate::theme;
 use eframe::egui;
 
 pub struct App {
@@ -104,54 +105,111 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_events();
 
-        egui::TopBottomPanel::top("connection").show(ctx, |ui| {
-            panels::connection::show(ui, &mut self.state, &self.cmd_tx);
-        });
-
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(msg) = &self.state.status_message {
-                    let color = if msg.is_error {
-                        egui::Color32::RED
-                    } else {
-                        egui::Color32::GREEN
-                    };
-                    ui.colored_label(color, &msg.text);
-                }
+        egui::TopBottomPanel::top("title_bar")
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::bg_dark())
+                    .inner_margin(egui::Margin::symmetric(12, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::accent(), "MQDB");
+                    ui.separator();
+                    panels::connection::show(ui, &mut self.state, &self.cmd_tx);
+                });
             });
-        });
+
+        egui::TopBottomPanel::bottom("status_bar")
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::bg_dark())
+                    .inner_margin(egui::Margin::symmetric(12, 4)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let status_color = match self.state.connection {
+                        ConnectionStatus::Connected => theme::SUCCESS,
+                        ConnectionStatus::Connecting => theme::WARNING,
+                        ConnectionStatus::Disconnected => theme::text_dim(),
+                    };
+                    let status_text = match self.state.connection {
+                        ConnectionStatus::Connected => "connected",
+                        ConnectionStatus::Connecting => "connecting...",
+                        ConnectionStatus::Disconnected => "disconnected",
+                    };
+                    ui.colored_label(status_color, status_text);
+
+                    if let Some(catalog) = &self.state.catalog {
+                        ui.separator();
+                        ui.colored_label(
+                            theme::text_dim(),
+                            format!(
+                                "{} entities | {}",
+                                catalog.entities.len(),
+                                catalog.server.mode
+                            ),
+                        );
+                        if let Some(node_id) = catalog.server.node_id {
+                            ui.colored_label(theme::text_dim(), format!("node {node_id}"));
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(msg) = &self.state.status_message {
+                            let color = if msg.is_error {
+                                theme::ERROR
+                            } else {
+                                theme::SUCCESS
+                            };
+                            ui.colored_label(color, &msg.text);
+                        }
+                    });
+                });
+            });
 
         egui::SidePanel::left("entities_panel")
             .default_width(200.0)
             .resizable(true)
+            .frame(
+                egui::Frame::NONE
+                    .fill(theme::bg_dark())
+                    .inner_margin(egui::Margin::same(8))
+                    .stroke(egui::Stroke::new(1.0, theme::separator())),
+            )
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     panels::entities::show(ui, &mut self.state, &self.cmd_tx);
                 });
             });
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.state.active_panel {
-            ActivePanel::Records => {
-                panels::records::show(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Detail => {
-                panels::record_edit::show_detail(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Create => {
-                panels::record_edit::show_create(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Edit => {
-                panels::record_edit::show_edit(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Schema => {
-                panels::schema::show(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Constraints => {
-                panels::constraints::show(ui, &mut self.state, &self.cmd_tx);
-            }
-            ActivePanel::Events => {
-                panels::events::show(ui, &mut self.state, &self.cmd_tx);
-            }
-        });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::same(12))
+                    .fill(ctx.style().visuals.panel_fill),
+            )
+            .show(ctx, |ui| match self.state.active_panel {
+                ActivePanel::Records => {
+                    panels::records::show(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Detail => {
+                    panels::record_edit::show_detail(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Create => {
+                    panels::record_edit::show_create(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Edit => {
+                    panels::record_edit::show_edit(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Schema => {
+                    panels::schema::show(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Constraints => {
+                    panels::constraints::show(ui, &mut self.state, &self.cmd_tx);
+                }
+                ActivePanel::Events => {
+                    panels::events::show(ui, &mut self.state, &self.cmd_tx);
+                }
+            });
     }
 }

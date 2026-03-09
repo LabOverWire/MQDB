@@ -1,4 +1,5 @@
 use crate::state::{ActivePanel, AppState, Command};
+use crate::theme;
 use eframe::egui;
 use serde_json::Value;
 
@@ -9,13 +10,14 @@ pub fn show_create(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Send
 
     ui.horizontal(|ui| {
         ui.heading(format!("Create {entity}"));
+        ui.add_space(8.0);
         if ui.button("Back").clicked() {
             state.active_panel = ActivePanel::Records;
         }
     });
     ui.separator();
+    ui.add_space(4.0);
 
-    ui.label("JSON data:");
     egui::ScrollArea::vertical()
         .max_height(ui.available_height() - 40.0)
         .show(ui, |ui| {
@@ -27,7 +29,7 @@ pub fn show_create(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Send
             );
         });
 
-    ui.separator();
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         if ui.button("Create").clicked() {
             match serde_json::from_str::<Value>(&state.create_json) {
@@ -63,17 +65,20 @@ pub fn show_edit(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Sender
         .map(String::from);
 
     let Some(id) = record_id else {
-        ui.label("No record selected");
+        ui.colored_label(theme::text_dim(), "No record selected");
         return;
     };
 
     ui.horizontal(|ui| {
-        ui.heading(format!("Edit {entity}/{id}"));
+        ui.heading(format!("Edit {entity}/"));
+        ui.colored_label(theme::accent(), &id);
+        ui.add_space(8.0);
         if ui.button("Back").clicked() {
             state.active_panel = ActivePanel::Records;
         }
     });
     ui.separator();
+    ui.add_space(4.0);
 
     egui::ScrollArea::vertical()
         .max_height(ui.available_height() - 40.0)
@@ -86,7 +91,7 @@ pub fn show_edit(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Sender
             );
         });
 
-    ui.separator();
+    ui.add_space(4.0);
     if ui.button("Update").clicked() {
         match serde_json::from_str::<Value>(&state.edit_json) {
             Ok(mut fields) => {
@@ -117,11 +122,13 @@ pub fn show_detail(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Send
 
     ui.horizontal(|ui| {
         ui.heading("Record Detail");
+        ui.add_space(8.0);
         if ui.button("Back").clicked() {
             state.active_panel = ActivePanel::Records;
         }
     });
     ui.separator();
+    ui.add_space(4.0);
 
     if let Some(record) = &state.selected_record {
         let pretty = serde_json::to_string_pretty(record).unwrap_or_default();
@@ -133,7 +140,7 @@ pub fn show_detail(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Send
             );
         });
 
-        ui.separator();
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui.button("Edit").clicked() {
                 state.edit_json = serde_json::to_string_pretty(record).unwrap_or_default();
@@ -158,6 +165,6 @@ pub fn show_detail(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Send
             }
         });
     } else {
-        ui.label("No record selected");
+        ui.colored_label(theme::text_dim(), "No record selected");
     }
 }

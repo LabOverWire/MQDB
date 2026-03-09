@@ -1,104 +1,140 @@
 use crate::state::{ActivePanel, AppState, Command, FilterSpec, SortSpec};
+use crate::theme;
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Sender<Command>) {
     let Some(entity) = state.selected_entity.clone() else {
         ui.centered_and_justified(|ui| {
-            ui.label("Select an entity from the sidebar");
+            ui.colored_label(theme::text_dim(), "Select an entity from the sidebar");
         });
         return;
     };
 
     ui.horizontal(|ui| {
         ui.heading(&entity);
-        ui.separator();
-        if ui.button("Create").clicked() {
-            state.active_panel = ActivePanel::Create;
-            state.create_json = "{\n  \n}".to_string();
-        }
-        if ui.button("Schema").clicked() {
-            state.active_panel = ActivePanel::Schema;
-            if let Some(catalog) = &state.catalog
-                && let Some(info) = catalog.entities.iter().find(|e| e.name == entity)
-            {
-                state.schema_json = info.schema.as_ref().map_or_else(
-                    || "{\n  \"fields\": {}\n}".to_string(),
-                    |s| serde_json::to_string_pretty(s).unwrap_or_default(),
-                );
-            }
-        }
-        if ui.button("Constraints").clicked() {
-            state.active_panel = ActivePanel::Constraints;
-        }
-        if ui.button("Events").clicked() {
-            state.active_panel = ActivePanel::Events;
-            let _ = cmd_tx.send(Command::SubscribeEvents {
-                entity: entity.clone(),
-            });
-        }
+        ui.add_space(8.0);
+        show_toolbar_buttons(ui, state, cmd_tx, &entity);
     });
 
+    ui.add_space(4.0);
     ui.separator();
     show_filter_bar(ui, state, cmd_tx, &entity);
     ui.separator();
+    ui.add_space(2.0);
 
     if state.records.is_empty() {
-        ui.label("No records");
+        ui.add_space(20.0);
+        ui.centered_and_justified(|ui| {
+            ui.colored_label(theme::text_dim(), "No records");
+        });
         return;
     }
 
     let columns = collect_columns(&state.records);
+    show_table(ui, state, &columns, &entity, cmd_tx);
+}
 
+fn show_toolbar_buttons(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    cmd_tx: &flume::Sender<Command>,
+    entity: &str,
+) {
+    if ui.button("Create").clicked() {
+        state.active_panel = ActivePanel::Create;
+        state.create_json = "{\n  \n}".to_string();
+    }
+    if ui.button("Schema").clicked() {
+        state.active_panel = ActivePanel::Schema;
+        if let Some(catalog) = &state.catalog
+            && let Some(info) = catalog.entities.iter().find(|e| e.name == entity)
+        {
+            state.schema_json = info.schema.as_ref().map_or_else(
+                || "{\n  \"fields\": {}\n}".to_string(),
+                |s| serde_json::to_string_pretty(s).unwrap_or_default(),
+            );
+        }
+    }
+    if ui.button("Constraints").clicked() {
+        state.active_panel = ActivePanel::Constraints;
+    }
+    if ui.button("Events").clicked() {
+        state.active_panel = ActivePanel::Events;
+        let _ = cmd_tx.send(Command::SubscribeEvents {
+            entity: entity.to_string(),
+        });
+    }
+}
+
+fn show_table(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    columns: &[String],
+    entity: &str,
+    cmd_tx: &flume::Sender<Command>,
+) {
     let available = ui.available_size();
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .min_scrolled_height(available.y - 20.0)
-        .columns(Column::auto().at_least(60.0), columns.len() + 1)
-        .header(20.0, |mut header| {
-            for col in &columns {
-                header.col(|ui| {
-                    ui.strong(col);
-                });
-            }
-            header.col(|ui| {
-                ui.strong("Actions");
-            });
-        })
-        .body(|body| {
-            let records = state.records.clone();
-            body.rows(20.0, records.len(), |mut row| {
-                let idx = row.index();
-                let record = &records[idx];
-                for col in &columns {
-                    row.col(|ui| {
-                        let val = record.get(col).map(format_value).unwrap_or_default();
-                        ui.label(&val);
+    egui::ScrollArea::horizontal().show(ui, |ui| {
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .min_scrolled_height(available.y - 20.0)
+            .column(Column::auto().at_least(60.0).clip(true).range(60.0..=200.0))
+            .columns(
+                Column::auto().at_least(60.0).clip(true).range(40.0..=300.0),
+                columns.len().saturating_sub(1),
+            )
+            .column(Column::auto().at_least(120.0))
+            .header(22.0, |mut header| {
+                for col in columns {
+                    header.col(|ui| {
+                        ui.colored_label(theme::accent(), egui::RichText::new(col).strong());
                     });
                 }
-                row.col(|ui| {
-                    if ui.small_button("View").clicked() {
-                        state.selected_record = Some(record.clone());
-                        state.active_panel = ActivePanel::Detail;
-                    }
-                    if ui.small_button("Edit").clicked() {
-                        state.selected_record = Some(record.clone());
-                        state.edit_json = serde_json::to_string_pretty(record).unwrap_or_default();
-                        state.active_panel = ActivePanel::Edit;
-                    }
-                    if ui.small_button("Delete").clicked()
-                        && let Some(id) = record.get("id").and_then(|v| v.as_str())
-                    {
-                        let _ = cmd_tx.send(Command::DeleteRecord {
-                            entity: entity.clone(),
-                            id: id.to_string(),
+                header.col(|ui| {
+                    ui.colored_label(theme::text_dim(), egui::RichText::new("Actions").strong());
+                });
+            })
+            .body(|body| {
+                let records = state.records.clone();
+                let entity_owned = entity.to_string();
+                body.rows(22.0, records.len(), |mut row| {
+                    let idx = row.index();
+                    let record = &records[idx];
+                    for col in columns {
+                        row.col(|ui| {
+                            let val = record.get(col).map(format_value).unwrap_or_default();
+                            ui.label(&val);
                         });
                     }
+                    row.col(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if ui.small_button("View").clicked() {
+                                state.selected_record = Some(record.clone());
+                                state.active_panel = ActivePanel::Detail;
+                            }
+                            if ui.small_button("Edit").clicked() {
+                                state.selected_record = Some(record.clone());
+                                state.edit_json =
+                                    serde_json::to_string_pretty(record).unwrap_or_default();
+                                state.active_panel = ActivePanel::Edit;
+                            }
+                            if ui.small_button("Del").clicked()
+                                && let Some(id) = record.get("id").and_then(|v| v.as_str())
+                            {
+                                let _ = cmd_tx.send(Command::DeleteRecord {
+                                    entity: entity_owned.clone(),
+                                    id: id.to_string(),
+                                });
+                            }
+                        });
+                    });
                 });
             });
-        });
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -114,9 +150,11 @@ fn show_filter_bar(
             let mut remove_idx = None;
             for (i, filter) in state.filter_rows.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label("Field:");
-                    ui.text_edit_singleline(&mut filter.field);
-                    ui.label("Op:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter.field)
+                            .desired_width(100.0)
+                            .hint_text("field"),
+                    );
                     egui::ComboBox::from_id_salt(format!("filter_op_{i}"))
                         .selected_text(&filter.op)
                         .width(50.0)
@@ -125,8 +163,11 @@ fn show_filter_bar(
                                 ui.selectable_value(&mut filter.op, op.to_string(), op);
                             }
                         });
-                    ui.label("Value:");
-                    ui.text_edit_singleline(&mut filter.value);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter.value)
+                            .desired_width(100.0)
+                            .hint_text("value"),
+                    );
                     if ui.small_button("X").clicked() {
                         remove_idx = Some(i);
                     }
@@ -135,7 +176,7 @@ fn show_filter_bar(
             if let Some(idx) = remove_idx {
                 state.filter_rows.remove(idx);
             }
-            if ui.small_button("+ Add Filter").clicked() {
+            if ui.small_button("+ Filter").clicked() {
                 state.filter_rows.push(FilterSpec {
                     op: "=".to_string(),
                     ..Default::default()
@@ -143,8 +184,12 @@ fn show_filter_bar(
             }
 
             ui.horizontal(|ui| {
-                ui.label("Sort:");
-                ui.text_edit_singleline(&mut state.sort_field);
+                ui.colored_label(theme::text_dim(), "Sort:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.sort_field)
+                        .desired_width(100.0)
+                        .hint_text("field"),
+                );
                 egui::ComboBox::from_id_salt("sort_dir")
                     .selected_text(&state.sort_direction)
                     .width(60.0)
@@ -155,9 +200,9 @@ fn show_filter_bar(
             });
 
             ui.horizontal(|ui| {
-                ui.label("Limit:");
+                ui.colored_label(theme::text_dim(), "Limit:");
                 ui.add(egui::TextEdit::singleline(&mut state.record_limit).desired_width(50.0));
-                ui.label("Offset:");
+                ui.colored_label(theme::text_dim(), "Offset:");
                 ui.add(egui::TextEdit::singleline(&mut state.record_offset).desired_width(50.0));
             });
         });
@@ -213,7 +258,10 @@ fn show_filter_bar(
             });
         }
 
-        ui.label(format!("{} records", state.records.len()));
+        ui.colored_label(
+            theme::text_dim(),
+            format!("{} records", state.records.len()),
+        );
     });
 }
 

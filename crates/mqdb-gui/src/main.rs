@@ -2,6 +2,7 @@ mod app;
 mod client;
 mod panels;
 mod state;
+mod theme;
 
 use eframe::egui;
 
@@ -17,7 +18,9 @@ fn main() -> eframe::Result {
     let (ui_tx, ui_rx) = flume::bounded::<state::UiEvent>(256);
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
     };
 
@@ -25,6 +28,8 @@ fn main() -> eframe::Result {
         "MQDB",
         options,
         Box::new(move |cc| {
+            theme::apply(&cc.egui_ctx);
+
             let repaint_ctx = cc.egui_ctx.clone();
             let repaint = Box::new(move || repaint_ctx.request_repaint());
 

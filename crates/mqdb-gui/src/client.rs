@@ -2,8 +2,12 @@ use crate::state::{CatalogData, Command, FilterSpec, LiveEvent, SortSpec, UiEven
 use mqtt5::client::MqttClient;
 use mqtt5::{PublishOptions, QoS};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+type PendingMap = Arc<Mutex<HashMap<String, flume::Sender<Vec<u8>>>>>;
 
 pub struct MqttBackend {
     cmd_rx: flume::Receiver<Command>,
@@ -12,6 +16,8 @@ pub struct MqttBackend {
     client: Option<MqttClient>,
     event_client: Option<MqttClient>,
     broker_addr: String,
+    response_base: String,
+    pending: PendingMap,
 }
 
 impl MqttBackend {
@@ -27,6 +33,8 @@ impl MqttBackend {
             client: None,
             event_client: None,
             broker_addr: String::new(),
+            response_base: String::new(),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -100,14 +108,41 @@ impl MqttBackend {
 
         let client = MqttClient::new(&client_id);
         let options = if let (Some(user), Some(pass)) = (username, password) {
-            mqtt5::ConnectOptions::new(&client_id).with_credentials(user, pass)
-        } else {
             mqtt5::ConnectOptions::new(&client_id)
+                .with_credentials(user, pass)
+                .with_automatic_reconnect(false)
+        } else {
+            mqtt5::ConnectOptions::new(&client_id).with_automatic_reconnect(false)
         };
 
         match Box::pin(client.connect_with_options(&addr, options)).await {
             Ok(_) => {
                 info!("connected to broker");
+                let response_base = format!("_gui/resp/{client_id}");
+                let wildcard_topic = format!("{response_base}/#");
+                let prefix = response_base.clone();
+                let pending = Arc::clone(&self.pending);
+                if let Err(e) = client
+                    .subscribe(&wildcard_topic, move |msg| {
+                        let request_id = msg.topic.strip_prefix(&prefix)
+                            .and_then(|rest| rest.strip_prefix('/'));
+                        if let Some(id) = request_id
+                            && let Ok(mut map) = pending.lock()
+                            && let Some(tx) = map.remove(id)
+                        {
+                            let _ = tx.send(msg.payload.clone());
+                        }
+                    })
+                    .await
+                {
+                    error!(error = %e, "failed to subscribe to response topic");
+                    let _ = client.disconnect().await;
+                    self.send_event(UiEvent::ConnectionError(format!(
+                        "failed to subscribe to response topic: {e}"
+                    )));
+                    return;
+                }
+                self.response_base = response_base;
                 self.broker_addr = addr;
                 self.client = Some(client);
                 self.send_event(UiEvent::Connected);
@@ -126,31 +161,34 @@ impl MqttBackend {
         if let Some(ec) = self.event_client.take() {
             let _ = ec.disconnect().await;
         }
+        self.response_base.clear();
+        if let Ok(mut map) = self.pending.lock() {
+            map.clear();
+        }
         self.broker_addr.clear();
         self.send_event(UiEvent::Disconnected);
     }
 
     async fn request_response(&self, topic: &str, payload: Value) -> Option<Value> {
         let client = self.client.as_ref()?;
-        let response_topic = format!("_gui/resp/{}", uuid::Uuid::new_v4());
+        if self.response_base.is_empty() {
+            warn!("response topic not set up");
+            return None;
+        }
 
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let response_topic = format!("{}/{request_id}", self.response_base);
         let (resp_tx, resp_rx) = flume::bounded::<Vec<u8>>(1);
 
-        if let Err(e) = client
-            .subscribe(&response_topic, move |msg| {
-                let _ = resp_tx.send(msg.payload.clone());
-            })
-            .await
-        {
-            warn!(error = %e, "failed to subscribe to response topic");
-            return None;
+        if let Ok(mut map) = self.pending.lock() {
+            map.insert(request_id.clone(), resp_tx);
         }
 
         let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
         let opts = PublishOptions {
             qos: QoS::AtLeastOnce,
             properties: mqtt5::PublishProperties {
-                response_topic: Some(response_topic.clone()),
+                response_topic: Some(response_topic),
                 ..Default::default()
             },
             ..Default::default()
@@ -161,19 +199,23 @@ impl MqttBackend {
             .await
         {
             warn!(error = %e, topic = %topic, "failed to publish request");
-            let _ = client.unsubscribe(&response_topic).await;
+            if let Ok(mut map) = self.pending.lock() {
+                map.remove(&request_id);
+            }
             return None;
         }
 
         let result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx.recv_async()).await;
+            tokio::time::timeout(Duration::from_secs(5), resp_rx.recv_async()).await;
 
-        let _ = client.unsubscribe(&response_topic).await;
+        if let Ok(mut map) = self.pending.lock() {
+            map.remove(&request_id);
+        }
 
         match result {
             Ok(Ok(data)) => serde_json::from_slice(&data).ok(),
             Ok(Err(e)) => {
-                warn!(error = %e, "failed to receive response");
+                warn!(error = %e, "response channel closed");
                 None
             }
             Err(_) => {
@@ -416,7 +458,7 @@ impl MqttBackend {
 
         let client_id = format!("mqdb-gui-events-{}", uuid::Uuid::new_v4());
         let event_client = MqttClient::new(&client_id);
-        let options = mqtt5::ConnectOptions::new(&client_id);
+        let options = mqtt5::ConnectOptions::new(&client_id).with_automatic_reconnect(false);
 
         if Box::pin(event_client.connect_with_options(&self.broker_addr, options))
             .await
