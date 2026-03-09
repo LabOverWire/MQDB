@@ -121,6 +121,22 @@ impl DbDataStore {
         self.len() == 0
     }
 
+    #[must_use]
+    pub fn entity_names(&self) -> Vec<String> {
+        let entities = self.read_entities();
+        let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for key in entities.keys() {
+            if let Some(entity) = key.split('/').next()
+                && !entity.starts_with('_')
+            {
+                names.insert(entity.to_string());
+            }
+        }
+        let mut result: Vec<String> = names.into_iter().collect();
+        result.sort();
+        result
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     ///

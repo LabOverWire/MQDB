@@ -445,6 +445,16 @@ impl ConstraintManager {
         Ok(())
     }
 
+    #[must_use]
+    pub fn entity_names(&self) -> Vec<String> {
+        self.constraints.keys().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn all_constraints(&self) -> &HashMap<String, Vec<Constraint>> {
+        &self.constraints
+    }
+
     pub fn remove_constraint(&mut self, batch: &mut BatchWriter, entity: &str, name: &str) {
         if let Some(constraints) = self.constraints.get_mut(entity)
             && let Some(pos) = constraints.iter().position(|c| c.name() == name)

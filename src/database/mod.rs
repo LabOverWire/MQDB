@@ -18,7 +18,7 @@ use crate::relationship::RelationshipRegistry;
 use crate::schema::SchemaRegistry;
 use crate::storage::Storage;
 use crate::subscription::SubscriptionRegistry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
@@ -40,6 +40,7 @@ pub struct Database {
     schema_registry: Arc<RwLock<SchemaRegistry>>,
     constraint_manager: Arc<RwLock<ConstraintManager>>,
     consumer_groups: Arc<RwLock<HashMap<String, ConsumerGroup>>>,
+    entity_names: Arc<RwLock<HashSet<String>>>,
     id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
@@ -112,6 +113,24 @@ impl Database {
         constraint_manager.load_constraints(&storage)?;
         let constraint_manager = Arc::new(RwLock::new(constraint_manager));
 
+        let mut entity_names: HashSet<String> = HashSet::new();
+        for name in schema_registry.read().await.entity_names() {
+            entity_names.insert(name);
+        }
+        for name in constraint_manager.read().await.entity_names() {
+            entity_names.insert(name);
+        }
+        if let Ok(items) = storage.prefix_scan(b"data/") {
+            for (key, _) in items {
+                if let Ok((entity, _)) = crate::keys::decode_data_key(&key)
+                    && !entity.starts_with('_')
+                {
+                    entity_names.insert(entity);
+                }
+            }
+        }
+        let entity_names = Arc::new(RwLock::new(entity_names));
+
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -135,6 +154,7 @@ impl Database {
             schema_registry,
             constraint_manager,
             consumer_groups,
+            entity_names,
             id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
             shutdown_tx,
@@ -172,6 +192,44 @@ impl Database {
     #[must_use]
     pub fn event_receiver(&self) -> tokio::sync::broadcast::Receiver<crate::events::ChangeEvent> {
         self.dispatcher.subscribe()
+    }
+
+    pub async fn entity_names(&self) -> Vec<String> {
+        let names = self.entity_names.read().await;
+        let mut result: Vec<String> = names.iter().cloned().collect();
+        result.sort();
+        result
+    }
+
+    pub async fn register_entity_name(&self, name: &str) {
+        if !name.starts_with('_') {
+            let mut names = self.entity_names.write().await;
+            names.insert(name.to_string());
+        }
+    }
+
+    #[must_use]
+    pub fn entity_record_count(&self, entity_name: &str) -> usize {
+        let prefix = format!("data/{entity_name}/");
+        self.storage
+            .prefix_scan(prefix.as_bytes())
+            .map_or(0, |items| items.len())
+    }
+
+    pub async fn all_schemas(&self) -> Vec<crate::schema::Schema> {
+        let registry = self.schema_registry.read().await;
+        let names = registry.entity_names();
+        names
+            .iter()
+            .filter_map(|name| registry.get_schema(name).cloned())
+            .collect()
+    }
+
+    pub async fn all_constraints(
+        &self,
+    ) -> std::collections::HashMap<String, Vec<crate::constraint::Constraint>> {
+        let manager = self.constraint_manager.read().await;
+        manager.all_constraints().clone()
     }
 }
 

@@ -71,6 +71,7 @@ pub enum AdminOperation {
     AclAssignmentUnassign,
     AclAssignmentList,
     IndexAdd { entity: String },
+    Catalog,
 }
 
 type ListOptions = (
@@ -138,6 +139,7 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
         ["acl", "assignments", "assign"] => Some(AdminOperation::AclAssignmentAssign),
         ["acl", "assignments", "unassign"] => Some(AdminOperation::AclAssignmentUnassign),
         ["acl", "assignments", "list"] => Some(AdminOperation::AclAssignmentList),
+        ["catalog"] => Some(AdminOperation::Catalog),
         _ => None,
     }
 }
@@ -443,5 +445,11 @@ mod tests {
     fn test_parse_admin_topic_health() {
         let op = parse_admin_topic("$DB/_health").unwrap();
         assert!(matches!(op, AdminOperation::Health));
+    }
+
+    #[test]
+    fn test_parse_admin_topic_catalog() {
+        let op = parse_admin_topic("$DB/_admin/catalog").unwrap();
+        assert!(matches!(op, AdminOperation::Catalog));
     }
 }

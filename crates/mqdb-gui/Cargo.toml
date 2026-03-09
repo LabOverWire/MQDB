@@ -1,0 +1,24 @@
+[package]
+name = "mqdb-gui"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["LabOverWire"]
+description = "Desktop GUI frontend for MQDB"
+repository = "https://github.com/LabOverWire/MQDB"
+
+[[bin]]
+name = "mqdb-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.31"
+egui_extras = { version = "0.31", features = ["all_loaders"] }
+mqtt5 = { version = "0.22" }
+tokio = { version = "1.49", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.19", features = ["v4"] }
+flume = { version = "0.12", features = ["async"] }

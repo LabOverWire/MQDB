@@ -40,7 +40,17 @@ pub(super) async fn handle_message(
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        handle_admin_operation(db, client, &message, admin_op, backup_dir, auth_providers).await;
+        handle_admin_operation(
+            db,
+            client,
+            &message,
+            admin_op,
+            backup_dir,
+            auth_providers,
+            ownership,
+            scope_config,
+        )
+        .await;
         return;
     }
 
@@ -314,6 +324,7 @@ fn vault_decrypt_response(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_admin_operation(
     db: &Database,
     client: &MqttClient,
@@ -321,6 +332,8 @@ async fn handle_admin_operation(
     op: AdminOperation,
     backup_dir: &Path,
     auth_providers: Option<&ComprehensiveAuthProvider>,
+    ownership: &OwnershipConfig,
+    scope_config: &ScopeConfig,
 ) {
     let payload: Value = if message.payload.is_empty() {
         Value::Null
@@ -377,6 +390,7 @@ async fn handle_admin_operation(
             handle_acl_assignment_list(auth_providers, &payload).await
         }
         AdminOperation::IndexAdd { entity } => handle_index_add(db, entity, &payload).await,
+        AdminOperation::Catalog => handle_catalog(db, ownership, scope_config).await,
     };
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -658,6 +672,57 @@ async fn handle_consumer_group_show(db: &Database, name: &str) -> Response {
             format!("consumer group not found: {name}"),
         ),
     }
+}
+
+async fn handle_catalog(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    scope_config: &ScopeConfig,
+) -> Response {
+    use serde_json::json;
+
+    let entity_names = db.entity_names().await;
+    let all_constraints = db.all_constraints().await;
+
+    let mut entities = Vec::new();
+    for name in &entity_names {
+        let record_count = db.entity_record_count(name);
+        let schema = db.get_schema(name).await;
+        let constraints = all_constraints.get(name).cloned().unwrap_or_default();
+        let constraint_data: Vec<Value> = constraints
+            .iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
+            .collect();
+
+        let ownership_info = ownership
+            .owner_field(name)
+            .map(|field| json!({"field": field}));
+        let scope_info = if scope_config.is_empty() {
+            None
+        } else {
+            Some(json!({
+                "entity": scope_config.scope_entity(),
+                "field": scope_config.scope_field()
+            }))
+        };
+
+        entities.push(json!({
+            "name": name,
+            "record_count": record_count,
+            "schema": schema.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
+            "constraints": constraint_data,
+            "ownership": ownership_info,
+            "scope": scope_info,
+        }));
+    }
+
+    Response::ok(json!({
+        "entities": entities,
+        "server": {
+            "mode": "agent",
+            "vault_enabled": false
+        }
+    }))
 }
 
 fn handle_health(db: &Database) -> Response {

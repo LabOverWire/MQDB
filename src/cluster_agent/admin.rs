@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 impl ClusteredAgent {
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_admin_request(
         &self,
         client: &mqtt5::client::MqttClient,
@@ -35,6 +36,8 @@ impl ClusteredAgent {
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid schema operation")
             }
+        } else if req.topic == "$DB/_admin/catalog" {
+            self.handle_catalog().await
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/index/") {
             if let Some(entity) = rest.strip_suffix("/add") {
                 Self::handle_index_add(entity, &req.payload)
@@ -115,6 +118,102 @@ impl ClusteredAgent {
         if let Err(e) = client.publish(&response_topic, payload).await {
             warn!(error = %e, "failed to send admin response");
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_catalog(&self) -> Response {
+        let ctrl = self.controller.read().await;
+
+        let mut entity_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for schema in ctrl.schema_list() {
+            let name = schema.entity_str().to_string();
+            if !name.starts_with('_') {
+                entity_set.insert(name);
+            }
+        }
+        for constraint in ctrl.constraint_list_all() {
+            let name = constraint.entity_str().to_string();
+            if !name.starts_with('_') {
+                entity_set.insert(name);
+            }
+        }
+        for name in ctrl.stores().db_data.entity_names() {
+            entity_set.insert(name);
+        }
+
+        let mut entity_names: Vec<String> = entity_set.into_iter().collect();
+        entity_names.sort();
+
+        let mut entities = Vec::new();
+        for name in &entity_names {
+            let record_count = ctrl.stores().db_data.list(name).len();
+
+            let schema_info = ctrl.schema_get(name).map(|s| {
+                let data: serde_json::Value =
+                    serde_json::from_slice(&s.data).unwrap_or(serde_json::Value::Null);
+                json!({
+                    "entity": s.entity_str(),
+                    "version": s.schema_version,
+                    "schema": data
+                })
+            });
+
+            let constraints = ctrl.constraint_list(name);
+            let constraint_data: Vec<serde_json::Value> = constraints
+                .iter()
+                .map(|c| {
+                    if c.is_foreign_key() {
+                        json!({
+                            "name": c.name_str(),
+                            "type": "fk",
+                            "field": c.field_str(),
+                            "target_entity": c.target_entity_str(),
+                            "target_field": c.target_field_str(),
+                            "on_delete": c.on_delete_action().as_str()
+                        })
+                    } else {
+                        json!({
+                            "name": c.name_str(),
+                            "type": "unique",
+                            "field": c.field_str()
+                        })
+                    }
+                })
+                .collect();
+
+            let ownership_info = self
+                .ownership
+                .owner_field(name)
+                .map(|field| json!({"field": field}));
+            let scope_info = if self.scope_config.is_empty() {
+                None
+            } else {
+                Some(json!({
+                    "entity": self.scope_config.scope_entity(),
+                    "field": self.scope_config.scope_field()
+                }))
+            };
+
+            entities.push(json!({
+                "name": name,
+                "record_count": record_count,
+                "schema": schema_info,
+                "constraints": constraint_data,
+                "ownership": ownership_info,
+                "scope": scope_info,
+            }));
+        }
+
+        let raft_status = self.rx_raft_status.borrow().clone();
+        Response::ok(json!({
+            "entities": entities,
+            "server": {
+                "mode": "cluster",
+                "node_id": self.node_id.get(),
+                "is_leader": raft_status.is_leader,
+                "vault_enabled": false
+            }
+        }))
     }
 
     async fn build_status_response(&self) -> Response {

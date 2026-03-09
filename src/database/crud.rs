@@ -86,6 +86,8 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &constraint_entity, None);
 
+        self.register_entity_name(&entity_name).await;
+
         let scope = scope_config.resolve_scope(&entity_name, &data);
         let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
             .with_sender(sender.map(String::from))

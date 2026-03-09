@@ -232,6 +232,11 @@ impl SchemaRegistry {
         Ok(())
     }
 
+    #[must_use]
+    pub fn entity_names(&self) -> Vec<String> {
+        self.schemas.keys().cloned().collect()
+    }
+
     pub fn remove_schema(&mut self, batch: &mut BatchWriter, entity: &str) {
         self.schemas.remove(entity);
         let key = keys::encode_schema_key(entity);
