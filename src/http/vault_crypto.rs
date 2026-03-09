@@ -143,6 +143,12 @@ impl VaultCrypto {
                     *s = encrypted;
                 }
             }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+                let text = format!("\x01{value}");
+                if let Ok(encrypted) = self.encrypt_value(entity, id, text.as_bytes()) {
+                    *value = serde_json::Value::String(encrypted);
+                }
+            }
             serde_json::Value::Object(map) => {
                 let keys: Vec<String> = map.keys().cloned().collect();
                 for key in keys {
@@ -159,20 +165,26 @@ impl VaultCrypto {
                     self.encrypt_value_recursive(entity, id, elem);
                 }
             }
-            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
-            }
         }
     }
 
     fn decrypt_value_recursive(&self, entity: &str, id: &str, value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::String(s) => {
-                if let Ok(decrypted) = self.decrypt_value(entity, id, s) {
-                    if let Ok(plain) = String::from_utf8(decrypted) {
-                        *s = plain;
+        if let serde_json::Value::String(s) = &*value {
+            if let Ok(decrypted) = self.decrypt_value(entity, id, s)
+                && let Ok(plain) = String::from_utf8(decrypted)
+            {
+                if let Some(json_text) = plain.strip_prefix('\x01') {
+                    if let Ok(restored) = serde_json::from_str(json_text) {
+                        *value = restored;
                     }
+                } else {
+                    *value = serde_json::Value::String(plain);
                 }
             }
+            return;
+        }
+
+        match value {
             serde_json::Value::Object(map) => {
                 let keys: Vec<String> = map.keys().cloned().collect();
                 for key in keys {
@@ -189,8 +201,7 @@ impl VaultCrypto {
                     self.decrypt_value_recursive(entity, id, elem);
                 }
             }
-            serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
-            }
+            _ => {}
         }
     }
 
@@ -299,14 +310,26 @@ mod tests {
         assert_eq!(data["owner"], "user-abc");
         assert_ne!(data["name"].as_str().unwrap(), "Alice");
         assert_ne!(data["email"].as_str().unwrap(), "alice@example.com");
-        assert_eq!(data["age"], 30);
-        assert_eq!(data["active"], true);
-        assert!(data["notes"].is_null());
+        assert!(
+            data["age"].is_string(),
+            "number should be encrypted to string"
+        );
+        assert!(
+            data["active"].is_string(),
+            "bool should be encrypted to string"
+        );
+        assert!(
+            data["notes"].is_string(),
+            "null should be encrypted to string"
+        );
 
         crypto.decrypt_record("people", "rec-1", &mut data, &["id", "owner"]);
 
         assert_eq!(data["name"], "Alice");
         assert_eq!(data["email"], "alice@example.com");
+        assert_eq!(data["age"], 30);
+        assert_eq!(data["active"], true);
+        assert!(data["notes"].is_null());
     }
 
     #[test]
@@ -324,12 +347,13 @@ mod tests {
         assert_eq!(data["id"], "rec-1");
         assert_ne!(data["profile"]["name"].as_str().unwrap(), "Alice");
         assert_ne!(data["profile"]["city"].as_str().unwrap(), "Paris");
-        assert_eq!(data["score"], 99);
+        assert!(data["score"].is_string());
 
         crypto.decrypt_record("people", "rec-1", &mut data, &["id"]);
 
         assert_eq!(data["profile"]["name"], "Alice");
         assert_eq!(data["profile"]["city"], "Paris");
+        assert_eq!(data["score"], 99);
     }
 
     #[test]
@@ -346,14 +370,17 @@ mod tests {
 
         assert_ne!(data["tags"][0].as_str().unwrap(), "alpha");
         assert_ne!(data["tags"][1].as_str().unwrap(), "beta");
-        assert_eq!(data["counts"][0], 1);
-        assert_eq!(data["counts"][1], 2);
-        assert_eq!(data["counts"][2], 3);
+        assert!(data["counts"][0].is_string());
+        assert!(data["counts"][1].is_string());
+        assert!(data["counts"][2].is_string());
 
         crypto.decrypt_record("entity", "rec-1", &mut data, &["id"]);
 
         assert_eq!(data["tags"][0], "alpha");
         assert_eq!(data["tags"][1], "beta");
+        assert_eq!(data["counts"][0], 1);
+        assert_eq!(data["counts"][1], 2);
+        assert_eq!(data["counts"][2], 3);
     }
 
     #[test]
@@ -372,7 +399,7 @@ mod tests {
         crypto.encrypt_record("entity", "rec-1", &mut data, &["id"]);
 
         assert_ne!(data["data"]["items"][0]["label"].as_str().unwrap(), "X");
-        assert_eq!(data["data"]["items"][0]["count"], 5);
+        assert!(data["data"]["items"][0]["count"].is_string());
         assert_ne!(
             data["data"]["items"][0]["nested"]["secret"]
                 .as_str()
@@ -383,6 +410,7 @@ mod tests {
         crypto.decrypt_record("entity", "rec-1", &mut data, &["id"]);
 
         assert_eq!(data["data"]["items"][0]["label"], "X");
+        assert_eq!(data["data"]["items"][0]["count"], 5);
         assert_eq!(data["data"]["items"][0]["nested"]["secret"], "deep");
     }
 
@@ -462,5 +490,94 @@ mod tests {
         let token = crypto1.create_check_token().unwrap();
         assert!(crypto1.verify_check_token(&token));
         assert!(!crypto2.verify_check_token(&token));
+    }
+
+    #[test]
+    fn number_roundtrip_preserves_type() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({"id": "r1", "val": 42});
+
+        crypto.encrypt_record("e", "r1", &mut data, &["id"]);
+        assert!(data["val"].is_string());
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert_eq!(data["val"], 42);
+    }
+
+    #[test]
+    fn bool_roundtrip_preserves_type() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({"id": "r1", "flag": true, "off": false});
+
+        crypto.encrypt_record("e", "r1", &mut data, &["id"]);
+        assert!(data["flag"].is_string());
+        assert!(data["off"].is_string());
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert_eq!(data["flag"], true);
+        assert_eq!(data["off"], false);
+    }
+
+    #[test]
+    fn null_roundtrip_preserves_type() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({"id": "r1", "empty": null});
+
+        crypto.encrypt_record("e", "r1", &mut data, &["id"]);
+        assert!(data["empty"].is_string());
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert!(data["empty"].is_null());
+    }
+
+    #[test]
+    fn float_roundtrip_preserves_type() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({"id": "r1", "price": 19.99});
+
+        crypto.encrypt_record("e", "r1", &mut data, &["id"]);
+        assert!(data["price"].is_string());
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert!((data["price"].as_f64().unwrap() - 19.99).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn mixed_array_roundtrip() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let mut data = serde_json::json!({
+            "id": "r1",
+            "mix": ["text", 42, true, null]
+        });
+
+        crypto.encrypt_record("e", "r1", &mut data, &["id"]);
+        for i in 0..4 {
+            assert!(
+                data["mix"][i].is_string(),
+                "element {i} should be encrypted to string"
+            );
+        }
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert_eq!(data["mix"][0], "text");
+        assert_eq!(data["mix"][1], 42);
+        assert_eq!(data["mix"][2], true);
+        assert!(data["mix"][3].is_null());
+    }
+
+    #[test]
+    fn backward_compat_string_without_prefix() {
+        let salt = VaultCrypto::generate_salt();
+        let crypto = VaultCrypto::derive("pass123", &salt);
+        let encrypted = crypto.encrypt_value("e", "r1", b"plain string").unwrap();
+        let mut data = serde_json::json!({"id": "r1", "val": encrypted});
+
+        crypto.decrypt_record("e", "r1", &mut data, &["id"]);
+        assert_eq!(data["val"], "plain string");
     }
 }
