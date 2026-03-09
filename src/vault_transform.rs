@@ -110,14 +110,14 @@ pub fn vault_decrypt_fields(
 }
 
 fn decrypt_value_recursive(crypto: &VaultCrypto, entity: &str, id: &str, value: &mut Value) {
-    if let Value::String(s) = &*value {
-        let mut wrapper = serde_json::json!({ "v": s.as_str() });
+    if value.is_string() {
+        let taken = std::mem::take(value);
+        let mut wrapper = serde_json::json!({ "v": taken });
         crypto.decrypt_record(entity, id, &mut wrapper, &[]);
-        if let Some(decrypted) = wrapper.get("v") {
-            if decrypted.as_str().is_some_and(|d| d == s) {
-                return;
-            }
-            *value = decrypted.clone();
+        if let Some(map) = wrapper.as_object_mut()
+            && let Some(decrypted) = map.remove("v")
+        {
+            *value = decrypted;
         }
         return;
     }
