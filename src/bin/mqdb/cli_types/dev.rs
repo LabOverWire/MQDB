@@ -8,11 +8,11 @@ use std::path::PathBuf;
 pub(crate) enum DevAction {
     Ps,
     Kill {
-        #[arg(long)]
+        #[arg(long, help = "Kill all nodes")]
         all: bool,
-        #[arg(long)]
+        #[arg(long, help = "Kill specific node by ID")]
         node: Option<u16>,
-        #[arg(long)]
+        #[arg(long, help = "Kill agent process")]
         agent: bool,
     },
     Clean {
@@ -20,43 +20,43 @@ pub(crate) enum DevAction {
         db_prefix: String,
     },
     Logs {
-        #[arg(long)]
+        #[arg(long, help = "Node number")]
         node: Option<u16>,
-        #[arg(long)]
+        #[arg(long, help = "Filter log lines by pattern")]
         pattern: Option<String>,
-        #[arg(long, short = 'f')]
+        #[arg(long, short = 'f', help = "Follow log output")]
         follow: bool,
-        #[arg(long, default_value = "50")]
+        #[arg(long, default_value = "50", help = "Number of recent lines to show")]
         last: usize,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
     },
     Test {
-        #[arg(long)]
+        #[arg(long, help = "Run pub/sub tests")]
         pubsub: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run DB CRUD tests")]
         db: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run constraint tests")]
         constraints: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run wildcard subscription tests")]
         wildcards: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run retained message tests")]
         retained: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run Last Will & Testament tests")]
         lwt: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run ownership tests")]
         ownership: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run constraint stress tests")]
         stress_constraints: bool,
-        #[arg(long)]
+        #[arg(long, help = "Run all test suites")]
         all: bool,
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "3", help = "Number of cluster nodes")]
         nodes: u8,
     },
     StartCluster {
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "3", help = "Number of cluster nodes to start")]
         nodes: u8,
-        #[arg(long)]
+        #[arg(long, help = "Remove existing data before starting")]
         clean: bool,
         #[arg(long, default_value = "test_certs/server.pem")]
         quic_cert: PathBuf,
@@ -64,7 +64,7 @@ pub(crate) enum DevAction {
         quic_key: PathBuf,
         #[arg(long, default_value = "test_certs/ca.pem")]
         quic_ca: PathBuf,
-        #[arg(long)]
+        #[arg(long, help = "Disable QUIC transport")]
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
