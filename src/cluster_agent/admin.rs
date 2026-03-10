@@ -346,14 +346,17 @@ impl ClusteredAgent {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let field = constraint_def
-            .get("field")
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
+            .or_else(|| constraint_def.get("field").and_then(|v| v.as_str()))
             .unwrap_or("");
 
         if name.is_empty() || field.is_empty() {
             return Response::error(
                 ErrorCode::BadRequest,
-                "constraint requires 'name' and 'field' parameters",
+                "constraint requires 'name' and 'fields' parameters",
             );
         }
 
