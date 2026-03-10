@@ -452,4 +452,20 @@ mod tests {
         let op = parse_admin_topic("$DB/_admin/catalog").unwrap();
         assert!(matches!(op, AdminOperation::Catalog));
     }
+
+    #[test]
+    fn test_extract_list_options_with_eq_filter() {
+        let payload = serde_json::json!({
+            "filters": [{"field": "email", "op": "eq", "value": "alice@example.com"}]
+        });
+        let (filters, sort, pagination, includes, projection) = extract_list_options(&payload);
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].field, "email");
+        assert!(matches!(filters[0].op, crate::FilterOp::Eq));
+        assert_eq!(filters[0].value, serde_json::json!("alice@example.com"));
+        assert!(sort.is_empty());
+        assert!(pagination.is_none());
+        assert!(includes.is_empty());
+        assert!(projection.is_none());
+    }
 }

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use mqdb::{
-    Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, Schema, ScopeConfig,
-    SortDirection, SortOrder,
+    Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, OwnershipConfig,
+    Schema, ScopeConfig, SortDirection, SortOrder,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -1508,4 +1508,253 @@ async fn test_read_projection_validates_against_schema() {
         .await;
 
     assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_index_backfill_on_add_index() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let users = vec![
+        json!({"name": "Alice", "status": "active"}),
+        json!({"name": "Bob", "status": "active"}),
+        json!({"name": "Charlie", "status": "inactive"}),
+    ];
+
+    for user in users {
+        db.create(
+            "users".into(),
+            user,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    db.add_index("users".into(), vec!["status".into()])
+        .await
+        .unwrap();
+
+    let active_filter = Filter::new("status".into(), FilterOp::Eq, json!("active"));
+    let active_users = db
+        .list(
+            "users".into(),
+            vec![active_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(active_users.len(), 2);
+
+    let inactive_filter = Filter::new("status".into(), FilterOp::Eq, json!("inactive"));
+    let inactive_users = db
+        .list(
+            "users".into(),
+            vec![inactive_filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(inactive_users.len(), 1);
+    assert_eq!(inactive_users[0]["name"], "Charlie");
+}
+
+#[tokio::test]
+async fn test_list_filter_eq_returns_only_matching_records() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    db.create(
+        "_identity_links".into(),
+        json!({"email": "alice@example.com", "canonical_id": "canon-aaa"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.create(
+        "_identity_links".into(),
+        json!({"email": "bob@example.com", "canonical_id": "canon-bbb"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let filter = Filter::new("email".into(), FilterOp::Eq, json!("alice@example.com"));
+    let results = db
+        .list(
+            "_identity_links".into(),
+            vec![filter],
+            vec![],
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["canonical_id"], "canon-aaa");
+    assert_eq!(results[0]["email"], "alice@example.com");
+}
+
+#[tokio::test]
+async fn test_ownership_isolates_user_data_on_list() {
+    use mqdb::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"userId": "user-aaa", "title": "Alice Diagram"}),
+    })
+    .await;
+
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"userId": "user-bbb", "title": "Bob Diagram"}),
+    })
+    .await;
+
+    let resp_aaa = db
+        .execute_with_sender(
+            Request::List {
+                entity: "diagrams".into(),
+                filters: vec![],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            },
+            Some("user-aaa"),
+            None,
+            &ownership,
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+
+    match resp_aaa {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["userId"], "user-aaa");
+            assert_eq!(items[0]["title"], "Alice Diagram");
+        }
+        Response::Error { code, message } => {
+            panic!("expected ok for user-aaa, got {code}: {message}")
+        }
+    }
+
+    let resp_bbb = db
+        .execute_with_sender(
+            Request::List {
+                entity: "diagrams".into(),
+                filters: vec![],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            },
+            Some("user-bbb"),
+            None,
+            &ownership,
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+
+    match resp_bbb {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["userId"], "user-bbb");
+            assert_eq!(items[0]["title"], "Bob Diagram");
+        }
+        Response::Error { code, message } => {
+            panic!("expected ok for user-bbb, got {code}: {message}")
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ownership_list_with_additional_filter() {
+    use mqdb::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"userId": "user-aaa", "title": "Draft"}),
+    })
+    .await;
+
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"userId": "user-aaa", "title": "Published"}),
+    })
+    .await;
+
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"userId": "user-bbb", "title": "Draft"}),
+    })
+    .await;
+
+    let resp = db
+        .execute_with_sender(
+            Request::List {
+                entity: "diagrams".into(),
+                filters: vec![Filter::new("title".into(), FilterOp::Eq, json!("Draft"))],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            },
+            Some("user-aaa"),
+            None,
+            &ownership,
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+
+    match resp {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["userId"], "user-aaa");
+            assert_eq!(items[0]["title"], "Draft");
+        }
+        Response::Error { code, message } => panic!("expected ok, got {code}: {message}"),
+    }
 }

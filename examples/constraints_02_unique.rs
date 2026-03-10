@@ -2,130 +2,101 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use mqdb::{Database, ScopeConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = Database::open("data/unique_example").await?;
-
-    db.add_unique_constraint("users".into(), vec!["email".into()])
-        .await?;
-
-    println!("=== Unique Constraints ===\n");
-
-    println!("Creating user with email alice@example.com...");
-    let user1 = json!({
-        "name": "Alice",
-        "email": "alice@example.com"
-    });
-    let created = db
-        .create(
-            "users".into(),
-            user1,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await?;
-    println!("✓ Created: {created}\n");
-
-    println!("Creating another user with different email...");
-    let user2 = json!({
-        "name": "Bob",
-        "email": "bob@example.com"
-    });
-    let created = db
-        .create(
-            "users".into(),
-            user2,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await?;
-    println!("✓ Created: {created}\n");
-
-    println!("Attempting to create user with duplicate email...");
-    let duplicate = json!({
-        "name": "Charlie",
-        "email": "alice@example.com"
-    });
-    match db
-        .create(
-            "users".into(),
-            duplicate,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await
-    {
-        Ok(_) => println!("✗ Should have failed!"),
-        Err(e) => println!("✓ Unique constraint violation: {e}\n"),
-    }
-
-    println!("=== Composite Unique Constraints ===\n");
-
-    db.add_unique_constraint("posts".into(), vec!["user_id".into(), "slug".into()])
-        .await?;
-
-    println!("Creating post with user_id=1, slug='hello'...");
-    let post1 = json!({
-        "user_id": "1",
-        "slug": "hello",
-        "title": "Hello World"
-    });
+async fn create_record(db: &Database, entity: &str, data: Value) -> mqdb::Result<Value> {
     db.create(
-        "posts".into(),
-        post1,
+        entity.into(),
+        data,
         None,
         None,
         None,
         &ScopeConfig::default(),
+    )
+    .await
+}
+
+async fn demo_single_field(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    db.add_unique_constraint("users".into(), vec!["email".into()])
+        .await?;
+
+    println!("Creating user with email alice@example.com...");
+    let created = create_record(
+        db,
+        "users",
+        json!({"name": "Alice", "email": "alice@example.com"}),
+    )
+    .await?;
+    println!("✓ Created: {created}\n");
+
+    println!("Creating another user with different email...");
+    let created = create_record(
+        db,
+        "users",
+        json!({"name": "Bob", "email": "bob@example.com"}),
+    )
+    .await?;
+    println!("✓ Created: {created}\n");
+
+    println!("Attempting to create user with duplicate email...");
+    match create_record(
+        db,
+        "users",
+        json!({"name": "Charlie", "email": "alice@example.com"}),
+    )
+    .await
+    {
+        Ok(_) => println!("✗ Should have failed!"),
+        Err(e) => println!("✓ Unique constraint violation: {e}\n"),
+    }
+    Ok(())
+}
+
+async fn demo_composite(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+    db.add_unique_constraint("posts".into(), vec!["user_id".into(), "slug".into()])
+        .await?;
+
+    println!("Creating post with user_id=1, slug='hello'...");
+    create_record(
+        db,
+        "posts",
+        json!({"user_id": "1", "slug": "hello", "title": "Hello World"}),
     )
     .await?;
     println!("✓ Created\n");
 
     println!("Creating post with same slug but different user_id...");
-    let post2 = json!({
-        "user_id": "2",
-        "slug": "hello",
-        "title": "Hello from Bob"
-    });
-    db.create(
-        "posts".into(),
-        post2,
-        None,
-        None,
-        None,
-        &ScopeConfig::default(),
+    create_record(
+        db,
+        "posts",
+        json!({"user_id": "2", "slug": "hello", "title": "Hello from Bob"}),
     )
     .await?;
     println!("✓ Created (different user_id, so allowed)\n");
 
     println!("Attempting to create duplicate (user_id=1, slug='hello')...");
-    let duplicate = json!({
-        "user_id": "1",
-        "slug": "hello",
-        "title": "Duplicate"
-    });
-    match db
-        .create(
-            "posts".into(),
-            duplicate,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await
+    match create_record(
+        db,
+        "posts",
+        json!({"user_id": "1", "slug": "hello", "title": "Duplicate"}),
+    )
+    .await
     {
         Ok(_) => println!("✗ Should have failed!"),
         Err(e) => println!("✓ Unique constraint violation: {e}\n"),
     }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::open("data/unique_example").await?;
+
+    println!("=== Unique Constraints ===\n");
+    demo_single_field(&db).await?;
+
+    println!("=== Composite Unique Constraints ===\n");
+    demo_composite(&db).await?;
 
     println!("Summary:");
     println!("- Unique constraints prevent duplicate values");
