@@ -196,7 +196,7 @@ pub(crate) async fn cmd_constraint_add(
 
     let payload = if let Some(field) = unique {
         let constraint_name = name.unwrap_or_else(|| format!("unique_{entity}_{field}"));
-        json!({ "type": "unique", "name": constraint_name, "field": field })
+        json!({ "type": "unique", "name": constraint_name, "fields": [field] })
     } else if let Some(fk_spec) = fk {
         let parts: Vec<&str> = fk_spec.split(':').collect();
         if parts.len() < 3 {
