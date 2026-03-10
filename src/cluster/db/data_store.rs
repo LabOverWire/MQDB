@@ -223,6 +223,15 @@ impl DbDataStore {
         db_entity
     }
 
+    #[must_use]
+    pub fn entity_record_count(&self, entity: &str) -> usize {
+        let prefix = format!("{entity}/");
+        self.read_entities()
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .count()
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]

@@ -4,7 +4,7 @@
 use mqdb::{Database, OnDeleteAction, ScopeConfig};
 use serde_json::{Value, json};
 
-async fn create_record(db: &Database, entity: &str, data: Value) -> Value {
+async fn create_record(db: &Database, entity: &str, data: Value) -> mqdb::Result<Value> {
     db.create(
         entity.into(),
         data,
@@ -14,7 +14,6 @@ async fn create_record(db: &Database, entity: &str, data: Value) -> Value {
         &ScopeConfig::default(),
     )
     .await
-    .unwrap()
 }
 
 async fn setup_constraints(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
@@ -38,9 +37,9 @@ async fn setup_constraints(db: &Database) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-async fn seed_data(db: &Database) -> String {
+async fn seed_data(db: &Database) -> Result<String, Box<dyn std::error::Error>> {
     println!("Creating user...");
-    let created_user = create_record(db, "users", json!({"name": "Alice"})).await;
+    let created_user = create_record(db, "users", json!({"name": "Alice"})).await?;
     let user_id = created_user["id"].as_str().unwrap().to_string();
     println!("✓ Created user: {user_id}\n");
 
@@ -50,7 +49,7 @@ async fn seed_data(db: &Database) -> String {
         "posts",
         json!({"title": "First Post", "author_id": &user_id}),
     )
-    .await;
+    .await?;
     let post1_id = created_post1["id"].as_str().unwrap();
 
     let created_post2 = create_record(
@@ -58,7 +57,7 @@ async fn seed_data(db: &Database) -> String {
         "posts",
         json!({"title": "Second Post", "author_id": &user_id}),
     )
-    .await;
+    .await?;
     let post2_id = created_post2["id"].as_str().unwrap();
     println!("✓ Created posts: {post1_id}, {post2_id}\n");
 
@@ -68,22 +67,22 @@ async fn seed_data(db: &Database) -> String {
         "comments",
         json!({"text": "Nice!", "post_id": post1_id}),
     )
-    .await;
+    .await?;
     create_record(
         db,
         "comments",
         json!({"text": "Great!", "post_id": post1_id}),
     )
-    .await;
+    .await?;
     create_record(
         db,
         "comments",
         json!({"text": "Awesome!", "post_id": post2_id}),
     )
-    .await;
+    .await?;
     println!("✓ Created 3 comments\n");
 
-    user_id
+    Ok(user_id)
 }
 
 #[tokio::main]
@@ -93,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("=== Foreign Key CASCADE Delete ===\n");
 
-    let user_id = seed_data(&db).await;
+    let user_id = seed_data(&db).await?;
 
     let posts_before = db
         .list("posts".into(), vec![], vec![], None, vec![], None)

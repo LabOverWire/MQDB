@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use crate::constraint::Constraint;
 use crate::http::VaultCrypto;
 use crate::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::{OwnershipConfig, ScopeConfig};
@@ -539,10 +540,7 @@ async fn handle_foreign_key_constraint(
 async fn handle_constraint_list(db: &Database, entity: &str) -> Response {
     use serde_json::json;
     let constraints = db.list_constraints(entity).await;
-    let data: Vec<Value> = constraints
-        .into_iter()
-        .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
-        .collect();
+    let data: Vec<Value> = constraints.iter().map(Constraint::to_api_value).collect();
     Response::ok(json!(data))
 }
 
@@ -689,10 +687,8 @@ async fn handle_catalog(
         let record_count = db.entity_record_count(name);
         let schema = db.get_schema(name).await;
         let constraints = all_constraints.get(name).cloned().unwrap_or_default();
-        let constraint_data: Vec<Value> = constraints
-            .iter()
-            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
-            .collect();
+        let constraint_data: Vec<Value> =
+            constraints.iter().map(Constraint::to_api_value).collect();
 
         let ownership_info = ownership
             .owner_field(name)
@@ -706,10 +702,19 @@ async fn handle_catalog(
             }))
         };
 
+        let schema_info = schema.map(|s| {
+            let fields = serde_json::to_value(&s.fields).unwrap_or(Value::Null);
+            json!({
+                "entity": s.entity,
+                "version": 1,
+                "schema": fields
+            })
+        });
+
         entities.push(json!({
             "name": name,
             "record_count": record_count,
-            "schema": schema.map(|s| serde_json::to_value(s).unwrap_or(Value::Null)),
+            "schema": schema_info,
             "constraints": constraint_data,
             "ownership": ownership_info,
             "scope": scope_info,
