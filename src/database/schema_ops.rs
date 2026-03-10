@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::Database;
+use crate::entity::Entity;
 use crate::error::Result;
+use crate::keys;
 use crate::relationship::Relationship;
 use crate::schema::Schema;
 
@@ -38,7 +40,20 @@ impl Database {
         drop(schema_registry);
 
         let mut manager = self.index_manager.write().await;
-        manager.add_index(crate::index::IndexDefinition::new(entity, fields));
+        manager.add_index(crate::index::IndexDefinition::new(entity.clone(), fields));
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+        let mut batch = self.storage.batch();
+        for (key, value) in &items {
+            if let Ok((_, id)) = keys::decode_data_key(key)
+                && let Ok(entity_obj) = Entity::deserialize(entity.clone(), id, value)
+            {
+                manager.update_indexes(&mut batch, &entity_obj, None);
+            }
+        }
+        batch.commit()?;
+
         Ok(())
     }
 
