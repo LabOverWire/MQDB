@@ -58,6 +58,7 @@ impl App {
                 UiEvent::RecordsReceived { entity, records } => {
                     if self.state.selected_entity.as_deref() == Some(&entity) {
                         self.state.records = records;
+                        self.state.selected_row = None;
                     }
                 }
                 UiEvent::RecordReceived { entity, record } => {

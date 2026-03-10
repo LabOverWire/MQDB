@@ -67,6 +67,7 @@ fn show_toolbar_buttons(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn show_table(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -79,23 +80,22 @@ fn show_table(
         TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
+            .sense(egui::Sense::click())
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .min_scrolled_height(available.y - 20.0)
+            .column(Column::exact(50.0))
             .column(Column::auto().at_least(60.0).clip(true).range(60.0..=200.0))
             .columns(
                 Column::auto().at_least(60.0).clip(true).range(40.0..=300.0),
                 columns.len().saturating_sub(1),
             )
-            .column(Column::auto().at_least(120.0))
             .header(22.0, |mut header| {
+                header.col(|_ui| {});
                 for col in columns {
                     header.col(|ui| {
                         ui.colored_label(theme::accent(), egui::RichText::new(col).strong());
                     });
                 }
-                header.col(|ui| {
-                    ui.colored_label(theme::text_dim(), egui::RichText::new("Actions").strong());
-                });
             })
             .body(|body| {
                 let records = state.records.clone();
@@ -103,35 +103,49 @@ fn show_table(
                 body.rows(22.0, records.len(), |mut row| {
                     let idx = row.index();
                     let record = &records[idx];
+                    let is_selected = state.selected_row == Some(idx);
+
+                    row.set_selected(is_selected);
+
+                    row.col(|ui| {
+                        if is_selected {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                if ui.small_button("E").on_hover_text("Edit").clicked() {
+                                    state.selected_record = Some(record.clone());
+                                    state.edit_json =
+                                        serde_json::to_string_pretty(record).unwrap_or_default();
+                                    state.active_panel = ActivePanel::Edit;
+                                }
+                                if ui.small_button("D").on_hover_text("Delete").clicked()
+                                    && let Some(id) =
+                                        record.get("id").and_then(|v| v.as_str())
+                                {
+                                    let _ = cmd_tx.send(Command::DeleteRecord {
+                                        entity: entity_owned.clone(),
+                                        id: id.to_string(),
+                                    });
+                                }
+                            });
+                        }
+                    });
+
                     for col in columns {
                         row.col(|ui| {
+                            ui.style_mut().interaction.selectable_labels = false;
                             let val = record.get(col).map(format_value).unwrap_or_default();
                             ui.label(&val);
                         });
                     }
-                    row.col(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            if ui.small_button("View").clicked() {
-                                state.selected_record = Some(record.clone());
-                                state.active_panel = ActivePanel::Detail;
-                            }
-                            if ui.small_button("Edit").clicked() {
-                                state.selected_record = Some(record.clone());
-                                state.edit_json =
-                                    serde_json::to_string_pretty(record).unwrap_or_default();
-                                state.active_panel = ActivePanel::Edit;
-                            }
-                            if ui.small_button("Del").clicked()
-                                && let Some(id) = record.get("id").and_then(|v| v.as_str())
-                            {
-                                let _ = cmd_tx.send(Command::DeleteRecord {
-                                    entity: entity_owned.clone(),
-                                    id: id.to_string(),
-                                });
-                            }
-                        });
-                    });
+
+                    let response = row.response();
+                    if response.clicked() {
+                        state.selected_row = Some(idx);
+                    }
+                    if response.double_clicked() {
+                        state.selected_record = Some(record.clone());
+                        state.active_panel = ActivePanel::Detail;
+                    }
                 });
             });
     });

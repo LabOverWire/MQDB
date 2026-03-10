@@ -143,6 +143,7 @@ pub struct AppState {
     pub schema_json: String,
     pub constraint_json: String,
     pub active_panel: ActivePanel,
+    pub selected_row: Option<usize>,
     pub new_entity_name: String,
 }
 
