@@ -25,12 +25,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Sender<Comm
             ui.colored_label(theme::text_dim(), "Current schema:");
             ui.add_space(2.0);
             let pretty = serde_json::to_string_pretty(schema).unwrap_or_default();
-            ui.add(
-                egui::TextEdit::multiline(&mut pretty.as_str())
-                    .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(8),
-            );
+            egui::ScrollArea::vertical()
+                .id_salt("current_schema")
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut pretty.as_str())
+                            .id_salt("current_schema_text")
+                            .code_editor()
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(8),
+                    );
+                });
             ui.add_space(8.0);
         } else {
             ui.colored_label(theme::text_dim(), "No schema defined");
@@ -41,6 +47,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cmd_tx: &flume::Sender<Comm
     ui.colored_label(theme::text_dim(), "Set schema (JSON):");
     ui.add_space(2.0);
     egui::ScrollArea::vertical()
+        .id_salt("set_schema")
         .max_height(ui.available_height() - 40.0)
         .show(ui, |ui| {
             ui.add(
