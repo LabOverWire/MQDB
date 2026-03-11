@@ -304,6 +304,19 @@ impl AsyncStorageBackend for IndexedDbBackend {
         Ok(results.borrow().clone())
     }
 
+    async fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        Ok(self.prefix_scan(prefix).await?.len())
+    }
+
+    async fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .prefix_scan(prefix)
+            .await?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     async fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let (_tx, store): (IdbTransaction, IdbObjectStore) =
             self.get_store(IdbTransactionMode::Readonly)?;

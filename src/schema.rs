@@ -65,6 +65,12 @@ impl FieldDefinition {
 pub struct Schema {
     pub entity: String,
     pub fields: HashMap<String, FieldDefinition>,
+    #[serde(default = "default_schema_version")]
+    pub version: u64,
+}
+
+fn default_schema_version() -> u64 {
+    1
 }
 
 impl Schema {
@@ -72,6 +78,7 @@ impl Schema {
         Self {
             entity: entity.into(),
             fields: HashMap::new(),
+            version: 1,
         }
     }
 
@@ -160,7 +167,10 @@ impl SchemaRegistry {
         }
     }
 
-    pub fn add_schema(&mut self, schema: Schema) {
+    pub fn add_schema(&mut self, mut schema: Schema) {
+        if let Some(existing) = self.schemas.get(&schema.entity) {
+            schema.version = existing.version + 1;
+        }
         self.schemas.insert(schema.entity.clone(), schema);
     }
 

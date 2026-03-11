@@ -65,6 +65,29 @@ impl StorageBackend for MemoryBackend {
         Ok(results)
     }
 
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .count())
+    }
+
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect())
+    }
+
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let data = self
             .data

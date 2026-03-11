@@ -120,8 +120,8 @@ impl Database {
         for name in constraint_manager.read().await.entity_names() {
             entity_names.insert(name);
         }
-        if let Ok(items) = storage.prefix_scan(b"data/") {
-            for (key, _) in items {
+        if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
+            for key in keys {
                 if let Ok((entity, _)) = crate::keys::decode_data_key(&key)
                     && !entity.starts_with('_')
                 {
@@ -211,9 +211,7 @@ impl Database {
     #[must_use]
     pub fn entity_record_count(&self, entity_name: &str) -> usize {
         let prefix = format!("data/{entity_name}/");
-        self.storage
-            .prefix_scan(prefix.as_bytes())
-            .map_or(0, |items| items.len())
+        self.storage.prefix_count(prefix.as_bytes()).unwrap_or(0)
     }
 
     pub async fn all_schemas(&self) -> Vec<crate::schema::Schema> {

@@ -41,17 +41,16 @@ pub(super) async fn handle_message(
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        handle_admin_operation(
+        let ctx = AdminContext {
             db,
             client,
-            &message,
-            admin_op,
+            message: &message,
             backup_dir,
             auth_providers,
             ownership,
             scope_config,
-        )
-        .await;
+        };
+        handle_admin_operation(&ctx, admin_op).await;
         return;
     }
 
@@ -325,27 +324,27 @@ fn vault_decrypt_response(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_admin_operation(
-    db: &Database,
-    client: &MqttClient,
-    message: &Message,
-    op: AdminOperation,
-    backup_dir: &Path,
-    auth_providers: Option<&ComprehensiveAuthProvider>,
-    ownership: &OwnershipConfig,
-    scope_config: &ScopeConfig,
-) {
-    let payload: Value = if message.payload.is_empty() {
+struct AdminContext<'a> {
+    db: &'a Database,
+    client: &'a MqttClient,
+    message: &'a Message,
+    backup_dir: &'a Path,
+    auth_providers: Option<&'a ComprehensiveAuthProvider>,
+    ownership: &'a OwnershipConfig,
+    scope_config: &'a ScopeConfig,
+}
+
+async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
+    let payload: Value = if ctx.message.payload.is_empty() {
         Value::Null
     } else {
-        match serde_json::from_slice(&message.payload) {
+        match serde_json::from_slice(&ctx.message.payload) {
             Ok(v) => v,
             Err(e) => {
-                if let Some(response_topic) = &message.properties.response_topic {
+                if let Some(response_topic) = &ctx.message.properties.response_topic {
                     let response = Response::error(crate::ErrorCode::BadRequest, e.to_string());
                     if let Ok(payload) = serde_json::to_vec(&response) {
-                        let _ = client.publish_qos1(response_topic, payload).await;
+                        let _ = ctx.client.publish_qos1(response_topic, payload).await;
                     }
                 }
                 return;
@@ -354,50 +353,52 @@ async fn handle_admin_operation(
     };
 
     let response = match op {
-        AdminOperation::SchemaSet { entity } => handle_schema_set(db, entity, payload).await,
-        AdminOperation::SchemaGet { entity } => handle_schema_get(db, &entity).await,
+        AdminOperation::SchemaSet { entity } => handle_schema_set(ctx.db, entity, payload).await,
+        AdminOperation::SchemaGet { entity } => handle_schema_get(ctx.db, &entity).await,
         AdminOperation::ConstraintAdd { entity } => {
-            handle_constraint_add(db, entity, &payload).await
+            handle_constraint_add(ctx.db, entity, &payload).await
         }
-        AdminOperation::ConstraintList { entity } => handle_constraint_list(db, &entity).await,
-        AdminOperation::Backup => handle_backup(db, &payload, backup_dir).await,
+        AdminOperation::ConstraintList { entity } => handle_constraint_list(ctx.db, &entity).await,
+        AdminOperation::Backup => handle_backup(ctx.db, &payload, ctx.backup_dir).await,
         AdminOperation::Restore => Response::error(
             crate::ErrorCode::Internal,
             "restore requires agent restart - use CLI with --restore flag",
         ),
-        AdminOperation::BackupList => handle_backup_list(backup_dir).await,
-        AdminOperation::Subscribe => handle_subscribe(db, &payload).await,
-        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(db, &sub_id).await,
-        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(db, &sub_id).await,
-        AdminOperation::ConsumerGroupList => handle_consumer_group_list(db).await,
-        AdminOperation::ConsumerGroupShow { name } => handle_consumer_group_show(db, &name).await,
-        AdminOperation::Health => handle_health(db),
-        AdminOperation::UserAdd => handle_user_add(auth_providers, &payload),
-        AdminOperation::UserDelete => handle_user_delete(auth_providers, &payload),
-        AdminOperation::UserList => handle_user_list(auth_providers),
-        AdminOperation::AclRuleAdd => handle_acl_rule_add(auth_providers, &payload).await,
-        AdminOperation::AclRuleRemove => handle_acl_rule_remove(auth_providers, &payload).await,
-        AdminOperation::AclRuleList => handle_acl_rule_list(auth_providers, &payload).await,
-        AdminOperation::AclRoleAdd => handle_acl_role_add(auth_providers, &payload).await,
-        AdminOperation::AclRoleDelete => handle_acl_role_delete(auth_providers, &payload).await,
-        AdminOperation::AclRoleList => handle_acl_role_list(auth_providers).await,
+        AdminOperation::BackupList => handle_backup_list(ctx.backup_dir).await,
+        AdminOperation::Subscribe => handle_subscribe(ctx.db, &payload).await,
+        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(ctx.db, &sub_id).await,
+        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(ctx.db, &sub_id).await,
+        AdminOperation::ConsumerGroupList => handle_consumer_group_list(ctx.db).await,
+        AdminOperation::ConsumerGroupShow { name } => {
+            handle_consumer_group_show(ctx.db, &name).await
+        }
+        AdminOperation::Health => handle_health(ctx.db),
+        AdminOperation::UserAdd => handle_user_add(ctx.auth_providers, &payload),
+        AdminOperation::UserDelete => handle_user_delete(ctx.auth_providers, &payload),
+        AdminOperation::UserList => handle_user_list(ctx.auth_providers),
+        AdminOperation::AclRuleAdd => handle_acl_rule_add(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRuleRemove => handle_acl_rule_remove(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRuleList => handle_acl_rule_list(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleAdd => handle_acl_role_add(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleDelete => handle_acl_role_delete(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleList => handle_acl_role_list(ctx.auth_providers).await,
         AdminOperation::AclAssignmentAssign => {
-            handle_acl_assignment_assign(auth_providers, &payload).await
+            handle_acl_assignment_assign(ctx.auth_providers, &payload).await
         }
         AdminOperation::AclAssignmentUnassign => {
-            handle_acl_assignment_unassign(auth_providers, &payload).await
+            handle_acl_assignment_unassign(ctx.auth_providers, &payload).await
         }
         AdminOperation::AclAssignmentList => {
-            handle_acl_assignment_list(auth_providers, &payload).await
+            handle_acl_assignment_list(ctx.auth_providers, &payload).await
         }
-        AdminOperation::IndexAdd { entity } => handle_index_add(db, entity, &payload).await,
-        AdminOperation::Catalog => handle_catalog(db, ownership, scope_config).await,
+        AdminOperation::IndexAdd { entity } => handle_index_add(ctx.db, entity, &payload).await,
+        AdminOperation::Catalog => handle_catalog(ctx.db, ctx.ownership, ctx.scope_config).await,
     };
 
-    if let Some(response_topic) = &message.properties.response_topic {
+    if let Some(response_topic) = &ctx.message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = client.publish_qos1(response_topic, payload).await {
+                if let Err(e) = ctx.client.publish_qos1(response_topic, payload).await {
                     error!("Failed to publish admin response to {response_topic}: {e}");
                 }
             }
@@ -706,7 +707,7 @@ async fn handle_catalog(
             let fields = serde_json::to_value(&s.fields).unwrap_or(Value::Null);
             json!({
                 "entity": s.entity,
-                "version": 1,
+                "version": s.version,
                 "schema": fields
             })
         });

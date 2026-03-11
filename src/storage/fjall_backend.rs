@@ -65,6 +65,26 @@ impl StorageBackend for FjallBackend {
         Ok(results)
     }
 
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        let snapshot = self.db.snapshot();
+        let mut count = 0;
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            let _ = guard.into_inner()?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let snapshot = self.db.snapshot();
+        let mut results = Vec::new();
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            let (k, _) = guard.into_inner()?;
+            results.push(k.to_vec());
+        }
+        Ok(results)
+    }
+
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let snapshot = self.db.snapshot();
         let mut results = Vec::new();

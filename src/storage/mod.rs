@@ -88,6 +88,18 @@ impl Storage {
 
     /// # Errors
     /// Returns an error if the storage operation fails.
+    pub fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        self.backend.prefix_count(prefix)
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        self.backend.prefix_scan_keys(prefix)
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
     pub fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.backend.range_scan(start, end)
     }
@@ -164,6 +176,18 @@ impl<B: AsyncStorageBackend> AsyncStorage<B> {
     /// Returns an error if the storage operation fails.
     pub async fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         self.backend.prefix_scan(prefix).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        self.backend.prefix_count(prefix).await
+    }
+
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    pub async fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        self.backend.prefix_scan_keys(prefix).await
     }
 
     /// # Errors
