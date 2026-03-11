@@ -69,7 +69,7 @@ impl StorageBackend for FjallBackend {
         let snapshot = self.db.snapshot();
         let mut count = 0;
         for guard in snapshot.prefix(&self.keyspace, prefix) {
-            let _ = guard.into_inner()?;
+            let _ = guard.key()?;
             count += 1;
         }
         Ok(count)
@@ -79,8 +79,30 @@ impl StorageBackend for FjallBackend {
         let snapshot = self.db.snapshot();
         let mut results = Vec::new();
         for guard in snapshot.prefix(&self.keyspace, prefix) {
-            let (k, _) = guard.into_inner()?;
-            results.push(k.to_vec());
+            results.push(guard.key()?.to_vec());
+        }
+        Ok(results)
+    }
+
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let snapshot = self.db.snapshot();
+        let mut results = Vec::with_capacity(batch_size);
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            let (k, v) = guard.into_inner()?;
+            if let Some(after) = after_key
+                && k.as_ref() <= after
+            {
+                continue;
+            }
+            results.push((k.to_vec(), v.to_vec()));
+            if results.len() >= batch_size {
+                break;
+            }
         }
         Ok(results)
     }

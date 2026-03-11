@@ -344,9 +344,18 @@ impl ClusteredAgent {
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let field = constraint_def
-            .get("fields")
-            .and_then(|v| v.as_array())
+        let fields_arr = constraint_def.get("fields").and_then(|v| v.as_array());
+
+        if let Some(arr) = &fields_arr
+            && arr.len() > 1
+        {
+            return Response::error(
+                ErrorCode::BadRequest,
+                "multi-field constraints are not yet supported",
+            );
+        }
+
+        let field = fields_arr
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
             .or_else(|| constraint_def.get("field").and_then(|v| v.as_str()))

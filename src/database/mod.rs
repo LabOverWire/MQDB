@@ -25,6 +25,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
+const ENTITY_NAMES_KEY: &[u8] = b"meta/entity_names";
+
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
     pub id: String,
@@ -122,13 +124,25 @@ impl Database {
         for name in constraint_manager.read().await.entity_names() {
             entity_names.insert(name);
         }
-        if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
+        let persisted = storage
+            .get(ENTITY_NAMES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<HashSet<String>>(&bytes).ok());
+        if let Some(names) = persisted {
+            for name in names {
+                entity_names.insert(name);
+            }
+        } else if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
             for key in keys {
                 if let Ok((entity, _)) = crate::keys::decode_data_key(&key)
                     && !entity.starts_with('_')
                 {
                     entity_names.insert(entity);
                 }
+            }
+            if let Ok(bytes) = serde_json::to_vec(&entity_names) {
+                let _ = storage.insert(ENTITY_NAMES_KEY, &bytes);
             }
         }
         let entity_names = Arc::new(RwLock::new(entity_names));
@@ -206,7 +220,11 @@ impl Database {
     pub async fn register_entity_name(&self, name: &str) {
         if !name.starts_with('_') {
             let mut names = self.entity_names.write().await;
-            names.insert(name.to_string());
+            if names.insert(name.to_string())
+                && let Ok(bytes) = serde_json::to_vec(&*names)
+            {
+                let _ = self.storage.insert(ENTITY_NAMES_KEY, &bytes);
+            }
         }
     }
 

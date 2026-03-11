@@ -43,16 +43,25 @@ impl Database {
         manager.add_index(crate::index::IndexDefinition::new(entity.clone(), fields));
 
         let prefix = format!("data/{entity}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes())?;
-        let mut batch = self.storage.batch();
-        for (key, value) in &items {
-            if let Ok((_, id)) = keys::decode_data_key(key)
-                && let Ok(entity_obj) = Entity::deserialize(entity.clone(), id, value)
-            {
-                manager.update_indexes(&mut batch, &entity_obj, None);
+        let mut after_key: Option<Vec<u8>> = None;
+        loop {
+            let batch_items =
+                self.storage
+                    .prefix_scan_batch(prefix.as_bytes(), 1000, after_key.as_deref())?;
+            if batch_items.is_empty() {
+                break;
             }
+            let mut write_batch = self.storage.batch();
+            for (key, value) in &batch_items {
+                if let Ok((_, id)) = keys::decode_data_key(key)
+                    && let Ok(entity_obj) = Entity::deserialize(entity.clone(), id, value)
+                {
+                    manager.update_indexes(&mut write_batch, &entity_obj, None);
+                }
+            }
+            write_batch.commit()?;
+            after_key = batch_items.last().map(|(k, _)| k.clone());
         }
-        batch.commit()?;
 
         Ok(())
     }

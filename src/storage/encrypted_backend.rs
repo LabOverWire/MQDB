@@ -88,6 +88,18 @@ impl StorageBackend for EncryptedBackend {
         self.inner.prefix_scan_keys(prefix)
     }
 
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let raw = self
+            .inner
+            .prefix_scan_batch(prefix, batch_size, after_key)?;
+        decrypt_pairs(&self.key, raw)
+    }
+
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let raw = self.inner.range_scan(start, end)?;
         decrypt_pairs(&self.key, raw)

@@ -42,6 +42,20 @@ pub trait StorageBackend: Send + Sync {
     /// Returns an error if the storage operation fails.
     fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>>;
 
+    /// Scans entries matching prefix in batches, starting after `after_key`.
+    ///
+    /// Returns at most `batch_size` entries. Pass `None` for `after_key` to start
+    /// from the beginning of the prefix range.
+    ///
+    /// # Errors
+    /// Returns an error if the storage operation fails.
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+
     /// Scans keys in the given range.
     ///
     /// # Errors
@@ -85,6 +99,12 @@ pub trait AsyncStorageBackend {
     fn prefix_scan(&self, prefix: &[u8]) -> impl Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>>>;
     fn prefix_count(&self, prefix: &[u8]) -> impl Future<Output = Result<usize>>;
     fn prefix_scan_keys(&self, prefix: &[u8]) -> impl Future<Output = Result<Vec<Vec<u8>>>>;
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> impl Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>>>;
     fn range_scan(
         &self,
         start: &[u8],

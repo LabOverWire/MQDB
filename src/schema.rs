@@ -18,7 +18,7 @@ pub enum FieldType {
     Null,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDefinition {
     pub name: String,
     pub field_type: FieldType,
@@ -169,7 +169,11 @@ impl SchemaRegistry {
 
     pub fn add_schema(&mut self, mut schema: Schema) {
         if let Some(existing) = self.schemas.get(&schema.entity) {
-            schema.version = existing.version + 1;
+            if existing.fields == schema.fields {
+                schema.version = existing.version;
+            } else {
+                schema.version = existing.version + 1;
+            }
         }
         self.schemas.insert(schema.entity.clone(), schema);
     }
@@ -348,5 +352,28 @@ mod tests {
 
         let invalid = json!({"age": 30});
         assert!(registry.validate_entity("users", &invalid).is_err());
+    }
+
+    #[test]
+    fn test_schema_version_stable_on_identical_fields() {
+        let mut registry = SchemaRegistry::new();
+
+        let schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("age", FieldType::Number));
+        registry.add_schema(schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 1);
+
+        let same_schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("age", FieldType::Number));
+        registry.add_schema(same_schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 1);
+
+        let different_schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("email", FieldType::String));
+        registry.add_schema(different_schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 2);
     }
 }
