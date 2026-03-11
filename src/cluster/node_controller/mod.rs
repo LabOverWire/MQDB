@@ -359,7 +359,6 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_storage(
         node_id: NodeId,
         transport: T,

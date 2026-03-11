@@ -7,7 +7,7 @@ use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::pkce::PkceCache;
 use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
-use super::session_store::{JtiRevocationStore, SessionStore};
+use super::session_store::{JtiRevocationStore, NewSession, SessionStore};
 use super::vault_crypto::VaultCrypto;
 use crate::VaultKeyStore;
 use crate::types::OwnershipConfig;
@@ -260,15 +260,15 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
 
     let jwt = mint_callback_jwt(state, &canonical_id, &identity);
 
-    let Some(session_id) = state.session_store.create(
+    let Some(session_id) = state.session_store.create(NewSession {
         jwt,
         canonical_id,
-        provider.to_string(),
-        identity.provider_sub.clone(),
-        identity.email.clone(),
-        identity.name.clone(),
-        identity.picture.clone(),
-    ) else {
+        provider: provider.to_string(),
+        provider_sub: identity.provider_sub.clone(),
+        email: identity.email.clone(),
+        name: identity.name.clone(),
+        picture: identity.picture.clone(),
+    }) else {
         return json_response(500, &json!({"error": "failed to create session"}));
     };
 
@@ -2111,15 +2111,15 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
         let _ = create_entity_with_response(&state.mqtt_client, "_identities", &data).await;
     }
 
-    let Some(session_id) = state.session_store.create(
-        String::new(),
-        canonical_id.clone(),
-        "dev".to_string(),
-        "dev-local".to_string(),
-        Some(email.to_string()),
-        Some(name.to_string()),
-        None,
-    ) else {
+    let Some(session_id) = state.session_store.create(NewSession {
+        jwt: String::new(),
+        canonical_id: canonical_id.clone(),
+        provider: "dev".to_string(),
+        provider_sub: "dev-local".to_string(),
+        email: Some(email.to_string()),
+        name: Some(name.to_string()),
+        picture: None,
+    }) else {
         return json_response_with_credentials(
             500,
             &json!({"error": "failed to create session"}),

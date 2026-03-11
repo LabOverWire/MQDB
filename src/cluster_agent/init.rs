@@ -268,26 +268,32 @@ impl ClusteredAgent {
             }
         }
 
-        let raft_task = crate::cluster::RaftTask::new(
+        let raft_task = crate::cluster::RaftTask {
             raft,
-            self.rx_raft_messages
+            rx_messages: self
+                .rx_raft_messages
                 .take()
                 .ok_or("run() called twice: rx_raft_messages already taken")?,
-            self.rx_raft_events
+            rx_events: self
+                .rx_raft_events
                 .take()
                 .ok_or("run() called twice: rx_raft_events already taken")?,
-            self.rx_raft_admin
+            rx_admin: self
+                .rx_raft_admin
                 .take()
                 .ok_or("run() called twice: rx_raft_admin already taken")?,
-            self.tx_partition_map
+            tx_partition_map: self
+                .tx_partition_map
                 .take()
                 .ok_or("run() called twice: tx_partition_map already taken")?,
-            self.tx_raft_status
+            tx_status: self
+                .tx_raft_status
                 .take()
                 .ok_or("run() called twice: tx_raft_status already taken")?,
-            self.shutdown_tx.subscribe(),
+            shutdown_rx: self.shutdown_tx.subscribe(),
             all_nodes,
-        );
+            partitions_initialized: false,
+        };
         tokio::spawn(async move {
             Box::pin(raft_task.run()).await;
         });

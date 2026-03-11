@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{Database, DatabaseConfig, DurabilityMode, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 use std::sync::Arc;
@@ -131,9 +132,11 @@ async fn test_recovery_after_many_operations() {
                     id.to_string(),
                     json!({"status": "updated"}),
                     None,
-                    None,
-                    None,
-                    &ScopeConfig::default(),
+                    &CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &ScopeConfig::default(),
+                    },
                 )
                 .await
                 .unwrap();
@@ -557,9 +560,11 @@ async fn test_recovery_after_update_operations() {
                     id.to_string(),
                     json!({"version": 2, "updated": true}),
                     None,
-                    None,
-                    None,
-                    &ScopeConfig::default(),
+                    &CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &ScopeConfig::default(),
+                    },
                 )
                 .await
                 .unwrap();

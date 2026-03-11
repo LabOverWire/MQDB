@@ -268,16 +268,13 @@ mod execute {
                         }
                         _ => None,
                     };
+                    let caller = crate::database::CallerContext {
+                        sender,
+                        client_id,
+                        scope_config,
+                    };
                     match self
-                        .update(
-                            entity,
-                            id,
-                            fields,
-                            update_constraint,
-                            sender,
-                            client_id,
-                            scope_config,
-                        )
+                        .update(entity, id, fields, update_constraint, &caller)
                         .await
                     {
                         Ok(v) => Response::ok(v),

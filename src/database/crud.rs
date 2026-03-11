@@ -9,10 +9,15 @@ use crate::keys;
 use crate::types::ScopeConfig;
 use serde_json::Value;
 
+pub struct CallerContext<'a> {
+    pub sender: Option<&'a str>,
+    pub client_id: Option<&'a str>,
+    pub scope_config: &'a ScopeConfig,
+}
+
 impl Database {
     /// # Errors
     /// Returns an error if validation, constraint checks, or storage fails.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         entity_name: String,
@@ -143,16 +148,13 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found, validation fails, or storage fails.
-    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         entity_name: String,
         id: String,
         fields: Value,
         update_constraint_data: Option<(Value, Value)>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        scope_config: &ScopeConfig,
+        caller: &CallerContext<'_>,
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
@@ -222,14 +224,16 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &constraint_new, Some(&constraint_old));
 
-        let scope = scope_config.resolve_scope(&entity_name, &updated_entity.data);
+        let scope = caller
+            .scope_config
+            .resolve_scope(&entity_name, &updated_entity.data);
         let event = ChangeEvent::update(
             entity_name,
             updated_entity.id.clone(),
             updated_entity.data.clone(),
         )
-        .with_sender(sender.map(String::from))
-        .with_client_id(client_id.map(String::from))
+        .with_sender(caller.sender.map(String::from))
+        .with_client_id(caller.client_id.map(String::from))
         .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);

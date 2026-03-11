@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{
     Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, OwnershipConfig,
     Schema, ScopeConfig, SortDirection, SortOrder,
@@ -54,9 +55,11 @@ async fn test_crud_operations() {
             id.clone(),
             updates,
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await
         .unwrap();

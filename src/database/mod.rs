@@ -8,6 +8,8 @@ mod query;
 mod schema_ops;
 mod subscriptions;
 
+pub use crud::CallerContext;
+
 use crate::config::DatabaseConfig;
 use crate::constraint::ConstraintManager;
 use crate::consumer_group::ConsumerGroup;

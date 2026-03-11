@@ -87,7 +87,16 @@ impl MqdbAgent {
                 tokio::select! {
                     msg = msg_rx.recv() => {
                         if let Some(message) = msg {
-                            handle_message(&db, &response_client, message, &backup_dir, &ownership_config, &scope_config, auth_providers.as_deref(), &vault_key_store).await;
+                            let ctx = super::handlers::MessageContext {
+                                db: &db,
+                                client: &response_client,
+                                backup_dir: &backup_dir,
+                                ownership: &ownership_config,
+                                scope_config: &scope_config,
+                                auth_providers: auth_providers.as_deref(),
+                                vault_key_store: &vault_key_store,
+                            };
+                            handle_message(&ctx, message).await;
                         } else {
                             debug!("Message channel closed");
                             break;

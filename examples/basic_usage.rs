@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{Database, Filter, FilterOp, ScopeConfig};
 use serde_json::json;
 
@@ -64,9 +65,11 @@ async fn run_example(db: &Database) -> Result<(), Box<dyn std::error::Error>> {
             alice_id.to_string(),
             updates,
             None,
-            None,
-            None,
-            &scope,
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &scope,
+            },
         )
         .await?;
     println!("Updated: {updated_alice}");

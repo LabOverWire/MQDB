@@ -2,41 +2,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::StoreManager;
-use crate::cluster::db::{ReserveResult, UniqueReservation, UniqueStore, unique_partition};
+use crate::cluster::db::{
+    ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore, unique_partition,
+};
 use crate::cluster::protocol::{Operation, ReplicationWrite};
-use crate::cluster::{Epoch, PartitionId, entity};
+use crate::cluster::{Epoch, entity};
 
 impl StoreManager {
-    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn unique_reserve_replicated(
         &self,
-        entity: &str,
-        field: &str,
-        value: &[u8],
-        record_id: &str,
-        request_id: &str,
-        data_partition: PartitionId,
-        ttl_ms: u64,
+        params: &UniqueReserveParams<'_>,
         now: u64,
     ) -> (ReserveResult, Option<ReplicationWrite>) {
-        let result = self.db_unique.reserve(
-            entity,
-            field,
-            value,
-            record_id,
-            request_id,
-            data_partition,
-            ttl_ms,
-            now,
-        );
+        let result = self.db_unique.reserve(params, now);
 
         match result {
             ReserveResult::Reserved => {
-                let reservation = self.db_unique.get(entity, field, value);
+                let reservation = self
+                    .db_unique
+                    .get(params.entity, params.field, params.value);
                 if let Some(r) = reservation {
                     let serialized = UniqueStore::serialize(&r);
-                    let partition = unique_partition(entity, field, value);
+                    let partition = unique_partition(params.entity, params.field, params.value);
                     let key = super::super::db::unique_key(&r);
                     let write = ReplicationWrite::new(
                         partition,
@@ -127,28 +115,8 @@ impl StoreManager {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn unique_reserve(
-        &self,
-        entity: &str,
-        field: &str,
-        value: &[u8],
-        record_id: &str,
-        request_id: &str,
-        data_partition: PartitionId,
-        ttl_ms: u64,
-        now: u64,
-    ) -> ReserveResult {
-        self.db_unique.reserve(
-            entity,
-            field,
-            value,
-            record_id,
-            request_id,
-            data_partition,
-            ttl_ms,
-            now,
-        )
+    pub fn unique_reserve(&self, params: &UniqueReserveParams<'_>, now: u64) -> ReserveResult {
+        self.db_unique.reserve(params, now)
     }
 
     pub fn unique_commit(&self, entity: &str, field: &str, value: &[u8], request_id: &str) -> bool {

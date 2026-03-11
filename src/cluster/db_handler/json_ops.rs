@@ -24,7 +24,23 @@ pub(super) enum JsonOpResult {
     PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
-#[allow(clippy::unused_self, clippy::too_many_arguments)]
+struct JsonOpContext<'a> {
+    entity: &'a str,
+    id: Option<&'a str>,
+    partition: PartitionId,
+    sender: Option<&'a str>,
+    client_id: Option<&'a str>,
+    response_topic: &'a str,
+    correlation_data: Option<&'a [u8]>,
+}
+
+struct UniqueDiffs<'a> {
+    has_changes: bool,
+    new_diff: &'a Value,
+    old_diff: &'a Value,
+}
+
+#[allow(clippy::unused_self)]
 impl DbRequestHandler {
     fn validate_against_schema<T: ClusterTransport>(
         controller: &NodeController<T>,
@@ -83,23 +99,16 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         operation: &DbTopicOperation,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+        let sender = mqtt_ctx.sender;
+
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
                 let result = self
-                    .handle_json_create(
-                        controller,
-                        entity,
-                        payload,
-                        response_topic,
-                        correlation_data,
-                        sender,
-                        client_id,
-                    )
+                    .handle_json_create(controller, entity, payload, mqtt_ctx)
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => JsonOpResult::Response(
@@ -117,16 +126,8 @@ impl DbRequestHandler {
                 {
                     return JsonOpResult::Response(err);
                 }
-                self.handle_json_read(
-                    controller,
-                    entity,
-                    id,
-                    payload,
-                    response_topic,
-                    correlation_data,
-                    sender,
-                )
-                .await
+                self.handle_json_read(controller, entity, id, payload, mqtt_ctx)
+                    .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
                 let stripped_payload;
@@ -170,16 +171,7 @@ impl DbRequestHandler {
                     };
                 }
                 let result = self
-                    .handle_json_update(
-                        controller,
-                        entity,
-                        id,
-                        effective_payload,
-                        sender,
-                        client_id,
-                        response_topic,
-                        correlation_data,
-                    )
+                    .handle_json_update(controller, entity, id, effective_payload, mqtt_ctx)
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => JsonOpResult::Response(
@@ -220,16 +212,8 @@ impl DbRequestHandler {
                         ))
                     };
                 }
-                self.handle_json_delete(
-                    controller,
-                    entity,
-                    id,
-                    sender,
-                    client_id,
-                    response_topic,
-                    correlation_data,
-                )
-                .await
+                self.handle_json_delete(controller, entity, id, mqtt_ctx)
+                    .await
             }
             DbTopicOperation::JsonList { entity } => {
                 match self
@@ -279,11 +263,13 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+        let sender = mqtt_ctx.sender;
+        let client_id = mqtt_ctx.client_id;
+
         let mut data: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
@@ -316,15 +302,7 @@ impl DbRequestHandler {
                 self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, &id, data);
             let encrypted_payload = serde_json::to_vec(&forward_data).unwrap_or_default();
             return match self
-                .try_forward_create(
-                    controller,
-                    partition,
-                    entity,
-                    &encrypted_payload,
-                    response_topic,
-                    correlation_data,
-                    sender,
-                )
+                .try_forward_create(controller, partition, entity, &encrypted_payload, mqtt_ctx)
                 .await
             {
                 Some(payload) => JsonOpResult::Response(payload),
@@ -332,31 +310,26 @@ impl DbRequestHandler {
             };
         }
 
-        self.execute_local_create(
-            controller,
+        let ctx = JsonOpContext {
             entity,
-            &id,
-            &data,
+            id: Some(&id),
             partition,
             sender,
             client_id,
             response_topic,
             correlation_data,
-            vault_crypto.as_ref(),
-        )
-        .await
+        };
+        self.execute_local_create(controller, &ctx, &data, vault_crypto.as_ref())
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn try_forward_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         partition: PartitionId,
         entity: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> Option<Vec<u8>> {
         let forwarded = controller
             .forward_json_db_request(
@@ -365,9 +338,9 @@ impl DbRequestHandler {
                 entity,
                 None,
                 payload,
-                response_topic,
-                correlation_data,
-                sender,
+                mqtt_ctx.response_topic.unwrap_or(""),
+                mqtt_ctx.correlation_data,
+                mqtt_ctx.sender,
             )
             .await;
         if forwarded {
@@ -381,20 +354,21 @@ impl DbRequestHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn execute_local_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
+        ctx: &JsonOpContext<'_>,
         data: &Value,
-        partition: PartitionId,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
         vault_crypto: Option<&crate::http::VaultCrypto>,
     ) -> JsonOpResult {
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let partition = ctx.partition;
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+        let response_topic = ctx.response_topic;
+        let correlation_data = ctx.correlation_data;
+
         let mut data = data.clone();
         if let Some(obj) = data.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
@@ -462,35 +436,41 @@ impl DbRequestHandler {
             }));
         }
 
-        self.complete_create(
-            controller,
+        let create_ctx = JsonOpContext {
             entity,
-            id,
-            &data,
-            &constraint_data,
+            id: Some(id),
             partition,
-            &request_id,
-            now_ms,
             sender,
             client_id,
+            response_topic,
+            correlation_data,
+        };
+        self.complete_create(
+            controller,
+            &create_ctx,
+            &data,
+            &constraint_data,
+            &request_id,
+            now_ms,
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn complete_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
+        ctx: &JsonOpContext<'_>,
         data: &Value,
         constraint_data: &Value,
-        partition: PartitionId,
         request_id: &str,
         now_ms: u64,
-        sender: Option<&str>,
-        client_id: Option<&str>,
     ) -> JsonOpResult {
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let partition = ctx.partition;
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
 
         JsonOpResult::Response(
@@ -558,10 +538,11 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+        let sender = mqtt_ctx.sender;
         let start = std::time::Instant::now();
         let partition = data_partition(entity, id);
         let can_serve = controller.can_serve_reads(partition);
@@ -656,48 +637,45 @@ impl DbRequestHandler {
         JsonOpResult::Response(result)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn handle_json_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
         payload: &[u8],
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
         let updates: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
 
-        self.execute_local_update(
-            controller,
+        let ctx = JsonOpContext {
             entity,
-            id,
-            updates,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        )
-        .await
+            id: Some(id),
+            partition: data_partition(entity, id),
+            sender: mqtt_ctx.sender,
+            client_id: mqtt_ctx.client_id,
+            response_topic: mqtt_ctx.response_topic.unwrap_or(""),
+            correlation_data: mqtt_ctx.correlation_data,
+        };
+        self.execute_local_update(controller, &ctx, updates).await
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
+        ctx: &JsonOpContext<'_>,
         mut updates: Value,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
     ) -> JsonOpResult {
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+        let response_topic = ctx.response_topic;
+        let correlation_data = ctx.correlation_data;
+
         if let Some(obj) = updates.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
@@ -801,39 +779,49 @@ impl DbRequestHandler {
             }
         }
 
-        self.complete_update(
-            controller,
+        let update_ctx = JsonOpContext {
             entity,
-            id,
-            &merged_data,
+            id: Some(id),
             partition,
-            &request_id,
-            now_ms,
-            has_unique_changes,
-            &new_diff,
-            &old_diff,
             sender,
             client_id,
+            response_topic,
+            correlation_data,
+        };
+        let unique_diffs = UniqueDiffs {
+            has_changes: has_unique_changes,
+            new_diff: &new_diff,
+            old_diff: &old_diff,
+        };
+        self.complete_update(
+            controller,
+            &update_ctx,
+            &merged_data,
+            &request_id,
+            now_ms,
+            &unique_diffs,
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn complete_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
+        ctx: &JsonOpContext<'_>,
         merged_data: &Value,
-        partition: PartitionId,
         request_id: &str,
         now_ms: u64,
-        has_unique_changes: bool,
-        new_diff: &Value,
-        old_diff: &Value,
-        sender: Option<&str>,
-        client_id: Option<&str>,
+        unique_diffs: &UniqueDiffs<'_>,
     ) -> JsonOpResult {
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let partition = ctx.partition;
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+        let has_unique_changes = unique_diffs.has_changes;
+        let new_diff = unique_diffs.new_diff;
+        let old_diff = unique_diffs.old_diff;
+
         let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
 
         JsonOpResult::Response(
@@ -932,11 +920,13 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
+        let sender = mqtt_ctx.sender;
+        let client_id = mqtt_ctx.client_id;
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+
         let (local_results, pending_remote) =
             match controller.start_fk_reverse_lookup(entity, id).await {
                 Ok(pair) => pair,
@@ -964,31 +954,33 @@ impl DbRequestHandler {
         };
         let effects = controller.prepare_fk_side_effects(&all_results);
         let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+        let ctx = JsonOpContext {
+            entity,
+            id: Some(id),
+            partition: data_partition(entity, id),
+            sender,
+            client_id,
+            response_topic,
+            correlation_data,
+        };
         JsonOpResult::Response(
-            self.execute_delete(
-                controller,
-                entity,
-                id,
-                sender,
-                client_id,
-                cascade.as_ref(),
-                ack_receivers,
-            )
-            .await,
+            self.execute_delete(controller, &ctx, cascade.as_ref(), ack_receivers)
+                .await,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn execute_delete<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
-        sender: Option<&str>,
-        client_id: Option<&str>,
+        ctx: &JsonOpContext<'_>,
         cascade: Option<&crate::cluster::store_manager::outbox::CascadeOutboxPayload>,
         ack_receivers: Vec<tokio::sync::oneshot::Receiver<bool>>,
     ) -> Vec<u8> {
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+
         let pre_delete_scope = if self.scope_config.is_empty() {
             None
         } else {
@@ -1473,16 +1465,17 @@ impl DbRequestHandler {
             } => {
                 let effects = controller.prepare_fk_side_effects(&side_effects);
                 let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+                let ctx = JsonOpContext {
+                    entity: &entity,
+                    id: Some(&id),
+                    partition: data_partition(&entity, &id),
+                    sender: sender.as_deref(),
+                    client_id: client_id.as_deref(),
+                    response_topic: &response_topic,
+                    correlation_data: correlation_data.as_deref(),
+                };
                 let payload = self
-                    .execute_delete(
-                        controller,
-                        &entity,
-                        &id,
-                        sender.as_deref(),
-                        client_id.as_deref(),
-                        cascade.as_ref(),
-                        ack_receivers,
-                    )
+                    .execute_delete(controller, &ctx, cascade.as_ref(), ack_receivers)
                     .await;
                 Some(super::DbPublishResponse {
                     topic: response_topic,
@@ -1543,18 +1536,23 @@ impl DbRequestHandler {
                 let constraint_data = data.clone();
                 let crypto = self.resolve_vault_crypto(&entity, sender.as_deref());
                 let data = self.vault_encrypt_if_needed(crypto.as_ref(), &entity, &id, data);
+                let ctx = JsonOpContext {
+                    entity: &entity,
+                    id: Some(&id),
+                    partition,
+                    sender: sender.as_deref(),
+                    client_id: client_id.as_deref(),
+                    response_topic: &response_topic,
+                    correlation_data: correlation_data.as_deref(),
+                };
                 let result = self
                     .complete_create(
                         controller,
-                        &entity,
-                        &id,
+                        &ctx,
                         &data,
                         &constraint_data,
-                        partition,
                         &request_id,
                         now_ms,
-                        sender.as_deref(),
-                        client_id.as_deref(),
                     )
                     .await;
                 match result {
@@ -1595,20 +1593,28 @@ impl DbRequestHandler {
             } => {
                 let now_ms = Self::current_time_ms();
                 let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
+                let ctx = JsonOpContext {
+                    entity: &entity,
+                    id: Some(&id),
+                    partition,
+                    sender: sender.as_deref(),
+                    client_id: client_id.as_deref(),
+                    response_topic: &response_topic,
+                    correlation_data: correlation_data.as_deref(),
+                };
+                let unique_diffs = UniqueDiffs {
+                    has_changes: has_unique_changes,
+                    new_diff: &new_diff,
+                    old_diff: &old_diff,
+                };
                 let result = self
                     .complete_update(
                         controller,
-                        &entity,
-                        &id,
+                        &ctx,
                         &merged_data,
-                        partition,
                         &request_id,
                         now_ms,
-                        has_unique_changes,
-                        &new_diff,
-                        &old_diff,
-                        sender.as_deref(),
-                        client_id.as_deref(),
+                        &unique_diffs,
                     )
                     .await;
                 match result {

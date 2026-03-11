@@ -1126,16 +1126,16 @@ impl<T: ClusterTransport> NodeController<T> {
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
         let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
-        let request = JsonDbRequest::new(
+        let request = JsonDbRequest {
             request_id,
             op,
-            entity.to_string(),
-            Some(id.to_string()),
-            payload.to_vec(),
+            entity: entity.to_string(),
+            id: Some(id.to_string()),
+            payload: payload.to_vec(),
             response_topic,
-            None,
-            None,
-        );
+            correlation_data: None,
+            sender: None,
+        };
         let _ = self
             .transport
             .send(
@@ -1182,16 +1182,16 @@ impl<T: ClusterTransport> NodeController<T> {
             "__mqdb_fk_expected": format!("{field}={expected_value}"),
         });
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-        let request = JsonDbRequest::new(
+        let request = JsonDbRequest {
             request_id,
-            JsonDbOp::Update,
-            entity.to_string(),
-            Some(id.to_string()),
-            bytes,
+            op: JsonDbOp::Update,
+            entity: entity.to_string(),
+            id: Some(id.to_string()),
+            payload: bytes,
             response_topic,
-            None,
-            None,
-        );
+            correlation_data: None,
+            sender: None,
+        };
         let _ = self
             .transport
             .send(
@@ -1344,17 +1344,17 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.reserve_unique_local(&params, &mut local_reserved)
                     .await
             } else if let Some(target_node) = primary {
+                let reserve_params = super::db::UniqueReserveParams {
+                    entity: params.entity,
+                    field: params.field,
+                    value: params.value,
+                    record_id: params.id,
+                    request_id: params.request_id,
+                    data_partition: params.partition,
+                    ttl_ms: 30_000,
+                };
                 match self
-                    .send_unique_reserve_request_async(
-                        target_node,
-                        params.entity,
-                        params.field,
-                        params.value,
-                        params.id,
-                        params.request_id,
-                        params.partition,
-                        30_000,
-                    )
+                    .send_unique_reserve_request_async(target_node, &reserve_params)
                     .await
                 {
                     Ok(rx) => {
@@ -1489,16 +1489,18 @@ impl<T: ClusterTransport> NodeController<T> {
         params: &UniqueReservationParams<'_>,
         local_reserved: &mut Vec<(String, Vec<u8>)>,
     ) -> bool {
-        let (result, write) = self.stores.unique_reserve_replicated(
-            params.entity,
-            params.field,
-            params.value,
-            params.id,
-            params.request_id,
-            params.partition,
-            30_000,
-            params.now_ms,
-        );
+        let reserve_params = super::db::UniqueReserveParams {
+            entity: params.entity,
+            field: params.field,
+            value: params.value,
+            record_id: params.id,
+            request_id: params.request_id,
+            data_partition: params.partition,
+            ttl_ms: 30_000,
+        };
+        let (result, write) = self
+            .stores
+            .unique_reserve_replicated(&reserve_params, params.now_ms);
 
         match result {
             super::db::ReserveResult::Reserved => {
@@ -1632,17 +1634,17 @@ impl<T: ClusterTransport> NodeController<T> {
                         self.reserve_unique_local(&params, &mut local_reserved)
                             .await
                     } else if let Some(target_node) = primary {
+                        let reserve_params = super::db::UniqueReserveParams {
+                            entity: params.entity,
+                            field: params.field,
+                            value: params.value,
+                            record_id: params.id,
+                            request_id: params.request_id,
+                            data_partition: params.partition,
+                            ttl_ms: 30_000,
+                        };
                         match self
-                            .send_unique_reserve_request_async(
-                                target_node,
-                                params.entity,
-                                params.field,
-                                params.value,
-                                params.id,
-                                params.request_id,
-                                params.partition,
-                                30_000,
-                            )
+                            .send_unique_reserve_request_async(target_node, &reserve_params)
                             .await
                         {
                             Ok(rx) => {
@@ -1790,17 +1792,17 @@ impl<T: ClusterTransport> NodeController<T> {
                             self.reserve_unique_local(&params, &mut local_reserved)
                                 .await
                         } else if let Some(target_node) = primary {
+                            let reserve_params = super::db::UniqueReserveParams {
+                                entity: params.entity,
+                                field: params.field,
+                                value: params.value,
+                                record_id: params.id,
+                                request_id: params.request_id,
+                                data_partition: params.partition,
+                                ttl_ms: 30_000,
+                            };
                             match self
-                                .send_unique_reserve_request_async(
-                                    target_node,
-                                    params.entity,
-                                    params.field,
-                                    params.value,
-                                    params.id,
-                                    params.request_id,
-                                    params.partition,
-                                    30_000,
-                                )
+                                .send_unique_reserve_request_async(target_node, &reserve_params)
                                 .await
                             {
                                 Ok(rx) => {
@@ -2102,16 +2104,16 @@ impl<T: ClusterTransport> NodeController<T> {
             );
         }
 
-        let request = JsonDbRequest::new(
+        let request = JsonDbRequest {
             request_id,
             op,
-            entity.to_string(),
-            id.map(String::from),
-            payload.to_vec(),
-            response_topic.to_string(),
-            correlation_data.map(<[u8]>::to_vec),
-            sender.map(String::from),
-        );
+            entity: entity.to_string(),
+            id: id.map(String::from),
+            payload: payload.to_vec(),
+            response_topic: response_topic.to_string(),
+            correlation_data: correlation_data.map(<[u8]>::to_vec),
+            sender: sender.map(String::from),
+        };
 
         let msg = ClusterMessage::JsonDbRequest { partition, request };
         if let Err(e) = self.transport.send(primary, msg).await {
@@ -2146,16 +2148,16 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         payload: &[u8],
     ) -> Vec<u8> {
-        let request = JsonDbRequest::new(
-            0,
-            JsonDbOp::Update,
-            entity.to_string(),
-            Some(id.to_string()),
-            payload.to_vec(),
-            String::new(),
-            None,
-            None,
-        );
+        let request = JsonDbRequest {
+            request_id: 0,
+            op: JsonDbOp::Update,
+            entity: entity.to_string(),
+            id: Some(id.to_string()),
+            payload: payload.to_vec(),
+            response_topic: String::new(),
+            correlation_data: None,
+            sender: None,
+        };
         let (result, _) = self
             .handle_json_update_local(entity, id, payload, &request, self.node_id)
             .await;

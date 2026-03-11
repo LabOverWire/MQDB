@@ -3106,7 +3106,7 @@ async fn index_multiple_records_same_value() {
 
 #[tokio::test]
 async fn unique_constraint_reserve_commit_release() {
-    use mqdb::cluster::db::ReserveResult;
+    use mqdb::cluster::db::{ReserveResult, UniqueReserveParams};
 
     let mut cluster = TestCluster::new(3);
     let (n2, n3) = (cluster.nodes[1].id, cluster.nodes[2].id);
@@ -3117,19 +3117,19 @@ async fn unique_constraint_reserve_commit_release() {
     let data_partition = PartitionId::new(10).unwrap();
     let (ttl_ms, now) = (5000, 1000);
 
+    let params = UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id,
+        request_id,
+        data_partition,
+        ttl_ms,
+    };
     let (result, write_opt) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            record_id,
-            request_id,
-            data_partition,
-            ttl_ms,
-            now,
-        );
+        .unique_reserve_replicated(&params, now);
     assert_eq!(result, ReserveResult::Reserved);
     assert!(write_opt.is_some(), "Should have replication write");
 
@@ -3145,34 +3145,25 @@ async fn unique_constraint_reserve_commit_release() {
         node.controller.process_messages().await;
     }
 
+    let conflict_params = UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "other-record",
+        request_id: "req-002",
+        data_partition,
+        ttl_ms,
+    };
     let (conflict_result, _) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            "other-record",
-            "req-002",
-            data_partition,
-            ttl_ms,
-            now + 100,
-        );
+        .unique_reserve_replicated(&conflict_params, now + 100);
     assert_eq!(conflict_result, ReserveResult::Conflict);
 
     let (idempotent_result, _) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            record_id,
-            request_id,
-            data_partition,
-            ttl_ms,
-            now + 100,
-        );
+        .unique_reserve_replicated(&params, now + 100);
     assert_eq!(
         idempotent_result,
         ReserveResult::AlreadyReservedBySameRequest
@@ -3195,19 +3186,19 @@ async fn unique_constraint_reserve_commit_release() {
         node.controller.process_messages().await;
     }
 
+    let post_commit_params = UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "third-record",
+        request_id: "req-003",
+        data_partition,
+        ttl_ms,
+    };
     let (post_commit_result, _) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            "third-record",
-            "req-003",
-            data_partition,
-            ttl_ms,
-            now + 200,
-        );
+        .unique_reserve_replicated(&post_commit_params, now + 200);
     assert_eq!(
         post_commit_result,
         ReserveResult::Conflict,
@@ -3217,7 +3208,7 @@ async fn unique_constraint_reserve_commit_release() {
 
 #[tokio::test]
 async fn unique_constraint_expires_after_ttl() {
-    use mqdb::cluster::db::ReserveResult;
+    use mqdb::cluster::db::{ReserveResult, UniqueReserveParams};
 
     let mut cluster = TestCluster::new(3);
 
@@ -3235,35 +3226,35 @@ async fn unique_constraint_expires_after_ttl() {
     let ttl_ms = 1000;
     let now = 1000;
 
+    let params = UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "record-1",
+        request_id: "req-expired",
+        data_partition,
+        ttl_ms,
+    };
     let (result, _) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            "record-1",
-            "req-expired",
-            data_partition,
-            ttl_ms,
-            now,
-        );
+        .unique_reserve_replicated(&params, now);
     assert_eq!(result, ReserveResult::Reserved);
 
     let after_expiry = now + ttl_ms + 100;
+    let new_params = UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "record-2",
+        request_id: "req-new",
+        data_partition,
+        ttl_ms,
+    };
     let (new_result, _) = cluster.nodes[0]
         .controller
         .stores()
-        .unique_reserve_replicated(
-            entity,
-            field,
-            value,
-            "record-2",
-            "req-new",
-            data_partition,
-            ttl_ms,
-            after_expiry,
-        );
+        .unique_reserve_replicated(&new_params, after_expiry);
 
     assert_eq!(
         new_result,

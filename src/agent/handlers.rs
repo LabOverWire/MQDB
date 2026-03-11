@@ -23,17 +23,23 @@ use mqtt5::telemetry::propagation;
 
 use tracing::Instrument;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) async fn handle_message(
-    db: &Database,
-    client: &MqttClient,
-    message: Message,
-    backup_dir: &Path,
-    ownership: &OwnershipConfig,
-    scope_config: &ScopeConfig,
-    auth_providers: Option<&ComprehensiveAuthProvider>,
-    vault_key_store: &VaultKeyStore,
-) {
+pub(super) struct MessageContext<'a> {
+    pub db: &'a Database,
+    pub client: &'a MqttClient,
+    pub backup_dir: &'a Path,
+    pub ownership: &'a OwnershipConfig,
+    pub scope_config: &'a ScopeConfig,
+    pub auth_providers: Option<&'a ComprehensiveAuthProvider>,
+    pub vault_key_store: &'a VaultKeyStore,
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
+    let db = ctx.db;
+    let client = ctx.client;
+    let ownership = ctx.ownership;
+    let scope_config = ctx.scope_config;
+    let vault_key_store = ctx.vault_key_store;
     let topic = &message.topic;
 
     if topic.contains("/events") {
@@ -41,16 +47,16 @@ pub(super) async fn handle_message(
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        let ctx = AdminContext {
+        let admin_ctx = AdminContext {
             db,
             client,
             message: &message,
-            backup_dir,
-            auth_providers,
+            backup_dir: ctx.backup_dir,
+            auth_providers: ctx.auth_providers,
             ownership,
             scope_config,
         };
-        handle_admin_operation(&ctx, admin_op).await;
+        handle_admin_operation(&admin_ctx, admin_op).await;
         return;
     }
 
@@ -214,10 +220,14 @@ async fn vault_transform_request(
             id,
             fields: delta,
         } => {
-            let (encrypted_request, constraint_data) = vault_pre_update(
-                db, crypto, &entity, &id, delta, &skip, sender_uid, ownership,
-            )
-            .await?;
+            let params = VaultUpdateParams {
+                crypto,
+                skip_fields: &skip,
+                sender_uid,
+                ownership,
+            };
+            let (encrypted_request, constraint_data) =
+                vault_pre_update(db, &params, &entity, &id, delta).await?;
             debug!(entity = %entity, id = %id, "vault-encrypted update");
             Ok((encrypted_request, constraint_data))
         }
@@ -225,20 +235,23 @@ async fn vault_transform_request(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct VaultUpdateParams<'a> {
+    crypto: &'a VaultCrypto,
+    skip_fields: &'a [String],
+    sender_uid: Option<&'a str>,
+    ownership: &'a OwnershipConfig,
+}
+
 async fn vault_pre_update(
     db: &Database,
-    crypto: &VaultCrypto,
+    params: &VaultUpdateParams<'_>,
     entity: &str,
     id: &str,
     delta: Value,
-    skip_fields: &[String],
-    sender_uid: Option<&str>,
-    ownership: &OwnershipConfig,
 ) -> Result<(Request, Option<(Value, Value)>), Response> {
-    if let Some(uid) = sender_uid
-        && !ownership.is_admin(uid)
-        && let Some(owner_field) = ownership.entity_owner_fields.get(entity)
+    if let Some(uid) = params.sender_uid
+        && !params.ownership.is_admin(uid)
+        && let Some(owner_field) = params.ownership.entity_owner_fields.get(entity)
         && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
     {
         return Err(e.into());
@@ -258,7 +271,13 @@ async fn vault_pre_update(
         ));
     };
 
-    vault_decrypt_fields(crypto, entity, id, &mut decrypted_existing, skip_fields);
+    vault_decrypt_fields(
+        params.crypto,
+        entity,
+        id,
+        &mut decrypted_existing,
+        params.skip_fields,
+    );
 
     let plaintext_existing = decrypted_existing.clone();
 
@@ -272,7 +291,7 @@ async fn vault_pre_update(
 
     if let Some(obj) = decrypted_existing.as_object_mut() {
         obj.remove("id");
-        for sf in skip_fields {
+        for sf in params.skip_fields {
             if sf != "id" {
                 obj.remove(sf.as_str());
             }
@@ -280,7 +299,7 @@ async fn vault_pre_update(
     }
 
     let mut merged = decrypted_existing;
-    vault_encrypt_fields(crypto, entity, id, &mut merged, skip_fields);
+    vault_encrypt_fields(params.crypto, entity, id, &mut merged, params.skip_fields);
 
     Ok((
         Request::Update {

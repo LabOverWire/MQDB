@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 use std::sync::Arc;
@@ -39,9 +40,11 @@ async fn test_concurrent_updates_last_write_wins() {
                     id_clone,
                     json!({"value": format!("update-{}", i)}),
                     None,
-                    None,
-                    None,
-                    &ScopeConfig::default(),
+                    &CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &ScopeConfig::default(),
+                    },
                 )
                 .await
         });
@@ -91,9 +94,11 @@ async fn test_no_torn_writes() {
             id1,
             json!({"status": "suspended"}),
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await
     });
@@ -225,9 +230,11 @@ async fn test_concurrent_updates_to_different_entities() {
                     id1_clone,
                     json!({"count": i}),
                     None,
-                    None,
-                    None,
-                    &ScopeConfig::default(),
+                    &CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &ScopeConfig::default(),
+                    },
                 )
                 .await
         });
@@ -244,9 +251,11 @@ async fn test_concurrent_updates_to_different_entities() {
                     id2_clone,
                     json!({"count": i + 100}),
                     None,
-                    None,
-                    None,
-                    &ScopeConfig::default(),
+                    &CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &ScopeConfig::default(),
+                    },
                 )
                 .await
         });

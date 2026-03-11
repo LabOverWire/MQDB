@@ -17,6 +17,13 @@ use crate::VaultKeyStore;
 use crate::types::{OwnershipConfig, ScopeConfig};
 use std::sync::Arc;
 
+pub struct MqttRequestContext<'a> {
+    pub response_topic: Option<&'a str>,
+    pub correlation_data: Option<&'a [u8]>,
+    pub sender: Option<&'a str>,
+    pub client_id: Option<&'a str>,
+}
+
 pub struct DbPublishResponse {
     pub topic: String,
     pub payload: Vec<u8>,
@@ -96,16 +103,12 @@ impl DbRequestHandler {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn handle_publish<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         topic: &str,
         payload: &[u8],
-        response_topic: Option<&str>,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
+        ctx: &MqttRequestContext<'_>,
     ) -> DbPublishResult {
         let Some(parsed) = ParsedDbTopic::parse(topic) else {
             return DbPublishResult::NoResponse;
@@ -125,19 +128,11 @@ impl DbRequestHandler {
                 }
             }
             ref op => {
-                let Some(resp_topic) = response_topic else {
+                if ctx.response_topic.is_none() {
                     return DbPublishResult::NoResponse;
-                };
+                }
                 match self
-                    .handle_json_operation(
-                        controller,
-                        op,
-                        payload,
-                        resp_topic,
-                        correlation_data,
-                        sender,
-                        client_id,
-                    )
+                    .handle_json_operation(controller, op, payload, ctx)
                     .await
                 {
                     json_ops::JsonOpResult::Response(payload) => payload,
@@ -155,14 +150,14 @@ impl DbRequestHandler {
             }
         };
 
-        let Some(resp_topic) = response_topic else {
+        let Some(resp_topic) = ctx.response_topic else {
             return DbPublishResult::NoResponse;
         };
 
         DbPublishResult::Response(DbPublishResponse {
             topic: resp_topic.to_string(),
             payload: response_payload,
-            correlation_data: correlation_data.map(<[u8]>::to_vec),
+            correlation_data: ctx.correlation_data.map(<[u8]>::to_vec),
         })
     }
 }

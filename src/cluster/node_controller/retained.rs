@@ -43,15 +43,16 @@ impl<T: ClusterTransport> NodeController<T> {
             Some(format!("topic={topic_filter}"))
         };
 
-        let (query_id, requests) = self.query_coordinator.start_query(
-            "retained",
-            filter.as_deref(),
-            1000,
-            None,
-            Some(timeout_ms),
-            partitions.clone(),
-            now,
-        );
+        let query_params = super::super::query_coordinator::ScatterQueryParams {
+            entity: "retained",
+            filter: filter.as_deref(),
+            limit: 1000,
+            cursor: None,
+            timeout_ms: Some(timeout_ms),
+        };
+        let (query_id, requests) =
+            self.query_coordinator
+                .start_query(&query_params, partitions.clone(), now);
 
         let requests_with_partitions: Vec<_> = partitions.into_iter().zip(requests).collect();
 

@@ -123,16 +123,16 @@ impl<T: ClusterTransport> NodeController<T> {
         let scatter_response_topic = format!("_mqdb/scatter/{}/{request_id}", self.node_id.get());
 
         for &target_node in &remote_nodes {
-            let request = JsonDbRequest::new(
+            let request = JsonDbRequest {
                 request_id,
-                JsonDbOp::List,
-                entity.to_string(),
-                None,
-                scatter_payload.to_vec(),
-                scatter_response_topic.clone(),
-                None,
-                None,
-            );
+                op: JsonDbOp::List,
+                entity: entity.to_string(),
+                id: None,
+                payload: scatter_payload.to_vec(),
+                response_topic: scatter_response_topic.clone(),
+                correlation_data: None,
+                sender: None,
+            };
 
             let msg = ClusterMessage::JsonDbRequest {
                 partition: PartitionId::ZERO,

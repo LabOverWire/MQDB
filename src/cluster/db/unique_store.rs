@@ -143,6 +143,16 @@ pub enum ReserveResult {
     Conflict,
 }
 
+pub struct UniqueReserveParams<'a> {
+    pub entity: &'a str,
+    pub field: &'a str,
+    pub value: &'a [u8],
+    pub record_id: &'a str,
+    pub request_id: &'a str,
+    pub data_partition: PartitionId,
+    pub ttl_ms: u64,
+}
+
 pub struct UniqueStore {
     node_id: NodeId,
     reservations: RwLock<HashMap<String, UniqueReservation>>,
@@ -159,19 +169,8 @@ impl UniqueStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::too_many_arguments)]
-    pub fn reserve(
-        &self,
-        entity: &str,
-        field: &str,
-        value: &[u8],
-        record_id: &str,
-        request_id: &str,
-        data_partition: PartitionId,
-        ttl_ms: u64,
-        now: u64,
-    ) -> ReserveResult {
-        let key = Self::unique_key(entity, field, value);
+    pub fn reserve(&self, params: &UniqueReserveParams<'_>, now: u64) -> ReserveResult {
+        let key = Self::unique_key(params.entity, params.field, params.value);
         let mut reservations = self.reservations.write().unwrap();
 
         if let Some(existing) = reservations.get(&key) {
@@ -179,7 +178,7 @@ impl UniqueStore {
                 return ReserveResult::Conflict;
             }
 
-            if existing.request_id_str() == request_id {
+            if existing.request_id_str() == params.request_id {
                 return ReserveResult::AlreadyReservedBySameRequest;
             }
 
@@ -189,13 +188,13 @@ impl UniqueStore {
         }
 
         let reservation = UniqueReservation::create(
-            entity,
-            field,
-            value,
-            record_id,
-            request_id,
-            data_partition,
-            now + ttl_ms,
+            params.entity,
+            params.field,
+            params.value,
+            params.record_id,
+            params.request_id,
+            params.data_partition,
+            now + params.ttl_ms,
         );
         reservations.insert(key, reservation);
         ReserveResult::Reserved
@@ -397,6 +396,26 @@ mod tests {
         PartitionId::new(id).unwrap()
     }
 
+    fn params<'a>(
+        entity: &'a str,
+        field: &'a str,
+        value: &'a [u8],
+        record_id: &'a str,
+        request_id: &'a str,
+        data_partition: PartitionId,
+        ttl_ms: u64,
+    ) -> UniqueReserveParams<'a> {
+        UniqueReserveParams {
+            entity,
+            field,
+            value,
+            record_id,
+            request_id,
+            data_partition,
+            ttl_ms,
+        }
+    }
+
     #[test]
     fn unique_reservation_bebytes_roundtrip() {
         let reservation = UniqueReservation::create(
@@ -423,13 +442,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         let result = store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -441,24 +462,28 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
         let result = store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user456",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user456",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -470,24 +495,28 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
         let result = store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user456",
-            "req-xyz",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user456",
+                "req-xyz",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -499,13 +528,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
         store
@@ -513,13 +544,15 @@ mod tests {
             .unwrap();
 
         let result = store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user456",
-            "req-xyz",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user456",
+                "req-xyz",
+                partition(42),
+                5000,
+            ),
             2000,
         );
 
@@ -531,24 +564,28 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
         let result = store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user456",
-            "req-xyz",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user456",
+                "req-xyz",
+                partition(42),
+                5000,
+            ),
             7000,
         );
 
@@ -560,13 +597,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -583,13 +622,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -603,13 +644,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -625,13 +668,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
         store
@@ -647,13 +692,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -666,13 +713,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
 
@@ -685,24 +734,28 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user1",
-            "req-1",
-            partition(42),
-            1000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user1",
+                "req-1",
+                partition(42),
+                1000,
+            ),
             1000,
         );
 
         store.reserve(
-            "users",
-            "email",
-            b"bob@example.com",
-            "user2",
-            "req-2",
-            partition(42),
-            10000,
+            &params(
+                "users",
+                "email",
+                b"bob@example.com",
+                "user2",
+                "req-2",
+                partition(42),
+                10000,
+            ),
             1000,
         );
 
@@ -716,13 +769,15 @@ mod tests {
         let store = UniqueStore::new(node(1));
 
         store.reserve(
-            "users",
-            "email",
-            b"alice@example.com",
-            "user123",
-            "req-abc",
-            partition(42),
-            5000,
+            &params(
+                "users",
+                "email",
+                b"alice@example.com",
+                "user123",
+                "req-abc",
+                partition(42),
+                5000,
+            ),
             1000,
         );
         store

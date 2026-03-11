@@ -15,9 +15,9 @@ use commands::cluster::{
     ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status,
 };
 use commands::crud::{
-    cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list, cmd_create,
-    cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get, cmd_schema_set,
-    cmd_subscribe, cmd_update, cmd_watch,
+    ListParams, cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list,
+    cmd_create, cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get,
+    cmd_schema_set, cmd_subscribe, cmd_update, cmd_watch,
 };
 
 use clap::Parser;
@@ -94,7 +94,16 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             format,
         } => {
             Box::pin(cmd_list(
-                entity, filter, sort, limit, offset, projection, conn, format,
+                ListParams {
+                    entity,
+                    filters: filter,
+                    sort,
+                    limit,
+                    offset,
+                    projection,
+                },
+                conn,
+                format,
             ))
             .await?;
         }

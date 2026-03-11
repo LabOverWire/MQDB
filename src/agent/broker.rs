@@ -14,6 +14,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::info;
 
+pub(super) struct AuthProviderConfig<'a> {
+    pub needs_composite: bool,
+    pub service_username: Option<&'a String>,
+    pub service_password: Option<&'a String>,
+    pub password_file: Option<&'a std::path::Path>,
+    pub acl_file: Option<&'a std::path::Path>,
+    pub admin_users: &'a HashSet<String>,
+    pub allow_anonymous: bool,
+}
+
 impl MqdbAgent {
     pub(super) async fn build_broker_config(
         &self,
@@ -100,27 +110,20 @@ impl MqdbAgent {
     }
 
     #[allow(clippy::type_complexity)]
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn apply_auth_providers(
         mut broker: MqttBroker,
-        needs_composite: bool,
-        service_username: Option<&String>,
-        service_password: Option<&String>,
-        password_file: Option<&std::path::Path>,
-        acl_file: Option<&std::path::Path>,
-        admin_users: &HashSet<String>,
-        allow_anonymous: bool,
+        config: AuthProviderConfig<'_>,
     ) -> Result<
         (MqttBroker, Option<Arc<ComprehensiveAuthProvider>>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let auth_providers = if password_file.is_some() || acl_file.is_some() {
-            let pwd = if let Some(path) = password_file {
+        let auth_providers = if config.password_file.is_some() || config.acl_file.is_some() {
+            let pwd = if let Some(path) = config.password_file {
                 PasswordAuthProvider::from_file(path).await?
             } else {
                 PasswordAuthProvider::new()
             };
-            let acl = if let Some(path) = acl_file {
+            let acl = if let Some(path) = config.acl_file {
                 AclManager::from_file(path).await?
             } else {
                 AclManager::allow_all()
@@ -132,8 +135,9 @@ impl MqdbAgent {
             None
         };
 
-        if needs_composite
-            && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
+        if config.needs_composite
+            && let (Some(svc_user), Some(svc_pass)) =
+                (config.service_username, config.service_password)
         {
             let primary = broker.auth_provider();
             let fallback: Arc<dyn mqtt5::broker::auth::AuthProvider> =
@@ -156,15 +160,15 @@ impl MqdbAgent {
 
         let current_provider = broker.auth_provider();
         let protected_provider =
-            TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
-                .with_internal_service_username(service_username.cloned())
-                .with_all_users_admin(allow_anonymous && admin_users.is_empty());
+            TopicProtectionAuthProvider::new(current_provider, config.admin_users.clone())
+                .with_internal_service_username(config.service_username.cloned())
+                .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty());
         broker = broker.with_auth_provider(Arc::new(protected_provider));
-        if admin_users.is_empty() {
+        if config.admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");
         } else {
             info!(
-                admin_users = ?admin_users,
+                admin_users = ?config.admin_users,
                 "topic protection enabled with admin users"
             );
         }

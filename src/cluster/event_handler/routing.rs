@@ -144,7 +144,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
 
     #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
-        use super::super::db_handler::DbPublishResult;
+        use super::super::db_handler::{DbPublishResult, MqttRequestContext};
         use super::super::node_controller::fk::await_fk_checks;
         use super::super::node_controller::unique::await_unique_reserves;
 
@@ -153,17 +153,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         let mut ctrl = self.controller.write().await;
         #[allow(clippy::cast_possible_truncation)]
         let t_lock = start.elapsed().as_micros() as u64;
+        let ctx = MqttRequestContext {
+            response_topic: event.response_topic.as_deref(),
+            correlation_data: event.correlation_data.as_deref(),
+            sender: event.user_id.as_deref(),
+            client_id: Some(event.client_id.as_ref()),
+        };
         let result = self
             .db_handler
-            .handle_publish(
-                &mut ctrl,
-                event.topic.as_ref(),
-                &event.payload,
-                event.response_topic.as_deref(),
-                event.correlation_data.as_deref(),
-                event.user_id.as_deref(),
-                Some(event.client_id.as_ref()),
-            )
+            .handle_publish(&mut ctrl, event.topic.as_ref(), &event.payload, &ctx)
             .await;
 
         match result {

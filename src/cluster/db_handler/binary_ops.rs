@@ -215,16 +215,19 @@ impl DbRequestHandler {
 
         let data_partition = PartitionId::new(request.data_partition).unwrap_or(PartitionId::ZERO);
 
-        let result = controller.stores_mut().db_unique.reserve(
-            request.entity_str(),
-            request.field_str(),
-            &request.value,
-            request.record_id_str(),
-            request.request_id_str(),
+        let reserve_params = db::UniqueReserveParams {
+            entity: request.entity_str(),
+            field: request.field_str(),
+            value: &request.value,
+            record_id: request.record_id_str(),
+            request_id: request.request_id_str(),
             data_partition,
-            u64::from(request.ttl_ms),
-            request.now_ms,
-        );
+            ttl_ms: u64::from(request.ttl_ms),
+        };
+        let result = controller
+            .stores_mut()
+            .db_unique
+            .reserve(&reserve_params, request.now_ms);
 
         let status = match result {
             db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
