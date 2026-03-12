@@ -108,7 +108,7 @@ pub(crate) enum AclAction {
         username: String,
         #[arg(help = "MQTT topic pattern")]
         topic: String,
-        #[arg(help = "Permission: pub, sub, or pubsub")]
+        #[arg(help = "Permission: read, write, readwrite, or deny")]
         permission: String,
         #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
@@ -128,7 +128,7 @@ pub(crate) enum AclAction {
         role_name: String,
         #[arg(help = "MQTT topic pattern")]
         topic: String,
-        #[arg(help = "Permission: pub, sub, or pubsub")]
+        #[arg(help = "Permission: read, write, readwrite, or deny")]
         permission: String,
         #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
@@ -180,7 +180,7 @@ pub(crate) enum AclAction {
         username: String,
         #[arg(help = "MQTT topic pattern")]
         topic: String,
-        #[arg(help = "Action to check: pub or sub")]
+        #[arg(help = "Action to check: read or write")]
         action: String,
         #[arg(short, long, help = "ACL file path")]
         file: PathBuf,

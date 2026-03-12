@@ -162,11 +162,8 @@ async fn test_admin_schema_set_and_get() {
     );
 
     let schema = json!({
-        "entity": "test_entity",
-        "fields": {
-            "name": {"name": "name", "field_type": "String", "required": true},
-            "email": {"name": "email", "field_type": "String", "required": false}
-        }
+        "name": {"type": "string", "required": true},
+        "email": {"type": "string", "required": false}
     });
 
     let set_response = mqtt_request_response(

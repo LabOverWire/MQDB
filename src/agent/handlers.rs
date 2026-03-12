@@ -430,15 +430,24 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
 
 async fn handle_schema_set(db: &Database, entity: String, payload: Value) -> Response {
     use serde_json::json;
-    match serde_json::from_value::<crate::schema::Schema>(payload) {
-        Ok(mut schema) => {
-            schema.entity = entity;
-            match db.add_schema(schema).await {
-                Ok(()) => Response::ok(json!({"message": "schema set"})),
-                Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-            }
+    let mut fields: std::collections::HashMap<String, crate::schema::FieldDefinition> =
+        match serde_json::from_value(payload) {
+            Ok(f) => f,
+            Err(e) => return Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+        };
+    for (key, def) in &mut fields {
+        if def.name.is_empty() {
+            def.name.clone_from(key);
         }
-        Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+    }
+    let schema = crate::schema::Schema {
+        entity,
+        fields,
+        version: 1,
+    };
+    match db.add_schema(schema).await {
+        Ok(()) => Response::ok(json!({"message": "schema set"})),
+        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
     }
 }
 

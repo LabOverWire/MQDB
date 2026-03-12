@@ -10,18 +10,27 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldType {
+    #[serde(alias = "string")]
     String,
+    #[serde(alias = "number")]
     Number,
+    #[serde(alias = "boolean")]
     Boolean,
+    #[serde(alias = "array")]
     Array,
+    #[serde(alias = "object")]
     Object,
+    #[serde(alias = "null")]
     Null,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDefinition {
+    #[serde(default)]
     pub name: String,
+    #[serde(alias = "type")]
     pub field_type: FieldType,
+    #[serde(default)]
     pub required: bool,
     pub default: Option<Value>,
 }

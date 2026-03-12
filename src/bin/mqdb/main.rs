@@ -84,28 +84,10 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             format,
         } => Box::pin(cmd_delete(entity, id, conn, format)).await?,
         Commands::List {
-            entity,
-            filter,
-            sort,
-            limit,
-            offset,
-            projection,
-            conn,
-            format,
+            entity, filter, sort, limit, offset, projection, conn, format,
         } => {
-            Box::pin(cmd_list(
-                ListParams {
-                    entity,
-                    filters: filter,
-                    sort,
-                    limit,
-                    offset,
-                    projection,
-                },
-                conn,
-                format,
-            ))
-            .await?;
+            let params = ListParams { entity, filters: filter, sort, limit, offset, projection };
+            Box::pin(cmd_list(params, conn, format)).await?;
         }
         Commands::Watch {
             entity,
@@ -119,24 +101,10 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         Commands::Backup { action } => dispatch_backup(action).await?,
         Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
         Commands::Subscribe {
-            pattern,
-            entity,
-            group,
-            mode,
-            heartbeat_interval,
-            conn,
-            format,
+            pattern, entity, group, mode, heartbeat_interval, conn, format,
         } => {
-            Box::pin(cmd_subscribe(
-                pattern,
-                entity,
-                group,
-                mode,
-                heartbeat_interval,
-                conn,
-                format,
-            ))
-            .await?;
+            Box::pin(cmd_subscribe(pattern, entity, group, mode, heartbeat_interval, conn, format))
+                .await?;
         }
         Commands::ConsumerGroup { action } => dispatch_consumer_group(action).await?,
         Commands::Db { action } => dispatch_db(action).await?,
