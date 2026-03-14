@@ -164,7 +164,6 @@ impl ClusteredAgent {
                 "mode": "cluster",
                 "node_id": self.node_id.get(),
                 "is_leader": raft_status.is_leader,
-                "vault_enabled": !self.ownership.entity_owner_fields.is_empty()
             }
         }))
     }
@@ -212,6 +211,7 @@ impl ClusteredAgent {
             "constraints": constraint_data,
             "ownership": ownership_info,
             "scope": scope_info,
+            "vault_eligible": crate::vault_transform::is_vault_eligible(name, &self.ownership),
         })
     }
 

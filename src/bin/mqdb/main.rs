@@ -66,7 +66,13 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         Commands::Db { action } => dispatch_db(action).await?,
         Commands::Dev { action } => dispatch_dev(action).await?,
         Commands::Bench { action } => dispatch_bench(action).await?,
-        crud => dispatch_crud(crud).await?,
+        crud @ (Commands::Create { .. }
+        | Commands::Read { .. }
+        | Commands::Update { .. }
+        | Commands::Delete { .. }
+        | Commands::List { .. }
+        | Commands::Watch { .. }
+        | Commands::Subscribe { .. }) => dispatch_crud(crud).await?,
     }
     Ok(())
 }
@@ -145,7 +151,7 @@ async fn dispatch_crud(command: Commands) -> Result<(), Box<dyn std::error::Erro
             ))
             .await?;
         }
-        _ => unreachable!(),
+        _ => unreachable!("caller ensures only CRUD variants reach dispatch_crud"),
     }
     Ok(())
 }

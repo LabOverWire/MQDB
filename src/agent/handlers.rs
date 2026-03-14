@@ -749,6 +749,7 @@ async fn handle_catalog(
             "constraints": constraint_data,
             "ownership": ownership_info,
             "scope": scope_info,
+            "vault_eligible": is_vault_eligible(name, ownership),
         }));
     }
 
@@ -756,7 +757,6 @@ async fn handle_catalog(
         "entities": entities,
         "server": {
             "mode": "agent",
-            "vault_enabled": !ownership.entity_owner_fields.is_empty()
         }
     }))
 }

@@ -510,21 +510,6 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 }
             }
-            "list" => {
-                if let Some(data) = parsed.get_mut("data")
-                    && let Some(items) = data.as_array_mut()
-                {
-                    for item in items {
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
-                            && let Some(item_data) = item.get_mut("data")
-                        {
-                            crate::vault_transform::vault_decrypt_fields(
-                                &crypto, entity, &id, item_data, &skip,
-                            );
-                        }
-                    }
-                }
-            }
             _ => {}
         }
         serde_json::to_vec(&parsed).unwrap_or(payload)
@@ -2063,21 +2048,23 @@ impl<T: ClusterTransport> NodeController<T> {
             && self.vault_key_store.get(sender_id).is_some()
         {
             let op_str = match op {
-                JsonDbOp::Create => "create",
-                JsonDbOp::Read => "read",
-                JsonDbOp::Update => "update",
-                JsonDbOp::List => "list",
-                JsonDbOp::Delete => "delete",
+                JsonDbOp::Create => Some("create"),
+                JsonDbOp::Read => Some("read"),
+                JsonDbOp::Update => Some("update"),
+                JsonDbOp::Delete => Some("delete"),
+                JsonDbOp::List => None,
             };
-            self.pending_vault_decrypts.insert(
-                request_id,
-                super::PendingVaultDecrypt {
-                    entity: entity.to_string(),
-                    sender: sender_id.to_string(),
-                    op: op_str.to_string(),
-                    created_at_ms: request_id / 1_000_000,
-                },
-            );
+            if let Some(op_str) = op_str {
+                self.pending_vault_decrypts.insert(
+                    request_id,
+                    super::PendingVaultDecrypt {
+                        entity: entity.to_string(),
+                        sender: sender_id.to_string(),
+                        op: op_str.to_string(),
+                        created_at_ms: request_id / 1_000_000,
+                    },
+                );
+            }
         }
 
         let request = JsonDbRequest {
