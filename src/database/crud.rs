@@ -35,7 +35,7 @@ impl Database {
             client_id.to_string()
         } else {
             let payload_bytes = serde_json::to_vec(&data).unwrap_or_default();
-            let generated = self.generate_id(&entity_name, &payload_bytes);
+            let generated = Self::generate_id(&entity_name, &payload_bytes);
             if let Value::Object(ref mut obj) = data {
                 obj.insert("id".to_string(), Value::String(generated.clone()));
             }
@@ -409,13 +409,13 @@ impl Database {
         Ok(())
     }
 
-    pub(super) fn generate_id(&self, entity_name: &str, data: &[u8]) -> String {
+    pub(super) fn generate_id(entity_name: &str, data: &[u8]) -> String {
         use std::sync::atomic::{AtomicU16, Ordering};
         static COUNTER: AtomicU16 = AtomicU16::new(0);
 
-        let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % crate::cluster::NUM_PARTITIONS;
+        let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % crate::partition::NUM_PARTITIONS;
         let partition =
-            crate::cluster::PartitionId::new(idx).unwrap_or(crate::cluster::PartitionId::ZERO);
-        crate::cluster::db::generate_id_for_partition(1, entity_name, partition, data)
+            crate::partition::PartitionId::new(idx).unwrap_or(crate::partition::PartitionId::ZERO);
+        crate::partition::generate_id_for_partition(1, entity_name, partition, data)
     }
 }

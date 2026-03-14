@@ -4,12 +4,15 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use super::agent::{AgentAction, ClusterAction};
+use super::agent::AgentAction;
+#[cfg(feature = "cluster")]
+use super::agent::ClusterAction;
 use super::auth::AclAction;
 use super::bench::BenchAction;
-use super::db::{
-    BackupAction, ConstraintAction, ConsumerGroupAction, DbAction, IndexAction, SchemaAction,
-};
+#[cfg(feature = "cluster")]
+use super::db::DbAction;
+use super::db::{BackupAction, ConstraintAction, ConsumerGroupAction, IndexAction, SchemaAction};
+#[cfg(feature = "cluster")]
 use super::dev::DevAction;
 
 #[derive(Parser)]
@@ -28,6 +31,7 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+    #[cfg(feature = "cluster")]
     #[command(about = "Manage distributed cluster nodes")]
     Cluster {
         #[command(subcommand)]
@@ -240,11 +244,13 @@ Examples:
         #[command(subcommand)]
         action: ConsumerGroupAction,
     },
+    #[cfg(feature = "cluster")]
     #[command(about = "Low-level database management commands")]
     Db {
         #[command(subcommand)]
         action: DbAction,
     },
+    #[cfg(feature = "cluster")]
     #[command(about = "Development and testing utilities")]
     Dev {
         #[command(subcommand)]

@@ -59,6 +59,7 @@ pub(crate) enum AgentAction {
     },
 }
 
+#[cfg(feature = "cluster")]
 #[derive(clap::Args)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct ClusterStartFields {
@@ -135,6 +136,7 @@ pub(crate) struct ClusterStartFields {
     pub(crate) passphrase_file: Option<PathBuf>,
 }
 
+#[cfg(feature = "cluster")]
 #[derive(Subcommand)]
 pub(crate) enum ClusterAction {
     #[command(about = "Start a cluster node")]

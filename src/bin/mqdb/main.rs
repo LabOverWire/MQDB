@@ -6,11 +6,14 @@ mod commands;
 mod common;
 
 use cli_types::{
-    AclAction, AgentAction, BackupAction, BenchAction, Cli, ClusterAction, Commands,
-    ConstraintAction, ConsumerGroupAction, DbAction, DevAction, IndexAction, SchemaAction,
+    AclAction, AgentAction, BackupAction, BenchAction, Cli, Commands, ConstraintAction,
+    ConsumerGroupAction, IndexAction, SchemaAction,
 };
+#[cfg(feature = "cluster")]
+use cli_types::{ClusterAction, DbAction, DevAction};
 use commands::agent::{AgentStartArgs, cmd_agent_start, cmd_agent_status};
 use commands::bench::{BenchDbArgs, BenchPubsubArgs, cmd_bench_db, cmd_bench_pubsub};
+#[cfg(feature = "cluster")]
 use commands::cluster::{
     ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status,
 };
@@ -25,6 +28,7 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "cluster")]
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -40,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Agent { action } => dispatch_agent(action).await?,
+        #[cfg(feature = "cluster")]
         Commands::Cluster { action } => dispatch_cluster(action).await?,
         Commands::Passwd {
             username,
@@ -63,7 +68,9 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         Commands::Backup { action } => dispatch_backup(action).await?,
         Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
         Commands::ConsumerGroup { action } => dispatch_consumer_group(action).await?,
+        #[cfg(feature = "cluster")]
         Commands::Db { action } => dispatch_db(action).await?,
+        #[cfg(feature = "cluster")]
         Commands::Dev { action } => dispatch_dev(action).await?,
         Commands::Bench { action } => dispatch_bench(action).await?,
         crud @ (Commands::Create { .. }
@@ -192,6 +199,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         ClusterAction::Start(fields) => {
@@ -290,6 +298,7 @@ async fn dispatch_consumer_group(
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn dispatch_db(action: DbAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DbAction::Create {
@@ -335,6 +344,7 @@ async fn dispatch_db(action: DbAction) -> Result<(), Box<dyn std::error::Error>>
     }
 }
 
+#[cfg(feature = "cluster")]
 async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DevAction::Ps => commands::dev::cmd_dev_ps()?,

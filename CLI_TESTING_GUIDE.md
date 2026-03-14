@@ -8,6 +8,11 @@ This guide provides end-to-end validation of MQDB CLI functionality through manu
 
 ```bash
 cd /path/to/mqdb
+
+# Agent-only (open-source edition — no cluster commands)
+cargo build --release --bin mqdb --features agent-only
+
+# Full build with clustering (commercial edition, default)
 cargo build --release
 ```
 

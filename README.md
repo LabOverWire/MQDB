@@ -2,6 +2,11 @@
 
 A high-performance reactive database with native MQTT integration, point-to-point delivery, and consumer groups. Built in Rust with support for both native and WASM targets.
 
+MQDB is available in two editions:
+
+- **Agent** (open-source): Standalone embedded MQTT broker with full database, authentication, vault encryption, and consumer groups.
+- **Native** (commercial): Everything in Agent plus distributed clustering with Raft consensus, QUIC transport, partition rebalancing, and cross-node replication.
+
 ## Features
 
 Per-entity atomicity with constraint enforcement and correlation ID dedup.
@@ -507,7 +512,9 @@ mqdb agent start --db /tmp/vault-demo/db --bind 127.0.0.1:1883 \
 
 See `examples/vault-mqtt/` for a single-node demo and `examples/vault-cluster/` for a multi-node E2E test.
 
-## Distributed Clustering
+## Distributed Clustering (Native Edition)
+
+> Clustering requires the `native` feature (commercial license). Agent-only builds (`--features agent-only`) do not include cluster code.
 
 MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 256 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams with mTLS mutual authentication.
 
@@ -620,6 +627,10 @@ The `mqdb` CLI provides command-line access to a running MQDB agent.
 ### Installation
 
 ```bash
+# Agent-only (open-source edition)
+cargo build --release --bin mqdb --features agent-only
+
+# Full build with clustering (commercial edition, default)
 cargo build --release --bin mqdb
 ```
 
@@ -649,11 +660,11 @@ The `mqdb dev start-cluster` command creates a password file with `admin` / `adm
 mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl acl.txt
 
 # CRUD operations
-mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
-mqdb create users '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
+mqdb create users -d '{"name": "Alice", "email": "alice@example.com"}'
+mqdb create users -d '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
 mqdb read users 1
 mqdb read users 1 --projection name,email
-mqdb update users 1 '{"name": "Alice Smith"}'
+mqdb update users 1 -d '{"name": "Alice Smith"}'
 mqdb delete users 1
 mqdb list users --filter "status=active" --sort "-created_at" --limit 10
 mqdb list users --projection name,email
@@ -745,7 +756,12 @@ Via MQTT, include `"projection"` in the request payload:
 ## Testing
 
 ```bash
+# Run all tests (default features = native)
 cargo test
+
+# Run agent-only tests (no cluster tests)
+cargo test --features agent-only
+
 cargo test --test integration_test
 ```
 
