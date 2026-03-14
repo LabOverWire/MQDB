@@ -1,15 +1,22 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#[cfg(feature = "cluster")]
 use bebytes::BeBytes;
+#[cfg(feature = "cluster")]
 use mqdb::cluster::db::DbEntity;
+#[cfg(feature = "cluster")]
 use mqdb::cluster::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
+#[cfg(feature = "cluster")]
 use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::json;
+#[cfg(feature = "cluster")]
 use std::time::Duration;
 
 use crate::cli_types::{ConnectionArgs, OutputFormat};
-use crate::common::{connect_client, execute_request, output_response};
+#[cfg(feature = "cluster")]
+use crate::common::connect_client;
+use crate::common::{execute_request, output_response};
 
 pub(crate) async fn cmd_consumer_group_list(
     conn: ConnectionArgs,
@@ -32,6 +39,7 @@ pub(crate) async fn cmd_consumer_group_show(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn execute_db_request(
     conn: &ConnectionArgs,
     topic: &str,
@@ -72,6 +80,7 @@ pub(crate) async fn execute_db_request(
     Ok(response)
 }
 
+#[cfg(feature = "cluster")]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) async fn cmd_db_create(
     partition: u16,
@@ -108,6 +117,7 @@ pub(crate) async fn cmd_db_create(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn cmd_db_read(
     partition: u16,
     entity: String,
@@ -140,6 +150,7 @@ pub(crate) async fn cmd_db_read(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) async fn cmd_db_update(
     partition: u16,
@@ -178,6 +189,7 @@ pub(crate) async fn cmd_db_update(
     Ok(())
 }
 
+#[cfg(feature = "cluster")]
 pub(crate) async fn cmd_db_delete(
     partition: u16,
     entity: String,

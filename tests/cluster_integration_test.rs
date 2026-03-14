@@ -1,6 +1,8 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#![cfg(feature = "cluster")]
+
 mod simulation;
 
 use mqdb::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};

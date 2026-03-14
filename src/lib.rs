@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 pub mod checksum;
+#[cfg(feature = "cluster")]
 pub mod cluster;
 pub mod config;
 pub mod constraint;
@@ -41,6 +42,7 @@ pub mod dispatcher;
 #[cfg(feature = "http-api")]
 pub mod http;
 pub mod outbox;
+pub mod partition;
 #[cfg(feature = "agent")]
 pub mod session;
 #[cfg(feature = "agent")]
@@ -95,7 +97,8 @@ pub use protocol::{
     parse_db_topic,
 };
 
-pub use cluster::{
+pub use partition::{
     Epoch, NUM_PARTITIONS, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole,
+    data_partition, generate_id_for_partition, index_partition, schema_partition, unique_partition,
 };
 pub use vault_keys::VaultKeyStore;

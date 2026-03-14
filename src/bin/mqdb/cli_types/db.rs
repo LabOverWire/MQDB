@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use super::base::{ConnectionArgs, OutputFormat};
 
+#[cfg(feature = "cluster")]
 #[derive(Subcommand)]
 pub(crate) enum DbAction {
     Create {
