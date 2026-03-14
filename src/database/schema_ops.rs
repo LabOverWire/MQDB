@@ -39,8 +39,10 @@ impl Database {
         schema_registry.validate_fields_exist(&entity, &field_refs, "index")?;
         drop(schema_registry);
 
-        let mut manager = self.index_manager.write().await;
-        manager.add_index(crate::index::IndexDefinition::new(entity.clone(), fields));
+        {
+            let mut manager = self.index_manager.write().await;
+            manager.add_index(crate::index::IndexDefinition::new(entity.clone(), fields));
+        }
 
         let prefix = format!("data/{entity}/");
         let mut after_key: Option<Vec<u8>> = None;
@@ -52,6 +54,7 @@ impl Database {
                 break;
             }
             let mut write_batch = self.storage.batch();
+            let manager = self.index_manager.write().await;
             for (key, value) in &batch_items {
                 if let Ok((_, id)) = keys::decode_data_key(key)
                     && let Ok(entity_obj) = Entity::deserialize(entity.clone(), id, value)
@@ -59,6 +62,7 @@ impl Database {
                     manager.update_indexes(&mut write_batch, &entity_obj, None);
                 }
             }
+            drop(manager);
             write_batch.commit()?;
             after_key = batch_items.last().map(|(k, _)| k.clone());
         }

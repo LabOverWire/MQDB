@@ -205,25 +205,12 @@ impl DbRequestHandler {
 
         match op {
             "create" | "read" | "update" => {
-                let id = parsed.get("id").and_then(|v| v.as_str()).map(String::from);
-                if let Some(id) = id
-                    && let Some(data) = parsed.get_mut("data")
-                {
-                    crate::vault_transform::vault_decrypt_fields(&crypto, entity, &id, data, &skip);
-                }
-            }
-            "list" => {
-                if let Some(data) = parsed.get_mut("data")
-                    && let Some(items) = data.as_array_mut()
-                {
-                    for item in items {
-                        if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from)
-                            && let Some(item_data) = item.get_mut("data")
-                        {
-                            crate::vault_transform::vault_decrypt_fields(
-                                &crypto, entity, &id, item_data, &skip,
-                            );
-                        }
+                if let Some(data) = parsed.get_mut("data") {
+                    let id = data.get("id").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(id) = id {
+                        crate::vault_transform::vault_decrypt_fields(
+                            &crypto, entity, &id, data, &skip,
+                        );
                     }
                 }
             }

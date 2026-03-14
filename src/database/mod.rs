@@ -22,7 +22,7 @@ use crate::storage::Storage;
 use crate::subscription::SubscriptionRegistry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 
 const ENTITY_NAMES_KEY: &[u8] = b"meta/entity_names";
@@ -45,7 +45,6 @@ pub struct Database {
     constraint_manager: Arc<RwLock<ConstraintManager>>,
     consumer_groups: Arc<RwLock<HashMap<String, ConsumerGroup>>>,
     entity_names: Arc<RwLock<HashSet<String>>>,
-    id_gen_lock: Arc<Mutex<()>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
     background_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
@@ -171,7 +170,6 @@ impl Database {
             constraint_manager,
             consumer_groups,
             entity_names,
-            id_gen_lock: Arc::new(Mutex::new(())),
             config: Arc::new(config),
             shutdown_tx,
             background_handles: Arc::new(std::sync::Mutex::new(handles)),
@@ -222,8 +220,9 @@ impl Database {
             let mut names = self.entity_names.write().await;
             if names.insert(name.to_string())
                 && let Ok(bytes) = serde_json::to_vec(&*names)
+                && let Err(e) = self.storage.insert(ENTITY_NAMES_KEY, &bytes)
             {
-                let _ = self.storage.insert(ENTITY_NAMES_KEY, &bytes);
+                tracing::warn!("failed to persist entity names: {e}");
             }
         }
     }

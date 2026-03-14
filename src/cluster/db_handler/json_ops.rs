@@ -499,7 +499,7 @@ impl DbRequestHandler {
                         .await;
                     self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                         .await;
-                    Self::json_success(entity, db_entity.id_str(), data)
+                    helpers::json_ok_with_id(db_entity.id_str(), data)
                 }
                 Err(db::DbDataStoreError::AlreadyExists) => {
                     controller
@@ -615,13 +615,7 @@ impl DbRequestHandler {
                 } else {
                     data
                 };
-                let result = json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": data
-                });
-                serde_json::to_vec(&result).unwrap_or_default()
+                helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
         };
@@ -850,7 +844,7 @@ impl DbRequestHandler {
                     }
                     self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                         .await;
-                    Self::json_success(entity, db_entity.id_str(), merged_data)
+                    helpers::json_ok_with_id(db_entity.id_str(), merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
                     if has_unique_changes {
@@ -1017,9 +1011,7 @@ impl DbRequestHandler {
                 }
                 let result = json!({
                     "status": "ok",
-                    "id": id,
-                    "entity": entity,
-                    "deleted": true
+                    "data": {"id": id, "deleted": true}
                 });
                 serde_json::to_vec(&result).unwrap_or_default()
             }
@@ -1055,7 +1047,7 @@ impl DbRequestHandler {
             return Some(Self::json_error(
                 400,
                 &format!(
-                    "too many filters: {} exceeds maximum of {MAX_FILTERS}",
+                    "validation error: too many filters: {} exceeds maximum of {MAX_FILTERS}",
                     filters.len()
                 ),
             ));
@@ -1071,11 +1063,27 @@ impl DbRequestHandler {
             return Some(Self::json_error(
                 400,
                 &format!(
-                    "too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
+                    "validation error: too many sort fields: {} exceeds maximum of {MAX_SORT_FIELDS}",
                     sorts.len()
                 ),
             ));
         }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let pagination: Option<crate::Pagination> = parsed_data.as_ref().and_then(|d| {
+            d.get("pagination")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .or_else(|| {
+                    let limit = d.get("limit").and_then(Value::as_u64).map(|v| v as usize);
+                    let offset = d.get("offset").and_then(Value::as_u64).map(|v| v as usize);
+                    match (limit, offset) {
+                        (Some(l), Some(o)) => Some(crate::Pagination::new(l, o)),
+                        (Some(l), None) => Some(crate::Pagination::new(l, 0)),
+                        (None, Some(o)) => Some(crate::Pagination::new(usize::MAX, o)),
+                        (None, None) => None,
+                    }
+                })
+        });
 
         if !filters.is_empty()
             && let Some(err) = Self::validate_filter_fields(controller, entity, &filters)
@@ -1127,6 +1135,7 @@ impl DbRequestHandler {
                     filters.clone(),
                     sorts,
                     projection.clone(),
+                    pagination.clone(),
                     sender,
                 )
                 .await;
@@ -1169,11 +1178,19 @@ impl DbRequestHandler {
                 }))
             })
             .collect();
+        if let Some(ref pagination) = pagination {
+            items = items
+                .into_iter()
+                .skip(pagination.offset)
+                .take(pagination.limit)
+                .collect();
+        }
         items.truncate(MAX_LIST_RESULTS);
+        let flattened = helpers::flatten_list_items(items);
 
         let result = json!({
             "status": "ok",
-            "data": items
+            "data": flattened
         });
 
         Some(serde_json::to_vec(&result).unwrap_or_default())
@@ -1263,7 +1280,7 @@ impl DbRequestHandler {
                                     &outbox.operation_id,
                                 )
                                 .await;
-                                Self::json_success(&entity, db_entity.id_str(), &data)
+                                helpers::json_ok_with_id(db_entity.id_str(), &data)
                             }
                             Err(db::DbDataStoreError::AlreadyExists) => {
                                 controller
@@ -1380,7 +1397,7 @@ impl DbRequestHandler {
                                     &outbox.operation_id,
                                 )
                                 .await;
-                                Self::json_success(&entity, db_entity.id_str(), &merged_data)
+                                helpers::json_ok_with_id(db_entity.id_str(), &merged_data)
                             }
                             Err(db::DbDataStoreError::NotFound) => {
                                 controller

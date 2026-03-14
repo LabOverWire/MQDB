@@ -164,7 +164,7 @@ impl ClusteredAgent {
                 "mode": "cluster",
                 "node_id": self.node_id.get(),
                 "is_leader": raft_status.is_leader,
-                "vault_enabled": false
+                "vault_enabled": !self.ownership.entity_owner_fields.is_empty()
             }
         }))
     }

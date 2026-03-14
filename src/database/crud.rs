@@ -34,7 +34,8 @@ impl Database {
         let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
             client_id.to_string()
         } else {
-            let generated = self.generate_id(&entity_name).await?;
+            let payload_bytes = serde_json::to_vec(&data).unwrap_or_default();
+            let generated = self.generate_id(&entity_name, &payload_bytes);
             if let Value::Object(ref mut obj) = data {
                 obj.insert("id".to_string(), Value::String(generated.clone()));
             }
@@ -408,22 +409,13 @@ impl Database {
         Ok(())
     }
 
-    pub(super) async fn generate_id(&self, entity_name: &str) -> Result<String> {
-        let _lock = self.id_gen_lock.lock().await;
+    pub(super) fn generate_id(&self, entity_name: &str, data: &[u8]) -> String {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static COUNTER: AtomicU16 = AtomicU16::new(0);
 
-        let counter_key = keys::encode_meta_key(&format!("seq:{entity_name}"));
-
-        let current = self
-            .storage
-            .get(&counter_key)?
-            .and_then(|v| String::from_utf8(v).ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let next = current + 1;
-        self.storage
-            .insert(&counter_key, next.to_string().as_bytes())?;
-
-        Ok(next.to_string())
+        let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % crate::cluster::NUM_PARTITIONS;
+        let partition =
+            crate::cluster::PartitionId::new(idx).unwrap_or(crate::cluster::PartitionId::ZERO);
+        crate::cluster::db::generate_id_for_partition(1, entity_name, partition, data)
     }
 }

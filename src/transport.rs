@@ -289,11 +289,15 @@ mod execute {
                     {
                         return e.into();
                     }
+                    let id_clone = id.clone();
                     match self
                         .delete(entity, id, sender, client_id, scope_config)
                         .await
                     {
-                        Ok(()) => Response::ok(value_from_unit(())),
+                        Ok(()) => Response::ok(serde_json::json!({
+                            "id": id_clone,
+                            "deleted": true
+                        })),
                         Err(e) => e.into(),
                     }
                 }

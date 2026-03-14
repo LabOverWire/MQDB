@@ -501,11 +501,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
         match op {
             "create" | "read" | "update" => {
-                let id = parsed.get("id").and_then(|v| v.as_str()).map(String::from);
-                if let Some(id) = id
-                    && let Some(data) = parsed.get_mut("data")
-                {
-                    crate::vault_transform::vault_decrypt_fields(&crypto, entity, &id, data, &skip);
+                if let Some(data) = parsed.get_mut("data") {
+                    let id = data.get("id").and_then(|v| v.as_str()).map(String::from);
+                    if let Some(id) = id {
+                        crate::vault_transform::vault_decrypt_fields(
+                            &crypto, entity, &id, data, &skip,
+                        );
+                    }
                 }
             }
             "list" => {
@@ -572,13 +574,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 } else {
                     data_json
                 };
-                let result = serde_json::json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": data_json
-                });
-                serde_json::to_vec(&result).unwrap_or_default()
+                crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data_json)
             }
             None => Self::json_error(404, &format!("entity not found: {entity} id={id}")),
         }
@@ -622,13 +618,10 @@ impl<T: ClusterTransport> NodeController<T> {
                         actual = ?current_fk,
                         "skipping set-null: FK field was updated since cascade"
                     );
-                    let result = serde_json::json!({
-                        "status": "ok",
-                        "id": id,
-                        "entity": entity,
-                        "data": existing_data
-                    });
-                    return (serde_json::to_vec(&result).unwrap_or_default(), None);
+                    return (
+                        crate::cluster::db_handler::helpers::json_ok_with_id(id, &existing_data),
+                        None,
+                    );
                 }
             }
 
@@ -767,13 +760,10 @@ impl<T: ClusterTransport> NodeController<T> {
                     self.release_unique_constraints(entity, id, &old_diff, partition, id, now_ms)
                         .await;
                 }
-                let result = serde_json::json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": merged_data
-                });
-                serde_json::to_vec(&result).unwrap_or_default()
+                crate::cluster::db_handler::helpers::json_ok_with_id(
+                    db_entity.id_str(),
+                    &merged_data,
+                )
             }
             Err(super::db::DbDataStoreError::NotFound) => {
                 if has_unique_changes {
@@ -882,9 +872,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 let result = serde_json::json!({
                     "status": "ok",
-                    "id": id,
-                    "entity": entity,
-                    "deleted": true
+                    "data": {"id": id, "deleted": true}
                 });
                 serde_json::to_vec(&result).unwrap_or_default()
             }
@@ -1434,13 +1422,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.db_commit(write, outbox.clone()).await;
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
-                let result = serde_json::json!({
-                    "status": "ok",
-                    "id": db_entity.id_str(),
-                    "entity": entity,
-                    "data": data
-                });
-                serde_json::to_vec(&result).unwrap_or_default()
+                crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
                 self.release_all_reservations(
@@ -1710,13 +1692,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             self.db_commit(write, outbox.clone()).await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)
                                 .await;
-                            let result = serde_json::json!({
-                                "status": "ok",
-                                "id": db_entity.id_str(),
-                                "entity": entity,
-                                "data": data
-                            });
-                            serde_json::to_vec(&result).unwrap_or_default()
+                            crate::cluster::db_handler::helpers::json_ok_with_id(
+                                db_entity.id_str(),
+                                &data,
+                            )
                         }
                         Err(super::db::DbDataStoreError::AlreadyExists) => {
                             self.release_all_reservations(
@@ -1879,13 +1858,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             self.db_commit(write, outbox.clone()).await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)
                                 .await;
-                            let result = serde_json::json!({
-                                "status": "ok",
-                                "id": db_entity.id_str(),
-                                "entity": entity,
-                                "data": merged_data
-                            });
-                            serde_json::to_vec(&result).unwrap_or_default()
+                            crate::cluster::db_handler::helpers::json_ok_with_id(
+                                db_entity.id_str(),
+                                &merged_data,
+                            )
                         }
                         Err(super::db::DbDataStoreError::NotFound) => {
                             self.release_all_reservations(

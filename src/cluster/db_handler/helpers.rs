@@ -15,11 +15,6 @@ impl DbRequestHandler {
         serde_json::to_vec(&result).unwrap_or_default()
     }
 
-    pub(super) fn json_success(entity: &str, id: &str, data: &Value) -> Vec<u8> {
-        let result = json!({ "status": "ok", "id": id, "entity": entity, "data": data });
-        serde_json::to_vec(&result).unwrap_or_default()
-    }
-
     pub(super) fn current_time_ms() -> u64 {
         u64::try_from(
             std::time::SystemTime::now()
@@ -37,6 +32,33 @@ impl DbRequestHandler {
     ) -> String {
         super::super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
+}
+
+pub(crate) fn json_ok_with_id(id: &str, data: &Value) -> Vec<u8> {
+    let mut merged = data.clone();
+    if let Value::Object(ref mut obj) = merged {
+        obj.insert("id".to_string(), Value::String(id.to_string()));
+    }
+    let result = json!({"status": "ok", "data": merged});
+    serde_json::to_vec(&result).unwrap_or_default()
+}
+
+pub(crate) fn flatten_list_items(items: Vec<Value>) -> Vec<Value> {
+    items
+        .into_iter()
+        .map(|item| {
+            if let Value::Object(mut obj) = item {
+                if let (Some(id), Some(Value::Object(mut data_obj))) =
+                    (obj.remove("id"), obj.remove("data"))
+                {
+                    data_obj.insert("id".to_string(), id);
+                    return Value::Object(data_obj);
+                }
+                return Value::Object(obj);
+            }
+            item
+        })
+        .collect()
 }
 
 pub(crate) fn validate_projection_against_schema(

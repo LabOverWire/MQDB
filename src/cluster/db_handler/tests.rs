@@ -478,7 +478,7 @@ async fn json_delete_allowed_for_owner() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 }
 
 #[tokio::test]
@@ -568,7 +568,7 @@ async fn json_list_filters_by_sender_ownership() {
     assert_eq!(json["status"], "ok");
     let items = json["data"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["data"]["userId"], "alice");
+    assert_eq!(items[0]["userId"], "alice");
 }
 
 #[tokio::test]
@@ -736,7 +736,7 @@ async fn admin_bypasses_ownership_on_delete() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 }
 
 #[tokio::test]
@@ -1226,7 +1226,7 @@ async fn fk_delete_cascade_removes_children() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 
     assert!(ctrl.db_get("users", "u1").is_none());
     assert!(ctrl.db_get("posts", "p1").is_none());
@@ -1282,7 +1282,7 @@ async fn fk_delete_set_null_nullifies_children() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 
     assert!(ctrl.db_get("users", "u1").is_none());
     let post = ctrl.db_get("posts", "p1").unwrap();
@@ -1376,7 +1376,7 @@ async fn fk_delete_restrict_allows_when_no_references() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }
 
@@ -1829,6 +1829,6 @@ async fn fk_delete_cascade_with_no_children_succeeds() {
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }

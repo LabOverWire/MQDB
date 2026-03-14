@@ -92,6 +92,18 @@ impl Schema {
     }
 
     #[must_use]
+    pub fn with_fields(
+        entity: impl Into<String>,
+        fields: HashMap<String, FieldDefinition>,
+    ) -> Self {
+        Self {
+            entity: entity.into(),
+            fields,
+            version: 1,
+        }
+    }
+
+    #[must_use]
     pub fn add_field(mut self, field: FieldDefinition) -> Self {
         self.fields.insert(field.name.clone(), field);
         self

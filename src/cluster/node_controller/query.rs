@@ -75,6 +75,7 @@ impl<T: ClusterTransport> NodeController<T> {
         filters: Vec<crate::Filter>,
         sorts: Vec<crate::SortOrder>,
         projection: Option<Vec<String>>,
+        pagination: Option<crate::Pagination>,
         sender: Option<&str>,
     ) -> bool {
         let alive_nodes = self.heartbeat.alive_nodes();
@@ -115,6 +116,7 @@ impl<T: ClusterTransport> NodeController<T> {
             filters,
             sorts,
             projection,
+            pagination,
             entity: entity.to_string(),
             vault_sender: sender.map(str::to_string),
         };
@@ -222,13 +224,21 @@ impl<T: ClusterTransport> NodeController<T> {
                 .collect();
 
             Self::sort_scatter_results(&mut filtered, &completed.sorts);
+            if let Some(ref pagination) = completed.pagination {
+                filtered = filtered
+                    .into_iter()
+                    .skip(pagination.offset)
+                    .take(pagination.limit)
+                    .collect();
+            }
             filtered.truncate(MAX_LIST_RESULTS);
 
             let projected = Self::apply_list_projection(filtered, completed.projection.as_deref());
+            let flattened = crate::cluster::db_handler::helpers::flatten_list_items(projected);
 
             let result = serde_json::json!({
                 "status": "ok",
-                "data": projected
+                "data": flattened
             });
             let payload = serde_json::to_vec(&result).unwrap_or_default();
 

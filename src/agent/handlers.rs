@@ -440,11 +440,7 @@ async fn handle_schema_set(db: &Database, entity: String, payload: Value) -> Res
             def.name.clone_from(key);
         }
     }
-    let schema = crate::schema::Schema {
-        entity,
-        fields,
-        version: 1,
-    };
+    let schema = crate::schema::Schema::with_fields(entity, fields);
     match db.add_schema(schema).await {
         Ok(()) => Response::ok(json!({"message": "schema set"})),
         Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
@@ -491,7 +487,7 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
 
     let result = match constraint_type {
         Some("unique") => {
-            let fields: Vec<String> = payload
+            let mut fields: Vec<String> = payload
                 .get("fields")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -501,8 +497,14 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
                 })
                 .unwrap_or_default();
 
+            if fields.is_empty()
+                && let Some(f) = payload.get("field").and_then(|v| v.as_str())
+            {
+                fields.push(f.to_string());
+            }
+
             if fields.is_empty() {
-                Err("unique constraint requires fields array".to_string())
+                Err("unique constraint requires 'fields' or 'field'".to_string())
             } else {
                 db.add_unique_constraint(entity, fields)
                     .await
@@ -754,7 +756,7 @@ async fn handle_catalog(
         "entities": entities,
         "server": {
             "mode": "agent",
-            "vault_enabled": false
+            "vault_enabled": !ownership.entity_owner_fields.is_empty()
         }
     }))
 }

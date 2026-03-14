@@ -92,12 +92,17 @@ impl StorageBackend for FjallBackend {
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let snapshot = self.db.snapshot();
         let mut results = Vec::with_capacity(batch_size);
-        for guard in snapshot.prefix(&self.keyspace, prefix) {
+        let start: Vec<u8> = if let Some(after) = after_key {
+            let mut s = after.to_vec();
+            s.push(0);
+            s
+        } else {
+            prefix.to_vec()
+        };
+        for guard in snapshot.range(&self.keyspace, start..) {
             let (k, v) = guard.into_inner()?;
-            if let Some(after) = after_key
-                && k.as_ref() <= after
-            {
-                continue;
+            if !k.starts_with(prefix) {
+                break;
             }
             results.push((k.to_vec(), v.to_vec()));
             if results.len() >= batch_size {
