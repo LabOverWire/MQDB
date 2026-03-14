@@ -67,36 +67,36 @@ async fn test_concurrent_delete_and_read() {
         .await
         .unwrap();
 
+    let mut created_ids = Vec::new();
     for i in 0..50 {
         let user = json!({
             "name": format!("User {}", i),
             "status": "active"
         });
-        db.create(
-            "users".into(),
-            user,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await
-        .unwrap();
+        let result = db
+            .create(
+                "users".into(),
+                user,
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+        created_ids.push(result["id"].as_str().unwrap().to_string());
     }
+
+    let ids_to_delete: Vec<String> = created_ids[..25].to_vec();
+    let ids_to_keep: Vec<String> = created_ids[25..].to_vec();
 
     let mut handles = vec![];
 
-    for i in 1..=25 {
+    for id in ids_to_delete.clone() {
         let db_clone = db.clone();
         let handle = tokio::spawn(async move {
             let _ = db_clone
-                .delete(
-                    "users".into(),
-                    i.to_string(),
-                    None,
-                    None,
-                    &ScopeConfig::default(),
-                )
+                .delete("users".into(), id, None, None, &ScopeConfig::default())
                 .await;
         });
         handles.push(handle);
@@ -137,14 +137,14 @@ async fn test_concurrent_delete_and_read() {
         "Index should only contain remaining 25 entities, no stale entries"
     );
 
-    for i in 1..=25 {
-        let result = db.read("users".into(), i.to_string(), vec![], None).await;
-        assert!(result.is_err(), "Deleted entity {i} should not exist");
+    for id in &ids_to_delete {
+        let result = db.read("users".into(), id.clone(), vec![], None).await;
+        assert!(result.is_err(), "Deleted entity {id} should not exist");
     }
 
-    for i in 26..=50 {
-        let result = db.read("users".into(), i.to_string(), vec![], None).await;
-        assert!(result.is_ok(), "Non-deleted entity {i} should exist");
+    for id in &ids_to_keep {
+        let result = db.read("users".into(), id.clone(), vec![], None).await;
+        assert!(result.is_ok(), "Non-deleted entity {id} should exist");
     }
 }
 

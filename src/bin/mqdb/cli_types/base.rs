@@ -71,7 +71,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: AclAction,
     },
-    #[command(about = "Create a new record in an entity")]
+    #[command(
+        about = "Create a new record in an entity",
+        after_long_help = "\
+Examples:
+  mqdb create users -d '{\"name\": \"Alice\", \"email\": \"alice@example.com\"}'
+  mqdb create users -d '{\"id\": \"custom-id\", \"name\": \"Bob\"}'"
+    )]
     Create {
         #[arg(help = "Entity name (e.g. users, orders)")]
         entity: String,
@@ -95,7 +101,12 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
-    #[command(about = "Update a record by ID")]
+    #[command(
+        about = "Update a record by ID",
+        after_long_help = "\
+Examples:
+  mqdb update users abc123 -d '{\"name\": \"Alice Smith\"}'"
+    )]
     Update {
         #[arg(help = "Entity name")]
         entity: String,
@@ -119,7 +130,18 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
-    #[command(about = "List records with optional filtering and sorting")]
+    #[command(
+        about = "List records with optional filtering and sorting",
+        after_long_help = "\
+Examples:
+  mqdb list users
+  mqdb list users --filter 'name=Alice'
+  mqdb list products --filter 'price>100' --filter 'category=electronics'
+  mqdb list users --sort name:asc --limit 10 --offset 20
+  mqdb list users --projection name,email
+
+Filter operators: = <> > < >= <= ~ (glob *) ? (null) !? (not null)"
+    )]
     List {
         #[arg(help = "Entity name")]
         entity: String,
@@ -142,7 +164,13 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "json")]
         format: OutputFormat,
     },
-    #[command(about = "Watch an entity for real-time change events")]
+    #[command(
+        about = "Watch an entity for real-time change events",
+        after_long_help = "\
+Examples:
+  mqdb watch users
+  mqdb watch orders --filter 'status=pending'"
+    )]
     Watch {
         #[arg(help = "Entity name")]
         entity: String,
@@ -180,7 +208,13 @@ pub(crate) enum Commands {
         #[command(flatten)]
         conn: ConnectionArgs,
     },
-    #[command(about = "Subscribe to entity change events")]
+    #[command(
+        about = "Subscribe to entity change events",
+        after_long_help = "\
+Examples:
+  mqdb subscribe '$DB/users/events/#'
+  mqdb subscribe '$DB/orders/events/#' --group order-processors"
+    )]
     Subscribe {
         #[arg(help = "Topic pattern to subscribe to")]
         pattern: String,

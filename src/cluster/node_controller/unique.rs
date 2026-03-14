@@ -62,17 +62,20 @@ impl<T: ClusterTransport> NodeController<T> {
             let unique_part = super::super::db::unique_partition(entity, field, &value);
             let primary = self.partition_map.primary(unique_part);
 
+            let reserve_params = super::super::db::UniqueReserveParams {
+                entity,
+                field,
+                value: &value,
+                record_id: id,
+                request_id,
+                data_partition,
+                ttl_ms: 30_000,
+            };
+
             let is_conflict = if primary == Some(self.node_id) {
-                let (result, write) = self.stores.unique_reserve_replicated(
-                    entity,
-                    field,
-                    &value,
-                    id,
-                    request_id,
-                    data_partition,
-                    30_000,
-                    now_ms,
-                );
+                let (result, write) = self
+                    .stores
+                    .unique_reserve_replicated(&reserve_params, now_ms);
 
                 match result {
                     super::super::db::ReserveResult::Reserved => {
@@ -90,16 +93,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
             } else if let Some(target_node) = primary {
                 let receiver = self
-                    .send_unique_reserve_request_async(
-                        target_node,
-                        entity,
-                        field,
-                        &value,
-                        id,
-                        request_id,
-                        data_partition,
-                        30_000,
-                    )
+                    .send_unique_reserve_request_async(target_node, &reserve_params)
                     .await;
 
                 match receiver {
@@ -291,16 +285,18 @@ impl<T: ClusterTransport> NodeController<T> {
         let idempotency_key = req.idempotency_key_str();
 
         let status = if let Some(data_partition) = req.data_partition() {
-            let result = self.stores.unique_reserve(
+            let reserve_params = super::super::db::UniqueReserveParams {
                 entity,
                 field,
-                &req.value,
+                value: &req.value,
                 record_id,
-                idempotency_key,
+                request_id: idempotency_key,
                 data_partition,
-                req.ttl_ms,
-                Self::current_time_ms(),
-            );
+                ttl_ms: req.ttl_ms,
+            };
+            let result = self
+                .stores
+                .unique_reserve(&reserve_params, Self::current_time_ms());
             match result {
                 super::super::db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
                 super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
@@ -363,17 +359,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.pending_constraints.allocate_unique_id()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_unique_reserve_request_async(
         &mut self,
         target_node: NodeId,
-        entity: &str,
-        field: &str,
-        value: &[u8],
-        record_id: &str,
-        idempotency_key: &str,
-        data_partition: PartitionId,
-        ttl_ms: u64,
+        params: &super::super::db::UniqueReserveParams<'_>,
     ) -> Result<oneshot::Receiver<UniqueReserveStatus>, super::super::transport::TransportError>
     {
         let request_id = self.allocate_unique_request_id();
@@ -383,13 +372,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let request = UniqueReserveRequest::create(
             request_id,
-            entity,
-            field,
-            value,
-            record_id,
-            idempotency_key,
-            data_partition,
-            ttl_ms,
+            params.entity,
+            params.field,
+            params.value,
+            params.record_id,
+            params.request_id,
+            params.data_partition,
+            params.ttl_ms,
         );
 
         self.transport

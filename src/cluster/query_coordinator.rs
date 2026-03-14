@@ -116,6 +116,14 @@ impl PendingQuery {
     }
 }
 
+pub struct ScatterQueryParams<'a> {
+    pub entity: &'a str,
+    pub filter: Option<&'a str>,
+    pub limit: u32,
+    pub cursor: Option<&'a ScatterCursor>,
+    pub timeout_ms: Option<u32>,
+}
+
 #[derive(Debug)]
 pub struct QueryCoordinator {
     node_id: NodeId,
@@ -140,19 +148,14 @@ impl QueryCoordinator {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn start_query(
         &mut self,
-        entity: &str,
-        filter: Option<&str>,
-        limit: u32,
-        cursor: Option<&ScatterCursor>,
-        timeout_ms: Option<u32>,
+        params: &ScatterQueryParams<'_>,
         partitions: Vec<PartitionId>,
         now: u64,
     ) -> (u64, Vec<QueryRequest>) {
         let query_id = self.generate_query_id();
-        let timeout = timeout_ms.unwrap_or(DEFAULT_QUERY_TIMEOUT_MS);
+        let timeout = params.timeout_ms.unwrap_or(DEFAULT_QUERY_TIMEOUT_MS);
 
         let pending = PendingQuery::new(query_id, timeout, partitions.clone(), now);
         self.pending_queries.insert(query_id, pending);
@@ -160,16 +163,17 @@ impl QueryCoordinator {
         let requests: Vec<QueryRequest> = partitions
             .into_iter()
             .map(|partition| {
-                let partition_cursor = cursor
+                let partition_cursor = params
+                    .cursor
                     .and_then(|c| c.get(partition))
                     .map(PartitionCursor::to_bytes);
 
                 QueryRequest::new(
                     query_id,
                     timeout,
-                    entity.to_string(),
-                    filter.map(String::from),
-                    limit,
+                    params.entity.to_string(),
+                    params.filter.map(String::from),
+                    params.limit,
                     partition_cursor,
                 )
             })
@@ -301,8 +305,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0), partition(1), partition(2)];
 
-        let (query_id, requests) =
-            coordinator.start_query("users", None, 100, None, Some(5000), partitions, 1000);
+        let (query_id, requests) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 100,
+                cursor: None,
+                timeout_ms: Some(5000),
+            },
+            partitions,
+            1000,
+        );
 
         assert_eq!(query_id, 1);
         assert_eq!(requests.len(), 3);
@@ -321,8 +334,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0), partition(1)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 100, None, None, partitions.clone(), 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 100,
+                cursor: None,
+                timeout_ms: None,
+            },
+            partitions.clone(),
+            1000,
+        );
 
         let resp0 = QueryResponse::ok(query_id, partition(0), b"data0".to_vec(), false, None);
         let result = coordinator.receive_response(resp0);
@@ -344,8 +366,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0), partition(1), partition(2)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 100, None, Some(1000), partitions, 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 100,
+                cursor: None,
+                timeout_ms: Some(1000),
+            },
+            partitions,
+            1000,
+        );
 
         let resp0 = QueryResponse::ok(query_id, partition(0), b"data0".to_vec(), false, None);
         coordinator.receive_response(resp0);
@@ -395,8 +426,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 100, None, None, partitions, 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 100,
+                cursor: None,
+                timeout_ms: None,
+            },
+            partitions,
+            1000,
+        );
 
         assert!(coordinator.has_pending(query_id));
         assert!(coordinator.cancel_query(query_id));
@@ -408,8 +448,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0), partition(1)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 10, None, None, partitions, 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 10,
+                cursor: None,
+                timeout_ms: None,
+            },
+            partitions,
+            1000,
+        );
 
         let resp0 = QueryResponse::ok(query_id, partition(0), b"data".to_vec(), true, None);
         coordinator.receive_response(resp0);
@@ -425,8 +474,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0), partition(1)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 10, None, None, partitions, 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 10,
+                cursor: None,
+                timeout_ms: None,
+            },
+            partitions,
+            1000,
+        );
 
         let cursor0 = PartitionCursor::new(partition(0), 100, None).to_bytes();
         let resp0 = QueryResponse::ok(
@@ -460,8 +518,17 @@ mod tests {
         let mut coordinator = QueryCoordinator::new(node(1));
         let partitions = vec![partition(0)];
 
-        let (query_id, _) =
-            coordinator.start_query("users", None, 100, None, None, partitions, 1000);
+        let (query_id, _) = coordinator.start_query(
+            &ScatterQueryParams {
+                entity: "users",
+                filter: None,
+                limit: 100,
+                cursor: None,
+                timeout_ms: None,
+            },
+            partitions,
+            1000,
+        );
 
         let resp = QueryResponse::ok(query_id, partition(0), b"data".to_vec(), false, None);
         let result = coordinator.receive_response(resp.clone());

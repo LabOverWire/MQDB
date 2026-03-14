@@ -44,42 +44,18 @@ pub enum RaftAdminCommand {
 }
 
 pub struct RaftTask<T: ClusterTransport> {
-    raft: RaftCoordinator<T>,
-    rx_messages: flume::Receiver<RaftMessage>,
-    rx_events: flume::Receiver<RaftEvent>,
-    rx_admin: flume::Receiver<RaftAdminCommand>,
-    tx_partition_map: watch::Sender<PartitionMap>,
-    tx_status: watch::Sender<RaftStatus>,
-    shutdown_rx: broadcast::Receiver<()>,
-    all_nodes: Vec<NodeId>,
-    partitions_initialized: bool,
+    pub(crate) raft: RaftCoordinator<T>,
+    pub(crate) rx_messages: flume::Receiver<RaftMessage>,
+    pub(crate) rx_events: flume::Receiver<RaftEvent>,
+    pub(crate) rx_admin: flume::Receiver<RaftAdminCommand>,
+    pub(crate) tx_partition_map: watch::Sender<PartitionMap>,
+    pub(crate) tx_status: watch::Sender<RaftStatus>,
+    pub(crate) shutdown_rx: broadcast::Receiver<()>,
+    pub(crate) all_nodes: Vec<NodeId>,
+    pub(crate) partitions_initialized: bool,
 }
 
 impl<T: ClusterTransport> RaftTask<T> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        raft: RaftCoordinator<T>,
-        rx_messages: flume::Receiver<RaftMessage>,
-        rx_events: flume::Receiver<RaftEvent>,
-        rx_admin: flume::Receiver<RaftAdminCommand>,
-        tx_partition_map: watch::Sender<PartitionMap>,
-        tx_status: watch::Sender<RaftStatus>,
-        shutdown_rx: broadcast::Receiver<()>,
-        all_nodes: Vec<NodeId>,
-    ) -> Self {
-        Self {
-            raft,
-            rx_messages,
-            rx_events,
-            rx_admin,
-            tx_partition_map,
-            tx_status,
-            shutdown_rx,
-            all_nodes,
-            partitions_initialized: false,
-        }
-    }
-
     pub async fn run(mut self) {
         let mut tick_interval = interval(Duration::from_millis(200));
 

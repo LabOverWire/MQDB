@@ -8,6 +8,8 @@ mod query;
 mod schema_ops;
 mod subscriptions;
 
+pub use crud::CallerContext;
+
 use crate::config::DatabaseConfig;
 use crate::constraint::ConstraintManager;
 use crate::consumer_group::ConsumerGroup;
@@ -18,10 +20,12 @@ use crate::relationship::RelationshipRegistry;
 use crate::schema::SchemaRegistry;
 use crate::storage::Storage;
 use crate::subscription::SubscriptionRegistry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
+
+const ENTITY_NAMES_KEY: &[u8] = b"meta/entity_names";
 
 #[derive(Debug, Clone)]
 pub struct SubscriptionResult {
@@ -40,7 +44,7 @@ pub struct Database {
     schema_registry: Arc<RwLock<SchemaRegistry>>,
     constraint_manager: Arc<RwLock<ConstraintManager>>,
     consumer_groups: Arc<RwLock<HashMap<String, ConsumerGroup>>>,
-    id_gen_lock: Arc<Mutex<()>>,
+    entity_names: Arc<RwLock<HashSet<String>>>,
     config: Arc<DatabaseConfig>,
     shutdown_tx: watch::Sender<bool>,
     background_handles: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
@@ -112,6 +116,36 @@ impl Database {
         constraint_manager.load_constraints(&storage)?;
         let constraint_manager = Arc::new(RwLock::new(constraint_manager));
 
+        let mut entity_names: HashSet<String> = HashSet::new();
+        for name in schema_registry.read().await.entity_names() {
+            entity_names.insert(name);
+        }
+        for name in constraint_manager.read().await.entity_names() {
+            entity_names.insert(name);
+        }
+        let persisted = storage
+            .get(ENTITY_NAMES_KEY)
+            .ok()
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<HashSet<String>>(&bytes).ok());
+        if let Some(names) = persisted {
+            for name in names {
+                entity_names.insert(name);
+            }
+        } else if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
+            for key in keys {
+                if let Ok((entity, _)) = crate::keys::decode_data_key(&key)
+                    && !entity.starts_with('_')
+                {
+                    entity_names.insert(entity);
+                }
+            }
+            if let Ok(bytes) = serde_json::to_vec(&entity_names) {
+                let _ = storage.insert(ENTITY_NAMES_KEY, &bytes);
+            }
+        }
+        let entity_names = Arc::new(RwLock::new(entity_names));
+
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -135,7 +169,7 @@ impl Database {
             schema_registry,
             constraint_manager,
             consumer_groups,
-            id_gen_lock: Arc::new(Mutex::new(())),
+            entity_names,
             config: Arc::new(config),
             shutdown_tx,
             background_handles: Arc::new(std::sync::Mutex::new(handles)),
@@ -172,6 +206,47 @@ impl Database {
     #[must_use]
     pub fn event_receiver(&self) -> tokio::sync::broadcast::Receiver<crate::events::ChangeEvent> {
         self.dispatcher.subscribe()
+    }
+
+    pub async fn entity_names(&self) -> Vec<String> {
+        let names = self.entity_names.read().await;
+        let mut result: Vec<String> = names.iter().cloned().collect();
+        result.sort();
+        result
+    }
+
+    pub async fn register_entity_name(&self, name: &str) {
+        if !name.starts_with('_') {
+            let mut names = self.entity_names.write().await;
+            if names.insert(name.to_string())
+                && let Ok(bytes) = serde_json::to_vec(&*names)
+                && let Err(e) = self.storage.insert(ENTITY_NAMES_KEY, &bytes)
+            {
+                tracing::warn!("failed to persist entity names: {e}");
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn entity_record_count(&self, entity_name: &str) -> usize {
+        let prefix = format!("data/{entity_name}/");
+        self.storage.prefix_count(prefix.as_bytes()).unwrap_or(0)
+    }
+
+    pub async fn all_schemas(&self) -> Vec<crate::schema::Schema> {
+        let registry = self.schema_registry.read().await;
+        let names = registry.entity_names();
+        names
+            .iter()
+            .filter_map(|name| registry.get_schema(name).cloned())
+            .collect()
+    }
+
+    pub async fn all_constraints(
+        &self,
+    ) -> std::collections::HashMap<String, Vec<crate::constraint::Constraint>> {
+        let manager = self.constraint_manager.read().await;
+        manager.all_constraints().clone()
     }
 }
 

@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::keys;
 use crate::storage::{BatchWriter, Storage};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -120,6 +121,34 @@ impl Constraint {
             Constraint::Unique(_) => "unique",
             Constraint::ForeignKey(_) => "fk",
             Constraint::NotNull(_) => "notnull",
+        }
+    }
+
+    #[must_use]
+    pub fn to_api_value(&self) -> Value {
+        match self {
+            Constraint::Unique(c) => json!({
+                "name": c.name,
+                "type": "unique",
+                "fields": c.fields,
+            }),
+            Constraint::ForeignKey(c) => json!({
+                "name": c.name,
+                "type": "fk",
+                "field": c.source_field,
+                "target_entity": c.target_entity,
+                "target_field": c.target_field,
+                "on_delete": match c.on_delete {
+                    OnDeleteAction::Restrict => "restrict",
+                    OnDeleteAction::Cascade => "cascade",
+                    OnDeleteAction::SetNull => "set_null",
+                }
+            }),
+            Constraint::NotNull(c) => json!({
+                "name": c.name,
+                "type": "notnull",
+                "field": c.field,
+            }),
         }
     }
 }
@@ -443,6 +472,16 @@ impl ConstraintManager {
         }
 
         Ok(())
+    }
+
+    #[must_use]
+    pub fn entity_names(&self) -> Vec<String> {
+        self.constraints.keys().cloned().collect()
+    }
+
+    #[must_use]
+    pub fn all_constraints(&self) -> &HashMap<String, Vec<Constraint>> {
+        &self.constraints
     }
 
     pub fn remove_constraint(&mut self, batch: &mut BatchWriter, entity: &str, name: &str) {

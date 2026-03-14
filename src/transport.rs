@@ -268,16 +268,13 @@ mod execute {
                         }
                         _ => None,
                     };
+                    let caller = crate::database::CallerContext {
+                        sender,
+                        client_id,
+                        scope_config,
+                    };
                     match self
-                        .update(
-                            entity,
-                            id,
-                            fields,
-                            update_constraint,
-                            sender,
-                            client_id,
-                            scope_config,
-                        )
+                        .update(entity, id, fields, update_constraint, &caller)
                         .await
                     {
                         Ok(v) => Response::ok(v),
@@ -292,11 +289,15 @@ mod execute {
                     {
                         return e.into();
                     }
+                    let id_clone = id.clone();
                     match self
                         .delete(entity, id, sender, client_id, scope_config)
                         .await
                     {
-                        Ok(()) => Response::ok(value_from_unit(())),
+                        Ok(()) => Response::ok(serde_json::json!({
+                            "id": id_clone,
+                            "deleted": true
+                        })),
                         Err(e) => e.into(),
                     }
                 }
@@ -877,5 +878,111 @@ mod tests {
             )
             .await;
         assert!(resp.is_ok());
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn two_users_see_only_their_own_records() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice Doc 1"}),
+        })
+        .await;
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice Doc 2"}),
+        })
+        .await;
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "bob", "title": "Bob Doc 1"}),
+        })
+        .await;
+
+        let alice_items = list_as_user(&db, "diagrams", vec![], "alice", &ownership).await;
+        assert_eq!(alice_items.len(), 2);
+        for item in &alice_items {
+            assert_eq!(item["userId"], "alice");
+        }
+
+        let bob_items = list_as_user(&db, "diagrams", vec![], "bob", &ownership).await;
+        assert_eq!(bob_items.len(), 1);
+        assert_eq!(bob_items[0]["userId"], "bob");
+        assert_eq!(bob_items[0]["title"], "Bob Doc 1");
+    }
+
+    #[cfg(feature = "agent")]
+    #[tokio::test]
+    async fn ownership_list_composes_with_user_filter() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = crate::Database::open(tmp.path()).await.unwrap();
+        let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice Doc 1"}),
+        })
+        .await;
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "alice", "title": "Alice Doc 2"}),
+        })
+        .await;
+
+        db.execute(Request::Create {
+            entity: "diagrams".to_string(),
+            data: serde_json::json!({"userId": "bob", "title": "Bob Doc 1"}),
+        })
+        .await;
+
+        let title_filter = vec![crate::Filter::new(
+            "title".to_string(),
+            crate::FilterOp::Eq,
+            serde_json::json!("Alice Doc 1"),
+        )];
+        let filtered = list_as_user(&db, "diagrams", title_filter, "alice", &ownership).await;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["title"], "Alice Doc 1");
+        assert_eq!(filtered[0]["userId"], "alice");
+    }
+
+    #[cfg(feature = "agent")]
+    async fn list_as_user(
+        db: &crate::Database,
+        entity: &str,
+        filters: Vec<crate::Filter>,
+        user: &str,
+        ownership: &OwnershipConfig,
+    ) -> Vec<serde_json::Value> {
+        let resp = db
+            .execute_with_sender(
+                Request::List {
+                    entity: entity.to_string(),
+                    filters,
+                    sort: vec![],
+                    pagination: None,
+                    includes: vec![],
+                    projection: None,
+                },
+                Some(user),
+                None,
+                ownership,
+                &ScopeConfig::default(),
+                None,
+            )
+            .await;
+        match resp {
+            Response::Ok { data } => data.as_array().unwrap().clone(),
+            Response::Error { code, message } => {
+                panic!("expected ok for {user}, got {code}: {message}")
+            }
+        }
     }
 }

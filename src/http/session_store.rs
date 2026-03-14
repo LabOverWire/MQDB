@@ -21,6 +21,16 @@ pub struct Session {
     pub vault_unlocked: bool,
 }
 
+pub struct NewSession {
+    pub jwt: String,
+    pub canonical_id: String,
+    pub provider: String,
+    pub provider_sub: String,
+    pub email: Option<String>,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+}
+
 pub struct SessionStore {
     sessions: RwLock<HashMap<String, Session>>,
 }
@@ -39,17 +49,7 @@ impl SessionStore {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create(
-        &self,
-        jwt: String,
-        canonical_id: String,
-        provider: String,
-        provider_sub: String,
-        email: Option<String>,
-        name: Option<String>,
-        picture: Option<String>,
-    ) -> Option<String> {
+    pub fn create(&self, new: NewSession) -> Option<String> {
         let rng = SystemRandom::new();
         let mut bytes = [0u8; SESSION_ID_BYTES];
         if rng.fill(&mut bytes).is_err() {
@@ -58,13 +58,13 @@ impl SessionStore {
 
         let session_id = hex_encode(&bytes);
         let session = Session {
-            jwt,
-            canonical_id,
-            provider,
-            provider_sub,
-            email,
-            name,
-            picture,
+            jwt: new.jwt,
+            canonical_id: new.canonical_id,
+            provider: new.provider,
+            provider_sub: new.provider_sub,
+            email: new.email,
+            name: new.name,
+            picture: new.picture,
             created_at: SystemTime::now(),
             vault_unlocked: false,
         };
@@ -232,15 +232,15 @@ mod tests {
     fn test_create_and_get_session() {
         let store = SessionStore::new();
         let session_id = store
-            .create(
-                "jwt123".into(),
-                "550e8400-e29b-41d4-a716-446655440000".into(),
-                "google".into(),
-                "112233445566".into(),
-                Some("user@example.com".into()),
-                Some("Test User".into()),
-                None,
-            )
+            .create(NewSession {
+                jwt: "jwt123".into(),
+                canonical_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                provider: "google".into(),
+                provider_sub: "112233445566".into(),
+                email: Some("user@example.com".into()),
+                name: Some("Test User".into()),
+                picture: None,
+            })
             .expect("create should succeed");
 
         assert_eq!(session_id.len(), 64);
@@ -257,15 +257,15 @@ mod tests {
     fn test_destroy_session() {
         let store = SessionStore::new();
         let session_id = store
-            .create(
-                "jwt".into(),
-                "canonical-1".into(),
-                "google".into(),
-                "sub-1".into(),
-                None,
-                None,
-                None,
-            )
+            .create(NewSession {
+                jwt: "jwt".into(),
+                canonical_id: "canonical-1".into(),
+                provider: "google".into(),
+                provider_sub: "sub-1".into(),
+                email: None,
+                name: None,
+                picture: None,
+            })
             .expect("create should succeed");
 
         assert!(store.get(&session_id).is_some());

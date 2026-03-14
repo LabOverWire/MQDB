@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{
     ChangeEvent, Database, Error, FieldDefinition, FieldType, OnDeleteAction, Operation, Schema,
     ScopeConfig,
@@ -110,9 +111,11 @@ async fn test_not_null_constraint_update_to_null() {
             id,
             json!({"email": null}),
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await;
 
@@ -232,9 +235,11 @@ async fn test_unique_constraint_update_to_duplicate() {
             id,
             json!({"email": "alice@example.com"}),
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await;
 
@@ -270,9 +275,11 @@ async fn test_unique_constraint_update_same_value() {
             id,
             json!({"name": "Alice Updated", "email": "alice@example.com"}),
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await;
 
@@ -481,9 +488,11 @@ async fn test_foreign_key_update_to_invalid() {
             post_id,
             json!({"author_id": "nonexistent"}),
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await;
 

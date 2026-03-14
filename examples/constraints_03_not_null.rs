@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{Database, ScopeConfig};
 use serde_json::json;
 
@@ -97,9 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             user_id.to_string(),
             update,
             None,
-            None,
-            None,
-            &ScopeConfig::default(),
+            &CallerContext {
+                sender: None,
+                client_id: None,
+                scope_config: &ScopeConfig::default(),
+            },
         )
         .await
     {

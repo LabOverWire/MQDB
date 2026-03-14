@@ -29,6 +29,15 @@ pub struct FkReverseLookupResult {
     pub target_id: String,
 }
 
+struct FkLookupParams<'a> {
+    constraint_name: &'a str,
+    source_entity: &'a str,
+    source_field: &'a str,
+    on_delete: OnDeleteAction,
+    target_id: &'a str,
+    target_entity: &'a str,
+}
+
 pub(crate) fn extract_fk_string_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -368,32 +377,32 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
             }
 
-            self.scatter_reverse_lookup_to_remote_nodes(
-                &mut pending_remote,
-                constraint.name_str(),
+            let fk_params = FkLookupParams {
+                constraint_name: constraint.name_str(),
                 source_entity,
                 source_field,
                 on_delete,
-                id,
-                entity,
-            )
-            .await;
+                target_id: id,
+                target_entity: entity,
+            };
+            self.scatter_reverse_lookup_to_remote_nodes(&mut pending_remote, &fk_params)
+                .await;
         }
 
         Ok((local_results, pending_remote))
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn scatter_reverse_lookup_to_remote_nodes(
         &mut self,
         pending_remote: &mut Vec<PendingFkReverseLookup>,
-        constraint_name: &str,
-        source_entity: &str,
-        source_field: &str,
-        on_delete: OnDeleteAction,
-        target_id: &str,
-        target_entity: &str,
+        params: &FkLookupParams<'_>,
     ) {
+        let constraint_name = params.constraint_name;
+        let source_entity = params.source_entity;
+        let source_field = params.source_field;
+        let on_delete = params.on_delete;
+        let target_id = params.target_id;
+        let target_entity = params.target_entity;
         let alive_nodes = self.heartbeat.alive_nodes();
         for &node in &alive_nodes {
             if node == self.node_id {

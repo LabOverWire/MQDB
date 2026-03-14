@@ -35,6 +35,8 @@ impl ClusteredAgent {
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid schema operation")
             }
+        } else if req.topic == "$DB/_admin/catalog" {
+            self.handle_catalog().await
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/index/") {
             if let Some(entity) = rest.strip_suffix("/add") {
                 Self::handle_index_add(entity, &req.payload)
@@ -42,15 +44,7 @@ impl ClusteredAgent {
                 Response::error(ErrorCode::BadRequest, "invalid index operation")
             }
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/constraint/") {
-            if let Some(entity) = rest.strip_suffix("/add") {
-                self.handle_constraint_add(entity, &req.payload).await
-            } else if let Some(entity) = rest.strip_suffix("/list") {
-                self.handle_constraint_list(entity).await
-            } else if let Some(entity) = rest.strip_suffix("/remove") {
-                self.handle_constraint_remove(entity, &req.payload).await
-            } else {
-                Response::error(ErrorCode::BadRequest, "invalid constraint operation")
-            }
+            self.handle_constraint_request(rest, &req.payload).await
         } else if req.topic == "$DB/_admin/backup" {
             self.handle_backup_create(&req.payload)
         } else if req.topic == "$DB/_admin/backup/list" {
@@ -65,45 +59,8 @@ impl ClusteredAgent {
         } else if let Some(name) = req.topic.strip_prefix("$DB/_admin/consumer-groups/") {
             Self::handle_consumer_group_show(name)
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/") {
-            let payload: Value = if req.payload.is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_slice(&req.payload).unwrap_or(Value::Null)
-            };
-            match rest {
-                "users/add" => handle_user_add(self.auth_providers.as_deref(), &payload),
-                "users/delete" => handle_user_delete(self.auth_providers.as_deref(), &payload),
-                "users/list" => handle_user_list(self.auth_providers.as_deref()),
-                "acl/rules/add" => {
-                    handle_acl_rule_add(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/rules/remove" => {
-                    handle_acl_rule_remove(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/rules/list" => {
-                    handle_acl_rule_list(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/roles/add" => {
-                    handle_acl_role_add(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/roles/delete" => {
-                    handle_acl_role_delete(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/roles/list" => handle_acl_role_list(self.auth_providers.as_deref()).await,
-                "acl/assignments/assign" => {
-                    handle_acl_assignment_assign(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/assignments/unassign" => {
-                    handle_acl_assignment_unassign(self.auth_providers.as_deref(), &payload).await
-                }
-                "acl/assignments/list" => {
-                    handle_acl_assignment_list(self.auth_providers.as_deref(), &payload).await
-                }
-                _ => Response::error(
-                    ErrorCode::BadRequest,
-                    format!("unknown admin command: {}", req.topic),
-                ),
-            }
+            self.handle_user_acl_request(rest, &req.payload, &req.topic)
+                .await
         } else {
             Response::error(
                 ErrorCode::BadRequest,
@@ -115,6 +72,147 @@ impl ClusteredAgent {
         if let Err(e) = client.publish(&response_topic, payload).await {
             warn!(error = %e, "failed to send admin response");
         }
+    }
+
+    async fn handle_constraint_request(&self, rest: &str, payload: &[u8]) -> Response {
+        if let Some(entity) = rest.strip_suffix("/add") {
+            self.handle_constraint_add(entity, payload).await
+        } else if let Some(entity) = rest.strip_suffix("/list") {
+            self.handle_constraint_list(entity).await
+        } else if let Some(entity) = rest.strip_suffix("/remove") {
+            self.handle_constraint_remove(entity, payload).await
+        } else {
+            Response::error(ErrorCode::BadRequest, "invalid constraint operation")
+        }
+    }
+
+    async fn handle_user_acl_request(
+        &self,
+        rest: &str,
+        raw_payload: &[u8],
+        topic: &str,
+    ) -> Response {
+        let payload: Value = if raw_payload.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(raw_payload).unwrap_or(Value::Null)
+        };
+        match rest {
+            "users/add" => handle_user_add(self.auth_providers.as_deref(), &payload),
+            "users/delete" => handle_user_delete(self.auth_providers.as_deref(), &payload),
+            "users/list" => handle_user_list(self.auth_providers.as_deref()),
+            "acl/rules/add" => handle_acl_rule_add(self.auth_providers.as_deref(), &payload).await,
+            "acl/rules/remove" => {
+                handle_acl_rule_remove(self.auth_providers.as_deref(), &payload).await
+            }
+            "acl/rules/list" => {
+                handle_acl_rule_list(self.auth_providers.as_deref(), &payload).await
+            }
+            "acl/roles/add" => handle_acl_role_add(self.auth_providers.as_deref(), &payload).await,
+            "acl/roles/delete" => {
+                handle_acl_role_delete(self.auth_providers.as_deref(), &payload).await
+            }
+            "acl/roles/list" => handle_acl_role_list(self.auth_providers.as_deref()).await,
+            "acl/assignments/assign" => {
+                handle_acl_assignment_assign(self.auth_providers.as_deref(), &payload).await
+            }
+            "acl/assignments/unassign" => {
+                handle_acl_assignment_unassign(self.auth_providers.as_deref(), &payload).await
+            }
+            "acl/assignments/list" => {
+                handle_acl_assignment_list(self.auth_providers.as_deref(), &payload).await
+            }
+            _ => Response::error(
+                ErrorCode::BadRequest,
+                format!("unknown admin command: {topic}"),
+            ),
+        }
+    }
+
+    async fn handle_catalog(&self) -> Response {
+        let ctrl = self.controller.read().await;
+
+        let mut entity_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for schema in ctrl.schema_list() {
+            let name = schema.entity_str().to_string();
+            if !name.starts_with('_') {
+                entity_set.insert(name);
+            }
+        }
+        for constraint in ctrl.constraint_list_all() {
+            let name = constraint.entity_str().to_string();
+            if !name.starts_with('_') {
+                entity_set.insert(name);
+            }
+        }
+        for name in ctrl.stores().db_data.entity_names() {
+            entity_set.insert(name);
+        }
+
+        let mut entity_names: Vec<String> = entity_set.into_iter().collect();
+        entity_names.sort();
+
+        let entities: Vec<serde_json::Value> = entity_names
+            .iter()
+            .map(|name| self.build_catalog_entry(&ctrl, name))
+            .collect();
+
+        let raft_status = self.rx_raft_status.borrow().clone();
+        Response::ok(json!({
+            "entities": entities,
+            "server": {
+                "mode": "cluster",
+                "node_id": self.node_id.get(),
+                "is_leader": raft_status.is_leader,
+            }
+        }))
+    }
+
+    fn build_catalog_entry(
+        &self,
+        ctrl: &crate::cluster::NodeController<super::ClusterTransportKind>,
+        name: &str,
+    ) -> serde_json::Value {
+        let record_count = ctrl.stores().db_data.entity_record_count(name);
+
+        let schema_info = ctrl.schema_get(name).map(|s| {
+            let data: serde_json::Value =
+                serde_json::from_slice(&s.data).unwrap_or(serde_json::Value::Null);
+            json!({
+                "entity": s.entity_str(),
+                "version": s.schema_version,
+                "schema": data
+            })
+        });
+
+        let constraints = ctrl.constraint_list(name);
+        let constraint_data: Vec<serde_json::Value> = constraints
+            .iter()
+            .map(cluster_constraint_to_api_value)
+            .collect();
+
+        let ownership_info = self
+            .ownership
+            .owner_field(name)
+            .map(|field| json!({"field": field}));
+        let scope_info = if self.scope_config.is_empty() {
+            None
+        } else {
+            Some(json!({
+                "entity": self.scope_config.scope_entity(),
+                "field": self.scope_config.scope_field()
+            }))
+        };
+
+        json!({
+            "name": name,
+            "record_count": record_count,
+            "schema": schema_info,
+            "constraints": constraint_data,
+            "ownership": ownership_info,
+            "scope": scope_info,
+            "vault_eligible": crate::vault_transform::is_vault_eligible(name, &self.ownership),
+        })
     }
 
     async fn build_status_response(&self) -> Response {
@@ -246,15 +344,27 @@ impl ClusteredAgent {
             .get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let field = constraint_def
-            .get("field")
+        let fields_arr = constraint_def.get("fields").and_then(|v| v.as_array());
+
+        if let Some(arr) = &fields_arr
+            && arr.len() > 1
+        {
+            return Response::error(
+                ErrorCode::BadRequest,
+                "multi-field constraints are not yet supported",
+            );
+        }
+
+        let field = fields_arr
+            .and_then(|arr| arr.first())
             .and_then(|v| v.as_str())
+            .or_else(|| constraint_def.get("field").and_then(|v| v.as_str()))
             .unwrap_or("");
 
         if name.is_empty() || field.is_empty() {
             return Response::error(
                 ErrorCode::BadRequest,
-                "constraint requires 'name' and 'field' parameters",
+                "constraint requires 'name' and 'fields' parameters",
             );
         }
 
@@ -350,24 +460,7 @@ impl ClusteredAgent {
         let constraints = ctrl.constraint_list(entity);
         let data: Vec<serde_json::Value> = constraints
             .iter()
-            .map(|c| {
-                if c.is_foreign_key() {
-                    json!({
-                        "name": c.name_str(),
-                        "type": "fk",
-                        "field": c.field_str(),
-                        "target_entity": c.target_entity_str(),
-                        "target_field": c.target_field_str(),
-                        "on_delete": c.on_delete_action().as_str()
-                    })
-                } else {
-                    json!({
-                        "name": c.name_str(),
-                        "type": "unique",
-                        "field": c.field_str()
-                    })
-                }
-            })
+            .map(cluster_constraint_to_api_value)
             .collect();
         Response::ok(json!(data))
     }
@@ -479,6 +572,25 @@ impl ClusteredAgent {
                 "alive_nodes": alive_nodes
             }
         }))
+    }
+}
+
+fn cluster_constraint_to_api_value(c: &crate::cluster::db::ClusterConstraint) -> serde_json::Value {
+    if c.is_foreign_key() {
+        json!({
+            "name": c.name_str(),
+            "type": "fk",
+            "field": c.field_str(),
+            "target_entity": c.target_entity_str(),
+            "target_field": c.target_field_str(),
+            "on_delete": c.on_delete_action().as_str()
+        })
+    } else {
+        json!({
+            "name": c.name_str(),
+            "type": "unique",
+            "fields": [c.field_str()]
+        })
     }
 }
 

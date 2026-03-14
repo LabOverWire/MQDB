@@ -200,13 +200,15 @@ impl MqdbAgent {
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
-            needs_composite,
-            service_username.as_ref(),
-            service_password.as_ref(),
-            self.auth_setup.password_file.as_deref(),
-            self.auth_setup.acl_file.as_deref(),
-            &admin_users,
-            self.auth_setup.allow_anonymous,
+            broker::AuthProviderConfig {
+                needs_composite,
+                service_username: service_username.as_ref(),
+                service_password: service_password.as_ref(),
+                password_file: self.auth_setup.password_file.as_deref(),
+                acl_file: self.auth_setup.acl_file.as_deref(),
+                admin_users: &admin_users,
+                allow_anonymous: self.auth_setup.allow_anonymous,
+            },
         )
         .await?;
 

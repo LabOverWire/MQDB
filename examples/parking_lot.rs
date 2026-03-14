@@ -1,6 +1,7 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use mqdb::database::CallerContext;
 use mqdb::{
     Database, DatabaseConfig, FieldDefinition, FieldType, Filter, FilterOp, OnDeleteAction, Schema,
     ScopeConfig,
@@ -353,9 +354,11 @@ async fn kiosk_client(db: Arc<Database>) -> Result<(String, String), Box<dyn std
         spot_id.clone(),
         json!({"status": "reserved"}),
         None,
-        None,
-        None,
-        &ScopeConfig::default(),
+        &CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &ScopeConfig::default(),
+        },
     )
     .await?;
 
@@ -504,9 +507,11 @@ async fn gate_camera_client(
         spot_id,
         json!({"status": "occupied"}),
         None,
-        None,
-        None,
-        &ScopeConfig::default(),
+        &CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &ScopeConfig::default(),
+        },
     )
     .await?;
 
@@ -719,9 +724,11 @@ async fn exit_gate_client(
             "session_status": "completed"
         }),
         None,
-        None,
-        None,
-        &ScopeConfig::default(),
+        &CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &ScopeConfig::default(),
+        },
     )
     .await?;
 
@@ -739,9 +746,11 @@ async fn exit_gate_client(
         spot_id.to_string(),
         json!({"status": "available"}),
         None,
-        None,
-        None,
-        &ScopeConfig::default(),
+        &CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &ScopeConfig::default(),
+        },
     )
     .await?;
 

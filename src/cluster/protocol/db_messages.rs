@@ -19,30 +19,6 @@ impl JsonDbRequest {
     pub const VERSION: u8 = 2;
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        request_id: u64,
-        op: JsonDbOp,
-        entity: String,
-        id: Option<String>,
-        payload: Vec<u8>,
-        response_topic: String,
-        correlation_data: Option<Vec<u8>>,
-        sender: Option<String>,
-    ) -> Self {
-        Self {
-            request_id,
-            op,
-            entity,
-            id,
-            payload,
-            response_topic,
-            correlation_data,
-            sender,
-        }
-    }
-
-    #[must_use]
     #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Vec<u8> {
         let entity_bytes = self.entity.as_bytes();
@@ -309,16 +285,16 @@ mod tests {
 
     #[test]
     fn request_roundtrip_with_sender() {
-        let req = JsonDbRequest::new(
-            42,
-            JsonDbOp::Update,
-            "users".to_string(),
-            Some("abc".to_string()),
-            b"payload".to_vec(),
-            "resp/topic".to_string(),
-            Some(b"corr".to_vec()),
-            Some("alice".to_string()),
-        );
+        let req = JsonDbRequest {
+            request_id: 42,
+            op: JsonDbOp::Update,
+            entity: "users".to_string(),
+            id: Some("abc".to_string()),
+            payload: b"payload".to_vec(),
+            response_topic: "resp/topic".to_string(),
+            correlation_data: Some(b"corr".to_vec()),
+            sender: Some("alice".to_string()),
+        };
         let bytes = req.to_bytes();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 42);
@@ -332,16 +308,16 @@ mod tests {
 
     #[test]
     fn request_roundtrip_without_sender() {
-        let req = JsonDbRequest::new(
-            1,
-            JsonDbOp::Read,
-            "items".to_string(),
-            Some("id1".to_string()),
-            vec![],
-            "resp".to_string(),
-            None,
-            None,
-        );
+        let req = JsonDbRequest {
+            request_id: 1,
+            op: JsonDbOp::Read,
+            entity: "items".to_string(),
+            id: Some("id1".to_string()),
+            payload: vec![],
+            response_topic: "resp".to_string(),
+            correlation_data: None,
+            sender: None,
+        };
         let bytes = req.to_bytes();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.entity, "items");

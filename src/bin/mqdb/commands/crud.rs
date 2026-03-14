@@ -74,27 +74,34 @@ pub(crate) async fn cmd_delete(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct ListParams {
+    pub entity: String,
+    pub filters: Vec<String>,
+    pub sort: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub projection: Option<String>,
+}
+
 pub(crate) async fn cmd_list(
-    entity: String,
-    filters: Vec<String>,
-    sort: Option<String>,
-    limit: Option<usize>,
-    offset: Option<usize>,
-    projection: Option<String>,
+    params: ListParams,
     conn: ConnectionArgs,
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = format!("$DB/{entity}/list");
+    let topic = format!("$DB/{}/list", params.entity);
 
     let mut payload = json!({});
 
-    if !filters.is_empty() {
-        let parsed_filters: Vec<Value> = filters.iter().flat_map(|f| parse_filters(f)).collect();
+    if !params.filters.is_empty() {
+        let parsed_filters: Vec<Value> = params
+            .filters
+            .iter()
+            .flat_map(|f| parse_filters(f))
+            .collect();
         payload["filters"] = json!(parsed_filters);
     }
 
-    if let Some(sort_str) = sort {
+    if let Some(sort_str) = params.sort {
         let sort_orders: Vec<Value> = sort_str
             .split(',')
             .map(|s| {
@@ -107,14 +114,14 @@ pub(crate) async fn cmd_list(
         payload["sort"] = json!(sort_orders);
     }
 
-    if limit.is_some() || offset.is_some() {
+    if params.limit.is_some() || params.offset.is_some() {
         payload["pagination"] = json!({
-            "limit": limit.unwrap_or(100),
-            "offset": offset.unwrap_or(0)
+            "limit": params.limit.unwrap_or(100),
+            "offset": params.offset.unwrap_or(0)
         });
     }
 
-    if let Some(proj) = projection {
+    if let Some(proj) = params.projection {
         let fields: Vec<&str> = proj.split(',').collect();
         payload["projection"] = json!(fields);
     }
@@ -196,7 +203,7 @@ pub(crate) async fn cmd_constraint_add(
 
     let payload = if let Some(field) = unique {
         let constraint_name = name.unwrap_or_else(|| format!("unique_{entity}_{field}"));
-        json!({ "type": "unique", "name": constraint_name, "field": field })
+        json!({ "type": "unique", "name": constraint_name, "fields": [field] })
     } else if let Some(fk_spec) = fk {
         let parts: Vec<&str> = fk_spec.split(':').collect();
         if parts.len() < 3 {

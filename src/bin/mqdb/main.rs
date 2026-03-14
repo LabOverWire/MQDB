@@ -15,9 +15,9 @@ use commands::cluster::{
     ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status,
 };
 use commands::crud::{
-    cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list, cmd_create,
-    cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get, cmd_schema_set,
-    cmd_subscribe, cmd_update, cmd_watch,
+    ListParams, cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list,
+    cmd_create, cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get,
+    cmd_schema_set, cmd_subscribe, cmd_update, cmd_watch,
 };
 
 use clap::Parser;
@@ -57,6 +57,28 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             iterations,
         } => commands::auth::cmd_scram(&username, batch, delete, stdout, file, iterations)?,
         Commands::Acl { action } => Box::pin(commands::acl::cmd_acl(action)).await?,
+        Commands::Schema { action } => dispatch_schema(action).await?,
+        Commands::Constraint { action } => dispatch_constraint(action).await?,
+        Commands::Index { action } => dispatch_index(action).await?,
+        Commands::Backup { action } => dispatch_backup(action).await?,
+        Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
+        Commands::ConsumerGroup { action } => dispatch_consumer_group(action).await?,
+        Commands::Db { action } => dispatch_db(action).await?,
+        Commands::Dev { action } => dispatch_dev(action).await?,
+        Commands::Bench { action } => dispatch_bench(action).await?,
+        crud @ (Commands::Create { .. }
+        | Commands::Read { .. }
+        | Commands::Update { .. }
+        | Commands::Delete { .. }
+        | Commands::List { .. }
+        | Commands::Watch { .. }
+        | Commands::Subscribe { .. }) => dispatch_crud(crud).await?,
+    }
+    Ok(())
+}
+
+async fn dispatch_crud(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
         Commands::Create {
             entity,
             data,
@@ -93,10 +115,15 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             conn,
             format,
         } => {
-            Box::pin(cmd_list(
-                entity, filter, sort, limit, offset, projection, conn, format,
-            ))
-            .await?;
+            let params = ListParams {
+                entity,
+                filters: filter,
+                sort,
+                limit,
+                offset,
+                projection,
+            };
+            Box::pin(cmd_list(params, conn, format)).await?;
         }
         Commands::Watch {
             entity,
@@ -104,11 +131,6 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             conn,
             format,
         } => Box::pin(cmd_watch(entity, filter, conn, format)).await?,
-        Commands::Schema { action } => dispatch_schema(action).await?,
-        Commands::Constraint { action } => dispatch_constraint(action).await?,
-        Commands::Index { action } => dispatch_index(action).await?,
-        Commands::Backup { action } => dispatch_backup(action).await?,
-        Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
         Commands::Subscribe {
             pattern,
             entity,
@@ -129,10 +151,7 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
             ))
             .await?;
         }
-        Commands::ConsumerGroup { action } => dispatch_consumer_group(action).await?,
-        Commands::Db { action } => dispatch_db(action).await?,
-        Commands::Dev { action } => dispatch_dev(action).await?,
-        Commands::Bench { action } => dispatch_bench(action).await?,
+        _ => unreachable!("caller ensures only CRUD variants reach dispatch_crud"),
     }
     Ok(())
 }

@@ -10,18 +10,27 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FieldType {
+    #[serde(alias = "string")]
     String,
+    #[serde(alias = "number")]
     Number,
+    #[serde(alias = "boolean")]
     Boolean,
+    #[serde(alias = "array")]
     Array,
+    #[serde(alias = "object")]
     Object,
+    #[serde(alias = "null")]
     Null,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDefinition {
+    #[serde(default)]
     pub name: String,
+    #[serde(alias = "type")]
     pub field_type: FieldType,
+    #[serde(default)]
     pub required: bool,
     pub default: Option<Value>,
 }
@@ -65,6 +74,12 @@ impl FieldDefinition {
 pub struct Schema {
     pub entity: String,
     pub fields: HashMap<String, FieldDefinition>,
+    #[serde(default = "default_schema_version")]
+    pub version: u64,
+}
+
+fn default_schema_version() -> u64 {
+    1
 }
 
 impl Schema {
@@ -72,6 +87,19 @@ impl Schema {
         Self {
             entity: entity.into(),
             fields: HashMap::new(),
+            version: 1,
+        }
+    }
+
+    #[must_use]
+    pub fn with_fields(
+        entity: impl Into<String>,
+        fields: HashMap<String, FieldDefinition>,
+    ) -> Self {
+        Self {
+            entity: entity.into(),
+            fields,
+            version: 1,
         }
     }
 
@@ -160,7 +188,14 @@ impl SchemaRegistry {
         }
     }
 
-    pub fn add_schema(&mut self, schema: Schema) {
+    pub fn add_schema(&mut self, mut schema: Schema) {
+        if let Some(existing) = self.schemas.get(&schema.entity) {
+            if existing.fields == schema.fields {
+                schema.version = existing.version;
+            } else {
+                schema.version = existing.version + 1;
+            }
+        }
         self.schemas.insert(schema.entity.clone(), schema);
     }
 
@@ -230,6 +265,11 @@ impl SchemaRegistry {
             }
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn entity_names(&self) -> Vec<String> {
+        self.schemas.keys().cloned().collect()
     }
 
     pub fn remove_schema(&mut self, batch: &mut BatchWriter, entity: &str) {
@@ -333,5 +373,28 @@ mod tests {
 
         let invalid = json!({"age": 30});
         assert!(registry.validate_entity("users", &invalid).is_err());
+    }
+
+    #[test]
+    fn test_schema_version_stable_on_identical_fields() {
+        let mut registry = SchemaRegistry::new();
+
+        let schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("age", FieldType::Number));
+        registry.add_schema(schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 1);
+
+        let same_schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("age", FieldType::Number));
+        registry.add_schema(same_schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 1);
+
+        let different_schema = Schema::new("users")
+            .add_field(FieldDefinition::new("name", FieldType::String).required())
+            .add_field(FieldDefinition::new("email", FieldType::String));
+        registry.add_schema(different_schema);
+        assert_eq!(registry.get_schema("users").unwrap().version, 2);
     }
 }

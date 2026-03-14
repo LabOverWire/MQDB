@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use crate::constraint::Constraint;
 use crate::http::VaultCrypto;
 use crate::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use crate::types::{OwnershipConfig, ScopeConfig};
@@ -22,17 +23,23 @@ use mqtt5::telemetry::propagation;
 
 use tracing::Instrument;
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(super) async fn handle_message(
-    db: &Database,
-    client: &MqttClient,
-    message: Message,
-    backup_dir: &Path,
-    ownership: &OwnershipConfig,
-    scope_config: &ScopeConfig,
-    auth_providers: Option<&ComprehensiveAuthProvider>,
-    vault_key_store: &VaultKeyStore,
-) {
+pub(super) struct MessageContext<'a> {
+    pub db: &'a Database,
+    pub client: &'a MqttClient,
+    pub backup_dir: &'a Path,
+    pub ownership: &'a OwnershipConfig,
+    pub scope_config: &'a ScopeConfig,
+    pub auth_providers: Option<&'a ComprehensiveAuthProvider>,
+    pub vault_key_store: &'a VaultKeyStore,
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
+    let db = ctx.db;
+    let client = ctx.client;
+    let ownership = ctx.ownership;
+    let scope_config = ctx.scope_config;
+    let vault_key_store = ctx.vault_key_store;
     let topic = &message.topic;
 
     if topic.contains("/events") {
@@ -40,7 +47,16 @@ pub(super) async fn handle_message(
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        handle_admin_operation(db, client, &message, admin_op, backup_dir, auth_providers).await;
+        let admin_ctx = AdminContext {
+            db,
+            client,
+            message: &message,
+            backup_dir: ctx.backup_dir,
+            auth_providers: ctx.auth_providers,
+            ownership,
+            scope_config,
+        };
+        handle_admin_operation(&admin_ctx, admin_op).await;
         return;
     }
 
@@ -204,10 +220,14 @@ async fn vault_transform_request(
             id,
             fields: delta,
         } => {
-            let (encrypted_request, constraint_data) = vault_pre_update(
-                db, crypto, &entity, &id, delta, &skip, sender_uid, ownership,
-            )
-            .await?;
+            let params = VaultUpdateParams {
+                crypto,
+                skip_fields: &skip,
+                sender_uid,
+                ownership,
+            };
+            let (encrypted_request, constraint_data) =
+                vault_pre_update(db, &params, &entity, &id, delta).await?;
             debug!(entity = %entity, id = %id, "vault-encrypted update");
             Ok((encrypted_request, constraint_data))
         }
@@ -215,20 +235,23 @@ async fn vault_transform_request(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct VaultUpdateParams<'a> {
+    crypto: &'a VaultCrypto,
+    skip_fields: &'a [String],
+    sender_uid: Option<&'a str>,
+    ownership: &'a OwnershipConfig,
+}
+
 async fn vault_pre_update(
     db: &Database,
-    crypto: &VaultCrypto,
+    params: &VaultUpdateParams<'_>,
     entity: &str,
     id: &str,
     delta: Value,
-    skip_fields: &[String],
-    sender_uid: Option<&str>,
-    ownership: &OwnershipConfig,
 ) -> Result<(Request, Option<(Value, Value)>), Response> {
-    if let Some(uid) = sender_uid
-        && !ownership.is_admin(uid)
-        && let Some(owner_field) = ownership.entity_owner_fields.get(entity)
+    if let Some(uid) = params.sender_uid
+        && !params.ownership.is_admin(uid)
+        && let Some(owner_field) = params.ownership.entity_owner_fields.get(entity)
         && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
     {
         return Err(e.into());
@@ -248,7 +271,13 @@ async fn vault_pre_update(
         ));
     };
 
-    vault_decrypt_fields(crypto, entity, id, &mut decrypted_existing, skip_fields);
+    vault_decrypt_fields(
+        params.crypto,
+        entity,
+        id,
+        &mut decrypted_existing,
+        params.skip_fields,
+    );
 
     let plaintext_existing = decrypted_existing.clone();
 
@@ -262,7 +291,7 @@ async fn vault_pre_update(
 
     if let Some(obj) = decrypted_existing.as_object_mut() {
         obj.remove("id");
-        for sf in skip_fields {
+        for sf in params.skip_fields {
             if sf != "id" {
                 obj.remove(sf.as_str());
             }
@@ -270,7 +299,7 @@ async fn vault_pre_update(
     }
 
     let mut merged = decrypted_existing;
-    vault_encrypt_fields(crypto, entity, id, &mut merged, skip_fields);
+    vault_encrypt_fields(params.crypto, entity, id, &mut merged, params.skip_fields);
 
     Ok((
         Request::Update {
@@ -314,24 +343,27 @@ fn vault_decrypt_response(
     }
 }
 
-async fn handle_admin_operation(
-    db: &Database,
-    client: &MqttClient,
-    message: &Message,
-    op: AdminOperation,
-    backup_dir: &Path,
-    auth_providers: Option<&ComprehensiveAuthProvider>,
-) {
-    let payload: Value = if message.payload.is_empty() {
+struct AdminContext<'a> {
+    db: &'a Database,
+    client: &'a MqttClient,
+    message: &'a Message,
+    backup_dir: &'a Path,
+    auth_providers: Option<&'a ComprehensiveAuthProvider>,
+    ownership: &'a OwnershipConfig,
+    scope_config: &'a ScopeConfig,
+}
+
+async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
+    let payload: Value = if ctx.message.payload.is_empty() {
         Value::Null
     } else {
-        match serde_json::from_slice(&message.payload) {
+        match serde_json::from_slice(&ctx.message.payload) {
             Ok(v) => v,
             Err(e) => {
-                if let Some(response_topic) = &message.properties.response_topic {
+                if let Some(response_topic) = &ctx.message.properties.response_topic {
                     let response = Response::error(crate::ErrorCode::BadRequest, e.to_string());
                     if let Ok(payload) = serde_json::to_vec(&response) {
-                        let _ = client.publish_qos1(response_topic, payload).await;
+                        let _ = ctx.client.publish_qos1(response_topic, payload).await;
                     }
                 }
                 return;
@@ -340,49 +372,52 @@ async fn handle_admin_operation(
     };
 
     let response = match op {
-        AdminOperation::SchemaSet { entity } => handle_schema_set(db, entity, payload).await,
-        AdminOperation::SchemaGet { entity } => handle_schema_get(db, &entity).await,
+        AdminOperation::SchemaSet { entity } => handle_schema_set(ctx.db, entity, payload).await,
+        AdminOperation::SchemaGet { entity } => handle_schema_get(ctx.db, &entity).await,
         AdminOperation::ConstraintAdd { entity } => {
-            handle_constraint_add(db, entity, &payload).await
+            handle_constraint_add(ctx.db, entity, &payload).await
         }
-        AdminOperation::ConstraintList { entity } => handle_constraint_list(db, &entity).await,
-        AdminOperation::Backup => handle_backup(db, &payload, backup_dir).await,
+        AdminOperation::ConstraintList { entity } => handle_constraint_list(ctx.db, &entity).await,
+        AdminOperation::Backup => handle_backup(ctx.db, &payload, ctx.backup_dir).await,
         AdminOperation::Restore => Response::error(
             crate::ErrorCode::Internal,
             "restore requires agent restart - use CLI with --restore flag",
         ),
-        AdminOperation::BackupList => handle_backup_list(backup_dir).await,
-        AdminOperation::Subscribe => handle_subscribe(db, &payload).await,
-        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(db, &sub_id).await,
-        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(db, &sub_id).await,
-        AdminOperation::ConsumerGroupList => handle_consumer_group_list(db).await,
-        AdminOperation::ConsumerGroupShow { name } => handle_consumer_group_show(db, &name).await,
-        AdminOperation::Health => handle_health(db),
-        AdminOperation::UserAdd => handle_user_add(auth_providers, &payload),
-        AdminOperation::UserDelete => handle_user_delete(auth_providers, &payload),
-        AdminOperation::UserList => handle_user_list(auth_providers),
-        AdminOperation::AclRuleAdd => handle_acl_rule_add(auth_providers, &payload).await,
-        AdminOperation::AclRuleRemove => handle_acl_rule_remove(auth_providers, &payload).await,
-        AdminOperation::AclRuleList => handle_acl_rule_list(auth_providers, &payload).await,
-        AdminOperation::AclRoleAdd => handle_acl_role_add(auth_providers, &payload).await,
-        AdminOperation::AclRoleDelete => handle_acl_role_delete(auth_providers, &payload).await,
-        AdminOperation::AclRoleList => handle_acl_role_list(auth_providers).await,
+        AdminOperation::BackupList => handle_backup_list(ctx.backup_dir).await,
+        AdminOperation::Subscribe => handle_subscribe(ctx.db, &payload).await,
+        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(ctx.db, &sub_id).await,
+        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(ctx.db, &sub_id).await,
+        AdminOperation::ConsumerGroupList => handle_consumer_group_list(ctx.db).await,
+        AdminOperation::ConsumerGroupShow { name } => {
+            handle_consumer_group_show(ctx.db, &name).await
+        }
+        AdminOperation::Health => handle_health(ctx.db),
+        AdminOperation::UserAdd => handle_user_add(ctx.auth_providers, &payload),
+        AdminOperation::UserDelete => handle_user_delete(ctx.auth_providers, &payload),
+        AdminOperation::UserList => handle_user_list(ctx.auth_providers),
+        AdminOperation::AclRuleAdd => handle_acl_rule_add(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRuleRemove => handle_acl_rule_remove(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRuleList => handle_acl_rule_list(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleAdd => handle_acl_role_add(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleDelete => handle_acl_role_delete(ctx.auth_providers, &payload).await,
+        AdminOperation::AclRoleList => handle_acl_role_list(ctx.auth_providers).await,
         AdminOperation::AclAssignmentAssign => {
-            handle_acl_assignment_assign(auth_providers, &payload).await
+            handle_acl_assignment_assign(ctx.auth_providers, &payload).await
         }
         AdminOperation::AclAssignmentUnassign => {
-            handle_acl_assignment_unassign(auth_providers, &payload).await
+            handle_acl_assignment_unassign(ctx.auth_providers, &payload).await
         }
         AdminOperation::AclAssignmentList => {
-            handle_acl_assignment_list(auth_providers, &payload).await
+            handle_acl_assignment_list(ctx.auth_providers, &payload).await
         }
-        AdminOperation::IndexAdd { entity } => handle_index_add(db, entity, &payload).await,
+        AdminOperation::IndexAdd { entity } => handle_index_add(ctx.db, entity, &payload).await,
+        AdminOperation::Catalog => handle_catalog(ctx.db, ctx.ownership, ctx.scope_config).await,
     };
 
-    if let Some(response_topic) = &message.properties.response_topic {
+    if let Some(response_topic) = &ctx.message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = client.publish_qos1(response_topic, payload).await {
+                if let Err(e) = ctx.client.publish_qos1(response_topic, payload).await {
                     error!("Failed to publish admin response to {response_topic}: {e}");
                 }
             }
@@ -395,15 +430,20 @@ async fn handle_admin_operation(
 
 async fn handle_schema_set(db: &Database, entity: String, payload: Value) -> Response {
     use serde_json::json;
-    match serde_json::from_value::<crate::schema::Schema>(payload) {
-        Ok(mut schema) => {
-            schema.entity = entity;
-            match db.add_schema(schema).await {
-                Ok(()) => Response::ok(json!({"message": "schema set"})),
-                Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
-            }
+    let mut fields: std::collections::HashMap<String, crate::schema::FieldDefinition> =
+        match serde_json::from_value(payload) {
+            Ok(f) => f,
+            Err(e) => return Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+        };
+    for (key, def) in &mut fields {
+        if def.name.is_empty() {
+            def.name.clone_from(key);
         }
-        Err(e) => Response::error(crate::ErrorCode::BadRequest, e.to_string()),
+    }
+    let schema = crate::schema::Schema::with_fields(entity, fields);
+    match db.add_schema(schema).await {
+        Ok(()) => Response::ok(json!({"message": "schema set"})),
+        Err(e) => Response::error(crate::ErrorCode::Internal, e.to_string()),
     }
 }
 
@@ -447,7 +487,7 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
 
     let result = match constraint_type {
         Some("unique") => {
-            let fields: Vec<String> = payload
+            let mut fields: Vec<String> = payload
                 .get("fields")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -457,8 +497,14 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
                 })
                 .unwrap_or_default();
 
+            if fields.is_empty()
+                && let Some(f) = payload.get("field").and_then(|v| v.as_str())
+            {
+                fields.push(f.to_string());
+            }
+
             if fields.is_empty() {
-                Err("unique constraint requires fields array".to_string())
+                Err("unique constraint requires 'fields' or 'field'".to_string())
             } else {
                 db.add_unique_constraint(entity, fields)
                     .await
@@ -525,10 +571,7 @@ async fn handle_foreign_key_constraint(
 async fn handle_constraint_list(db: &Database, entity: &str) -> Response {
     use serde_json::json;
     let constraints = db.list_constraints(entity).await;
-    let data: Vec<Value> = constraints
-        .into_iter()
-        .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
-        .collect();
+    let data: Vec<Value> = constraints.iter().map(Constraint::to_api_value).collect();
     Response::ok(json!(data))
 }
 
@@ -658,6 +701,64 @@ async fn handle_consumer_group_show(db: &Database, name: &str) -> Response {
             format!("consumer group not found: {name}"),
         ),
     }
+}
+
+async fn handle_catalog(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    scope_config: &ScopeConfig,
+) -> Response {
+    use serde_json::json;
+
+    let entity_names = db.entity_names().await;
+    let all_constraints = db.all_constraints().await;
+
+    let mut entities = Vec::new();
+    for name in &entity_names {
+        let record_count = db.entity_record_count(name);
+        let schema = db.get_schema(name).await;
+        let constraints = all_constraints.get(name).cloned().unwrap_or_default();
+        let constraint_data: Vec<Value> =
+            constraints.iter().map(Constraint::to_api_value).collect();
+
+        let ownership_info = ownership
+            .owner_field(name)
+            .map(|field| json!({"field": field}));
+        let scope_info = if scope_config.is_empty() {
+            None
+        } else {
+            Some(json!({
+                "entity": scope_config.scope_entity(),
+                "field": scope_config.scope_field()
+            }))
+        };
+
+        let schema_info = schema.map(|s| {
+            let fields = serde_json::to_value(&s.fields).unwrap_or(Value::Null);
+            json!({
+                "entity": s.entity,
+                "version": s.version,
+                "schema": fields
+            })
+        });
+
+        entities.push(json!({
+            "name": name,
+            "record_count": record_count,
+            "schema": schema_info,
+            "constraints": constraint_data,
+            "ownership": ownership_info,
+            "scope": scope_info,
+            "vault_eligible": is_vault_eligible(name, ownership),
+        }));
+    }
+
+    Response::ok(json!({
+        "entities": entities,
+        "server": {
+            "mode": "agent",
+        }
+    }))
 }
 
 fn handle_health(db: &Database) -> Response {

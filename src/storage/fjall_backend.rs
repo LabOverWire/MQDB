@@ -65,6 +65,53 @@ impl StorageBackend for FjallBackend {
         Ok(results)
     }
 
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        let snapshot = self.db.snapshot();
+        let mut count = 0;
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            let _ = guard.key()?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let snapshot = self.db.snapshot();
+        let mut results = Vec::new();
+        for guard in snapshot.prefix(&self.keyspace, prefix) {
+            results.push(guard.key()?.to_vec());
+        }
+        Ok(results)
+    }
+
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let snapshot = self.db.snapshot();
+        let mut results = Vec::with_capacity(batch_size);
+        let start: Vec<u8> = if let Some(after) = after_key {
+            let mut s = after.to_vec();
+            s.push(0);
+            s
+        } else {
+            prefix.to_vec()
+        };
+        for guard in snapshot.range(&self.keyspace, start..) {
+            let (k, v) = guard.into_inner()?;
+            if !k.starts_with(prefix) {
+                break;
+            }
+            results.push((k.to_vec(), v.to_vec()));
+            if results.len() >= batch_size {
+                break;
+            }
+        }
+        Ok(results)
+    }
+
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let snapshot = self.db.snapshot();
         let mut results = Vec::new();

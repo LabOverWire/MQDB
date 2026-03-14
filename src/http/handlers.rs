@@ -7,7 +7,7 @@ use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::pkce::PkceCache;
 use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
-use super::session_store::{JtiRevocationStore, SessionStore};
+use super::session_store::{JtiRevocationStore, NewSession, SessionStore};
 use super::vault_crypto::VaultCrypto;
 use crate::VaultKeyStore;
 use crate::types::OwnershipConfig;
@@ -260,15 +260,15 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
 
     let jwt = mint_callback_jwt(state, &canonical_id, &identity);
 
-    let Some(session_id) = state.session_store.create(
+    let Some(session_id) = state.session_store.create(NewSession {
         jwt,
         canonical_id,
-        provider.to_string(),
-        identity.provider_sub.clone(),
-        identity.email.clone(),
-        identity.name.clone(),
-        identity.picture.clone(),
-    ) else {
+        provider: provider.to_string(),
+        provider_sub: identity.provider_sub.clone(),
+        email: identity.email.clone(),
+        name: identity.name.clone(),
+        picture: identity.picture.clone(),
+    }) else {
         return json_response(500, &json!({"error": "failed to create session"}));
     };
 
@@ -395,6 +395,12 @@ async fn resolve_or_create_identity(
     if let Some(existing_link) = read_entity(&state.mqtt_client, "_identity_links", link_key).await
         && let Some(cid) = existing_link.get("canonical_id").and_then(|v| v.as_str())
     {
+        if read_entity(&state.mqtt_client, "_identities", cid)
+            .await
+            .is_none()
+        {
+            create_identity(state, cid, identity).await;
+        }
         update_identity_link(state, link_key, identity).await;
         return Ok(cid.to_string());
     }
@@ -507,62 +513,18 @@ fn is_safe_filter_value(value: &str) -> bool {
 }
 
 async fn find_canonical_id_by_email(state: &ServerState, email: &str) -> Option<String> {
-    let filter = if let Some(ref crypto) = state.identity_crypto {
+    let (field, value) = if let Some(ref crypto) = state.identity_crypto {
         let hash = crypto.blind_index("_identity_links", email);
-        format!("email_hash={hash}")
+        ("email_hash".to_string(), hash)
     } else {
         if !is_safe_filter_value(email) {
             return None;
         }
-        format!("email={email}")
+        ("email".to_string(), email.to_string())
     };
-    let client = &state.mqtt_client;
-    let topic = "$DB/_identity_links/list".to_string();
-    let response_topic = format!("_mqdb/http_resp/{}", uuid_v4());
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
-
-    if client
-        .subscribe(&response_topic, move |msg: mqtt5::types::Message| {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                if let Some(tx) = tx.lock().await.take() {
-                    let _ = tx.send(msg.payload.clone());
-                }
-            });
-        })
-        .await
-        .is_err()
-    {
-        return None;
-    }
-
-    let props = mqtt5::types::PublishProperties {
-        response_topic: Some(response_topic.clone()),
-        user_properties: vec![("filter".to_string(), filter)],
-        ..Default::default()
-    };
-    let options = mqtt5::PublishOptions {
-        properties: props,
-        ..Default::default()
-    };
-    if client
-        .publish_with_options(&topic, vec![], options)
-        .await
-        .is_err()
-    {
-        let _ = client.unsubscribe(&response_topic).await;
-        return None;
-    }
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
-    let _ = client.unsubscribe(&response_topic).await;
-    let payload = result.ok()?.ok()?;
-
-    let response: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    let items = response.get("data")?.as_array()?;
-    items
+    let filter = format!("{field}={value}");
+    let records = list_entities(&state.mqtt_client, "_identity_links", &filter).await?;
+    records
         .first()?
         .get("canonical_id")
         .and_then(|v| v.as_str())
@@ -1304,9 +1266,17 @@ async fn list_entities(
         return None;
     }
 
+    let list_payload = if let Some((field, value)) = filter.split_once('=') {
+        serde_json::to_vec(&json!({
+            "filters": [{"field": field, "op": "eq", "value": value}]
+        }))
+        .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
     let props = mqtt5::types::PublishProperties {
         response_topic: Some(response_topic.clone()),
-        user_properties: vec![("filter".to_string(), filter.to_string())],
         ..Default::default()
     };
     let options = mqtt5::PublishOptions {
@@ -1314,7 +1284,7 @@ async fn list_entities(
         ..Default::default()
     };
     if client
-        .publish_with_options(&topic, vec![], options)
+        .publish_with_options(&topic, list_payload, options)
         .await
         .is_err()
     {
@@ -2141,15 +2111,15 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
         let _ = create_entity_with_response(&state.mqtt_client, "_identities", &data).await;
     }
 
-    let Some(session_id) = state.session_store.create(
-        String::new(),
-        canonical_id.clone(),
-        "dev".to_string(),
-        "dev-local".to_string(),
-        Some(email.to_string()),
-        Some(name.to_string()),
-        None,
-    ) else {
+    let Some(session_id) = state.session_store.create(NewSession {
+        jwt: String::new(),
+        canonical_id: canonical_id.clone(),
+        provider: "dev".to_string(),
+        provider_sub: "dev-local".to_string(),
+        email: Some(email.to_string()),
+        name: Some(name.to_string()),
+        picture: None,
+    }) else {
         return json_response_with_credentials(
             500,
             &json!({"error": "failed to create session"}),

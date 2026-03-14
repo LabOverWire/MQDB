@@ -17,7 +17,7 @@ Binary location: `target/release/mqdb`
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MQDB_BROKER` | MQTT broker URL | `mqtt://localhost:1883` |
+| `MQDB_BROKER` | MQTT broker address | `127.0.0.1:1883` |
 | `MQDB_USER` | Authentication username | (none) |
 | `MQDB_PASS` | Authentication password | (none) |
 
@@ -35,20 +35,22 @@ Terminal 3: Subscriber/watcher (for reactive tests)
 
 ## 1. Starting the Agent
 
-### Basic Start (Anonymous Mode)
+### Basic Start (with Authentication)
 
 **Terminal 1:**
 ```bash
-mqdb agent start --db ./data/testdb --anonymous
+mqdb passwd admin -b admin123 -f ./passwd.txt
+mqdb agent start --db ./data/testdb --passwd ./passwd.txt
 ```
 
 **Expected output:**
 ```
-(agent starts silently, listening on 127.0.0.1:1883)
+(agent starts, listening on 127.0.0.1:1883)
 ```
 
-> **Note:** The `--anonymous` flag allows connections without authentication.
-> Without it, you must provide `--passwd` and `--acl` files.
+> **Note:** The `--anonymous` flag exists but requires the `dev-insecure` build feature
+> (`cargo build --release --features dev-insecure`). For production and standard testing,
+> always use `--passwd` for password auth or `--scram-file` for SCRAM-SHA-256 auth.
 
 ### Check Agent Status
 
@@ -58,43 +60,107 @@ mqdb agent status
 ```
 
 **Expected output:**
-```
-status: connected
-broker: mqtt://localhost:1883
-database: ./data/testdb
+```json
+{"data":{"mode":"agent","ready":true,"status":"healthy"},"status":"ok"}
 ```
 
-### Start with Authentication
+The `status` command connects to the broker via MQTT and queries the `$DB/_health` endpoint.
 
-**Terminal 1:**
+### Start with Full Authentication Stack
+
 ```bash
-mqdb agent start --db ./data/testdb --passwd ./passwd.txt --acl ./acl.txt
+mqdb agent start --db ./data/testdb --passwd ./passwd.txt --acl ./acl.txt \
+    --admin-users admin
 ```
+
+### Agent Start Options Reference
+
+**Core:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--db` | Database directory path | (required) |
+| `--bind` | MQTT listener address | `127.0.0.1:1883` |
+| `--durability` | `immediate`, `periodic`, or `none` | `periodic` |
+| `--durability-ms` | Fsync interval in ms (periodic mode) | `10` |
+| `--ownership` | Ownership config: `entity=field` pairs | (none) |
+| `--event-scope` | Scope events by entity field | (none) |
+| `--passphrase-file` | File-at-rest encryption passphrase | (none) |
+
+**Authentication:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--passwd` | Path to password file | (none) |
+| `--acl` | Path to ACL file | (none) |
+| `--scram-file` | Path to SCRAM-SHA-256 credentials file | (none) |
+| `--jwt-algorithm` | JWT algorithm: `hs256`, `rs256`, `es256` | (none) |
+| `--jwt-key` | Path to JWT secret/key file | (none) |
+| `--jwt-issuer` | JWT issuer claim | (none) |
+| `--jwt-audience` | JWT audience claim | (none) |
+| `--jwt-clock-skew` | JWT clock skew tolerance in seconds | `60` |
+| `--federated-jwt-config` | Path to federated JWT config JSON (conflicts with `--jwt-algorithm`) | (none) |
+| `--cert-auth-file` | Path to certificate auth file | (none) |
+| `--admin-users` | Comma-separated list of admin usernames | (none) |
+| `--no-rate-limit` | Disable authentication rate limiting | `false` |
+| `--rate-limit-max-attempts` | Max failed auth attempts before lockout | `5` |
+| `--rate-limit-window-secs` | Rate limit window in seconds | `60` |
+| `--rate-limit-lockout-secs` | Lockout duration in seconds | `300` |
+
+**Transport:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--quic-cert` | TLS certificate (PEM) for MQTT-over-TLS | (none) |
+| `--quic-key` | TLS private key (PEM) for MQTT-over-TLS | (none) |
+| `--ws-bind` | WebSocket bind address (e.g. `0.0.0.0:8080`) | (none) |
+
+**OAuth/Identity:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--http-bind` | HTTP server for OAuth (e.g. `0.0.0.0:8081`) | (none) |
+| `--oauth-client-secret` | Path to Google OAuth client secret | (none) |
+| `--oauth-redirect-uri` | OAuth redirect URI | `http://localhost:{port}/oauth/callback` |
+| `--oauth-frontend-redirect` | Browser redirect after OAuth completes | (none) |
+| `--ticket-expiry-secs` | Ticket JWT expiry in seconds | `30` |
+| `--cookie-secure` | Set Secure flag on session cookies (HTTPS) | `false` |
+| `--cors-origin` | CORS allowed origin for auth endpoints | (none) |
+| `--ticket-rate-limit` | Max ticket requests per minute per IP | `10` |
+| `--trust-proxy` | Trust X-Forwarded-For header | `false` |
+| `--identity-key-file` | 32-byte identity encryption key file | (auto-generated) |
 
 ---
 
 ## 2. Basic CRUD Operations
 
+> **Note:** These examples assume the agent started in Section 1 with `--passwd`. All commands
+> require `--user admin --pass admin123` (or set `MQDB_USER`/`MQDB_PASS` env vars).
+
 ### Create Entity
 
 **Terminal 2:**
 ```bash
-mqdb create users --data '{"name": "Alice", "email": "alice@example.com", "age": 30}'
+mqdb create users --data '{"name": "Alice", "email": "alice@example.com", "age": 30}' \
+  --user admin --pass admin123
 ```
 
-**Expected output:**
+**Expected output (agent mode):**
 ```json
 {
-  "status": "ok",
-  "entity": "users",
-  "id": "18c09201f3ac5801-0039",
   "data": {
-    "name": "Alice",
+    "_version": 1,
+    "age": 30,
     "email": "alice@example.com",
-    "age": 30
-  }
+    "id": "1",
+    "name": "Alice"
+  },
+  "status": "ok"
 }
 ```
+
+> **Note:** Response format differs between modes. In agent mode, `id` is inside `data`.
+> In cluster mode, `id` and `entity` are top-level fields alongside `data`.
 
 ### Read Entity
 
@@ -106,14 +172,14 @@ mqdb read users <id>
 **Expected output:**
 ```json
 {
-  "status": "ok",
-  "entity": "users",
-  "id": "<id>",
   "data": {
-    "name": "Alice",
+    "_version": 1,
+    "age": 30,
     "email": "alice@example.com",
-    "age": 30
-  }
+    "id": "<id>",
+    "name": "Alice"
+  },
+  "status": "ok"
 }
 ```
 
@@ -126,14 +192,14 @@ mqdb update users <id> --data '{"age": 25}'
 **Expected output:**
 ```json
 {
-  "status": "ok",
-  "entity": "users",
-  "id": "<id>",
   "data": {
-    "name": "Alice",
+    "_version": 2,
+    "age": 25,
     "email": "alice@example.com",
-    "age": 25
-  }
+    "id": "<id>",
+    "name": "Alice"
+  },
+  "status": "ok"
 }
 ```
 
@@ -146,29 +212,29 @@ mqdb delete users <id>
 **Expected output:**
 ```json
 {
-  "status": "ok",
-  "entity": "users",
-  "id": "<id>",
-  "deleted": true
+  "data": null,
+  "status": "ok"
 }
 ```
 
 ### Output Formats
 
-**Table format (default):**
-```bash
-mqdb read users user-001 --format table
-```
-
-**JSON format:**
+**JSON format (default):**
 ```bash
 mqdb read users user-001 --format json
+```
+
+**Table format:**
+```bash
+mqdb read users user-001 --format table
 ```
 
 **CSV format:**
 ```bash
 mqdb list users --format csv
 ```
+
+All client commands support `--format json|table|csv`. Default is `json`.
 
 ---
 
@@ -186,7 +252,10 @@ mqdb create products --data '{"name": "Keyboard", "price": 79, "category": "elec
 
 > **Note:** IDs are auto-generated if not provided. To use a client-provided ID, include `"id"` in the payload:
 > `mqdb create products --data '{"id": "my-uuid", "name": "Monitor", "price": 499}'`
-> If no `"id"` field is present, the server generates one (sequential in agent mode, hash-based in cluster mode).
+> If no `"id"` field is present, the server generates a partition-prefixed hex ID (e.g., `"6fc263177a320176-0011"`).
+>
+> **Important:** In agent mode, `create` with an existing ID performs an upsert (overwrites the existing record).
+> To prevent duplicates with client-provided IDs, add a unique constraint on the relevant field.
 
 ### Basic List
 
@@ -210,8 +279,8 @@ mqdb list products --filter 'category<>electronics'
 
 **Expected:** Returns Desk, Chair
 
-> **Note:** Use `<>` (SQL-style) for not-equal. The `!=` syntax also works but requires
-> shell escaping due to bash history expansion.
+> **Note:** Use `<>` (SQL-style) for not-equal. Use single quotes around the filter expression
+> to prevent shell interpretation of special characters.
 
 ### Greater Than Filter (>)
 
@@ -281,9 +350,9 @@ mqdb list products --sort price:asc
 mqdb list products --sort price:desc
 ```
 
-**Multiple sort fields:**
+**Multiple sort fields (comma-separated):**
 ```bash
-mqdb list products --sort category:asc --sort price:desc
+mqdb list products --sort 'category:asc,price:desc'
 ```
 
 ### Pagination
@@ -324,8 +393,8 @@ mqdb schema set users --file users_schema.json
 ```
 
 **Expected output:**
-```
-schema set for users
+```json
+{"data": {"message": "schema set"}, "status": "ok"}
 ```
 
 ### Get Schema
@@ -337,12 +406,22 @@ mqdb schema get users
 **Expected output:**
 ```json
 {
-  "name": {"type": "string", "required": true},
-  "email": {"type": "string", "required": true},
-  "age": {"type": "number", "default": 0},
-  "active": {"type": "boolean", "default": true}
+  "data": {
+    "entity": "users",
+    "fields": {
+      "name": {"field_type": "String", "name": "name", "required": true, "default": null},
+      "email": {"field_type": "String", "name": "email", "required": true, "default": null},
+      "age": {"field_type": "Number", "name": "age", "required": false, "default": 0},
+      "active": {"field_type": "Boolean", "name": "active", "required": false, "default": true}
+    },
+    "version": 1
+  },
+  "status": "ok"
 }
 ```
+
+> **Note:** The schema file uses lowercase `"type"` (e.g., `"string"`), but the stored
+> schema returns the internal format with `"field_type"` (e.g., `"String"`).
 
 ### Schema Validation - Required Field
 
@@ -352,7 +431,7 @@ mqdb create users --data '{"email": "test@example.com"}'
 
 **Expected error:**
 ```
-error: missing required field: name
+error: schema validation failed: name - required field is missing
 ```
 
 ### Schema Validation - Type Check
@@ -363,7 +442,7 @@ mqdb create users --data '{"name": "Test", "email": "test@example.com", "age": "
 
 **Expected error:**
 ```
-error: field 'age' expected number, got string
+error: schema validation failed: age - expected type Number, got string
 ```
 
 ### Schema Validation - Default Values
@@ -388,8 +467,8 @@ mqdb create users --data '{"name": "User2", "email": "unique@test.com"}'
 ```
 
 **Expected error on second create:**
-```
-error: unique constraint violation on field 'email'
+```json
+{"code": 409, "message": "unique constraint violation on field 'email'", "status": "error"}
 ```
 
 ### Unique Constraint on Update (Conflict)
@@ -399,8 +478,8 @@ mqdb update users <user1-id> --data '{"email": "unique@test.com"}'
 ```
 
 **Expected error:**
-```
-error: unique constraint violation on field 'email'
+```json
+{"code": 409, "message": "unique constraint violation on field 'email'", "status": "error"}
 ```
 
 The update is rejected because another entity already has that email value.
@@ -438,10 +517,14 @@ mqdb constraint list users
 ```
 
 **Expected output:**
-```
-users constraints:
-  - unique(email)
-  - not_null(name)
+```json
+{
+  "data": [
+    {"name": "users_email_unique", "type": "unique", "fields": ["email"]},
+    {"name": "users_name_notnull", "type": "notnull", "field": "name"}
+  ],
+  "status": "ok"
+}
 ```
 
 ### Foreign Key Constraint
@@ -453,7 +536,7 @@ mqdb create authors --data '{"name": "Jane Author"}'
 mqdb constraint add posts --fk "author_id:authors:id:cascade"
 ```
 
-The `--fk` format is `field:target_entity:target_field:action` where action is `cascade`, `restrict`, or `set_null`.
+The `--fk` format is `field:target_entity:target_field[:action]` where action is `cascade`, `restrict`, or `set_null`. Default action is `restrict` if omitted.
 
 Test referential integrity:
 ```bash
@@ -462,7 +545,7 @@ mqdb create posts --data '{"title": "Post 1", "author_id": "invalid-author"}'
 
 **Expected error:**
 ```
-error: foreign key constraint violation: author_id references non-existent authors/invalid-author
+error: foreign key violation: referenced record authors/invalid-author does not exist
 ```
 
 Valid foreign key:
@@ -544,6 +627,36 @@ mqdb delete authors 1
 
 ---
 
+## 5b. Index Management
+
+Indexes optimize range filter queries (`>`, `>=`, `<`, `<=`) by avoiding full table scans.
+
+### Add an Index
+
+```bash
+mqdb index add products --fields price
+```
+
+Multi-field indexes:
+```bash
+mqdb index add products --fields category price
+```
+
+### Verify Index Usage
+
+After adding an index, range queries on indexed fields use the index for lookup:
+
+```bash
+mqdb list products --filter 'price>100'
+```
+
+Without an index, this scans all records. With an index, only matching records are retrieved.
+
+> **Note:** `index add` is currently an agent-mode operation. In cluster mode, range filters
+> work via full table scan (correct results, no index optimization).
+
+---
+
 ## 6. Reactive Subscriptions
 
 ### Watch Command (Broadcast)
@@ -565,14 +678,16 @@ mqdb create users --data '{"name": "Watcher Test"}'
 
 ### Subscribe with Consumer Group (Load-Balanced)
 
+The `subscribe` command takes a **topic pattern** (not an entity name). Use the `$DB/{entity}/events/#` pattern to receive change events.
+
 **Terminal 3 (Consumer A):**
 ```bash
-mqdb subscribe users --group workers --mode load_balanced
+mqdb subscribe '$DB/users/events/#' --group workers --mode load-balanced
 ```
 
 **Open Terminal 4 (Consumer B):**
 ```bash
-mqdb subscribe users --group workers --mode load_balanced
+mqdb subscribe '$DB/users/events/#' --group workers --mode load-balanced
 ```
 
 **Terminal 2 (create multiple entities):**
@@ -585,19 +700,24 @@ mqdb create users --data '{"name": "User 4"}'
 
 **Expected:** Events distributed between Terminal 3 and Terminal 4 (each receives ~2 events)
 
+> **Note:** `subscribe` takes a raw MQTT topic pattern, unlike `watch` which takes an entity name.
+> Mode values: `broadcast` (default), `load-balanced`, `ordered`.
+
 ### Subscribe with Ordered Mode
 
 **Terminal 3:**
 ```bash
-mqdb subscribe users --group processors --mode ordered
+mqdb subscribe '$DB/users/events/#' --group processors --mode ordered
 ```
 
 **Expected:** All events for same entity ID go to same consumer
 
 ### Custom Heartbeat Interval
 
+The `--heartbeat-interval` flag specifies seconds (default: 10):
+
 ```bash
-mqdb subscribe users --group workers --heartbeat-interval 5000
+mqdb subscribe '$DB/users/events/#' --group workers --heartbeat-interval 5
 ```
 
 ---
@@ -610,12 +730,12 @@ mqdb subscribe users --group workers --heartbeat-interval 5000
 mqdb consumer-group list
 ```
 
-**Expected output:**
+**Expected output (JSON, default format):**
+```json
+{"data": [{"name": "workers", "members": 2}, {"name": "processors", "members": 1}], "status": "ok"}
 ```
-Consumer Groups:
-  workers (2 members, 4 partitions)
-  processors (1 member, 4 partitions)
-```
+
+Use `--format table` for human-readable output.
 
 ### Show Consumer Group Details
 
@@ -623,16 +743,9 @@ Consumer Groups:
 mqdb consumer-group show workers
 ```
 
-**Expected output:**
-```
-Group: workers
-Mode: LoadBalanced
-Members: 2
-Partitions: 4
-
-Member Assignments:
-  consumer-abc123: [0, 1]
-  consumer-def456: [2, 3]
+**Expected output (JSON, default format):**
+```json
+{"data": {"name": "workers", "mode": "LoadBalanced", "members": [...]}, "status": "ok"}
 ```
 
 ---
@@ -643,12 +756,10 @@ Member Assignments:
 
 ```bash
 mqdb backup create
+mqdb backup create --name my-snapshot
 ```
 
-**Expected output:**
-```
-backup created: backup_20241208_143022
-```
+The `--name` flag is optional (default: `backup`).
 
 ### List Backups
 
@@ -656,28 +767,15 @@ backup created: backup_20241208_143022
 mqdb backup list
 ```
 
-**Expected output:**
-```
-Backups:
-  backup_20241208_143022 (1.2 MB)
-  backup_20241207_091500 (1.1 MB)
-```
-
 ### Restore from Backup
 
-**Note:** Restore requires stopping and restarting the agent.
+Restore sends a restore command to the running broker via MQTT. The agent handles the restore internally — no restart required.
 
-**Terminal 1:** Stop agent (Ctrl+C)
-
-**Terminal 2:**
 ```bash
 mqdb restore --name backup_20241208_143022
 ```
 
-**Terminal 1:** Restart agent
-```bash
-mqdb agent start --db ./data/testdb
-```
+All backup/restore commands connect to the broker (support `--broker`, `--user`, `--pass`, `--insecure` flags).
 
 ---
 
@@ -728,19 +826,19 @@ mqdb read users nonexistent-id
 ```
 
 **Expected error:**
-```
-error: entity not found: users/nonexistent-id
+```json
+{"code": 404, "message": "not found: users", "status": "error"}
 ```
 
 ### Connection Refused
 
 ```bash
-MQDB_BROKER=mqtt://localhost:9999 mqdb list users
+MQDB_BROKER=127.0.0.1:9999 mqdb list users
 ```
 
 **Expected error:**
 ```
-error: connection refused: mqtt://localhost:9999
+error: connection refused: 127.0.0.1:9999
 ```
 
 ### Invalid Filter Syntax
@@ -761,57 +859,67 @@ mqdb constraint add users --not-null email
 mqdb create users --data '{"name": "No Email"}'
 ```
 
-**Expected error:**
+**Expected error (depends on whether schema is set):**
+```json
+{"code": 400, "message": "not_null constraint violation: field 'email' is null", "status": "error"}
 ```
-error: not_null constraint violation: field 'email' cannot be null
-```
+
+> **Note:** If a schema with `"required": true` is set for this field, the schema validation
+> fires first with: `schema validation failed: email - required field is missing`
 
 ---
 
 ## Quick Test Checklist
 
-Run through these commands to validate core functionality:
+Run through these commands to validate core functionality.
+
+> **Tip:** For quick development testing with the `dev-insecure` feature build, you can use
+> `mqdb agent start --db /tmp/quicktest --anonymous` and omit `--user`/`--pass` from all commands.
 
 ```bash
-# 1. Start agent
-mqdb agent start --db ./data/quicktest
+# 0. Setup credentials
+mqdb passwd admin -b admin -f /tmp/quicktest-passwd
 
-# 2. CRUD operations
-mqdb create users --data '{"name": "Test User", "email": "test@example.com"}'
-# Note the returned ID (e.g., abc123)
-mqdb read users <id>
-mqdb update users <id> --data '{"age": 25}'
-mqdb list users
-mqdb delete users <id>
+# 1. Start agent
+mqdb agent start --db /tmp/quicktest --passwd /tmp/quicktest-passwd --admin-users admin
+
+# 2. CRUD operations (in a second terminal)
+mqdb create users --data '{"name": "Test User", "email": "test@example.com"}' --user admin --pass admin
+# Note the returned ID (e.g., 1)
+mqdb read users <id> --user admin --pass admin
+mqdb update users <id> --data '{"age": 25}' --user admin --pass admin
+mqdb list users --user admin --pass admin
+mqdb delete users <id> --user admin --pass admin
 
 # 3. Filtering and sorting
-mqdb create items --data '{"name": "A", "value": 10}'
-mqdb create items --data '{"name": "B", "value": 20}'
-mqdb create items --data '{"name": "C", "value": 5}'
-mqdb list items --filter 'value>5' --sort value:desc
+mqdb create items --data '{"name": "A", "value": 10}' --user admin --pass admin
+mqdb create items --data '{"name": "B", "value": 20}' --user admin --pass admin
+mqdb create items --data '{"name": "C", "value": 5}' --user admin --pass admin
+mqdb list items --filter 'value>5' --sort value:desc --user admin --pass admin
 
 # 4. Schema validation
 echo '{"name": {"type": "string", "required": true}}' > /tmp/schema.json
-mqdb schema set validated --file /tmp/schema.json
-mqdb create validated --data '{}'  # Should fail
+mqdb schema set validated --file /tmp/schema.json --user admin --pass admin
+mqdb create validated --data '{}' --user admin --pass admin  # Should fail
 
 # 5. Constraints
-mqdb constraint add items --unique name
-mqdb create items --data '{"name": "A", "value": 100}'  # Should fail (duplicate name)
+mqdb constraint add items --unique name --user admin --pass admin
+mqdb create items --data '{"name": "A", "value": 100}' --user admin --pass admin  # Should fail (duplicate name)
 
 # 6. Subscriptions (in separate terminal)
-# Terminal 3: mqdb watch items
-# Terminal 2: mqdb create items --data '{"name": "D", "value": 15}'
+# Terminal 3: mqdb watch items --user admin --pass admin
+# Terminal 2: mqdb create items --data '{"name": "D", "value": 15}' --user admin --pass admin
 
 # 7. Consumer groups
-mqdb consumer-group list
+mqdb consumer-group list --user admin --pass admin
 
 # 8. Backup
-mqdb backup create
-mqdb backup list
+mqdb backup create --user admin --pass admin
+mqdb backup list --user admin --pass admin
 
 # 9. Cleanup
-rm -rf ./data/quicktest
+mqdb dev kill --agent
+rm -rf /tmp/quicktest /tmp/quicktest-passwd
 ```
 
 ---
@@ -820,9 +928,9 @@ rm -rf ./data/quicktest
 
 ### Agent Won't Start
 
-1. Check if MQTT broker is running:
+1. Check for port conflicts:
    ```bash
-   nc -zv localhost 1883
+   lsof -i :1883
    ```
 
 2. Verify database path is writable:
@@ -830,21 +938,21 @@ rm -rf ./data/quicktest
    mkdir -p ./data/testdb && touch ./data/testdb/.test && rm ./data/testdb/.test
    ```
 
-3. Check for port conflicts or existing agent:
+3. Check for existing agent processes:
    ```bash
-   mqdb agent status
+   mqdb dev ps
    ```
 
 ### Connection Timeout
 
-1. Verify broker URL:
+1. Verify broker address:
    ```bash
    echo $MQDB_BROKER
    ```
 
 2. Test broker connectivity:
    ```bash
-   mosquitto_pub -h localhost -p 1883 -t test -m "ping"
+   mqdb agent status --broker 127.0.0.1:1883
    ```
 
 ### Authentication Failures
@@ -887,32 +995,58 @@ rm -rf ./data/quicktest
 
 ---
 
+## 10b. TLS and Client Options
+
+All client commands (`create`, `read`, `update`, `delete`, `list`, `watch`, `subscribe`,
+`schema`, `constraint`, `index`, `backup`, `restore`, `consumer-group`, `agent status`,
+`cluster status`, `cluster rebalance`, `bench`) support these common options:
+
+| Option | Description |
+|--------|-------------|
+| `--broker` | Broker address (default: `127.0.0.1:1883`, env: `MQDB_BROKER`) |
+| `--user` | Authentication username (env: `MQDB_USER`) |
+| `--pass` | Authentication password (env: `MQDB_PASS`) |
+| `--timeout` | Connection timeout in seconds (default: `30`) |
+| `--insecure` | Skip TLS certificate verification (for self-signed certs) |
+
+When connecting to a broker with TLS (via `--quic-cert`/`--quic-key` on the server), use
+`--insecure` to accept self-signed certificates during testing:
+
+```bash
+mqdb list users --broker 127.0.0.1:1883 --insecure
+```
+
+---
+
 ## 11. Cluster Mode
 
 Cluster mode runs a distributed MQDB with Raft consensus for partition management.
 
-> **Note:** Standard CRUD operations (`mqdb create/read/update/delete/list`) now work in cluster mode.
+> **Note:** Standard CRUD operations (`mqdb create/read/update/delete/list`) work in cluster mode.
 > The cluster automatically routes operations to the appropriate partition.
 > For direct partition access, use the low-level `mqdb db` commands (Section 12).
+>
+> **Authentication:** `mqdb dev start-cluster` auto-generates credentials `admin`/`admin` and
+> sets `--admin-users admin` on all nodes. All CLI commands against a dev cluster require
+> `--user admin --pass admin`. Manual `mqdb cluster start` without `--passwd` allows unauthenticated
+> connections (only useful for quick tests with `dev-insecure` builds).
 
 ### Starting a Single-Node Cluster
 
 ```bash
-mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 --no-quic
+mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
-**Expected output:**
-```
-cluster node started node_id=1 node_name=node-1 bind=127.0.0.1:1883 peers=[]
-became Raft leader node=1
-Raft leader initializing partition assignments
-```
+**Expected behavior:**
+- Becomes Raft leader immediately (single-node quorum)
+- Assigns all 256 partitions to itself
 
-The node should:
-- Become Raft leader immediately (single-node quorum)
-- Assign all 256 partitions to itself
+> **Tip:** For quick testing without TLS, use `--no-quic` to fall back to TCP bridges.
 
-### Starting a Multi-Node Cluster
+### Starting a Multi-Node Cluster (Manual)
+
+Generate TLS certificates first: `./scripts/generate_test_certs.sh`
 
 **Terminal 1 (Node 1):**
 ```bash
@@ -921,7 +1055,7 @@ mqdb cluster start \
   --bind 127.0.0.1:1883 \
   --db /tmp/mqdb-node1 \
   --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 \
-  --no-quic
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
 **Terminal 2 (Node 2):**
@@ -931,7 +1065,7 @@ mqdb cluster start \
   --bind 127.0.0.1:1884 \
   --db /tmp/mqdb-node2 \
   --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 \
-  --no-quic
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
 **Terminal 3 (Node 3):**
@@ -941,17 +1075,20 @@ mqdb cluster start \
   --bind 127.0.0.1:1885 \
   --db /tmp/mqdb-node3 \
   --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
-  --no-quic
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
 **Expected behavior:**
 - One node wins Raft election and becomes leader
 - Leader assigns partitions across all nodes
-- Bridges establish connections between nodes
+- QUIC connections established between nodes
 
-### Cluster with QUIC Transport
+> **Preferred:** Use `mqdb dev start-cluster --nodes 3 --clean` instead of manual setup.
+> It handles cert paths, password generation, and topology configuration automatically.
 
-First, generate TLS certificates:
+### Cluster with QUIC Transport (Recommended)
+
+QUIC is the default and recommended transport for cluster communication. First, generate TLS certificates:
 ```bash
 ./scripts/generate_test_certs.sh
 ```
@@ -964,24 +1101,30 @@ mqdb cluster start \
   --db /tmp/mqdb-node1 \
   --peers 2@127.0.0.1:1884 \
   --quic-cert test_certs/server.pem \
-  --quic-key test_certs/server.key
+  --quic-key test_certs/server.key \
+  --quic-ca test_certs/ca.pem
 ```
 
 ### Cluster Options Reference
 
-| Option | Description |
-|--------|-------------|
-| `--node-id` | Unique node ID (1-65535, required) |
-| `--node-name` | Human-readable node name (optional) |
-| `--bind` | MQTT listener address (default: 0.0.0.0:1883) |
-| `--db` | Database directory path (required) |
-| `--peers` | Peer nodes in format `id@host:port` (comma-separated) |
-| `--passwd` | Path to password file |
-| `--acl` | Path to ACL file |
-| `--quic-cert` | TLS certificate for QUIC transport |
-| `--quic-key` | TLS private key for QUIC transport |
-| `--no-quic` | Disable QUIC (use TCP bridges only) |
-| `--no-persist-stores` | Disable store persistence (data lost on restart) |
+Cluster mode supports all agent authentication and OAuth options (see Section 1), plus:
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--node-id` | Unique node ID (1-65535) | (required) |
+| `--node-name` | Human-readable node name | (none) |
+| `--bind` | MQTT listener address | `0.0.0.0:1883` |
+| `--db` | Database directory path | (required) |
+| `--peers` | Peer nodes: `id@host:port` (comma-separated) | (none) |
+| `--quic-cert` | TLS certificate for QUIC transport | (none) |
+| `--quic-key` | TLS private key for QUIC transport | (none) |
+| `--quic-ca` | CA certificate for QUIC peer verification | (none) |
+| `--no-quic` | Disable QUIC (use TCP bridges only) | `false` |
+| `--no-persist-stores` | Disable store persistence (data lost on restart) | `false` |
+| `--durability` | `immediate`, `periodic`, or `none` | `periodic` |
+| `--durability-ms` | Fsync interval in ms (periodic mode) | `10` |
+| `--bridge-out` | Use outgoing-only bridge direction | `false` |
+| `--cluster-port-offset` | Port offset for cluster listener | `100` |
 
 ### Testing Without Persistence
 
@@ -989,7 +1132,8 @@ For quick tests where data doesn't need to survive restarts:
 
 ```bash
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test \
-  --no-quic --no-persist-stores
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --no-persist-stores
 ```
 
 ### Check Cluster Status
@@ -1022,31 +1166,37 @@ mqdb cluster rebalance --broker 127.0.0.1:1883
 Standard CRUD commands work in cluster mode with automatic partition routing:
 
 ```bash
-# Start a single-node cluster
-mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-cluster \
-  --quic-cert test_certs/server.pem --quic-key test_certs/server.key &
-sleep 3
+# Start a cluster (auto-generates admin/admin credentials)
+mqdb dev start-cluster --nodes 1 --clean
+sleep 5
 
 # Create - automatically routed to a partition
-mqdb create users --data '{"name": "Alice", "email": "alice@example.com"}' --broker 127.0.0.1:1883
-# Returns: {"status":"ok","entity":"users","id":"<generated-id>","data":{...}}
+mqdb create users --data '{"name": "Alice", "email": "alice@example.com"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # Read
-mqdb read users <id> --broker 127.0.0.1:1883
+mqdb read users <id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # Update
-mqdb update users <id> --data '{"name": "Alice Updated", "age": 30}' --broker 127.0.0.1:1883
+mqdb update users <id> --data '{"name": "Alice Updated", "age": 30}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # List with filter
-mqdb list users --broker 127.0.0.1:1883
-mqdb list users --filter "name=Alice Updated" --broker 127.0.0.1:1883
+mqdb list users --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb list users --filter "name=Alice Updated" --broker 127.0.0.1:1883 --user admin --pass admin
 
 # Delete
-mqdb delete users <id> --broker 127.0.0.1:1883
+mqdb delete users <id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # Cleanup
-pkill -f "mqdb cluster"
+mqdb dev kill
 ```
+
+> **Note:** Response format in cluster mode differs from agent mode. In cluster mode,
+> `id` and `entity` are top-level fields alongside `data`:
+> ```json
+> {"data": {"_version": 1, "name": "Alice", ...}, "entity": "users", "id": "<hash-id>", "status": "ok"}
+> ```
 
 ---
 
@@ -1144,33 +1294,32 @@ mqdb db read -p 99 -e users -i test-id
 ### Full CRUD Workflow Test
 
 ```bash
-# Start a single-node cluster
-mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test --no-quic &
-sleep 3
+# Start a single-node cluster (auto-generates admin/admin credentials)
+mqdb dev start-cluster --nodes 1 --clean
+sleep 5
 
 # Create
-mqdb db create -p 0 -e products -d '{"name": "Widget", "price": 99}'
+mqdb db create -p 0 -e products -d '{"name": "Widget", "price": 99}' --user admin --pass admin
 # Note the ID from output (e.g., abc123-0001)
 
 # Read
-mqdb db read -p 0 -e products -i abc123-0001
+mqdb db read -p 0 -e products -i abc123-0001 --user admin --pass admin
 
 # Update
-mqdb db update -p 0 -e products -i abc123-0001 -d '{"name": "Widget Pro", "price": 149}'
+mqdb db update -p 0 -e products -i abc123-0001 -d '{"name": "Widget Pro", "price": 149}' --user admin --pass admin
 
 # Verify update
-mqdb db read -p 0 -e products -i abc123-0001
+mqdb db read -p 0 -e products -i abc123-0001 --user admin --pass admin
 
 # Delete
-mqdb db delete -p 0 -e products -i abc123-0001
+mqdb db delete -p 0 -e products -i abc123-0001 --user admin --pass admin
 
 # Verify deletion
-mqdb db read -p 0 -e products -i abc123-0001
+mqdb db read -p 0 -e products -i abc123-0001 --user admin --pass admin
 # Should output: Not found
 
 # Cleanup
-pkill -f "mqdb cluster"
-rm -rf /tmp/mqdb-test
+mqdb dev kill
 ```
 
 ### Testing Across Partitions
@@ -1192,21 +1341,32 @@ Each partition can be independently queried.
 
 ### Setup 3-Node Cluster
 
+Use `mqdb dev start-cluster` for automated setup (recommended):
+
 ```bash
-# Clean up any previous data
+mqdb dev start-cluster --nodes 3 --clean
+```
+
+Or set up manually with QUIC:
+
+```bash
+./scripts/generate_test_certs.sh
 rm -rf /tmp/mqdb-node{1,2,3}
 
 # Terminal 1
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
-  --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 --no-quic
+  --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 
 # Terminal 2
 mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 --db /tmp/mqdb-node2 \
-  --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 --no-quic
+  --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 
 # Terminal 3
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-node3 \
-  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 --no-quic
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
 ```
 
 ### Verify Cluster Formation
@@ -1224,13 +1384,13 @@ mqdb cluster status --broker 127.0.0.1:1885
 Create data via different nodes:
 ```bash
 # Via node 1
-mqdb db create -p 0 -e items -d '{"via": "node1"}' --broker 127.0.0.1:1883
+mqdb db create -p 0 -e items -d '{"via": "node1"}' --broker 127.0.0.1:1883 --user admin --pass admin
 
 # Via node 2
-mqdb db create -p 0 -e items -d '{"via": "node2"}' --broker 127.0.0.1:1884
+mqdb db create -p 0 -e items -d '{"via": "node2"}' --broker 127.0.0.1:1884 --user admin --pass admin
 
 # Via node 3
-mqdb db create -p 0 -e items -d '{"via": "node3"}' --broker 127.0.0.1:1885
+mqdb db create -p 0 -e items -d '{"via": "node3"}' --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
 ### Cross-Partition JSON Create Forwarding
@@ -1238,24 +1398,24 @@ mqdb db create -p 0 -e items -d '{"via": "node3"}' --broker 127.0.0.1:1885
 Verify that JSON creates on non-local partitions are forwarded to the correct primary node:
 
 ```bash
-# Start 3-node cluster
+# Start 3-node cluster (auto-generates admin/admin credentials)
 mqdb dev start-cluster --nodes 3 --clean
 sleep 5
 
 # Create entities on each node (with 256 partitions across 3 nodes,
 # ~2/3 of creates will hit non-local partitions and require forwarding)
-mqdb create testfw -d '{"name":"from-node1"}' --broker 127.0.0.1:1883
-mqdb create testfw -d '{"name":"from-node2"}' --broker 127.0.0.1:1884
-mqdb create testfw -d '{"name":"from-node3"}' --broker 127.0.0.1:1885
+mqdb create testfw -d '{"name":"from-node1"}' --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create testfw -d '{"name":"from-node2"}' --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create testfw -d '{"name":"from-node3"}' --broker 127.0.0.1:1885 --user admin --pass admin
 
 # Create more records to ensure forwarding paths are exercised
 for i in $(seq 1 10); do
-  mqdb create testfw -d "{\"seq\":$i}" --broker 127.0.0.1:1884
+  mqdb create testfw -d "{\"seq\":$i}" --broker 127.0.0.1:1884 --user admin --pass admin
 done
 
 # Verify all records are visible from any node
-mqdb list testfw --broker 127.0.0.1:1883
-mqdb list testfw --broker 127.0.0.1:1885
+mqdb list testfw --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb list testfw --broker 127.0.0.1:1885 --user admin --pass admin
 
 # Counts should match across all nodes
 mqdb dev kill
@@ -1278,8 +1438,7 @@ mqdb cluster status --broker 127.0.0.1:1884
 ### Cleanup
 
 ```bash
-pkill -f "mqdb cluster"
-rm -rf /tmp/mqdb-node{1,2,3}
+mqdb dev kill
 ```
 
 ---
@@ -1343,7 +1502,7 @@ mqdb dev logs --last 100
 Start a multi-node cluster for testing:
 
 ```bash
-# Start 3-node cluster (default)
+# Start 3-node cluster (default, QUIC transport)
 mqdb dev start-cluster
 
 # Start with custom node count
@@ -1352,9 +1511,41 @@ mqdb dev start-cluster --nodes 5
 # Clean existing data first
 mqdb dev start-cluster --clean
 
+# Choose topology: partial (default), upper, or full
+mqdb dev start-cluster --topology partial
+mqdb dev start-cluster --topology upper
+mqdb dev start-cluster --topology full
+
 # Without QUIC transport
 mqdb dev start-cluster --no-quic
 ```
+
+> **Note:** `dev start-cluster` auto-generates a password file at `{db_prefix}-passwd` (default
+> `/tmp/mqdb-test-passwd`) with credentials `admin`/`admin`. It also sets `--admin-users admin`
+> on all nodes. Use `--user admin --pass admin` when running CLI commands against the cluster.
+
+**Topology options:**
+- `partial` (default): each node connects to lower-numbered nodes
+- `upper`: each node connects to higher-numbered nodes
+- `full`: every node connects to every other node
+
+### Start-Cluster Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--nodes` | Number of cluster nodes | `3` |
+| `--clean` | Remove existing data before starting | `false` |
+| `--quic-cert` | TLS certificate path | `test_certs/server.pem` |
+| `--quic-key` | TLS private key path | `test_certs/server.key` |
+| `--quic-ca` | CA certificate path | `test_certs/ca.pem` |
+| `--no-quic` | Disable QUIC transport | `false` |
+| `--db-prefix` | Database path prefix | `/tmp/mqdb-test` |
+| `--bind-host` | Host to bind | `127.0.0.1` |
+| `--topology` | Mesh topology: `partial`, `upper`, `full` | `partial` |
+| `--bridge-out` | Use Out-only bridge direction | `false` |
+| `--no-bridge-out` | Use Both bridge direction even for full topology | `false` |
+| `--passwd` | Path to password file (auto-generated if omitted) | (auto) |
+| `--ownership` | Ownership config: `entity=field` pairs | (none) |
 
 ### Run Built-in Tests
 
@@ -1363,12 +1554,14 @@ mqdb dev start-cluster --no-quic
 mqdb dev test --all
 
 # Run specific test suites
-mqdb dev test --pubsub      # Cross-node pub/sub matrix
-mqdb dev test --db          # Cross-node DB CRUD
-mqdb dev test --wildcards   # Wildcard subscriptions
-mqdb dev test --retained    # Retained messages
-mqdb dev test --lwt         # Last Will & Testament
-mqdb dev test --ownership   # Ownership enforcement (self-contained, see Section 22)
+mqdb dev test --pubsub              # Cross-node pub/sub matrix
+mqdb dev test --db                  # Cross-node DB CRUD
+mqdb dev test --constraints         # Constraint tests
+mqdb dev test --wildcards           # Wildcard subscriptions
+mqdb dev test --retained            # Retained messages
+mqdb dev test --lwt                 # Last Will & Testament
+mqdb dev test --ownership           # Ownership enforcement (self-contained, see Section 22)
+mqdb dev test --stress-constraints  # Constraint stress tests
 
 # Specify node count
 mqdb dev test --all --nodes 5
@@ -1377,6 +1570,58 @@ mqdb dev test --all --nodes 5
 > **Note:** `--ownership` is excluded from `--all` because it manages its own authenticated cluster.
 > It kills any running cluster, starts a fresh one with password auth and `--ownership` config,
 > runs ownership tests, then kills the cluster.
+
+### Dev Bench (Benchmarking with Auto-Start)
+
+`dev bench` auto-starts an agent, runs benchmarks, and saves results. Parent options
+(`--output`, `--baseline`, `--db`) go before the subcommand:
+
+```bash
+# Pub/sub benchmark
+mqdb dev bench pubsub
+
+# Database benchmark
+mqdb dev bench db --operations 10000 --concurrency 4 --op mixed
+
+# Save results to file and compare against baseline
+mqdb dev bench --output results.json --baseline baseline.json db
+```
+
+> **Note:** `dev bench` uses higher defaults than standalone `bench`:
+> pub/sub defaults to 4 publishers/subscribers (vs 1), db defaults to 10000 operations
+> with concurrency 4 (vs 1000 operations, concurrency 1).
+
+### Dev Profile (Performance Profiling)
+
+Profile the broker using `samply` or `flamegraph`. Parent options (`--tool`, `--duration`, `--output`) go before the subcommand:
+
+```bash
+# Profile pub/sub with samply (default tool, 30s)
+mqdb dev profile --duration 30 pubsub
+
+# Profile DB operations with flamegraph
+mqdb dev profile --tool flamegraph db --operations 10000
+
+# Save profile output
+mqdb dev profile --output profile.svg pubsub
+```
+
+### Dev Baseline (Benchmark Comparison)
+
+Save and compare benchmark baselines:
+
+```bash
+# Save a baseline
+mqdb dev baseline save v1.0 pubsub
+mqdb dev baseline save v1.0 db
+
+# List saved baselines
+mqdb dev baseline list
+
+# Compare current performance against a baseline
+mqdb dev baseline compare v1.0 pubsub
+mqdb dev baseline compare v1.0 db
+```
 
 ---
 
@@ -1390,36 +1635,27 @@ The `mqdb bench` commands measure performance.
 mqdb bench pubsub \
   --publishers 4 \
   --subscribers 4 \
-  --messages 10000 \
+  --duration 10 \
   --size 256 \
-  --qos 1 \
-  --topic "bench/test"
+  --qos 1
 ```
 
 **Options:**
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--publishers` | Number of publisher tasks | 1 |
-| `--subscribers` | Number of subscriber tasks | 1 |
-| `--messages` | Total messages to send | 10000 |
-| `--rate` | Messages per second (0 = unlimited) | 0 |
-| `--size` | Payload size in bytes | 64 |
-| `--qos` | MQTT QoS level (0, 1, or 2) | 0 |
-| `--topic` | Topic pattern | bench/test |
-| `--warmup` | Warmup messages before measuring | (none) |
-
-**Expected output:**
-```
-Pub/Sub Benchmark Results
-─────────────────────────
-Messages sent:     10000
-Messages received: 10000
-Duration:          2.34s
-Throughput:        4273 msg/s
-Latency (p50):     1.2ms
-Latency (p99):     8.5ms
-```
+| `--publishers` | Number of publisher tasks | `1` |
+| `--subscribers` | Number of subscriber tasks | `1` |
+| `--duration` | Duration in seconds | `10` |
+| `--size` | Payload size in bytes | `64` |
+| `--qos` | MQTT QoS level (0, 1, or 2) | `0` |
+| `--topic` | Topic base pattern | `bench/test` |
+| `--topics` | Number of topics to spread load across | `1` |
+| `--wildcard` | Use wildcard subscription (`topic/#`) | `false` |
+| `--warmup` | Warmup duration in seconds | `1` |
+| `--pub-broker` | Broker for publishers (for cross-node testing) | (same as `--broker`) |
+| `--sub-broker` | Broker for subscribers (for cross-node testing) | (same as `--broker`) |
+| `--format` | Output format: `json`, `table`, `csv` | `table` |
 
 ### Database Benchmark
 
@@ -1437,31 +1673,23 @@ mqdb bench db \
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--operations` | Number of operations | 1000 |
-| `--entity` | Entity name to use | bench_entity |
-| `--op` | Operation type (insert, get, update, delete, list, mixed) | mixed |
-| `--concurrency` | Concurrent clients | 1 |
-| `--fields` | Fields per record | 5 |
-| `--field-size` | Size of each field value | 100 |
-| `--warmup` | Warmup operations | (none) |
-| `--cleanup` | Delete test data after | false |
+| `--operations` | Number of operations | `1000` |
+| `--entity` | Entity name to use | `bench_entity` |
+| `--op` | Operation type: `insert`, `get`, `update`, `delete`, `list`, `mixed` | `mixed` |
+| `--concurrency` | Number of concurrent clients | `1` |
+| `--fields` | Fields per record | `5` |
+| `--field-size` | Size of each field value in bytes | `100` |
+| `--warmup` | Warmup operations before measuring | (none) |
+| `--cleanup` | Delete test entity after benchmark | `false` |
+| `--seed` | Pre-populate N records (for get/update/delete/list) | `0` |
+| `--no-latency` | Disable latency tracking for pure throughput | `false` |
+| `--async` | Use pipelined mode (fire all ops, collect responses) | `false` |
+| `--qos` | MQTT QoS level for async mode | `1` |
+| `--duration` | Duration in seconds (async mode only, overrides `--operations`) | (none) |
+| `--format` | Output format: `json`, `table`, `csv` | `table` |
 
-**Expected output:**
-```
-Database Benchmark Results
-──────────────────────────
-Operations:    1000
-Duration:      1.56s
-Throughput:    641 ops/s
-Latency (p50): 1.4ms
-Latency (p99): 12.3ms
-
-By Operation:
-  insert: 234 ops, 2.1ms avg
-  get:    312 ops, 0.8ms avg
-  update: 267 ops, 1.9ms avg
-  delete: 187 ops, 1.2ms avg
-```
+> **QoS Warning:** Async mode defaults to QoS 1 because QoS 0 causes connection resets at
+> ~5000 ops/s due to lack of flow control. QoS 1's PUBACK provides natural backpressure.
 
 ---
 
@@ -1469,16 +1697,10 @@ By Operation:
 
 The `$DB/_health` topic provides cluster and node health status.
 
-### Subscribe to Health Status
+### Query Health Status
 
-**Terminal 3:**
 ```bash
-mosquitto_sub -h 127.0.0.1 -p 1883 -t '$DB/_health' -v
-```
-
-**Terminal 2:**
-```bash
-mosquitto_pub -h 127.0.0.1 -p 1883 -t '$DB/_health' -m ''
+mosquitto_rr -h 127.0.0.1 -p 1883 -t '$DB/_health' -e 'r' -m '{}' -W 5
 ```
 
 **Expected response:**
@@ -1508,7 +1730,7 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t '$DB/_health' -m ''
 
 ```bash
 # After killing Node 1
-mosquitto_pub -h 127.0.0.1 -p 1884 -t '$DB/_health' -m ''
+mosquitto_rr -h 127.0.0.1 -p 1884 -t '$DB/_health' -e 'r' -m '{}' -W 5
 ```
 
 **Expected:** `alive_nodes` should show `[2, 3]` and a new leader elected.
@@ -1528,11 +1750,12 @@ Verify data survives a full cluster restart.
 mqdb dev start-cluster --nodes 3 --clean
 
 # 2. Create test data
-mqdb create users --data '{"name": "Persist Test", "value": 123}' --broker 127.0.0.1:1883
+mqdb create users --data '{"name": "Persist Test", "value": 123}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 # Note the returned ID
 
 # 3. Verify data exists
-mqdb read users <id> --broker 127.0.0.1:1883
+mqdb read users <id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Stop all nodes
 mqdb dev kill --all
@@ -1541,7 +1764,7 @@ mqdb dev kill --all
 mqdb dev start-cluster --nodes 3
 
 # 6. Verify data survived
-mqdb read users <id> --broker 127.0.0.1:1883
+mqdb read users <id> --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
 **Expected:** Data should be readable after restart.
@@ -1555,17 +1778,18 @@ Verify data exists on replica nodes.
 mqdb dev start-cluster --nodes 3 --clean
 
 # 2. Create data via Node 1
-mqdb create test_repl --data '{"key": "replication_test"}' --broker 127.0.0.1:1883
+mqdb create test_repl --data '{"key": "replication_test"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 # Note the returned ID
 
 # 3. Read from Node 1
-mqdb read test_repl <id> --broker 127.0.0.1:1883
+mqdb read test_repl <id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Read from Node 2
-mqdb read test_repl <id> --broker 127.0.0.1:1884
+mqdb read test_repl <id> --broker 127.0.0.1:1884 --user admin --pass admin
 
 # 5. Read from Node 3
-mqdb read test_repl <id> --broker 127.0.0.1:1885
+mqdb read test_repl <id> --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
 **Expected:** All nodes should return the data (replicated across cluster).
@@ -1580,11 +1804,12 @@ mqdb dev start-cluster --nodes 3 --clean
 
 # 2. Create multiple entities across partitions
 for i in {1..10}; do
-  mqdb create failover_test --data "{\"index\": $i}" --broker 127.0.0.1:1883
+  mqdb create failover_test --data "{\"index\": $i}" \
+    --broker 127.0.0.1:1883 --user admin --pass admin
 done
 
 # 3. Note the IDs and verify all readable
-mqdb list failover_test --broker 127.0.0.1:1883
+mqdb list failover_test --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Kill Node 1
 mqdb dev kill --node 1
@@ -1593,7 +1818,7 @@ mqdb dev kill --node 1
 sleep 3
 
 # 6. Verify all data still accessible via Node 2
-mqdb list failover_test --broker 127.0.0.1:1884
+mqdb list failover_test --broker 127.0.0.1:1884 --user admin --pass admin
 
 # 7. Verify count matches
 ```
@@ -1607,23 +1832,27 @@ mqdb list failover_test --broker 127.0.0.1:1884
 mqdb dev start-cluster --nodes 3 --clean
 
 # 2. Create data
-mqdb create partition_test --data '{"before": "partition"}' --broker 127.0.0.1:1883
+mqdb create partition_test --data '{"before": "partition"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Simulate partition by killing Node 3
 mqdb dev kill --node 3
 
 # 4. Create more data (should succeed with 2 nodes)
-mqdb create partition_test --data '{"during": "partition"}' --broker 127.0.0.1:1883
+mqdb create partition_test --data '{"during": "partition"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 5. Restart Node 3
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-test-3 \
-  --peers 1@127.0.0.1:1883 --no-quic &
+  --peers 1@127.0.0.1:1883 \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --passwd /tmp/mqdb-test-passwd --admin-users admin &
 
 # 6. Wait for rejoin
 sleep 5
 
 # 7. Verify Node 3 has all data
-mqdb list partition_test --broker 127.0.0.1:1885
+mqdb list partition_test --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
 **Expected:** Node 3 should catch up and have all data after rejoining.
@@ -1789,15 +2018,15 @@ Verify database constraints work across cluster nodes.
 mqdb dev start-cluster --nodes 2 --clean
 
 # 2. Add unique constraint
-mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883
+mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Create entity on Node 1
 mqdb create cluster_users --data '{"name": "Alice", "email": "alice@test.com"}' \
-  --broker 127.0.0.1:1883
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Try duplicate on Node 2 (should fail)
 mqdb create cluster_users --data '{"name": "Bob", "email": "alice@test.com"}' \
-  --broker 127.0.0.1:1884
+  --broker 127.0.0.1:1884 --user admin --pass admin
 ```
 
 **Expected:** Second create fails with unique constraint violation.
@@ -1809,20 +2038,20 @@ mqdb create cluster_users --data '{"name": "Bob", "email": "alice@test.com"}' \
 mqdb dev start-cluster --nodes 2 --clean
 
 # 2. Add unique constraint
-mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883
+mqdb constraint add cluster_users --unique email --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Create two entities on different nodes
 mqdb create cluster_users --data '{"name": "Alice", "email": "alice@test.com"}' \
-  --broker 127.0.0.1:1883
+  --broker 127.0.0.1:1883 --user admin --pass admin
 # Note Alice's ID
 
 mqdb create cluster_users --data '{"name": "Bob", "email": "bob@test.com"}' \
-  --broker 127.0.0.1:1884
+  --broker 127.0.0.1:1884 --user admin --pass admin
 # Note Bob's ID
 
 # 4. Update Bob's email to conflict with Alice (should fail)
 mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
-  --broker 127.0.0.1:1884
+  --broker 127.0.0.1:1884 --user admin --pass admin
 ```
 
 **Expected:** Update fails with 409 unique constraint violation.
@@ -1834,11 +2063,11 @@ mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
 
 # 2. Update Alice's email to a new value
 mqdb update cluster_users <alice-id> --data '{"email": "alice-new@test.com"}' \
-  --broker 127.0.0.1:1883
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Now update Bob's email to Alice's OLD value (should succeed)
 mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
-  --broker 127.0.0.1:1884
+  --broker 127.0.0.1:1884 --user admin --pass admin
 ```
 
 **Expected:** Update succeeds — the old unique value was released when Alice changed her email.
@@ -1847,19 +2076,20 @@ mqdb update cluster_users <bob-id> --data '{"email": "alice@test.com"}' \
 
 ```bash
 # 1. Create parent entity on Node 1
-mqdb create authors --data '{"name": "Jane"}' --broker 127.0.0.1:1883
-# Note the ID (e.g., 1)
+mqdb create authors --data '{"name": "Jane"}' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID
 
 # 2. Add FK constraint (restrict)
-mqdb constraint add books --fk "author_id:authors:id:restrict" --broker 127.0.0.1:1883
+mqdb constraint add books --fk "author_id:authors:id:restrict" \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Create child with valid FK on Node 2
-mqdb create books --data '{"title": "Book 1", "author_id": "1"}' \
-  --broker 127.0.0.1:1884
+mqdb create books --data '{"title": "Book 1", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1884 --user admin --pass admin
 
 # 4. Try invalid FK on Node 2 (should fail)
 mqdb create books --data '{"title": "Book 2", "author_id": "nonexistent"}' \
-  --broker 127.0.0.1:1884
+  --broker 127.0.0.1:1884 --user admin --pass admin
 ```
 
 **Expected:** Valid FK succeeds, invalid FK fails with constraint violation.
@@ -1868,22 +2098,26 @@ mqdb create books --data '{"title": "Book 2", "author_id": "nonexistent"}' \
 
 ```bash
 # 1. Create parent on Node 1
-mqdb create authors --data '{"name": "Alice"}' --broker 127.0.0.1:1883
-# Note the ID (e.g., 1)
+mqdb create authors --data '{"name": "Alice"}' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID
 
 # 2. Add cascade FK
-mqdb constraint add posts --fk "author_id:authors:id:cascade" --broker 127.0.0.1:1883
+mqdb constraint add posts --fk "author_id:authors:id:cascade" \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
-# 3. Create children on different nodes (some may land on different partitions)
-mqdb create posts --data '{"title": "Post 1", "author_id": "1"}' --broker 127.0.0.1:1884
-mqdb create posts --data '{"title": "Post 2", "author_id": "1"}' --broker 127.0.0.1:1885
-mqdb create posts --data '{"title": "Post 3", "author_id": "1"}' --broker 127.0.0.1:1883
+# 3. Create children on different nodes
+mqdb create posts --data '{"title": "Post 1", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create posts --data '{"title": "Post 2", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1885 --user admin --pass admin
+mqdb create posts --data '{"title": "Post 3", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Delete parent
-mqdb delete authors 1 --broker 127.0.0.1:1883
+mqdb delete authors <author-id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 5. Verify all posts deleted
-mqdb list posts --broker 127.0.0.1:1883
+mqdb list posts --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
 **Expected:** All posts are cascade deleted across all nodes.
@@ -1892,21 +2126,24 @@ mqdb list posts --broker 127.0.0.1:1883
 
 ```bash
 # 1. Create parent on Node 1
-mqdb create authors --data '{"name": "Bob"}' --broker 127.0.0.1:1883
-# Note the ID (e.g., 1)
+mqdb create authors --data '{"name": "Bob"}' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID
 
 # 2. Add set_null FK
-mqdb constraint add posts --fk "author_id:authors:id:set_null" --broker 127.0.0.1:1883
+mqdb constraint add posts --fk "author_id:authors:id:set_null" \
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Create children
-mqdb create posts --data '{"title": "Post 1", "author_id": "1"}' --broker 127.0.0.1:1884
-mqdb create posts --data '{"title": "Post 2", "author_id": "1"}' --broker 127.0.0.1:1885
+mqdb create posts --data '{"title": "Post 1", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1884 --user admin --pass admin
+mqdb create posts --data '{"title": "Post 2", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1885 --user admin --pass admin
 
 # 4. Delete parent
-mqdb delete authors 1 --broker 127.0.0.1:1883
+mqdb delete authors <author-id> --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 5. Verify posts still exist with null FK
-mqdb list posts --broker 127.0.0.1:1883
+mqdb list posts --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
 **Expected:** Posts still exist with `author_id: null` and `_version: 2`.
@@ -1927,14 +2164,13 @@ mqdb dev start-cluster --nodes 3 --clean
 
 # 2. Create entity with multiple fields
 mqdb create products --data '{"name": "Widget", "price": 100, "stock": 50, "category": "electronics"}' \
-  --broker 127.0.0.1:1883
-# Note the returned ID (e.g., abc123-0042)
+  --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 3. Update only price field
-mqdb update products <id> --data '{"price": 150}' --broker 127.0.0.1:1883
+mqdb update products <id> --data '{"price": 150}' --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 4. Read and verify ALL fields preserved
-mqdb read products <id> --broker 127.0.0.1:1883
+mqdb read products <id> --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
 **Expected:** Response shows `price: 150` AND all other fields (`name`, `stock`, `category`) preserved.
@@ -1957,10 +2193,10 @@ mqdb read products <id> --broker 127.0.0.1:1883
 
 ```bash
 # 1. Add a new field to existing entity
-mqdb update products <id> --data '{"discount": true}' --broker 127.0.0.1:1883
+mqdb update products <id> --data '{"discount": true}' --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 2. Read and verify new field added
-mqdb read products <id> --broker 127.0.0.1:1883
+mqdb read products <id> --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
 **Expected:** Entity now has `discount: true` plus all original fields.
@@ -1973,33 +2209,31 @@ Verify schema set/get works across cluster nodes.
 # 1. Start cluster
 mqdb dev start-cluster --nodes 3 --clean
 
-# 2. Create schema file
-echo '{"type": "object", "properties": {"title": {"type": "string"}}}' > /tmp/articles_schema.json
+# 2. Create schema file (uses flat field-map format)
+echo '{"title": {"type": "string", "required": true}}' > /tmp/articles_schema.json
 
 # 3. Set schema on Node 1
-mqdb schema set articles --file /tmp/articles_schema.json --broker 127.0.0.1:1883
+mqdb schema set articles --file /tmp/articles_schema.json --broker 127.0.0.1:1883 \
+    --user admin --pass admin
 
 # 4. Get schema from Node 2 (verifies broadcast)
-mqdb schema get articles --broker 127.0.0.1:1884
+mqdb schema get articles --broker 127.0.0.1:1884 --user admin --pass admin
 
 # 5. Get schema from Node 3 (verifies broadcast)
-mqdb schema get articles --broker 127.0.0.1:1885
+mqdb schema get articles --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
-**Expected:** All nodes return the same schema:
+**Expected:** All nodes return the same schema (stored format uses `field_type` not `type`):
 ```json
 {
-  "status": "ok",
   "data": {
     "entity": "articles",
-    "schema": {
-      "type": "object",
-      "properties": {
-        "title": {"type": "string"}
-      }
+    "fields": {
+      "title": {"field_type": "String", "name": "title", "required": true, "default": null}
     },
     "version": 1
-  }
+  },
+  "status": "ok"
 }
 ```
 
@@ -2007,14 +2241,15 @@ mqdb schema get articles --broker 127.0.0.1:1885
 
 ```bash
 # 1. Update schema with new field
-echo '{"type": "object", "properties": {"title": {"type": "string"}, "content": {"type": "string"}}}' \
+echo '{"title": {"type": "string", "required": true}, "content": {"type": "string"}}' \
   > /tmp/articles_schema2.json
 
 # 2. Update schema on Node 1
-mqdb schema set articles --file /tmp/articles_schema2.json --broker 127.0.0.1:1883
+mqdb schema set articles --file /tmp/articles_schema2.json --broker 127.0.0.1:1883 \
+    --user admin --pass admin
 
 # 3. Verify update on Node 3
-mqdb schema get articles --broker 127.0.0.1:1885
+mqdb schema get articles --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
 **Expected:** Node 3 shows updated schema with version 2.
@@ -2025,14 +2260,14 @@ Verify UPDATE merge works when connecting to different nodes.
 
 ```bash
 # 1. Create on Node 1
-mqdb create items --data '{"a": 1, "b": 2, "c": 3}' --broker 127.0.0.1:1883
+mqdb create items --data '{"a": 1, "b": 2, "c": 3}' --broker 127.0.0.1:1883 --user admin --pass admin
 # Note ID
 
 # 2. Update via Node 2
-mqdb update items <id> --data '{"b": 20}' --broker 127.0.0.1:1884
+mqdb update items <id> --data '{"b": 20}' --broker 127.0.0.1:1884 --user admin --pass admin
 
 # 3. Read from Node 3
-mqdb read items <id> --broker 127.0.0.1:1885
+mqdb read items <id> --broker 127.0.0.1:1885 --user admin --pass admin
 ```
 
 **Expected:** `{"a": 1, "b": 20, "c": 3}` - only `b` changed.
@@ -2044,10 +2279,13 @@ mqdb read items <id> --broker 127.0.0.1:1885
 Run through this checklist to verify MQDB works completely:
 
 ### Agent Mode
-- [ ] Agent start/stop
+- [ ] Agent start/stop (with `--passwd`)
+- [ ] Agent status returns health JSON
 - [ ] CRUD operations (create, read, update, delete, list)
 - [ ] Filtering and sorting
+- [ ] Output formats (`--format json`, `--format table`, `--format csv`)
 - [ ] Schema validation
+- [ ] Index management (`index add`)
 - [ ] Constraints (unique, not-null, foreign key)
 - [ ] Unique constraint enforced on updates (conflict returns 409)
 - [ ] Unique constraint allows non-unique field updates
@@ -2057,7 +2295,8 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Cascade delete emits Delete ChangeEvents for children
 - [ ] Set-null emits Update ChangeEvents for modified children
 - [ ] Watch/Subscribe
-- [ ] Consumer groups
+- [ ] Subscribe with consumer group (load-balanced mode)
+- [ ] Consumer groups (list, show)
 - [ ] Backup/Restore
 
 ### Agent Mode — Index Range Queries
@@ -2128,8 +2367,12 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Health updates on node failure
 
 ### Performance
-- [ ] Pub/sub benchmark runs successfully
-- [ ] Database benchmark runs successfully
+- [ ] `mqdb bench pubsub` runs successfully
+- [ ] `mqdb bench db` runs successfully
+- [ ] `mqdb dev bench pubsub` (auto-start) runs successfully
+- [ ] `mqdb dev bench db` (auto-start) runs successfully
+- [ ] `mqdb dev profile pubsub` produces profiling output
+- [ ] `mqdb dev baseline save/list/compare` works correctly
 
 ## Authentication & Authorization Testing
 
@@ -2228,7 +2471,7 @@ mqdb acl list -f /tmp/acl.txt
 mqdb acl role-list -f /tmp/acl.txt
 
 # Check permission
-mqdb acl check alice '$DB/users/create' pub -f /tmp/acl.txt
+mqdb acl check alice '$DB/users/create' write -f /tmp/acl.txt
 
 # List user roles
 mqdb acl user-roles alice -f /tmp/acl.txt
@@ -2730,7 +2973,7 @@ mqdb list products --filter 'price>300' --broker 127.0.0.1:1883
 
 ```bash
 # Stop agent
-pkill -f "mqdb agent"
+mqdb dev kill --agent
 rm -rf /tmp/mqdb-range-test
 ```
 
@@ -2966,7 +3209,7 @@ Expected: returns `id` and `name`. The `nonexistent` field is silently omitted.
 
 ```bash
 cat > /tmp/users_schema.json << 'EOF'
-{"entity": "users_strict", "fields": {"name": {"name": "name", "field_type": "String", "required": false, "default": null}, "email": {"name": "email", "field_type": "String", "required": false, "default": null}}}
+{"name": {"type": "string"}, "email": {"type": "string"}}
 EOF
 mqdb schema set users_strict -f /tmp/users_schema.json --user testuser --pass testpass
 mqdb create users_strict -d '{"name": "Dave", "email": "dave@example.com"}' --user testuser --pass testpass
@@ -2979,7 +3222,7 @@ Expected: error response indicating the projection field does not exist in the s
 #### Cleanup
 
 ```bash
-pkill -f "mqdb agent"
+mqdb dev kill --agent
 rm -rf /tmp/mqdb-projection /tmp/mqdb-projection-passwd
 ```
 
@@ -3240,3 +3483,1238 @@ This runs 70 tests covering:
 - [ ] Observer without vault key sees ciphertext in cluster mode
 - [ ] Vault survives node rebalance (new node joins, data accessible)
 - [ ] All 70 E2E tests pass (`examples/vault-cluster/run.sh`)
+
+---
+
+## 26. OAuth/Identity HTTP Endpoints
+
+The HTTP server provides OAuth 2.0 login, session management, and identity linking.
+These endpoints require `--http-bind` and OAuth provider configuration.
+
+### Prerequisites
+
+```bash
+mqdb passwd admin -b admin123 -f /tmp/oauth-test/passwd.txt
+openssl rand -base64 32 > /tmp/oauth-test/jwt.key
+
+mqdb agent start --db /tmp/oauth-test/db --bind 127.0.0.1:1883 \
+    --http-bind 127.0.0.1:3000 \
+    --passwd /tmp/oauth-test/passwd.txt \
+    --jwt-algorithm hs256 --jwt-key /tmp/oauth-test/jwt.key \
+    --oauth-client-secret /path/to/google-client-secret.json \
+    --ownership notes=userId
+```
+
+### HTTP Health Check
+
+```bash
+curl -s http://127.0.0.1:3000/health
+```
+
+Expected: `{"oauth_enabled":true,"status":"ok"}`
+
+### OAuth Authorize (Redirect)
+
+```bash
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}' \
+    'http://127.0.0.1:3000/oauth/authorize?provider=google'
+```
+
+Expected: HTTP 302 redirect to Google's OAuth consent page with PKCE `code_challenge`.
+
+### OAuth Callback
+
+The callback endpoint (`GET /oauth/callback?code=...&state=...`) is invoked by the OAuth
+provider after user consent. It:
+1. Exchanges the authorization code for tokens (with PKCE verifier)
+2. Verifies the `id_token`
+3. Creates or links an identity in `_identities`/`_identity_links`
+4. Creates an HTTP session with a `Set-Cookie` header
+5. Redirects to `--oauth-frontend-redirect` URI with base64-encoded user info
+
+This endpoint cannot be tested with curl alone (requires a real OAuth provider flow).
+
+### Token Refresh
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/oauth/refresh \
+    -H 'Content-Type: application/json' \
+    -d '{"token":"<expired-jwt>"}'
+```
+
+Expected on success: `{"expires_in":3600,"token":"<new-jwt>"}`
+Expected on invalid token: HTTP 401 `{"error":"invalid or tampered token"}`
+Expected on revoked token: HTTP 401 `{"error":"token has been revoked"}`
+
+### Session Status
+
+```bash
+curl -s -b "session=$SESSION" http://127.0.0.1:3000/auth/session
+```
+
+Expected when authenticated:
+```json
+{"authenticated":true,"user":{"canonical_id":"...","email":"...","name":"...","picture":null,"provider":"...","provider_sub":"..."}}
+```
+
+Expected when not authenticated: `{"authenticated":false}`
+
+### Ticket Request (Short-lived JWT)
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/ticket
+```
+
+Expected: `{"expires_in":30,"ticket":"<jwt>"}`
+
+The ticket JWT has `"ticket": true` in claims and expires quickly (default 30s,
+configurable via `--ticket-expiry-secs`).
+
+Rate limited: `--ticket-rate-limit` requests per minute per IP (default: 10).
+
+### Logout
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/logout
+```
+
+Expected: `{"status":"logged_out"}` with `Set-Cookie` that clears the session cookie.
+The session JWT's `jti` is also revoked.
+
+### Identity Unlinking
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/unlink \
+    -H 'Content-Type: application/json' \
+    -d '{"provider":"google","provider_sub":"12345"}'
+```
+
+Expected: `{"status":"unlinked"}`
+Expected when only one provider linked: HTTP 400 `{"error":"cannot unlink last remaining provider"}`
+Expected when link belongs to another user: HTTP 403
+
+### Dev Login (dev-insecure feature only)
+
+```bash
+curl -s -c - -X POST http://127.0.0.1:3000/auth/dev-login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"test@example.com","name":"Test User"}'
+```
+
+Expected: `{"canonical_id":"...","email":"test@example.com","name":"Test User"}`
+with `Set-Cookie: session=...` header.
+
+### CORS Configuration
+
+Use `--cors-origin http://localhost:8000` to enable credentialed CORS for:
+`/auth/ticket`, `/auth/logout`, `/auth/session`, `/auth/unlink`, `/oauth/refresh`,
+and all `/vault/*` endpoints.
+
+### OAuth CLI Options Reference
+
+| Option | Description |
+|--------|-------------|
+| `--http-bind` | HTTP server bind address (e.g. `0.0.0.0:3000`) |
+| `--oauth-client-secret` | Path to OAuth client secret JSON file |
+| `--oauth-redirect-uri` | Override OAuth callback URI |
+| `--oauth-frontend-redirect` | URI to redirect browser after OAuth completes |
+| `--ticket-expiry-secs` | Ticket JWT lifetime (default: 30) |
+| `--cookie-secure` | Set `Secure` flag on session cookies (requires HTTPS) |
+| `--cors-origin` | CORS allowed origin for auth endpoints |
+| `--ticket-rate-limit` | Max ticket requests per minute per IP (default: 10) |
+| `--trust-proxy` | Trust `X-Forwarded-For` for client IP (behind reverse proxy) |
+| `--identity-key-file` | Path to 32-byte identity encryption key (auto-generated if omitted) |
+
+### Verification Checklist
+
+- [ ] `/health` returns `{"oauth_enabled":true,"status":"ok"}`
+- [ ] `/oauth/authorize` redirects to provider consent page
+- [ ] `/oauth/callback` creates identity and session
+- [ ] `/auth/session` returns user info when session cookie present
+- [ ] `/auth/session` returns `{"authenticated":false}` without cookie
+- [ ] `/auth/ticket` returns short-lived JWT with `ticket: true`
+- [ ] `/auth/ticket` rate limited after N requests per minute
+- [ ] `/auth/logout` clears session and revokes JWT `jti`
+- [ ] `/auth/unlink` removes provider link (prevents unlinking last provider)
+- [ ] `/oauth/refresh` issues new JWT from expired token + stored refresh token
+- [ ] CORS headers present when `--cors-origin` set
+
+---
+
+## 27. Runtime ACL/User Management via MQTT
+
+Users and ACL rules can be managed at runtime via MQTT `$DB/_admin/` topics,
+without restarting the broker or editing files. Requires authentication to be configured.
+
+### Setup
+
+```bash
+mqdb passwd admin -b admin123 -f /tmp/rtacl/passwd.txt
+mqdb agent start --db /tmp/rtacl/db --bind 127.0.0.1:1883 \
+    --passwd /tmp/rtacl/passwd.txt --admin-users admin
+```
+
+### User Management
+
+Add a user:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/users/add' -e 'resp/test' -W 5 \
+    -m '{"username":"alice","password":"alice123"}'
+```
+
+Expected: `{"data":{"message":"user added"},"status":"ok"}`
+
+List users:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/users/list' -e 'resp/test' -W 5 -m '{}'
+```
+
+Expected: `{"data":["admin","alice"],"status":"ok"}`
+
+Delete a user:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/users/delete' -e 'resp/test' -W 5 \
+    -m '{"username":"alice"}'
+```
+
+Expected: `{"data":{"message":"user deleted"},"status":"ok"}`
+
+### ACL Rule Management
+
+Add a rule:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/rules/add' -e 'resp/test' -W 5 \
+    -m '{"user":"alice","topic":"$DB/users/#","access":"readwrite"}'
+```
+
+Expected: `{"data":{"message":"rule added"},"status":"ok"}`
+
+List rules:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/rules/list' -e 'resp/test' -W 5 \
+    -m '{"user":"alice"}'
+```
+
+Expected: `{"data":[{"access":"readwrite","topic":"$DB/users/#","user":"alice"}],"status":"ok"}`
+
+Remove a rule:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/rules/remove' -e 'resp/test' -W 5 \
+    -m '{"user":"alice","topic":"$DB/users/#"}'
+```
+
+### ACL Role Management
+
+Create a role with rules:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/roles/add' -e 'resp/test' -W 5 \
+    -m '{"role":"editor","rules":[{"topic":"$DB/posts/#","access":"readwrite"},{"topic":"$DB/comments/#","access":"read"}]}'
+```
+
+Expected: `{"data":{"message":"role added"},"status":"ok"}`
+
+List roles:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/roles/list' -e 'resp/test' -W 5 -m '{}'
+```
+
+Expected: `{"data":{"editor":[{"access":"readwrite","topic":"$DB/posts/#"},{"access":"read","topic":"$DB/comments/#"}]},"status":"ok"}`
+
+Delete a role:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/roles/delete' -e 'resp/test' -W 5 \
+    -m '{"role":"editor"}'
+```
+
+### Role Assignment
+
+Assign a role to a user:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/assignments/assign' -e 'resp/test' -W 5 \
+    -m '{"user":"alice","role":"editor"}'
+```
+
+List user's roles:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/assignments/list' -e 'resp/test' -W 5 \
+    -m '{"user":"alice"}'
+```
+
+Unassign a role:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/acl/assignments/unassign' -e 'resp/test' -W 5 \
+    -m '{"user":"alice","role":"editor"}'
+```
+
+Access values: `read`, `write`, `readwrite`, `deny` (also accepts `subscribe`, `publish`, `rw`, `all`, `none`).
+
+### Verification Checklist
+
+- [ ] Add user at runtime and authenticate with new credentials
+- [ ] Delete user at runtime and verify connection rejected
+- [ ] List users returns all password-auth users
+- [ ] Add ACL rule at runtime and verify access granted
+- [ ] Remove ACL rule and verify access denied
+- [ ] List rules with optional user filter
+- [ ] Create role with inline rules
+- [ ] Delete role
+- [ ] Assign/unassign roles to users
+- [ ] List user's role assignments
+- [ ] All operations require admin user (non-admin gets rejected)
+- [ ] Operations return error when auth not configured: `authentication not configured`
+
+---
+
+## 28. Additional Admin MQTT Endpoints
+
+### Entity Catalog
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/catalog' -e 'resp/test' -W 5 -m '{}'
+```
+
+Expected: JSON with `entities` array, each entry containing:
+```json
+{
+  "name": "users",
+  "record_count": 5,
+  "schema": {"entity":"users","version":1,"schema":{...}},
+  "constraints": [{"name":"email_unique","type":"unique","fields":["email"]}],
+  "ownership": null,
+  "scope": null
+}
+```
+
+Plus `server` object with `mode`, `node_id` (cluster), or `vault_enabled` (agent).
+
+### Constraint Removal
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_admin/constraint/users/remove' -e 'resp/test' -W 5 \
+    -m '{"name":"email_unique"}'
+```
+
+Expected: `{"data":{"message":"constraint removed"},"status":"ok"}`
+Expected when not found: `{"code":404,"message":"constraint not found","status":"error"}`
+
+### Verification Checklist
+
+- [ ] Catalog returns all entities with schemas, constraints, record counts
+- [ ] Catalog includes ownership and scope info when configured
+- [ ] Constraint removal by name works
+- [ ] Constraint removal returns 404 for non-existent constraint
+
+---
+
+## 29. Advanced Agent/Cluster Options
+
+### WebSocket Transport
+
+```bash
+mqdb agent start --db /tmp/ws-test --bind 127.0.0.1:1883 \
+    --ws-bind 0.0.0.0:8083 --passwd /tmp/passwd.txt
+```
+
+WebSocket clients connect on the `--ws-bind` port using the MQTT-over-WebSocket protocol.
+Test with a WebSocket MQTT client (e.g., MQTT.js in browser).
+
+### Storage-Level Encryption (Passphrase File)
+
+```bash
+echo 'my-storage-passphrase' > /tmp/passphrase.txt
+chmod 600 /tmp/passphrase.txt
+
+mqdb agent start --db /tmp/encrypted-db --bind 127.0.0.1:1883 \
+    --passphrase-file /tmp/passphrase.txt --passwd /tmp/passwd.txt
+```
+
+This encrypts the entire storage layer with AES-256-GCM. All data at rest is encrypted.
+Different from Vault encryption (which encrypts individual fields per-user).
+
+The same passphrase file must be provided on every restart. Wrong passphrase = unreadable data.
+
+### Event Scope
+
+```bash
+mqdb agent start --db /tmp/scope-test --bind 127.0.0.1:1883 \
+    --event-scope customers=customerId --passwd /tmp/passwd.txt --admin-users admin
+```
+
+With event scope configured, change events publish to scoped topic paths:
+- Without scope: `$DB/orders/events/created`
+- With scope `customers=customerId`: `$DB/customers/{customerId}/orders/events/created`
+
+Test:
+```bash
+# Terminal 1: Subscribe to scoped events
+mosquitto_sub -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/customers/cust-1/orders/events/#' -v
+
+# Terminal 2: Create a scoped record
+mqdb create orders --data '{"customerId":"cust-1","item":"Widget","qty":5}' \
+    --user admin --pass admin123
+```
+
+Expected: Terminal 1 receives event on `$DB/customers/cust-1/orders/events/created`.
+
+### Certificate Authentication
+
+```bash
+mqdb agent start --db /tmp/cert-auth --bind 127.0.0.1:1883 \
+    --cert-auth-file /path/to/cert-auth.json \
+    --quic-cert server.pem --quic-key server.key
+```
+
+Certificate authentication maps client TLS certificate fields (CN, SAN) to usernames.
+
+### Federated JWT Authentication
+
+```bash
+cat > /tmp/federated-jwt.json << 'EOF'
+[
+  {
+    "issuer": "https://accounts.google.com",
+    "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+    "audience": "my-app-id"
+  },
+  {
+    "issuer": "https://login.microsoftonline.com/{tenant}/v2.0",
+    "jwks_uri": "https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys",
+    "audience": "my-app-id"
+  }
+]
+EOF
+
+mqdb agent start --db /tmp/fed-jwt --bind 127.0.0.1:1883 \
+    --federated-jwt-config /tmp/federated-jwt.json
+```
+
+Accepts JWTs from multiple identity providers. Mutually exclusive with `--jwt-algorithm`.
+
+### Durability Modes
+
+```bash
+# Immediate: fsync every write (safest, slowest)
+mqdb agent start --db /tmp/dur-test --durability immediate --passwd /tmp/passwd.txt
+
+# Periodic: fsync every N ms (default: 10ms)
+mqdb agent start --db /tmp/dur-test --durability periodic --durability-ms 50 --passwd /tmp/passwd.txt
+
+# None: no fsync (fastest, data loss on crash)
+mqdb agent start --db /tmp/dur-test --durability none --passwd /tmp/passwd.txt
+```
+
+### Verification Checklist
+
+- [ ] WebSocket transport accepts connections on `--ws-bind` port
+- [ ] Passphrase file encrypts storage (data unreadable without it)
+- [ ] Passphrase file required on restart (wrong passphrase = failure)
+- [ ] Event scope publishes to `$DB/{scope_entity}/{scope_id}/{entity}/events/{op}`
+- [ ] Certificate auth maps TLS client certs to usernames
+- [ ] Federated JWT accepts tokens from multiple issuers
+- [ ] Durability modes: `immediate` fsyncs every write, `periodic` at interval, `none` skips
+
+---
+
+## 30. Authentication Flow Testing
+
+### SCRAM-SHA-256 Connection Flow
+
+```bash
+# Setup
+mqdb scram admin -b admin123 -f /tmp/scram-flow/scram.txt
+
+mqdb agent start --db /tmp/scram-flow/db --bind 127.0.0.1:1883 \
+    --scram-file /tmp/scram-flow/scram.txt --admin-users admin
+
+# Test SCRAM authentication
+mqdb list users --user admin --pass admin123
+```
+
+Expected: Successful connection using SCRAM-SHA-256 challenge-response.
+
+```bash
+# Test wrong password
+mqdb list users --user admin --pass wrongpassword
+```
+
+Expected: Authentication failure.
+
+### JWT Connection Flow
+
+```bash
+# Setup
+openssl rand -base64 32 > /tmp/jwt-flow/secret.key
+
+mqdb agent start --db /tmp/jwt-flow/db --bind 127.0.0.1:1883 \
+    --jwt-algorithm hs256 --jwt-key /tmp/jwt-flow/secret.key \
+    --jwt-issuer myapp --jwt-audience mqdb
+
+# Generate a test JWT (requires a JWT tool like `jwt-cli` or python)
+python3 -c "
+import json, hmac, hashlib, base64, time
+key = open('/tmp/jwt-flow/secret.key','rb').read().strip()
+header = base64.urlsafe_b64encode(json.dumps({'alg':'HS256','typ':'JWT'}).encode()).rstrip(b'=')
+payload = base64.urlsafe_b64encode(json.dumps({
+    'sub':'testuser','iss':'myapp','aud':'mqdb',
+    'exp':int(time.time())+3600,'iat':int(time.time())
+}).encode()).rstrip(b'=')
+msg = header + b'.' + payload
+sig = base64.urlsafe_b64encode(hmac.new(base64.b64decode(key),msg,hashlib.sha256).digest()).rstrip(b'=')
+print((msg + b'.' + sig).decode())
+" > /tmp/jwt-flow/token.txt
+
+# Connect with JWT (via mqttv5 CLI or compatible client)
+# mqttv5 sub --auth-method jwt --jwt-token "$(cat /tmp/jwt-flow/token.txt)" -H 127.0.0.1 -p 1883 -t test
+```
+
+### Rate Limiting Lockout Behavior
+
+```bash
+mqdb passwd admin -b admin123 -f /tmp/ratelimit/passwd.txt
+
+mqdb agent start --db /tmp/ratelimit/db --bind 127.0.0.1:1883 \
+    --passwd /tmp/ratelimit/passwd.txt \
+    --rate-limit-max-attempts 3 --rate-limit-window-secs 60 --rate-limit-lockout-secs 120
+
+# Trigger lockout: 3 failed attempts
+for i in 1 2 3; do
+    mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P wrongpass -t test -m test 2>&1 || true
+done
+
+# 4th attempt should be locked out even with correct password
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 -t test -m test
+```
+
+Expected: After 3 failed attempts within 60 seconds, the client IP is locked out for 120 seconds.
+The 4th connection attempt (even with correct credentials) is rejected.
+
+### Verification Checklist
+
+- [ ] SCRAM-SHA-256 authenticates successfully with correct password
+- [ ] SCRAM-SHA-256 rejects wrong password
+- [ ] JWT auth accepts valid token with matching issuer/audience
+- [ ] JWT auth rejects expired/invalid tokens
+- [ ] Rate limiting locks out after N failed attempts
+- [ ] Lockout applies to correct credentials too (IP-based)
+- [ ] Lockout expires after configured duration
+
+---
+
+## 31. Output Format Examples
+
+All CRUD and list commands support `--format json` (default), `--format table`, and `--format csv`.
+
+### JSON Output (default)
+
+```bash
+mqdb list users --format json --user admin --pass admin123
+```
+
+```json
+[
+  {"age": 25, "email": "alice@example.com", "id": "abc123", "name": "Alice"},
+  {"age": 30, "email": "bob@example.com", "id": "def456", "name": "Bob"}
+]
+```
+
+### Table Output
+
+```bash
+mqdb list users --format table --user admin --pass admin123
+```
+
+```
+id       | name  | email              | age
+---------+-------+--------------------+----
+abc123   | Alice | alice@example.com  | 25
+def456   | Bob   | bob@example.com    | 30
+```
+
+### CSV Output
+
+```bash
+mqdb list users --format csv --user admin --pass admin123
+```
+
+```
+id,name,email,age
+abc123,Alice,alice@example.com,25
+def456,Bob,bob@example.com,30
+```
+
+### Single Record Formats
+
+```bash
+mqdb read users abc123 --format table --user admin --pass admin123
+```
+
+Table and CSV formats work for single-record responses too (`read`, `create`, `update`).
+
+### Verification Checklist
+
+- [ ] `--format json` outputs valid JSON array for list, JSON object for single record
+- [ ] `--format table` outputs aligned columns with header
+- [ ] `--format csv` outputs CSV with header row
+- [ ] All three formats work for: list, read, create, update, schema get, constraint list
+
+---
+
+## 32. Query Limits and Enforcement
+
+MQDB enforces hard limits on query complexity: `MAX_FILTERS=16`, `MAX_SORT_FIELDS=4`, and `MAX_LIST_RESULTS=10,000`.
+
+### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-limits-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
+```
+
+Create test entity:
+```bash
+mqdb create products --data '{"name":"Widget","price":10,"category":"tools"}' --user admin --pass admin123
+```
+
+### 17 Filters Returns Error
+
+```bash
+mqdb list products \
+    --filter 'name=a' --filter 'name=b' --filter 'name=c' --filter 'name=d' \
+    --filter 'name=e' --filter 'name=f' --filter 'name=g' --filter 'name=h' \
+    --filter 'name=i' --filter 'name=j' --filter 'name=k' --filter 'name=l' \
+    --filter 'name=m' --filter 'name=n' --filter 'name=o' --filter 'name=p' \
+    --filter 'name=q' \
+    --user admin --pass admin123
+```
+
+**Expected:** Error response with `"validation error: too many filters: 17 exceeds maximum of 16"`
+
+### 5 Sort Fields Returns Error
+
+```bash
+mqdb list products --sort 'a:asc,b:asc,c:asc,d:asc,e:asc' --user admin --pass admin123
+```
+
+**Expected:** Error response with `"validation error: too many sort fields: 5 exceeds maximum of 4"`
+
+### 16 Filters Succeeds (Boundary)
+
+```bash
+mqdb list products \
+    --filter 'name=a' --filter 'name=b' --filter 'name=c' --filter 'name=d' \
+    --filter 'name=e' --filter 'name=f' --filter 'name=g' --filter 'name=h' \
+    --filter 'name=i' --filter 'name=j' --filter 'name=k' --filter 'name=l' \
+    --filter 'name=m' --filter 'name=n' --filter 'name=o' --filter 'name=p' \
+    --user admin --pass admin123
+```
+
+**Expected:** Empty result set `[]` (no records match all 16 filters), but no error — the query is accepted.
+
+### 4 Sort Fields Succeeds (Boundary)
+
+```bash
+mqdb list products --sort 'name:asc,price:desc,category:asc,id:desc' --user admin --pass admin123
+```
+
+**Expected:** Products listed sorted by the 4-field sort key. No error.
+
+### Large Result Set Truncation
+
+> **Note:** This test requires creating >10,000 records. The broker silently truncates results to 10,000 items and logs the truncation server-side.
+
+```bash
+# Create 10,001 records using a loop
+for i in $(seq 1 10001); do
+    mqdb create items --data "{\"n\":$i}" --user admin --pass admin123 > /dev/null
+done
+
+# List all
+mqdb list items --user admin --pass admin123 | python3 -c "import sys,json; print(len(json.load(sys.stdin)))"
+```
+
+**Expected:** Output is `10000` — the result is silently truncated.
+
+### Cluster Mode
+
+Repeat the 17-filter and 5-sort-field tests from a non-primary node (dev cluster uses credentials `admin`/`admin`):
+
+```bash
+mqdb dev start-cluster --nodes 3 --clean
+sleep 10
+mqdb create products --data '{"name":"Widget"}' --user admin --pass admin --broker 127.0.0.1:1884
+
+mqdb list products \
+    --filter 'name=a' --filter 'name=b' --filter 'name=c' --filter 'name=d' \
+    --filter 'name=e' --filter 'name=f' --filter 'name=g' --filter 'name=h' \
+    --filter 'name=i' --filter 'name=j' --filter 'name=k' --filter 'name=l' \
+    --filter 'name=m' --filter 'name=n' --filter 'name=o' --filter 'name=p' \
+    --filter 'name=q' \
+    --user admin --pass admin --broker 127.0.0.1:1885
+```
+
+**Expected:** Error `"validation error: too many filters: 17 exceeds maximum of 16"` from any node (same format as agent mode).
+
+### Verification Checklist
+
+- [ ] 17 filters returns 400 error with correct message
+- [ ] 5 sort fields returns 400 error with correct message
+- [ ] 16 filters succeeds (boundary)
+- [ ] 4 sort fields succeeds (boundary)
+- [ ] >10,000 results silently truncated to 10,000
+- [ ] Limit errors reproduced from non-primary cluster node
+
+---
+
+## 33. Sort Edge Cases
+
+### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-sort-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
+```
+
+### Sort on Missing Field
+
+Create records where some lack the sort field:
+
+```bash
+mqdb create items --data '{"name":"Alpha","priority":1}' --user admin --pass admin123
+mqdb create items --data '{"name":"Beta","priority":3}' --user admin --pass admin123
+mqdb create items --data '{"name":"Gamma"}' --user admin --pass admin123
+mqdb create items --data '{"name":"Delta","priority":2}' --user admin --pass admin123
+mqdb create items --data '{"name":"Epsilon"}' --user admin --pass admin123
+```
+
+```bash
+mqdb list items --sort 'priority:asc' --user admin --pass admin123
+```
+
+**Expected:** Records missing `priority` sort to the FRONT (ascending). Order: Gamma, Epsilon (no priority), then Alpha (1), Delta (2), Beta (3).
+
+```bash
+mqdb list items --sort 'priority:desc' --user admin --pass admin123
+```
+
+**Expected:** Records missing `priority` sort to the BACK (descending). Order: Beta (3), Delta (2), Alpha (1), then Gamma, Epsilon (no priority).
+
+### Sort on Mixed Types
+
+Create records with a field that has both number and string values:
+
+```bash
+mqdb create mixed --data '{"name":"A","value":100}' --user admin --pass admin123
+mqdb create mixed --data '{"name":"B","value":"hello"}' --user admin --pass admin123
+mqdb create mixed --data '{"name":"C","value":5}' --user admin --pass admin123
+```
+
+```bash
+mqdb list mixed --sort 'value:asc' --user admin --pass admin123
+```
+
+**Expected:** All records returned. Ordering depends on JSON value comparison (numbers before strings, or vice versa). Verify the output is deterministic.
+
+### Multi-Field Sort
+
+```bash
+mqdb create employees --data '{"dept":"Engineering","name":"Charlie","salary":90}' --user admin --pass admin123
+mqdb create employees --data '{"dept":"Engineering","name":"Alice","salary":120}' --user admin --pass admin123
+mqdb create employees --data '{"dept":"Sales","name":"Bob","salary":80}' --user admin --pass admin123
+mqdb create employees --data '{"dept":"Engineering","name":"Bob","salary":100}' --user admin --pass admin123
+mqdb create employees --data '{"dept":"Sales","name":"Alice","salary":95}' --user admin --pass admin123
+```
+
+```bash
+mqdb list employees --sort 'dept:asc,name:asc' --user admin --pass admin123
+```
+
+**Expected:** Primary sort by `dept`, secondary sort by `name` within each department:
+1. Engineering, Alice
+2. Engineering, Bob
+3. Engineering, Charlie
+4. Sales, Alice
+5. Sales, Bob
+
+### Sort with All Null Values
+
+All records missing the sort field:
+
+```bash
+mqdb create nullsort --data '{"name":"A"}' --user admin --pass admin123
+mqdb create nullsort --data '{"name":"B"}' --user admin --pass admin123
+mqdb create nullsort --data '{"name":"C"}' --user admin --pass admin123
+```
+
+```bash
+mqdb list nullsort --sort 'missing_field:asc' --user admin --pass admin123
+```
+
+**Expected:** All 3 records returned. Order is stable (all are equal for the sort key).
+
+### Verification Checklist
+
+- [ ] Records missing sort field sort to front (ascending)
+- [ ] Records missing sort field sort to back (descending)
+- [ ] Mixed-type sort returns all records deterministically
+- [ ] Multi-field sort applies correct priority (primary then secondary)
+- [ ] Sort on universally missing field returns all records
+
+---
+
+## 34. Filter Edge Cases
+
+### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-filter-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
+```
+
+### Filter on Nonexistent Field Without Schema
+
+No schema set — filter on a field no record has:
+
+```bash
+mqdb create products --data '{"name":"Widget","price":10}' --user admin --pass admin123
+mqdb create products --data '{"name":"Gadget","price":25}' --user admin --pass admin123
+
+mqdb list products --filter 'color=red' --user admin --pass admin123
+```
+
+**Expected:** Empty result set `[]` — no records have `color`, so none match. No error because there is no schema to validate against.
+
+### Filter on Nonexistent Field With Schema
+
+Set a schema, then filter on a field not in it:
+
+```bash
+echo '{"name":{"type":"string"},"price":{"type":"number"}}' > /tmp/widgets_schema.json
+mqdb schema set widgets --file /tmp/widgets_schema.json --user admin --pass admin123
+mqdb create widgets --data '{"name":"Sprocket","price":15}' --user admin --pass admin123
+
+mqdb list widgets --filter 'color=red' --user admin --pass admin123
+```
+
+**Expected:** Error: `"schema validation failed: color - filter field does not exist in schema"`
+
+### Sort on Nonexistent Field With Schema
+
+```bash
+mqdb list widgets --sort 'color:asc' --user admin --pass admin123
+```
+
+**Expected:** Error: `"schema validation failed: color - sort field does not exist in schema"`
+
+### Projection on Nonexistent Field With Schema
+
+```bash
+mqdb list widgets --projection color --user admin --pass admin123
+```
+
+**Expected:** Error: `"schema validation failed: color - projection field does not exist in schema"`
+
+### Multiple Filters on Same Field (Range Narrowing)
+
+```bash
+mqdb create prices --data '{"item":"A","price":30}' --user admin --pass admin123
+mqdb create prices --data '{"item":"B","price":75}' --user admin --pass admin123
+mqdb create prices --data '{"item":"C","price":150}' --user admin --pass admin123
+mqdb create prices --data '{"item":"D","price":200}' --user admin --pass admin123
+
+mqdb list prices --filter 'price>50' --filter 'price<200' --user admin --pass admin123
+```
+
+**Expected:** Only item B (75) and C (150) returned — both filters narrow the range.
+
+### Contradictory Filters
+
+```bash
+mqdb list prices --filter 'price>100' --filter 'price<50' --user admin --pass admin123
+```
+
+**Expected:** Empty result set `[]` — no value can be both >100 and <50.
+
+### Filter with Empty String
+
+```bash
+mqdb create tags --data '{"label":"important"}' --user admin --pass admin123
+mqdb create tags --data '{"label":""}' --user admin --pass admin123
+mqdb create tags --data '{"label":"urgent"}' --user admin --pass admin123
+
+mqdb list tags --filter 'label=' --user admin --pass admin123
+```
+
+**Expected:** Only the record with `"label":""` is returned.
+
+### Like Filter with No Wildcards
+
+```bash
+mqdb list tags --filter 'label~important' --user admin --pass admin123
+```
+
+**Expected:** Only the record with `"label":"important"` is returned — like filter without `*` wildcards matches the exact value.
+
+### Null Filter Combined with Equality
+
+> **Note:** The `?` (is null) filter matches records where the field exists with an explicit JSON `null` value. Records that simply omit the field are NOT matched — a missing field is treated as "doesn't match any filter", not as null.
+
+```bash
+mqdb create inventory --data '{"category":"electronics","description":"A phone"}' --user admin --pass admin123
+mqdb create inventory --data '{"category":"electronics","description":null}' --user admin --pass admin123
+mqdb create inventory --data '{"category":"furniture","description":"A table"}' --user admin --pass admin123
+mqdb create inventory --data '{"category":"furniture","description":null}' --user admin --pass admin123
+
+mqdb list inventory --filter 'category=electronics' --filter 'description?' --user admin --pass admin123
+```
+
+**Expected:** Only the electronics record with `"description": null` is returned — `?` matches explicit null values, not missing fields.
+
+### Verification Checklist
+
+- [ ] Filter on nonexistent field without schema returns empty set
+- [ ] Filter on nonexistent field with schema returns 400 error
+- [ ] Sort on nonexistent field with schema returns 400 error
+- [ ] Projection on nonexistent field with schema returns 400 error
+- [ ] Multiple filters on same field narrow results correctly
+- [ ] Contradictory filters return empty set
+- [ ] Filter with empty string matches empty-string records
+- [ ] Like filter without wildcards matches exact value
+- [ ] Null filter matches explicit null, not missing fields
+
+---
+
+## 35. MQTT-Only Query Features
+
+These features are accessible only via MQTT payloads, not through CLI `--filter` syntax.
+
+### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-mqtt-query-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
+```
+
+### In Operator
+
+The `in` operator matches records where a field's value is in a given array. This is only available via direct MQTT payload.
+
+```bash
+mqdb create products --data '{"name":"Phone","category":"electronics"}' --user admin --pass admin123
+mqdb create products --data '{"name":"Laptop","category":"electronics"}' --user admin --pass admin123
+mqdb create products --data '{"name":"Desk","category":"furniture"}' --user admin --pass admin123
+mqdb create products --data '{"name":"Shirt","category":"clothing"}' --user admin --pass admin123
+mqdb create products --data '{"name":"Chair","category":"furniture"}' --user admin --pass admin123
+```
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/products/list' -e 'resp/test' -W 5 \
+    -m '{"filters":[{"field":"category","op":"in","value":["electronics","furniture"]}]}'
+```
+
+**Expected:** 4 records returned (Phone, Laptop, Desk, Chair) — clothing is excluded.
+
+### In Operator with Empty Array
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/products/list' -e 'resp/test' -W 5 \
+    -m '{"filters":[{"field":"category","op":"in","value":[]}]}'
+```
+
+**Expected:** Empty result set — no value is contained in an empty array.
+
+### In Operator Combined with Other Filters
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/products/list' -e 'resp/test' -W 5 \
+    -m '{"filters":[{"field":"category","op":"in","value":["electronics","furniture"]},{"field":"name","op":"eq","value":"Desk"}]}'
+```
+
+**Expected:** Only the Desk record returned — it matches both the `in` filter (furniture) and the `eq` filter (name=Desk).
+
+### Includes (Relationships)
+
+Includes load related entities via foreign key relationships. Requires a foreign key constraint between entities.
+
+```bash
+# Create parent entity
+mqdb create authors --data '{"id":"author-1","name":"Alice"}' --user admin --pass admin123
+mqdb create authors --data '{"id":"author-2","name":"Bob"}' --user admin --pass admin123
+
+# Create child entity with FK
+mqdb create posts --data '{"title":"First Post","author_id":"author-1"}' --user admin --pass admin123
+mqdb create posts --data '{"title":"Second Post","author_id":"author-2"}' --user admin --pass admin123
+mqdb create posts --data '{"title":"Third Post","author_id":"author-1"}' --user admin --pass admin123
+
+# Add foreign key constraint (creates the relationship)
+mqdb constraint add posts --fk 'author_id:authors:id' --user admin --pass admin123
+
+# List posts with included author
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/posts/list' -e 'resp/test' -W 5 \
+    -m '{"includes":["authors"]}'
+```
+
+**Expected:** Each post includes its related author data nested in the response.
+
+### Verification Checklist
+
+- [ ] `in` operator via MQTT payload matches records in value array
+- [ ] `in` operator with empty array returns empty set
+- [ ] `in` operator combined with `eq` filter narrows correctly
+- [ ] Includes load related entities via FK relationships
+
+---
+
+## 36. Index Backfill and Interactions
+
+> **Note:** Index management is only supported in agent mode. Cluster mode returns `"index management is only supported in agent mode"`.
+
+### Setup
+
+```bash
+mqdb agent start --db /tmp/mqdb-index-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
+```
+
+### Index on Existing Data (Backfill)
+
+Create records FIRST, then add an index. The index backfills existing data.
+
+```bash
+mqdb create products --data '{"name":"Phone","price":999}' --user admin --pass admin123
+mqdb create products --data '{"name":"Laptop","price":1500}' --user admin --pass admin123
+mqdb create products --data '{"name":"Mouse","price":25}' --user admin --pass admin123
+mqdb create products --data '{"name":"Keyboard","price":75}' --user admin --pass admin123
+mqdb create products --data '{"name":"Monitor","price":400}' --user admin --pass admin123
+
+# Add index AFTER data exists
+mqdb index add products --fields price --user admin --pass admin123
+
+# Query using the indexed field
+mqdb list products --filter 'price>100' --sort 'price:asc' --user admin --pass admin123
+```
+
+**Expected:** Returns Monitor (400), Phone (999), Laptop (1500) — the index was backfilled over existing data, range query works correctly.
+
+### Index Add Is Idempotent
+
+```bash
+mqdb index add products --fields price --user admin --pass admin123
+mqdb index add products --fields price --user admin --pass admin123
+```
+
+**Expected:** Both calls succeed with no error. The second call overwrites the index with the same definition and re-indexes.
+
+### Only First Equality Filter Uses Index
+
+```bash
+mqdb index add products --fields name --user admin --pass admin123
+
+mqdb list products --filter 'name=Mouse' --filter 'price>10' --user admin --pass admin123
+```
+
+**Expected:** Returns the Mouse record (price 25 > 10). The index on `name` accelerates the first equality filter; the second filter (`price>10`) is applied as a post-filter.
+
+### Range Filter Uses Index
+
+```bash
+mqdb index add products --fields price --user admin --pass admin123
+
+mqdb list products --filter 'price>100' --user admin --pass admin123
+```
+
+**Expected:** Returns Monitor, Phone, Laptop — the index on `price` is used for the range query.
+
+### Verification Checklist
+
+- [ ] Index on existing data backfills correctly (range query works)
+- [ ] Adding same index twice causes no error (idempotent)
+- [ ] First equality filter uses index, subsequent filters post-filter
+- [ ] Range filter uses index correctly
+
+---
+
+## 37. Cluster Scatter-Gather Query Behavior
+
+In cluster mode, list queries scatter to all nodes holding partitions and gather results. These tests verify consistency across nodes.
+
+### Setup
+
+The dev cluster uses credentials `admin`/`admin` (auto-generated by `mqdb dev start-cluster`).
+
+```bash
+mqdb dev start-cluster --nodes 3 --clean
+sleep 10
+```
+
+Create test data (from node 1):
+
+```bash
+for i in $(seq 1 15); do
+    mqdb create items --data "{\"name\":\"item-$(printf '%02d' $i)\",\"priority\":$i}" \
+        --user admin --pass admin --broker 127.0.0.1:1883
+done
+```
+
+### Sort Consistency Across Nodes
+
+Query the same sort from each node — all must return identical order:
+
+```bash
+mqdb list items --sort 'priority:asc' --user admin --pass admin --broker 127.0.0.1:1883 > /tmp/node1.json
+mqdb list items --sort 'priority:asc' --user admin --pass admin --broker 127.0.0.1:1884 > /tmp/node2.json
+mqdb list items --sort 'priority:asc' --user admin --pass admin --broker 127.0.0.1:1885 > /tmp/node3.json
+
+diff /tmp/node1.json /tmp/node2.json && diff /tmp/node2.json /tmp/node3.json && echo "PASS: all nodes consistent"
+```
+
+**Expected:** All three outputs are identical. No diff output, "PASS" printed.
+
+### Filter+Sort Across Nodes
+
+Test filter+sort across nodes:
+
+```bash
+mqdb list items --filter 'priority>5' --sort 'priority:desc' \
+    --user admin --pass admin --broker 127.0.0.1:1883 > /tmp/complex1.json
+mqdb list items --filter 'priority>5' --sort 'priority:desc' \
+    --user admin --pass admin --broker 127.0.0.1:1884 > /tmp/complex2.json
+mqdb list items --filter 'priority>5' --sort 'priority:desc' \
+    --user admin --pass admin --broker 127.0.0.1:1885 > /tmp/complex3.json
+
+diff /tmp/complex1.json /tmp/complex2.json && diff /tmp/complex2.json /tmp/complex3.json && echo "PASS"
+```
+
+**Expected:** All three return the same 10 records (priority 6-15) in descending order. Identical across nodes.
+
+### No Deduplication Issues
+
+```bash
+mqdb list items --user admin --pass admin --broker 127.0.0.1:1884 \
+    | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+ids=[r['id'] for r in d['data']]
+print('PASS: no dupes' if len(ids)==len(set(ids)) else f'FAIL: {len(ids)-len(set(ids))} dupes')
+"
+```
+
+**Expected:** "PASS: no dupes" — each record appears exactly once regardless of partition distribution.
+
+### Pagination in Cluster Mode
+
+```bash
+mqdb list items --sort 'priority:asc' --limit 3 --user admin --pass admin --broker 127.0.0.1:1884
+```
+
+**Expected:** Returns exactly 3 records (priority 1, 2, 3).
+
+```bash
+mqdb list items --sort 'priority:asc' --limit 3 --offset 5 --user admin --pass admin --broker 127.0.0.1:1884
+```
+
+**Expected:** Returns 3 records starting from position 5 (priority 6, 7, 8).
+
+### Verification Checklist
+
+- [ ] Sort consistency across all 3 nodes (identical order)
+- [ ] Filter+sort consistent across all nodes
+- [ ] No duplicate records in list results
+- [ ] `--limit` returns correct number of records in cluster mode
+- [ ] `--limit` with `--offset` returns correct page in cluster mode
+
+---
+
+## 38. Agent vs Cluster Response Format
+
+Agent mode and cluster mode produce identical JSON response formats for all CRUD operations, list queries, pagination, and validation errors. Both modes generate the same partition-prefixed hex IDs — the agent is effectively a single-node cluster owning all 256 partitions.
+
+### Response Format
+
+**Create/Read/Update** — `id` embedded in `data`:
+```json
+{"status": "ok", "data": {"id": "6fc263177a320176-0011", "name": "Alice", "_version": 1}}
+```
+
+**Delete** — `id` and `deleted` flag in `data`:
+```json
+{"status": "ok", "data": {"id": "6fc263177a320176-0011", "deleted": true}}
+```
+
+**List** — flat records with `id` embedded:
+```json
+{"status": "ok", "data": [{"id": "6fc263177a320176-0011", "name": "Alice", "_version": 1}]}
+```
+
+**Validation errors** — same prefix in both modes:
+```json
+{"status": "error", "code": 400, "message": "validation error: too many filters: 17 exceeds maximum of 16"}
+```
+
+### Verification Checklist
+
+- [ ] Create response format identical
+- [ ] List response format identical
+- [ ] Delete response format identical
+- [ ] ID format identical (partition-prefixed hex in both modes)
+- [ ] Validation error messages identical
+- [ ] Pagination works in both modes
+
+---
+
+## Complete Verification Checklist Additions
+
+### Query Limits (Section 32)
+- [ ] 17 filters returns 400 error
+- [ ] 5 sort fields returns 400 error
+- [ ] 16 filters succeeds (boundary)
+- [ ] 4 sort fields succeeds (boundary)
+
+### Sort Edge Cases (Section 33)
+- [ ] Records missing sort field sort to front (ascending)
+- [ ] Multi-field sort applies correct priority
+
+### Filter Edge Cases (Section 34)
+- [ ] Filter on nonexistent field without schema excludes records
+- [ ] Filter on nonexistent field with schema returns 400
+- [ ] Sort on nonexistent field with schema returns 400
+- [ ] Projection on nonexistent field with schema returns 400
+- [ ] Contradictory filters return empty set
+- [ ] Multiple filters on same field narrows results
+
+### MQTT-Only Features (Section 35)
+- [ ] In operator via MQTT payload
+- [ ] In operator with empty array returns empty set
+- [ ] Includes/relationships via MQTT payload
+
+### Index Interactions (Section 36, Agent Only)
+- [ ] Index on existing data backfills correctly
+- [ ] Index add is idempotent
+- [ ] First Eq filter uses index, rest post-filter
+
+### Cluster Scatter-Gather (Section 37)
+- [ ] Sort consistency across all nodes
+- [ ] Filter+sort consistent across all nodes
+- [ ] No duplicate records in results
+- [ ] Pagination works in cluster mode
+
+### Agent vs Cluster Format (Section 38)
+- [ ] Create response format identical
+- [ ] List response format identical
+- [ ] Delete response format identical
+- [ ] ID format identical (partition-prefixed hex in both modes)
+- [ ] Validation error messages identical
+- [ ] Pagination works in both modes

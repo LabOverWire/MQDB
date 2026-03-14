@@ -82,6 +82,7 @@ pub struct PendingScatterRequest {
     pub filters: Vec<crate::Filter>,
     pub sorts: Vec<crate::SortOrder>,
     pub projection: Option<Vec<String>>,
+    pub pagination: Option<crate::Pagination>,
     pub entity: String,
     pub vault_sender: Option<String>,
 }
@@ -359,7 +360,6 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_arguments)]
     pub fn new_with_storage(
         node_id: NodeId,
         transport: T,
@@ -634,10 +634,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 let projected =
                     Self::apply_list_projection(filtered, pending.projection.as_deref());
+                let flattened = crate::cluster::db_handler::helpers::flatten_list_items(projected);
 
                 let result = serde_json::json!({
                     "status": "ok",
-                    "data": projected,
+                    "data": flattened,
                     "partial": true
                 });
                 let payload = serde_json::to_vec(&result).unwrap_or_default();
@@ -1340,13 +1341,10 @@ impl<T: ClusterTransport> NodeController<T> {
                                     now_ms,
                                 )
                                 .await;
-                                let result = serde_json::json!({
-                                    "status": "ok",
-                                    "id": db_entity.id_str(),
-                                    "entity": entity,
-                                    "data": data
-                                });
-                                serde_json::to_vec(&result).unwrap_or_default()
+                                crate::cluster::db_handler::helpers::json_ok_with_id(
+                                    db_entity.id_str(),
+                                    &data,
+                                )
                             }
                             Err(super::db::DbDataStoreError::AlreadyExists) => {
                                 self.release_unique_check_reservations(
@@ -1423,13 +1421,10 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &entity, &id, &old_diff, partition, &id, now_ms,
                                 )
                                 .await;
-                                let result = serde_json::json!({
-                                    "status": "ok",
-                                    "id": db_entity.id_str(),
-                                    "entity": entity,
-                                    "data": merged_data
-                                });
-                                serde_json::to_vec(&result).unwrap_or_default()
+                                crate::cluster::db_handler::helpers::json_ok_with_id(
+                                    db_entity.id_str(),
+                                    &merged_data,
+                                )
                             }
                             Err(super::db::DbDataStoreError::NotFound) => {
                                 self.release_unique_check_reservations(

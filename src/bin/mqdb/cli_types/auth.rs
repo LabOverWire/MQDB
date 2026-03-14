@@ -104,73 +104,92 @@ pub(crate) struct OAuthArgs {
 pub(crate) enum AclAction {
     #[command(about = "Add a user ACL rule")]
     Add {
+        #[arg(help = "Username")]
         username: String,
+        #[arg(help = "MQTT topic pattern")]
         topic: String,
+        #[arg(help = "Permission: read, write, readwrite, or deny")]
         permission: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Remove user ACL rules")]
     Remove {
+        #[arg(help = "Username")]
         username: String,
+        #[arg(help = "MQTT topic pattern (removes all rules if omitted)")]
         topic: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Add a role rule")]
     RoleAdd {
+        #[arg(help = "Role name")]
         role_name: String,
+        #[arg(help = "MQTT topic pattern")]
         topic: String,
+        #[arg(help = "Permission: read, write, readwrite, or deny")]
         permission: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Remove a role or role rule")]
     RoleRemove {
+        #[arg(help = "Role name")]
         role_name: String,
+        #[arg(help = "MQTT topic pattern (removes entire role if omitted)")]
         topic: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "List roles")]
     RoleList {
+        #[arg(help = "Role name (lists all roles if omitted)")]
         role_name: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Assign a role to a user")]
     Assign {
+        #[arg(help = "Username")]
         username: String,
+        #[arg(help = "Role name")]
         role: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Unassign a role from a user")]
     Unassign {
+        #[arg(help = "Username")]
         username: String,
+        #[arg(help = "Role name")]
         role: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "List ACL rules")]
     List {
-        #[arg(long)]
+        #[arg(long, help = "Filter by username")]
         user: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "Check if a user can perform an action on a topic")]
     Check {
+        #[arg(help = "Username")]
         username: String,
+        #[arg(help = "MQTT topic pattern")]
         topic: String,
+        #[arg(help = "Action to check: read or write")]
         action: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
     #[command(about = "List roles assigned to a user")]
     UserRoles {
+        #[arg(help = "Username")]
         username: String,
-        #[arg(short, long)]
+        #[arg(short, long, help = "ACL file path")]
         file: PathBuf,
     },
 }

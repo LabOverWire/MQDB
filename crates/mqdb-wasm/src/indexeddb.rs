@@ -304,6 +304,35 @@ impl AsyncStorageBackend for IndexedDbBackend {
         Ok(results.borrow().clone())
     }
 
+    async fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        Ok(self.prefix_scan(prefix).await?.len())
+    }
+
+    async fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .prefix_scan(prefix)
+            .await?
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect())
+    }
+
+    async fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let all = self.prefix_scan(prefix).await?;
+        let iter: Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)>> = if let Some(after) = after_key {
+            let after_owned = after.to_vec();
+            Box::new(all.into_iter().filter(move |(k, _)| *k > after_owned))
+        } else {
+            Box::new(all.into_iter())
+        };
+        Ok(iter.take(batch_size).collect())
+    }
+
     async fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let (_tx, store): (IdbTransaction, IdbObjectStore) =
             self.get_store(IdbTransactionMode::Readonly)?;

@@ -65,6 +65,54 @@ impl StorageBackend for MemoryBackend {
         Ok(results)
     }
 
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .count())
+    }
+
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(data
+            .range(prefix.to_vec()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .map(|(k, _)| k.clone())
+            .collect())
+    }
+
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        let start: Vec<u8> = if let Some(after) = after_key {
+            let mut s = after.to_vec();
+            s.push(0);
+            s
+        } else {
+            prefix.to_vec()
+        };
+        Ok(data
+            .range(start..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+            .take(batch_size)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let data = self
             .data

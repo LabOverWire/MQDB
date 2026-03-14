@@ -9,10 +9,15 @@ use crate::keys;
 use crate::types::ScopeConfig;
 use serde_json::Value;
 
+pub struct CallerContext<'a> {
+    pub sender: Option<&'a str>,
+    pub client_id: Option<&'a str>,
+    pub scope_config: &'a ScopeConfig,
+}
+
 impl Database {
     /// # Errors
     /// Returns an error if validation, constraint checks, or storage fails.
-    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
         entity_name: String,
@@ -29,7 +34,8 @@ impl Database {
         let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
             client_id.to_string()
         } else {
-            let generated = self.generate_id(&entity_name).await?;
+            let payload_bytes = serde_json::to_vec(&data).unwrap_or_default();
+            let generated = self.generate_id(&entity_name, &payload_bytes);
             if let Value::Object(ref mut obj) = data {
                 obj.insert("id".to_string(), Value::String(generated.clone()));
             }
@@ -86,6 +92,8 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &constraint_entity, None);
 
+        self.register_entity_name(&entity_name).await;
+
         let scope = scope_config.resolve_scope(&entity_name, &data);
         let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
             .with_sender(sender.map(String::from))
@@ -141,16 +149,13 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found, validation fails, or storage fails.
-    #[allow(clippy::too_many_arguments)]
     pub async fn update(
         &self,
         entity_name: String,
         id: String,
         fields: Value,
         update_constraint_data: Option<(Value, Value)>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        scope_config: &ScopeConfig,
+        caller: &CallerContext<'_>,
     ) -> Result<Value> {
         let key = keys::encode_data_key(&entity_name, &id);
 
@@ -220,14 +225,16 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &constraint_new, Some(&constraint_old));
 
-        let scope = scope_config.resolve_scope(&entity_name, &updated_entity.data);
+        let scope = caller
+            .scope_config
+            .resolve_scope(&entity_name, &updated_entity.data);
         let event = ChangeEvent::update(
             entity_name,
             updated_entity.id.clone(),
             updated_entity.data.clone(),
         )
-        .with_sender(sender.map(String::from))
-        .with_client_id(client_id.map(String::from))
+        .with_sender(caller.sender.map(String::from))
+        .with_client_id(caller.client_id.map(String::from))
         .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
@@ -402,22 +409,13 @@ impl Database {
         Ok(())
     }
 
-    pub(super) async fn generate_id(&self, entity_name: &str) -> Result<String> {
-        let _lock = self.id_gen_lock.lock().await;
+    pub(super) fn generate_id(&self, entity_name: &str, data: &[u8]) -> String {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static COUNTER: AtomicU16 = AtomicU16::new(0);
 
-        let counter_key = keys::encode_meta_key(&format!("seq:{entity_name}"));
-
-        let current = self
-            .storage
-            .get(&counter_key)?
-            .and_then(|v| String::from_utf8(v).ok())
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let next = current + 1;
-        self.storage
-            .insert(&counter_key, next.to_string().as_bytes())?;
-
-        Ok(next.to_string())
+        let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % crate::cluster::NUM_PARTITIONS;
+        let partition =
+            crate::cluster::PartitionId::new(idx).unwrap_or(crate::cluster::PartitionId::ZERO);
+        crate::cluster::db::generate_id_for_partition(1, entity_name, partition, data)
     }
 }

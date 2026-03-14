@@ -7,6 +7,7 @@ use super::super::node_controller::NodeController;
 use super::super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
 use super::DbRequestHandler;
+use super::MqttRequestContext;
 use crate::types::OwnershipConfig;
 use bebytes::BeBytes;
 use std::collections::{HashMap, VecDeque};
@@ -182,10 +183,12 @@ async fn handle_create_success() {
             &mut ctrl,
             &topic,
             &payload,
-            Some("$DB/_resp/client1"),
-            Some(b"corr-123"),
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: Some(b"corr-123"),
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -219,10 +222,12 @@ async fn handle_read_not_found() {
             &mut ctrl,
             &topic,
             &payload,
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -251,10 +256,12 @@ async fn handle_invalid_partition_returns_error() {
             &mut ctrl,
             topic,
             &payload,
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -279,7 +286,17 @@ async fn no_response_without_response_topic() {
     let topic = "$DB/p0/users/create";
 
     let response = handler
-        .handle_publish(&mut ctrl, topic, &payload, None, None, None, None)
+        .handle_publish(
+            &mut ctrl,
+            topic,
+            &payload,
+            &MqttRequestContext {
+                response_topic: None,
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
         .await;
 
     assert!(response.is_none());
@@ -298,10 +315,12 @@ async fn parse_invalid_topic_returns_none() {
             &mut ctrl,
             "not/a/db/topic",
             &[],
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -333,10 +352,12 @@ async fn json_update_forbidden_for_non_owner() {
             &mut ctrl,
             &topic,
             &update_payload,
-            Some("$DB/_resp/client1"),
-            None,
-            Some("bob"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("bob"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -374,10 +395,12 @@ async fn json_update_allowed_for_owner() {
             &mut ctrl,
             &topic,
             &update_payload,
-            Some("$DB/_resp/client1"),
-            None,
-            Some("alice"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -407,10 +430,12 @@ async fn json_delete_forbidden_for_non_owner() {
             &mut ctrl,
             &topic,
             &[],
-            Some("$DB/_resp/client1"),
-            None,
-            Some("bob"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("bob"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -441,17 +466,19 @@ async fn json_delete_allowed_for_owner() {
             &mut ctrl,
             &topic,
             &[],
-            Some("$DB/_resp/client1"),
-            None,
-            Some("alice"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 }
 
 #[tokio::test]
@@ -477,10 +504,12 @@ async fn json_update_bypasses_ownership_when_no_sender() {
             &mut ctrl,
             &topic,
             &update_payload,
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -525,10 +554,12 @@ async fn json_list_filters_by_sender_ownership() {
             &mut ctrl,
             &topic,
             payload,
-            Some("$DB/_resp/client1"),
-            None,
-            Some("alice"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -537,7 +568,7 @@ async fn json_list_filters_by_sender_ownership() {
     assert_eq!(json["status"], "ok");
     let items = json["data"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["data"]["userId"], "alice");
+    assert_eq!(items[0]["userId"], "alice");
 }
 
 #[tokio::test]
@@ -575,10 +606,12 @@ async fn json_list_returns_all_when_no_sender() {
             &mut ctrl,
             &topic,
             b"{}",
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -610,10 +643,12 @@ async fn json_update_no_ownership_config_allows_any_sender() {
             &mut ctrl,
             &topic,
             &update_payload,
-            Some("$DB/_resp/client1"),
-            None,
-            Some("eve"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("eve"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -649,10 +684,12 @@ async fn admin_bypasses_ownership_on_update() {
             &mut ctrl,
             topic,
             &update_payload,
-            Some("$DB/_resp/c1"),
-            None,
-            Some("admin"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/c1"),
+                correlation_data: None,
+                sender: Some("admin"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -687,17 +724,19 @@ async fn admin_bypasses_ownership_on_delete() {
             &mut ctrl,
             topic,
             &[],
-            Some("$DB/_resp/c1"),
-            None,
-            Some("admin"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/c1"),
+                correlation_data: None,
+                sender: Some("admin"),
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 }
 
 #[tokio::test]
@@ -734,10 +773,12 @@ async fn admin_sees_all_records_on_list() {
             &mut ctrl,
             topic,
             b"{}",
-            Some("$DB/_resp/c1"),
-            None,
-            Some("admin"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/c1"),
+                correlation_data: None,
+                sender: Some("admin"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -775,10 +816,12 @@ async fn json_create_rejects_wrong_type_with_schema() {
             &mut ctrl,
             topic,
             &payload,
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -828,10 +871,12 @@ async fn json_list_rejects_nonexistent_filter_field() {
             &mut ctrl,
             topic,
             &list_payload,
-            Some("$DB/_resp/client1"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -868,10 +913,12 @@ async fn update_strips_ownership_field_for_non_admin() {
             &mut ctrl,
             topic,
             &serde_json::to_vec(&update).unwrap(),
-            Some("$DB/_resp/client1"),
-            None,
-            Some("alice"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -903,10 +950,12 @@ async fn read_forbidden_for_non_owner_cluster_path() {
             &mut ctrl,
             topic,
             &[],
-            Some("$DB/_resp/client1"),
-            None,
-            Some("bob"),
-            None,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: Some("bob"),
+                client_id: None,
+            },
         )
         .await;
 
@@ -951,10 +1000,12 @@ async fn fk_create_with_valid_reference() {
             &mut ctrl,
             "$DB/posts/create",
             &payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -994,10 +1045,12 @@ async fn fk_create_with_invalid_reference() {
             &mut ctrl,
             "$DB/posts/create",
             &payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1048,10 +1101,12 @@ async fn fk_update_to_invalid_reference() {
             &mut ctrl,
             "$DB/posts/p1/update",
             &update_payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1102,10 +1157,12 @@ async fn fk_delete_restrict_blocks() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1157,17 +1214,19 @@ async fn fk_delete_cascade_removes_children() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 
     assert!(ctrl.db_get("users", "u1").is_none());
     assert!(ctrl.db_get("posts", "p1").is_none());
@@ -1211,17 +1270,19 @@ async fn fk_delete_set_null_nullifies_children() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
 
     assert!(ctrl.db_get("users", "u1").is_none());
     let post = ctrl.db_get("posts", "p1").unwrap();
@@ -1260,10 +1321,12 @@ async fn fk_create_with_null_fk_field_allowed() {
             &mut ctrl,
             "$DB/posts/create",
             &payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1301,17 +1364,19 @@ async fn fk_delete_restrict_allows_when_no_references() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }
 
@@ -1369,10 +1434,12 @@ async fn fk_delete_cascade_multilevel() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1422,10 +1489,12 @@ async fn fk_delete_cascade_circular_no_infinite_loop() {
             &mut ctrl,
             "$DB/entity_a/a1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1478,10 +1547,12 @@ async fn fk_delete_cascade_depth_limit_exceeded() {
             &mut ctrl,
             "$DB/e0/r0/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1532,10 +1603,12 @@ async fn fk_set_null_skips_when_fk_field_changed() {
             &mut ctrl,
             "$DB/posts/p1/update",
             &update_payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
     let resp = response.unwrap();
@@ -1587,10 +1660,12 @@ async fn fk_create_with_absent_fk_field_allowed() {
             &mut ctrl,
             "$DB/posts/create",
             &payload,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
@@ -1601,6 +1676,7 @@ async fn fk_create_with_absent_fk_field_allowed() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn fk_create_with_multiple_constraints_validates_all() {
     use super::super::db::{ClusterConstraint, OnDeleteAction};
 
@@ -1650,10 +1726,12 @@ async fn fk_create_with_multiple_constraints_validates_all() {
             &mut ctrl,
             "$DB/posts/create",
             &valid,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
     let resp = response.unwrap();
@@ -1672,10 +1750,12 @@ async fn fk_create_with_multiple_constraints_validates_all() {
             &mut ctrl,
             "$DB/posts/create",
             &bad_cat,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
     let resp = response.unwrap();
@@ -1695,10 +1775,12 @@ async fn fk_create_with_multiple_constraints_validates_all() {
             &mut ctrl,
             "$DB/posts/create",
             &bad_author,
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
     let resp = response.unwrap();
@@ -1735,16 +1817,18 @@ async fn fk_delete_cascade_with_no_children_succeeds() {
             &mut ctrl,
             "$DB/users/u1/delete",
             &[],
-            Some("resp/t"),
-            None,
-            None,
-            None,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
         )
         .await;
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["deleted"], true);
+    assert_eq!(json["data"]["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }
