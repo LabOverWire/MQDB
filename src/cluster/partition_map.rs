@@ -5,7 +5,6 @@ pub use crate::partition::{PartitionAssignment, PartitionMap, PartitionRole};
 
 use super::{Epoch, NodeId, PartitionId};
 
-#[cfg(feature = "agent")]
 impl PartitionMap {
     pub fn apply_update(&mut self, update: &super::raft::PartitionUpdate) -> bool {
         let Some(partition) = PartitionId::new(u16::from(update.partition)) else {
