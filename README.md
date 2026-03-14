@@ -660,11 +660,11 @@ The `mqdb dev start-cluster` command creates a password file with `admin` / `adm
 mqdb agent start --bind 0.0.0.0:1884 --db ./data/mydb --passwd passwd.txt --acl acl.txt
 
 # CRUD operations
-mqdb create users '{"name": "Alice", "email": "alice@example.com"}'
-mqdb create users '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
+mqdb create users -d '{"name": "Alice", "email": "alice@example.com"}'
+mqdb create users -d '{"id": "my-uuid", "name": "Bob", "email": "bob@example.com"}'
 mqdb read users 1
 mqdb read users 1 --projection name,email
-mqdb update users 1 '{"name": "Alice Smith"}'
+mqdb update users 1 -d '{"name": "Alice Smith"}'
 mqdb delete users 1
 mqdb list users --filter "status=active" --sort "-created_at" --limit 10
 mqdb list users --projection name,email
