@@ -69,7 +69,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 **Work done:**
 - Wrote Chapter 1 first draft (`ch01-why-unify.md`, 3,522 words)
 - Sections: Two-System Problem, Core Insight, MQTT as Protocol, What We're Building, Tradeoffs
-- Grounded in README.md, DISTRIBUTED_DESIGN.md (A1-A2), actual ReplicationWrite struct from protocol/replication.rs, key encoding from keys.rs
+- Grounded in README.md, docs/distributed-design.md (A1-A2), actual ReplicationWrite struct from protocol/replication.rs, key encoding from keys.rs
 
 **Key user feedback (CRITICAL — applies to all future chapters):**
 - The book describes what is in the code and how we got there
@@ -79,8 +79,8 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 
 **Notes on Chapter 1:**
 - 3,522 words, below the 5,000-6,000 target — acceptable for an introductory thesis chapter
-- Used actual `ReplicationWrite` struct from `src/cluster/protocol/replication.rs`
-- Used actual key encoding prefixes from `src/keys.rs`
+- Used actual `ReplicationWrite` struct from `crates/mqdb-cluster/src/cluster/protocol/replication.rs`
+- Used actual key encoding prefixes from `crates/mqdb-core/src/keys.rs`
 - Referenced actual `$DB/` topic patterns from README.md
 - Did NOT include commit history narrative — Ch 1 sets up the thesis, not the journey
 - The "how we got there" narrative starts in earnest from Chapter 4 onward
@@ -89,7 +89,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 
 **Work done (code, not prose):**
 - Implemented foreign key constraint enforcement across the cluster (Steps 1-8 of FK plan)
-- New files: `src/cluster/node_controller/fk.rs`, `src/cluster/protocol/fk.rs`
+- New files: `crates/mqdb-cluster/src/cluster/node_controller/fk.rs`, `crates/mqdb-cluster/src/cluster/protocol/fk.rs`
 - FK existence checks on create/update, reverse lookups on delete
 - Cascade (delete children), SetNull (null FK field), Restrict (block delete) — all wired through both DB paths
 - Lock-drop/reacquire pattern for async FK checks (same as unique constraints)
@@ -172,7 +172,7 @@ Tracking the incremental writing of *Building a Distributed Reactive Database*.
 ### Session 7 — 2026-02-19
 
 **Work done:**
-- Revised Chapter 2 encoding section: rewrote "The Numeric Encoding Trick" (lines 46-76) to match the new binary sign-bit-flipping encoding in `src/keys.rs`
+- Revised Chapter 2 encoding section: rewrote "The Numeric Encoding Trick" (lines 46-76) to match the new binary sign-bit-flipping encoding in `crates/mqdb-core/src/keys.rs`
 - Old approach: zero-padded text encoding (`format!("{i:020}")`) — didn't handle negative numbers
 - New approach: `encode_i64_sortable` (big-endian bytes, XOR sign bit 0x80) and `encode_f64_sortable` (IEEE 754 bits, negative floats XOR all 0xFF, positive floats XOR sign bit 0x80)
 - Fixed prefix count: "Nine prefixes" → "Eight prefixes" — the `fkref/` prefix from Session 5's expansion never existed in the codebase
@@ -198,27 +198,27 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 
 | Chapter | Primary Sources |
 |---------|----------------|
-| 1 | README.md, DISTRIBUTED_DESIGN.md (A1) |
-| 2 | src/storage/, src/database/, src/schema.rs, src/index.rs, src/keys.rs, src/outbox.rs |
-| 3 | src/agent/, src/transport.rs, README.md (MQTT API sections) |
-| 4 | src/cluster/partition_map.rs, src/cluster/partition.rs, DISTRIBUTED_DESIGN.md (A1, Part 1, Part 5) |
-| 5 | src/cluster/replication.rs, src/cluster/store_manager/, DISTRIBUTED_DESIGN.md (A4) |
-| 6 | src/cluster/raft/, DISTRIBUTED_DESIGN.md (Part 8, Issues 11.2, 11.5) |
-| 7 | src/cluster/quic_transport.rs, src/cluster/mqtt_transport.rs, src/cluster/transport.rs, DISTRIBUTED_DESIGN.md (A6) |
-| 8 | src/cluster/topic_index.rs, src/cluster/topic_trie.rs, src/cluster/publish_router.rs, src/cluster/client_location.rs, DISTRIBUTED_DESIGN.md (Part 7) |
-| 9 | src/cluster/query_coordinator.rs, src/cursor.rs, src/cluster/node_controller/retained.rs, src/cluster/retained_store.rs, src/cluster/event_handler/broker_events.rs (deliver_retained_messages), DISTRIBUTED_DESIGN.md (A5) |
-| 10 | src/cluster/heartbeat.rs, src/cluster/snapshot.rs, DISTRIBUTED_DESIGN.md (Part 3, Part 9) |
-| 11 | src/cluster/rebalancer.rs, src/cluster/migration.rs, DISTRIBUTED_DESIGN.md (Part 4, Issues 11.10, 11.17) |
-| 12 | src/cluster/session.rs, src/cluster/inflight_store.rs, src/cluster/qos2_store.rs, DISTRIBUTED_DESIGN.md (M8-M10) |
-| 13 | src/cluster/message_processor.rs, src/cluster/dedicated_executor.rs, DISTRIBUTED_DESIGN.md (A6.6, A6.7) |
-| 14 | src/cluster/protocol/, DISTRIBUTED_DESIGN.md (Part 2) |
-| 15 | src/cluster/node_controller/unique.rs, src/cluster/node_controller/fk.rs, src/cluster/node_controller/db_ops.rs (CascadeSideEffect), src/cluster/node_controller/pending.rs, src/cluster/db/constraint_store.rs, src/cluster/db/data_store.rs (FkReverseIndex), src/cluster/store_manager/constraint_ops.rs, src/cluster/store_manager/outbox.rs (CascadeOutboxPayload), src/cluster/protocol/fk.rs, DISTRIBUTED_DESIGN.md |
-| 16 | src/consumer_group.rs, src/dispatcher.rs |
-| 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, DISTRIBUTED_DESIGN.md (A6.4, A6.5 benchmarks) |
-| 18 | src/auth_config.rs, src/topic_protection.rs, src/topic_rules.rs, src/types.rs (OwnershipConfig, ScopeConfig), src/transport.rs (execute_with_sender), src/agent/broker.rs, src/agent/handlers.rs, src/bin/mqdb/commands/auth.rs, src/bin/mqdb/commands/acl.rs, src/http/oauth.rs |
-| 19 | src/http/vault_crypto.rs, src/http/identity_crypto.rs, src/vault_keys.rs, src/http/handlers.rs (vault endpoints, batch ops), src/agent/handlers.rs (vault MQTT data path), src/http/session_store.rs, src/http/server.rs (vault routes), docs/OAUTH_VAULT_FUTURE_WORK.md |
-| 20 | CLI_TESTING_GUIDE.md, src/bin/mqdb/ |
-| 21 | src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
+| 1 | README.md, docs/distributed-design.md (A1) |
+| 2 | crates/mqdb-core/src/storage/, crates/mqdb-agent/src/database/, crates/mqdb-core/src/schema.rs, crates/mqdb-core/src/index.rs, crates/mqdb-core/src/keys.rs, crates/mqdb-core/src/outbox.rs |
+| 3 | crates/mqdb-agent/src/agent/, crates/mqdb-core/src/transport.rs, README.md (MQTT API sections) |
+| 4 | crates/mqdb-cluster/src/cluster/partition_map.rs, crates/mqdb-cluster/src/cluster/partition.rs, docs/distributed-design.md (A1, Part 1, Part 5) |
+| 5 | crates/mqdb-cluster/src/cluster/replication.rs, crates/mqdb-cluster/src/cluster/store_manager/, docs/distributed-design.md (A4) |
+| 6 | crates/mqdb-cluster/src/cluster/raft/, docs/distributed-design.md (Part 8, Issues 11.2, 11.5) |
+| 7 | crates/mqdb-cluster/src/cluster/quic_transport.rs, crates/mqdb-cluster/src/cluster/mqtt_transport.rs, crates/mqdb-cluster/src/cluster/transport.rs, docs/distributed-design.md (A6) |
+| 8 | crates/mqdb-cluster/src/cluster/topic_index.rs, crates/mqdb-cluster/src/cluster/topic_trie.rs, crates/mqdb-cluster/src/cluster/publish_router.rs, crates/mqdb-cluster/src/cluster/client_location.rs, docs/distributed-design.md (Part 7) |
+| 9 | crates/mqdb-cluster/src/cluster/query_coordinator.rs, crates/mqdb-agent/src/cursor.rs, crates/mqdb-cluster/src/cluster/node_controller/retained.rs, crates/mqdb-cluster/src/cluster/retained_store.rs, crates/mqdb-cluster/src/cluster/event_handler/broker_events.rs (deliver_retained_messages), docs/distributed-design.md (A5) |
+| 10 | crates/mqdb-cluster/src/cluster/heartbeat.rs, crates/mqdb-cluster/src/cluster/snapshot.rs, docs/distributed-design.md (Part 3, Part 9) |
+| 11 | crates/mqdb-cluster/src/cluster/rebalancer.rs, crates/mqdb-cluster/src/cluster/migration.rs, docs/distributed-design.md (Part 4, Issues 11.10, 11.17) |
+| 12 | crates/mqdb-cluster/src/cluster/session.rs, crates/mqdb-cluster/src/cluster/inflight_store.rs, crates/mqdb-cluster/src/cluster/qos2_store.rs, docs/distributed-design.md (M8-M10) |
+| 13 | crates/mqdb-cluster/src/cluster/message_processor.rs, crates/mqdb-cluster/src/cluster/dedicated_executor.rs, docs/distributed-design.md (A6.6, A6.7) |
+| 14 | crates/mqdb-cluster/src/cluster/protocol/, docs/distributed-design.md (Part 2) |
+| 15 | crates/mqdb-cluster/src/cluster/node_controller/unique.rs, crates/mqdb-cluster/src/cluster/node_controller/fk.rs, crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs (CascadeSideEffect), crates/mqdb-cluster/src/cluster/node_controller/pending.rs, crates/mqdb-cluster/src/cluster/db/constraint_store.rs, crates/mqdb-cluster/src/cluster/db/data_store.rs (FkReverseIndex), crates/mqdb-cluster/src/cluster/store_manager/constraint_ops.rs, crates/mqdb-cluster/src/cluster/store_manager/outbox.rs (CascadeOutboxPayload), crates/mqdb-cluster/src/cluster/protocol/fk.rs, docs/distributed-design.md |
+| 16 | crates/mqdb-agent/src/consumer_group.rs, crates/mqdb-agent/src/dispatcher.rs |
+| 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, docs/distributed-design.md (A6.4, A6.5 benchmarks) |
+| 18 | crates/mqdb-agent/src/auth_config.rs, crates/mqdb-agent/src/topic_protection.rs, crates/mqdb-agent/src/topic_rules.rs, crates/mqdb-core/src/types.rs (OwnershipConfig, ScopeConfig), crates/mqdb-core/src/transport.rs (execute_with_sender), crates/mqdb-agent/src/agent/broker.rs, crates/mqdb-agent/src/agent/handlers.rs, crates/mqdb-cli/src/commands/auth.rs, crates/mqdb-cli/src/commands/acl.rs, crates/mqdb-agent/src/http/oauth.rs |
+| 19 | crates/mqdb-agent/src/http/vault_crypto.rs, crates/mqdb-agent/src/http/identity_crypto.rs, crates/mqdb-core/src/vault_keys.rs, crates/mqdb-agent/src/http/handlers.rs (vault endpoints, batch ops), crates/mqdb-agent/src/agent/handlers.rs (vault MQTT data path), crates/mqdb-agent/src/http/session_store.rs, crates/mqdb-agent/src/http/server.rs (vault routes), docs/docs/design/oauth-vault-future.md |
+| 20 | docs/cli-testing-guide.md, crates/mqdb-cli/src/ |
+| 21 | crates/mqdb-core/src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
 
 ### Learnings
 
@@ -228,7 +228,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Always read the actual source files before writing, not just docs — the code is ground truth
 - The `ReplicationWrite` struct is the single most important concept to introduce early
 - Git commit history is a primary source for "how we got there" — use `git log` to trace design evolution
-- DISTRIBUTED_DESIGN.md can be outdated — always verify claims against actual code call sites, not just method definitions
+- docs/distributed-design.md can be outdated — always verify claims against actual code call sites, not just method definitions
 - Dead code in store_manager (`subscribe_topic_replicated`, `schema_register_replicated`) was removed — these created 256-write fan-outs but were superseded by lightweight broadcast messages
 - When a method exists but is never called, check git blame/log to find when the calling code changed
 - Avoid tautologies — don't restate a definition as a use case (e.g., "suits scenarios where MQTT is unnecessary" for the no-MQTT mode). Use concrete examples instead.
@@ -240,7 +240,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Always verify prefix/namespace counts against actual code constants, not session notes — Session 5 expanded to "9 prefixes" including `fkref/`, but `fkref/` was never implemented. The code has 8 prefixes.
 - When multiple bugs share the same root cause pattern, combine them into a single narrative section — 11.9 and 11.14 are structurally identical (time-blind dedup) and telling them together strengthens the lesson. Telling them separately would be repetitive.
 - Minimize code in the book when abstract representations (flow diagrams, field tables, trie ASCII art) can convey the same information — code is a testament to openness, not a tutorial. Use it sparingly and purposefully.
-- Documentation (DISTRIBUTED_DESIGN.md) can describe the dedup cache as "LRU" when it's actually FIFO (HashSet+VecDeque). Always verify implementation details against the code, not just the docs.
+- Documentation (docs/distributed-design.md) can describe the dedup cache as "LRU" when it's actually FIFO (HashSet+VecDeque). Always verify implementation details against the code, not just the docs.
 - When a chapter covers multiple interacting components (three broadcast stores + router + dedup), organize by concern (subscribe flow, publish flow, protocol) rather than by file — readers follow the data flow, not the module structure.
 
 ### Session 8 — 2026-02-21
@@ -294,7 +294,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Read all primary source files before writing: `transport.rs` (ClusterTransport trait, ClusterMessage enum), `quic_transport.rs` (QuicDirectTransport, bind/connect/send, wire format, mTLS config), `mqtt_transport.rs` (MqttTransport, dual clients, topic subscriptions), `cluster_agent/transport.rs` (ClusterTransportKind wrapper), `cluster_agent/config.rs` (cluster_port_offset=100)
 - Verified all benchmark data against `COMPLETE_MATRIX_RESULTS.md` (lines 157-248)
 - Verified root cause analysis data against `COMPLETE_MATRIX_DOC.md` (lines 325-416)
-- Verified bridge loop prevention against `DISTRIBUTED_DESIGN.md` (lines 477-485)
+- Verified bridge loop prevention against `docs/distributed-design.md` (lines 477-485)
 - Verified 35 ClusterMessage variants by counting `transport.rs:21-67`
 - Verified constants: SEND_TIMEOUT_MS=5000, INBOX_CHANNEL_CAPACITY=16384, MAX_MESSAGE_SIZE=10MB, cluster_port_offset=100
 - Verified 5 MQTT subscription topic patterns from `mqtt_transport.rs:142-221`
@@ -322,7 +322,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Verified response topic detection: `topic.starts_with("resp/") || topic.contains("/resp/")`
 - Verified internal client filter: `client_id.starts_with("mqdb-")` and forward client filter: `client_id.starts_with("mqdb-forward-")`
 - Verified $-topic protection in trie: `match_topic` returns empty vec for topics starting with '$'
-- Cross-referenced all four bugs (11.8, 11.9, 11.11, 11.14) against DISTRIBUTED_DESIGN.md and HISTORICAL_SESSIONS.md
+- Cross-referenced all four bugs (11.8, 11.9, 11.11, 11.14) against docs/distributed-design.md and HISTORICAL_SESSIONS.md
 
 **Key decisions:**
 - 4,351 words, consistent with Ch5 (3,899), Ch6 (4,213), Ch7 (4,474). Chapter has substantial tables and diagrams that carry narrative weight beyond word count.
@@ -341,7 +341,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - The subscribe flow diagram accurately reflects the code paths in broker_events.rs and routing.rs
 - The ForwardedPublish wire format table matches protocol/publish.rs:to_bytes() exactly
 - The dedup description matches message_processor.rs (HashSet+VecDeque FIFO, not LRU as some docs incorrectly state)
-- The three propagation mechanisms table matches DISTRIBUTED_DESIGN.md A1.3
+- The three propagation mechanisms table matches docs/distributed-design.md A1.3
 
 ### Session 12 — 2026-03-01
 
@@ -354,7 +354,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Verified merge pipeline order: dedup (HashSet<String> by ID) → filter → sort (multi-field, coordinator-side) → truncate → project
 - Verified PartitionCursor binary encoding: 12 bytes + key length; ScatterCursor: 2 bytes (count) + sum of partition cursors
 - Verified three retained dedup layers: per-node query dedup (HashSet<NodeId>), local store filtering, TTL-based write filtering (5-second cache)
-- Discovered DISTRIBUTED_DESIGN.md line 339 incorrectly claims wildcard retained queries are NOT implemented — code at broker_events.rs:249 confirms they ARE implemented
+- Discovered docs/distributed-design.md line 339 incorrectly claims wildcard retained queries are NOT implemented — code at broker_events.rs:249 confirms they ARE implemented
 
 **Key decisions:**
 - 3,369 words, the shortest chapter so far (Ch1: 3,522, Ch5: 3,899). The chapter is table-heavy and diagram-driven; tables carry significant narrative weight that word count undercounts.
@@ -371,7 +371,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - The partition hash formula matches `db/partition.rs` (CRC32, not xxHash or FNV)
 - The merge pipeline matches `node_controller/query.rs:sort_scatter_results` and `apply_list_projection`
 - The three dedup layers match `node_controller/retained.rs` (Layer 1: queried_nodes HashSet, Layer 2: local store check) and `event_handler/broker_events.rs` (Layer 3: synced_retained_topics TTL cache)
-- The 170x duplication figure is referenced from DISTRIBUTED_DESIGN.md Issue 11.20
+- The 170x duplication figure is referenced from docs/distributed-design.md Issue 11.20
 
 ### Session 13 — 2026-03-01
 
@@ -384,7 +384,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Verified Unknown and Dead nodes skipped in check_timeouts (line 180)
 - Verified select_new_primary: `replicas.iter().find(|r| alive_nodes.contains(r)).or_else(|| alive_nodes.first())`
 - Verified SnapshotChunk header is 23 bytes: 1 + 2 + 4 + 4 + 8 + 4
-- Cross-referenced Issues 11.3 (empty heartbeat) and 11.4 (false death) against DISTRIBUTED_DESIGN.md
+- Cross-referenced Issues 11.3 (empty heartbeat) and 11.4 (false death) against docs/distributed-design.md
 
 **Key decisions:**
 - 3,568 words, consistent with Ch1 (3,522), Ch5 (3,899), Ch9 (3,369). Chapter is diagram-heavy and table-driven.
@@ -447,7 +447,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Wrote Chapter 19 placeholder draft (`ch19-vault-encryption.md`, 3,514 words)
 - Sections: Two Threat Models, Vault Crypto Primitives, Vault Lifecycle, In-Memory Key Management, Transparent MQTT Data Path, Identity Encryption, What Went Wrong, Lessons
 - Updated OUTLINE.md: inserted Chapter 19 in Part IV, renumbered existing Ch19 (Operations) → Ch20, Ch20 (WASM) → Ch21, updated dependency graph and page estimate
-- Read all primary source files before writing: `vault_crypto.rs` (VaultCrypto, PBKDF2, AES-256-GCM, field-level encrypt/decrypt), `identity_crypto.rs` (IdentityCrypto, HKDF dual keys, blind indexing, key wrapping), `vault_keys.rs` (VaultKeyStore, zeroized keys, write fences), `handlers.rs` (vault HTTP endpoints: enable/unlock/lock/disable/change/status, batch_vault_operation, batch_vault_re_encrypt), `agent/handlers.rs` (vault_transform_request, vault_pre_update, vault_decrypt_response, is_vault_eligible), `session_store.rs` (Session.vault_unlocked, set_vault_unlocked_by_canonical_id), `server.rs` (vault route definitions, vault_unlock_limiter), `docs/OAUTH_VAULT_FUTURE_WORK.md` (batch atomicity, TOCTOU, identity race condition, schema initialization)
+- Read all primary source files before writing: `vault_crypto.rs` (VaultCrypto, PBKDF2, AES-256-GCM, field-level encrypt/decrypt), `identity_crypto.rs` (IdentityCrypto, HKDF dual keys, blind indexing, key wrapping), `vault_keys.rs` (VaultKeyStore, zeroized keys, write fences), `handlers.rs` (vault HTTP endpoints: enable/unlock/lock/disable/change/status, batch_vault_operation, batch_vault_re_encrypt), `agent/handlers.rs` (vault_transform_request, vault_pre_update, vault_decrypt_response, is_vault_eligible), `session_store.rs` (Session.vault_unlocked, set_vault_unlocked_by_canonical_id), `server.rs` (vault route definitions, vault_unlock_limiter), `docs/docs/design/oauth-vault-future.md` (batch atomicity, TOCTOU, identity race condition, schema initialization)
 - Verified PBKDF2 iterations: 600,000 (vault_crypto.rs:16 and identity_crypto.rs:18)
 - Verified nonce: 12 bytes, salt: 32 bytes, key: 32 bytes, tag: 16 bytes
 - Verified AAD format: `"{entity}:{id}"` for vault, `"{entity}"` for identity
@@ -461,7 +461,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - 3,514 words, below the 5,000-6,000 target. Appropriate for a placeholder chapter on an incomplete feature — the chapter documents what exists and marks what is planned.
 - Placed as Chapter 19 in Part IV (Advanced Patterns), after Chapter 18 (Access Control). The vault depends on OAuth sessions and ownership, both covered in Ch18.
 - Included both vault and identity encryption in a single chapter — they share crypto primitives (AES-256-GCM, PBKDF2) but serve different threat models. Splitting into two chapters would create a very short identity-only chapter.
-- Three "What Went Wrong" sections: batch atomicity (crash recovery), TOCTOU (vault state change during update), identity race condition (missing unique constraint). All documented in `OAUTH_VAULT_FUTURE_WORK.md`.
+- Three "What Went Wrong" sections: batch atomicity (crash recovery), TOCTOU (vault state change during update), identity race condition (missing unique constraint). All documented in `docs/design/oauth-vault-future.md`.
 - Marked planned work with *(planned)* tags throughout — matches user's request for placeholder that acknowledges incompleteness.
 - Did NOT include code — used tables, state diagrams, and narrative descriptions.
 - Forward reference to Chapter 20 (Operations) at the closing.

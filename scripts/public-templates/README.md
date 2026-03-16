@@ -59,7 +59,8 @@ _dead_letter/{operation_id}     → failed events after max retries
 ## Quick Start
 
 ```rust
-use mqdb::{Database, Filter, FilterOp};
+use mqdb_agent::Database;
+use mqdb_core::{Filter, FilterOp};
 use serde_json::json;
 
 #[tokio::main]
@@ -131,7 +132,7 @@ MQDB supports shared subscriptions for distributing events across multiple consu
 | **Ordered** | Partition-based routing — same entity:id always goes to same consumer |
 
 ```rust
-use mqdb::SubscriptionMode;
+use mqdb_core::SubscriptionMode;
 
 let result = db.subscribe_shared(
     "orders/#".into(),
@@ -195,7 +196,7 @@ for user in active_users {
 ### Extended Filtering
 
 ```rust
-use mqdb::{Filter, FilterOp};
+use mqdb_core::{Filter, FilterOp};
 
 let filter = Filter::new("email".into(), FilterOp::Like, json!("*@example.com"));
 let results = db.list("users".into(), vec![filter], vec![], None, vec![]).await?;
@@ -207,7 +208,7 @@ let results = db.list("users".into(), vec![in_filter], vec![], None, vec![]).awa
 ## Sorting and Pagination
 
 ```rust
-use mqdb::{SortOrder, Pagination};
+use mqdb_core::{SortOrder, Pagination};
 
 let sort = vec![
     SortOrder::desc("created_at".into()),
@@ -242,7 +243,7 @@ MQDB provides a comprehensive constraint system for maintaining data integrity.
 ### Schemas with Type Validation
 
 ```rust
-use mqdb::{Schema, FieldDefinition, FieldType};
+use mqdb_core::schema::{Schema, FieldDefinition, FieldType};
 
 let schema = Schema::new("users")
     .add_field(FieldDefinition::new("name", FieldType::String).required())
@@ -269,7 +270,7 @@ db.add_not_null("users".into(), "email".into()).await?;
 ### Foreign Keys
 
 ```rust
-use mqdb::OnDeleteAction;
+use mqdb_core::OnDeleteAction;
 
 db.add_foreign_key(
     "posts".into(),
@@ -301,7 +302,7 @@ db.add_foreign_key(
 ## TTL (Time-To-Live)
 
 ```rust
-use mqdb::DatabaseConfig;
+use mqdb_core::config::DatabaseConfig;
 
 let config = DatabaseConfig::new("./data/mydb")
     .with_ttl_cleanup_interval(Some(60));
@@ -323,7 +324,7 @@ MQDB includes an embedded MQTT broker that exposes database operations via MQTT 
 ### Starting the Agent
 
 ```rust
-use mqdb::{Database, MqdbAgent};
+use mqdb_agent::{Database, MqdbAgent};
 
 let db = Database::open("./data/mydb").await?;
 let agent = MqdbAgent::new(db)

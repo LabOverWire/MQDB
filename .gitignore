@@ -5,10 +5,9 @@ data/
 mqtt_storage/
 pkg/
 **/mqdb-wasm/target/
-docs/
+docs/internal/
 .idea/
 test_certs/
 .playwright-mcp/
 benchmark_results/
-specs/FRONTEND_OWNERSHIP_INTEGRATION.md
 Cargo.lock

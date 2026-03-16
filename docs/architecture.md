@@ -41,7 +41,7 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 │         MQTT Agent (MqdbAgent)                  │
 │  Embedded Broker │ Auth │ ACL │ Topic Handlers  │
 ├─────────────────────────────────────────────────┤
-│         Database API (database.rs)              │
+│     Database API (mqdb-agent/database/)         │
 │  CRUD │ Queries │ Subscriptions │ Constraints   │
 ├─────────────────────────────────────────────────┤
 │          Reactive Event System                  │
@@ -66,17 +66,17 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 ┌─────────────────────────────────────────────────┐
 │           MQTT Clients / Web Browsers           │
 ├─────────────────────────────────────────────────┤
-│       ClusteredAgent (cluster_agent.rs)         │
+│       ClusteredAgent (cluster_agent/mod.rs)     │
 │  Embedded Broker │ Auth │ ACL │ Event Handler   │
 ├─────────────────────────────────────────────────┤
-│         NodeController (node_controller.rs)     │
+│    NodeController (mqdb-cluster/node_controller)│
 │  Partition Map │ Write Routing │ Replication    │
 ├─────────────────────────────────────────────────┤
 │      Raft Consensus    │    Store Manager       │
 │  Leader Election │     │  17 Typed Stores       │
 │  Log Replication │     │  Sessions, Topics, DB  │
 ├─────────────────────────────────────────────────┤
-│         Cluster Transport (transport.rs)        │
+│     Cluster Transport (mqdb-cluster/transport)  │
 │  MQTT Bridges  or  Direct QUIC Transport        │
 ├─────────────────────────────────────────────────┤
 │         Storage Abstraction (StorageBackend)    │
@@ -102,7 +102,7 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 
 ## 3. Core Components
 
-### 3.1 Storage Layer (`storage/`)
+### 3.1 Storage Layer (`crates/mqdb-core/src/storage/`)
 
 **Responsibility:** Persistence and transaction management with pluggable backends
 
@@ -163,7 +163,7 @@ batch.commit()?;  // Fails if precondition not met
 
 ---
 
-### 3.2 Key Encoding Scheme (`keys.rs`)
+### 3.2 Key Encoding Scheme (`crates/mqdb-core/src/keys.rs`)
 
 **Namespace Design:**
 ```
@@ -200,7 +200,7 @@ meta/constraint/fk/posts/posts_author_id_fk → Foreign key constraint
 
 ---
 
-### 3.3 Entity Layer (`entity.rs`)
+### 3.3 Entity Layer (`crates/mqdb-core/src/entity.rs`)
 
 **Data Model:**
 - JSON-based schema-less storage
@@ -232,7 +232,7 @@ User JSON ← Entity ← Deserialize ← Verify ← Read from Storage
 
 ---
 
-### 3.4 Index System (`index.rs`)
+### 3.4 Index System (`crates/mqdb-core/src/index.rs`)
 
 **Purpose:** Accelerate filtered queries beyond full table scans
 
@@ -270,7 +270,7 @@ idx/users/email/alice@example.com/123
 
 ---
 
-### 3.5 Constraint System (`constraint.rs`, `schema.rs`)
+### 3.5 Constraint System (`crates/mqdb-core/src/constraint.rs`, `crates/mqdb-core/src/schema.rs`)
 
 #### Schema Validation
 
@@ -364,7 +364,7 @@ Dispatch delete events for all affected entities
 
 ---
 
-### 3.6 Reactive System (`subscription.rs`, `dispatcher.rs`, `events.rs`, `consumer_group.rs`)
+### 3.6 Reactive System (`crates/mqdb-core/src/subscription.rs`, `crates/mqdb-agent/src/dispatcher.rs`, `crates/mqdb-core/src/events.rs`, `crates/mqdb-agent/src/consumer_group.rs`)
 
 **Purpose:** Real-time change notifications with configurable delivery modes
 
@@ -455,7 +455,7 @@ users/123        users/123                   users/124
 - No guarantee of delivery (best-effort for Broadcast)
 - Subscribers responsible for handling missed events
 
-#### Consumer Groups (`consumer_group.rs`)
+#### Consumer Groups (`crates/mqdb-agent/src/consumer_group.rs`)
 
 **Purpose:** Partition-based message routing for point-to-point delivery
 
@@ -489,7 +489,7 @@ db.heartbeat(&subscription_id).await?;
 - First subscriber sets the mode
 - Subsequent subscribers must match or get rejected
 
-#### Outbox Pattern (`outbox.rs`)
+#### Outbox Pattern (`crates/mqdb-core/src/outbox.rs`)
 
 **Purpose:** Atomic event persistence with guaranteed delivery
 
@@ -518,7 +518,7 @@ OutboxConfig {
 - Dead letter queue for investigation
 - Survives crashes and restarts
 
-#### Cluster-Mode Outbox (`store_manager/outbox.rs`)
+#### Cluster-Mode Outbox (`crates/mqdb-cluster/src/cluster/store_manager/outbox.rs`)
 
 In cluster mode, the `ClusterOutbox` provides the same durability guarantee for change events on local partitions. The outbox entry is written atomically with the data in a single fjall batch via `PartitionStorage::write_with_outbox()`. On startup, `recover_pending_outbox()` scans for undelivered entries and replays them.
 
@@ -901,7 +901,7 @@ db.create("sessions", session).await?;
 
 ---
 
-### 7.2 Idempotency (`dedup.rs`)
+### 7.2 Idempotency (`crates/mqdb-core/src/dedup.rs`)
 
 **Purpose:** Prevent duplicate operations from retries or network issues
 
@@ -1140,8 +1140,8 @@ pub trait StorageBackend: Send + Sync {
 
 | Backend | File | Use Case |
 |---------|------|----------|
-| `FjallBackend` | `storage/fjall_backend.rs` | Native production (LSM persistence) |
-| `MemoryBackend` | `storage/memory_backend.rs` | WASM/testing (in-memory) |
+| `FjallBackend` | `crates/mqdb-core/src/storage/fjall_backend.rs` | Native production (LSM persistence) |
+| `MemoryBackend` | `crates/mqdb-core/src/storage/memory_backend.rs` | WASM/testing (in-memory) |
 
 **Adding Custom Backends:**
 
@@ -1189,8 +1189,8 @@ MQDB supports two deployment modes:
 
 | Mode | Entry Point | Use Case |
 |------|-------------|----------|
-| **Agent** | `MqdbAgent` (`agent.rs`) | Single-node standalone broker |
-| **Cluster** | `ClusteredAgent` (`cluster_agent.rs`) | Multi-node distributed system |
+| **Agent** | `MqdbAgent` (`crates/mqdb-agent/src/agent/mod.rs`) | Single-node standalone broker |
+| **Cluster** | `ClusteredAgent` (`crates/mqdb-cluster/src/cluster_agent/mod.rs`) | Multi-node distributed system |
 
 Both modes share the same database API, but cluster mode adds:
 - Raft consensus for partition management
@@ -1202,12 +1202,12 @@ Both modes share the same database API, but cluster mode adds:
 
 In cluster mode, the `StorageBackend` trait is used by multiple subsystems:
 
-**Raft Storage** (`cluster/raft/storage.rs`):
+**Raft Storage** (`crates/mqdb-cluster/src/cluster/raft/storage.rs`):
 - Persists Raft log entries and metadata
 - Uses `DurabilityMode::Immediate` for consensus safety
 - Path: `{db_path}/raft/`
 
-**Cluster Stores** (`cluster/store_manager.rs`):
+**Cluster Stores** (`crates/mqdb-cluster/src/cluster/store_manager.rs`):
 - Manages 17 distinct stores for MQTT and database state
 - Uses configurable durability (default: `PeriodicMs(10)`)
 - Path: `{db_path}/stores/`
@@ -1481,12 +1481,12 @@ DatabaseConfig::new("db")
 ### Test Categories
 
 **1. Unit Tests:**
-- `entity.rs`: Serialization, JSON conversion
-- `keys.rs`: Key encoding/decoding
-- `schema.rs`: Validation, defaults
-- `constraint.rs`: Constraint creation
-- `checksum.rs`: Corruption detection
-- `index.rs`: Index definition
+- `crates/mqdb-core/src/entity.rs`: Serialization, JSON conversion
+- `crates/mqdb-core/src/keys.rs`: Key encoding/decoding
+- `crates/mqdb-core/src/schema.rs`: Validation, defaults
+- `crates/mqdb-core/src/constraint.rs`: Constraint creation
+- `crates/mqdb-core/src/checksum.rs`: Corruption detection
+- `crates/mqdb-core/src/index.rs`: Index definition
 
 **2. Integration Tests:**
 - `integration_test.rs`: CRUD, subscriptions, indexes, relationships, TTL
@@ -1670,7 +1670,7 @@ Topic protection provides defense-in-depth security by enforcing access controls
 
 ### Protection Rules
 
-Located in `src/topic_rules.rs`:
+Located in `crates/mqdb-agent/src/topic_rules.rs`:
 
 | Pattern | Tier | Purpose |
 |---------|------|---------|
@@ -1712,7 +1712,7 @@ On every startup, each MQDB node generates a new, unique identity for its intern
 1.  **Username:** A random, unpredictable username is created with the format `mqdb-internal-<UUID>`.
 2.  **Password:** A random, unpredictable password is also generated.
 
-This process occurs within the `configure_broker_auth` function in `src/auth_config.rs`.
+This process occurs within the `configure_broker_auth` function in `crates/mqdb-agent/src/auth_config.rs`.
 
 #### Automatic Registration
 
@@ -1736,11 +1736,11 @@ In a cluster, each node's internal client only ever connects to its own local br
 
 | File | Purpose |
 |------|---------|
-| `src/topic_rules.rs` | Protection rules, pattern matching, tier definitions |
-| `src/topic_protection.rs` | AuthProvider wrapper implementation |
-| `src/auth_config.rs` | Admin user configuration |
-| `src/agent.rs` | Wraps broker auth with protection (agent mode) |
-| `src/cluster_agent.rs` | Wraps broker auth with protection (cluster mode) |
+| `crates/mqdb-agent/src/topic_rules.rs` | Protection rules, pattern matching, tier definitions |
+| `crates/mqdb-agent/src/topic_protection.rs` | AuthProvider wrapper implementation |
+| `crates/mqdb-agent/src/auth_config.rs` | Admin user configuration |
+| `crates/mqdb-agent/src/agent/mod.rs` | Wraps broker auth with protection (agent mode) |
+| `crates/mqdb-cluster/src/cluster_agent/mod.rs` | Wraps broker auth with protection (cluster mode) |
 
 ### Block Reasons
 
@@ -1790,8 +1790,8 @@ Both are set in `mqtt-lib/crates/mqtt5/src/broker/client_handler/publish.rs` via
 | `x-origin-client-id` | The `client_id` that triggered the DB mutation | Echo suppression in change-event subscribers |
 
 Set by MQDB's event publisher when emitting change events:
-- Agent mode: `src/agent/tasks.rs`
-- Cluster mode: `src/cluster/db_handler/json_ops.rs`
+- Agent mode: `crates/mqdb-agent/src/agent/tasks.rs`
+- Cluster mode: `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs`
 
 ### Why Both `x-mqtt-client-id` and `x-origin-client-id` Exist
 
@@ -1851,10 +1851,10 @@ else:
 |------|------|
 | `mqtt-lib/.../properties/accessors.rs` | `inject_sender()`, `inject_client_id()` |
 | `mqtt-lib/.../client_handler/publish.rs` | Calls inject on every client PUBLISH |
-| `src/agent/handlers.rs:59-71` | Reads `x-mqtt-sender` and `x-mqtt-client-id` for DB operations |
-| `src/agent/tasks.rs:148-152` | Adds `x-origin-client-id` to change events (agent mode) |
-| `src/cluster/db_handler/json_ops.rs:1009-1012` | Adds `x-origin-client-id` to change events (cluster mode) |
-| `src/events.rs:17-31` | `ChangeEvent` struct carries `sender` and `client_id` through the pipeline |
+| `crates/mqdb-agent/src/agent/handlers.rs:59-71` | Reads `x-mqtt-sender` and `x-mqtt-client-id` for DB operations |
+| `crates/mqdb-agent/src/agent/tasks.rs:148-152` | Adds `x-origin-client-id` to change events (agent mode) |
+| `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs:1009-1012` | Adds `x-origin-client-id` to change events (cluster mode) |
+| `crates/mqdb-core/src/events.rs:17-31` | `ChangeEvent` struct carries `sender` and `client_id` through the pipeline |
 
 ---
 
@@ -1907,11 +1907,11 @@ MQDB prioritizes:
 ### Contributing:
 
 The architecture is designed for extensibility. Key extension points:
-- Custom storage backends (implement `StorageBackend` trait from `storage/backend.rs`)
-- Cluster transport (implement `ClusterTransport` trait from `cluster/transport.rs`)
-- MQTT integration layer (dispatcher hooks in `agent.rs`)
-- Query language (filter system in `database.rs`)
-- Additional constraint types (framework in place via `cluster/db/constraint_store.rs`)
+- Custom storage backends (implement `StorageBackend` trait from `crates/mqdb-core/src/storage/backend.rs`)
+- Cluster transport (implement `ClusterTransport` trait from `crates/mqdb-cluster/src/cluster/transport.rs`)
+- MQTT integration layer (dispatcher hooks in `crates/mqdb-agent/src/agent/mod.rs`)
+- Query language (filter system in `crates/mqdb-agent/src/database/mod.rs`)
+- Additional constraint types (framework in place via `crates/mqdb-cluster/src/cluster/db/constraint_store.rs`)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 

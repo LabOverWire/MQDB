@@ -4,7 +4,7 @@
 > Every claim has file:line references. When in doubt, verify against code.
 > Last verified: January 2026 (all milestones M1-M10 complete, Direct QUIC transport added)
 >
-> **Note:** Clustering requires the `native` feature flag (commercial license). Agent-only builds (`--features agent-only`) exclude all cluster code. Shared types (partitions, IDs) live in `src/partition/` and compile unconditionally.
+> **Note:** Clustering requires the `native` feature flag (commercial license). Agent-only builds (`--features agent-only`) exclude all cluster code. Shared types (partitions, IDs) live in `crates/mqdb-core/src/partition/` and compile unconditionally.
 
 ## Overview
 
@@ -478,7 +478,7 @@ Each node creates N-1 outbound bridges (one per peer). Messages flow bidirection
 
 For performance-critical deployments, consider star topology (all nodes bridge to leader only) at the cost of no direct follower-to-follower routes.
 
-**Key Files**: `transport.rs:83-113`, `mqtt_transport.rs:19-21`, `cluster_agent.rs:172-201`
+**Key Files**: `transport.rs:83-113`, `mqtt_transport.rs:19-21`, `crates/mqdb-cluster/src/cluster_agent/mod.rs:172-201`
 
 **Bridge Loop Prevention**: When a remote bridge publishes TO the local broker, the router must NOT forward that message back to other bridges. Without this check, messages amplify exponentially:
 
@@ -488,7 +488,7 @@ For performance-critical deployments, consider star topology (all nodes bridge t
 4. Node 3's router would forward back to Node 1's bridge
 5. Infinite loop
 
-The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `cluster_agent.rs:262`) and skips bridge forwarding for messages from bridge clients. See `mqtt5/src/broker/router.rs`.
+The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `crates/mqdb-cluster/src/cluster_agent/mod.rs:262`) and skips bridge forwarding for messages from bridge clients. See `mqtt5/src/broker/router.rs`.
 
 **Topology Options** (`mqdb dev start-cluster --topology`):
 
@@ -694,7 +694,7 @@ mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/n1 \
     --quic-ca test_certs/ca.pem
 ```
 
-**Key Files**: `quic_transport.rs`, `cluster_agent.rs` (transport selection)
+**Key Files**: `quic_transport.rs`, `crates/mqdb-cluster/src/cluster_agent/mod.rs` (transport selection)
 
 ### A6.6 Message Processor
 
@@ -772,7 +772,7 @@ executor.shutdown(); // graceful shutdown
 
 ### A6.8 Admin Request Handlers
 
-The cluster agent (`cluster_agent.rs`) handles admin requests via `$SYS/mqdb/cluster/#` (requires `AdminRequired` topic protection — only admin users can publish to these topics):
+The cluster agent (`crates/mqdb-cluster/src/cluster_agent/mod.rs`) handles admin requests via `$SYS/mqdb/cluster/#` (requires `AdminRequired` topic protection — only admin users can publish to these topics):
 
 | Topic | Handler | Response |
 |-------|---------|----------|
@@ -885,7 +885,7 @@ The `primaries_imbalanced()` check triggers when `max_primary_count - min_primar
 | `PartitionId` | Newtype(u16) | 0-255 | `partition.rs:5-94` |
 | `Epoch` | Newtype(u64) | 0-MAX, saturating add | `epoch.rs:4-95` |
 
-**NodeId** (`src/cluster/node.rs:4-72`):
+**NodeId** (`crates/mqdb-cluster/src/cluster/node.rs:4-72`):
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BeBytes)]
 pub struct NodeId {
@@ -902,7 +902,7 @@ impl NodeId {
 }
 ```
 
-**PartitionId** (`src/cluster/partition.rs:5-94`):
+**PartitionId** (`crates/mqdb-cluster/src/cluster/partition.rs:5-94`):
 ```rust
 pub const NUM_PARTITIONS: u16 = 256;
 
@@ -922,7 +922,7 @@ impl PartitionId {
 
 ### 1.2 Entity Constants
 
-All cluster-managed data types (`src/cluster/entity.rs`):
+All cluster-managed data types (`crates/mqdb-cluster/src/cluster/entity.rs`):
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
@@ -977,7 +977,7 @@ Each node can be:
 - **MQTT Bridges** connect nodes (not direct TCP sockets)
 - Bridges subscribe to cluster topics on remote nodes
 - All cluster messages flow through MQTT publish/subscribe
-- Topic prefixes (`src/cluster/mqtt_transport.rs:19-21`):
+- Topic prefixes (`crates/mqdb-cluster/src/cluster/mqtt_transport.rs:19-21`):
   ```rust
   const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
   const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
@@ -998,7 +998,7 @@ QUIC preferred for multi-node clusters:
 
 ### 2.1 Wire Format
 
-All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`):
+All cluster messages follow this format (`crates/mqdb-cluster/src/cluster/mqtt_transport.rs:318-389`):
 
 ```
 [sender_node_id: 2 bytes BE][message_type: 1 byte][serialized_data: variable]
@@ -1047,7 +1047,7 @@ All cluster messages follow this format (`src/cluster/mqtt_transport.rs:318-389`
 
 ### 2.3 Heartbeat Message (75 bytes)
 
-`src/cluster/protocol.rs` - BeBytes serialization:
+`crates/mqdb-cluster/src/cluster/protocol.rs` - BeBytes serialization:
 
 ```rust
 struct Heartbeat {
@@ -1062,7 +1062,7 @@ struct Heartbeat {
 
 ### 2.4 ReplicationWrite Message (variable)
 
-`src/cluster/protocol.rs:152-208`:
+`crates/mqdb-cluster/src/cluster/protocol.rs:152-208`:
 
 ```
 version: u8
@@ -1080,7 +1080,7 @@ data: [data_len bytes]
 
 ### 2.5 ForwardedPublish Message (variable)
 
-`src/cluster/protocol.rs:515-658`:
+`crates/mqdb-cluster/src/cluster/protocol.rs:515-658`:
 
 ```rust
 struct ForwardedPublish {
@@ -1119,7 +1119,7 @@ target_count: u8
 
 ### 2.6 Raft Messages
 
-**RequestVoteRequest** (26 bytes, `src/cluster/raft/rpc.rs`):
+**RequestVoteRequest** (26 bytes, `crates/mqdb-cluster/src/cluster/raft/rpc.rs`):
 ```
 term: u64           // 8 bytes
 candidate_id: u16   // 2 bytes
@@ -1163,7 +1163,7 @@ struct AppendEntriesResponse {
 
 ### 2.7 Snapshot Messages
 
-**SnapshotRequest** (5 bytes, `src/cluster/snapshot.rs:29-57`):
+**SnapshotRequest** (5 bytes, `crates/mqdb-cluster/src/cluster/snapshot.rs:29-57`):
 ```rust
 struct SnapshotRequest {
     version: u8,      // = 1
@@ -1172,7 +1172,7 @@ struct SnapshotRequest {
 }
 ```
 
-**SnapshotChunk** (23+ bytes, `src/cluster/snapshot.rs:59-140`):
+**SnapshotChunk** (23+ bytes, `crates/mqdb-cluster/src/cluster/snapshot.rs:59-140`):
 ```rust
 struct SnapshotChunk {
     partition: PartitionId,
@@ -1183,7 +1183,7 @@ struct SnapshotChunk {
 }
 ```
 
-**SnapshotComplete** (12 bytes, `src/cluster/snapshot.rs:142-202`):
+**SnapshotComplete** (12 bytes, `crates/mqdb-cluster/src/cluster/snapshot.rs:142-202`):
 ```rust
 struct SnapshotComplete {
     version: u8,
@@ -1697,7 +1697,7 @@ BridgeConfig::new(format!("bridge-to-node-{}", peer_id), remote_addr)
 
 ### 12.1 SessionData Structure
 
-`src/cluster/session.rs:7-32`:
+`crates/mqdb-cluster/src/cluster/session.rs:7-32`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -1729,7 +1729,7 @@ pub struct SessionData {
 
 ### 12.2 Session Partition Mapping
 
-`src/cluster/session.rs:177-191`:
+`crates/mqdb-cluster/src/cluster/session.rs:177-191`:
 
 ```rust
 pub fn session_partition(client_id: &str) -> PartitionId {
@@ -1743,7 +1743,7 @@ All session state is stored on the partition derived from `client_id`.
 
 ### 12.3 Session Creation Flow
 
-`src/cluster/event_handler.rs:43-118`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:43-118`:
 
 1. `on_client_connect()` triggered by MQTT broker
 2. If `clean_start=true`: Clear old session and subscriptions
@@ -1754,7 +1754,7 @@ All session state is stored on the partition derived from `client_id`.
 
 ### 12.4 Session Replication
 
-`src/cluster/store_manager.rs:621-640`:
+`crates/mqdb-cluster/src/cluster/store_manager.rs:621-640`:
 
 ```rust
 pub fn create_session_replicated(
@@ -1791,7 +1791,7 @@ When client reconnects to Node B (was on Node A):
 
 ### 13.1 Entry Point
 
-`src/cluster/event_handler.rs:451-583`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:451-583`:
 
 ```rust
 fn on_client_publish(&self, event: ClientPublishEvent) {
@@ -1804,7 +1804,7 @@ fn on_client_publish(&self, event: ClientPublishEvent) {
 
 ### 13.2 TopicIndex Lookup
 
-`src/cluster/topic_index.rs:190-198`:
+`crates/mqdb-cluster/src/cluster/topic_index.rs:190-198`:
 
 ```rust
 pub fn get_subscribers(&self, topic: &str) -> Vec<SubscriberLocation> {
@@ -1824,7 +1824,7 @@ pub fn get_subscribers(&self, topic: &str) -> Vec<SubscriberLocation> {
 
 ### 13.3 Local vs Remote Decision
 
-`src/cluster/event_handler.rs:508-534`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:508-534`:
 
 ```rust
 for target in route.targets {
@@ -1856,7 +1856,7 @@ for target in route.targets {
 
 ### 13.4 ForwardedPublish Sending
 
-`src/cluster/event_handler.rs:547-562`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:547-562`:
 
 ```rust
 for (target_node, targets) in remote_nodes {
@@ -1874,7 +1874,7 @@ for (target_node, targets) in remote_nodes {
 
 ### 13.5 Remote Node Receives ForwardedPublish
 
-`src/cluster/node_controller.rs:1217-1251`:
+`crates/mqdb-cluster/src/cluster/node_controller.rs:1217-1251`:
 
 ```rust
 fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
@@ -1894,7 +1894,7 @@ fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
 
 ### 13.6 Final Delivery
 
-`src/cluster/mqtt_transport.rs:588-599`:
+`crates/mqdb-cluster/src/cluster/mqtt_transport.rs:588-599`:
 
 Uses `forward_client` (client ID: `mqdb-forward-{node_id}`) to publish locally.
 This client ID is filtered in `on_client_publish()` to prevent infinite forwarding.
@@ -1905,7 +1905,7 @@ This client ID is filtered in `on_client_publish()` to prevent infinite forwardi
 
 ### 14.1 TopicTrie Structure
 
-`src/cluster/topic_trie.rs:42-60`:
+`crates/mqdb-cluster/src/cluster/topic_trie.rs:42-60`:
 
 ```rust
 struct TrieNode {
@@ -1923,7 +1923,7 @@ pub struct TopicTrie {
 
 ### 14.2 Wildcard Pattern Rules
 
-`src/cluster/topic_trie.rs:257-275`:
+`crates/mqdb-cluster/src/cluster/topic_trie.rs:257-275`:
 
 - `+` matches exactly one topic level
 - `#` matches zero or more levels (must be last segment)
@@ -1932,7 +1932,7 @@ pub struct TopicTrie {
 
 ### 14.3 Matching Algorithm
 
-`src/cluster/topic_trie.rs:153-177`:
+`crates/mqdb-cluster/src/cluster/topic_trie.rs:153-177`:
 
 ```rust
 fn match_recursive(node: &TrieNode, levels: &[&str], depth: usize, matches: &mut Vec) {
@@ -1964,7 +1964,7 @@ fn match_recursive(node: &TrieNode, levels: &[&str], depth: usize, matches: &mut
 
 Message type code: **60**
 
-`src/cluster/protocol.rs:1128-1231`:
+`crates/mqdb-cluster/src/cluster/protocol.rs:1128-1231`:
 
 ```rust
 pub struct WildcardBroadcast {
@@ -1982,7 +1982,7 @@ pub struct WildcardBroadcast {
 
 ### 14.5 Broadcast Flow
 
-On wildcard subscribe (`src/cluster/event_handler.rs:299-323`):
+On wildcard subscribe (`crates/mqdb-cluster/src/cluster/event_handler.rs:299-323`):
 
 1. Store locally in WildcardStore
 2. Create `WildcardBroadcast::subscribe(...)` message
@@ -1993,7 +1993,7 @@ On wildcard subscribe (`src/cluster/event_handler.rs:299-323`):
 
 Message type code: **61**
 
-`src/cluster/protocol.rs`:
+`crates/mqdb-cluster/src/cluster/protocol.rs`:
 
 ```rust
 pub struct TopicSubscriptionBroadcast {
@@ -2010,7 +2010,7 @@ pub struct TopicSubscriptionBroadcast {
 
 ### 14.7 Topic Subscription Broadcast Flow
 
-On individual topic subscribe (`src/cluster/event_handler.rs`):
+On individual topic subscribe (`crates/mqdb-cluster/src/cluster/event_handler.rs`):
 
 1. Store locally in TopicIndex via `topics.subscribe()`
 2. Create `TopicSubscriptionBroadcast::subscribe(...)` message
@@ -2025,7 +2025,7 @@ This mirrors the wildcard subscription flow. Individual topic subscriptions must
 
 ### 15.1 QoS 1 Inflight Store
 
-`src/cluster/inflight_store.rs:7-23`:
+`crates/mqdb-cluster/src/cluster/inflight_store.rs:7-23`:
 
 ```rust
 pub struct InflightMessage {
@@ -2044,7 +2044,7 @@ Key format: `_mqtt_inflight/p{partition}/clients/{client_id}/pending/{packet_id}
 
 ### 15.2 QoS 2 State Machine
 
-`src/cluster/qos2_store.rs:8-20`:
+`crates/mqdb-cluster/src/cluster/qos2_store.rs:8-20`:
 
 ```
 Inbound:  PubrecSent(1) → PubrelReceived(2) → PubcompSent(3)
@@ -2066,7 +2066,7 @@ pub struct Qos2State {
 
 ### 15.3 Retry Mechanism
 
-`src/cluster/inflight_store.rs:77-82`:
+`crates/mqdb-cluster/src/cluster/inflight_store.rs:77-82`:
 
 ```rust
 // Exponential backoff: base * 2^attempts
@@ -2082,7 +2082,7 @@ Default `max_attempts`: 10
 
 ### 15.4 ACK Handling
 
-`src/cluster/event_handler.rs:626-668`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:626-668`:
 
 - QoS 1 PUBACK: `acknowledge_inflight_replicated(client_id, packet_id)`
 - QoS 2 PUBCOMP: `complete_qos2_replicated(client_id, packet_id)`
@@ -2095,7 +2095,7 @@ Both create ReplicationWrite with `Operation::Delete` to remove state.
 
 ### 16.1 RetainedMessage Structure
 
-`src/cluster/retained_store.rs:36-47`:
+`crates/mqdb-cluster/src/cluster/retained_store.rs:36-47`:
 
 ```rust
 pub struct RetainedMessage {
@@ -2111,7 +2111,7 @@ pub struct RetainedMessage {
 
 ### 16.2 Retain on Publish
 
-`src/cluster/store_manager.rs:827-853`:
+`crates/mqdb-cluster/src/cluster/store_manager.rs:827-853`:
 
 - Create RetainedMessage
 - Empty payload = DELETE operation (clears retained)
@@ -2121,7 +2121,7 @@ pub struct RetainedMessage {
 
 ### 16.3 Deliver on Subscribe
 
-`src/cluster/event_handler.rs:286-291`:
+`crates/mqdb-cluster/src/cluster/event_handler.rs:286-291`:
 
 1. Check local store: `query_local_retained_exact(topic)`
 2. If not local: `start_async_retained_query(topic)` to partition primary
@@ -2141,7 +2141,7 @@ Empty payload publish with retain=true:
 
 ### 17.1 Trigger
 
-`src/cluster/node_controller.rs:1412-1428`:
+`crates/mqdb-cluster/src/cluster/node_controller.rs:1412-1428`:
 
 Snapshots triggered during **partition migration**:
 - New primary requests snapshot from old primary
@@ -2157,7 +2157,7 @@ Snapshots triggered during **partition migration**:
 
 ### 17.3 Chunk Size
 
-`src/cluster/snapshot.rs:290`:
+`crates/mqdb-cluster/src/cluster/snapshot.rs:290`:
 
 ```rust
 pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
@@ -2165,7 +2165,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
 ### 17.4 State Rebuild
 
-`src/cluster/node_controller.rs:1301-1371`:
+`crates/mqdb-cluster/src/cluster/node_controller.rs:1301-1371`:
 
 1. SnapshotBuilder collects chunks (can arrive out-of-order)
 2. Once all chunks received, `assemble()` concatenates in order
@@ -2183,7 +2183,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
 ### 18.1 CLI Entry
 
-`src/bin/mqdb.rs:371-395`:
+`crates/mqdb-cli/src/main.rs:371-395`:
 
 ```bash
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb --peers "2@127.0.0.1:1884"
@@ -2193,7 +2193,7 @@ Peer format: `{node_id}@{address}:{port}` (comma-separated for multiple)
 
 ### 18.2 ClusteredAgent Initialization
 
-`src/cluster_agent.rs:131-170`:
+`crates/mqdb-cluster/src/cluster_agent/mod.rs:131-170`:
 
 ```
 1. Validate NodeId (1-65535)
@@ -2207,7 +2207,7 @@ Peer format: `{node_id}@{address}:{port}` (comma-separated for multiple)
 
 ### 18.3 Run Sequence
 
-`src/cluster_agent.rs:206-530`:
+`crates/mqdb-cluster/src/cluster_agent/mod.rs:206-530`:
 
 ```
 1. Create ClusterEventHandler
@@ -2226,7 +2226,7 @@ Peer format: `{node_id}@{address}:{port}` (comma-separated for multiple)
 
 ### 18.4 Bridge Configuration
 
-`src/cluster_agent.rs:172-201`:
+`crates/mqdb-cluster/src/cluster_agent/mod.rs:172-201`:
 
 ```rust
 BridgeConfig::new(&bridge_name, &peer.address)
@@ -2243,7 +2243,7 @@ Bridge settings:
 
 ### 18.5 Raft Leader Partition Init
 
-`src/cluster_agent.rs:396-421`:
+`crates/mqdb-cluster/src/cluster_agent/mod.rs:396-421`:
 
 When Raft leader and partitions not initialized:
 1. Calculate primary for each partition: `partition % node_count`
@@ -2311,7 +2311,7 @@ delete itself.
 
 The following are implemented but documented in other files:
 
-- **LWT (Last Will Testament)**: Implemented in M9, see `IMPLEMENTATION_PLAN.md`
+- **LWT (Last Will Testament)**: Implemented in M9, see `docs/implementation-plan.md`
 - **Subscription cache reconciliation**: `SubscriptionCache::reconcile()` runs every 5 minutes
 - **Database operations ($DB/#)**: See README.md "MQTT Topic Structure" section
 - **Backup and restore**: See README.md "Admin Operations" section
@@ -2337,41 +2337,41 @@ The following sections may need documentation:
 
 | File | Purpose |
 |------|---------|
-| `src/cluster/node_controller/fk.rs` | Foreign key constraint protocol |
-| `src/cluster/node_controller/db_ops.rs` | CascadeSideEffect enum, cascade execution, CAS guard |
-| `src/cluster/node_controller/pending.rs` | Pending constraint state tracking, cascade ack bookkeeping |
-| `src/cluster/node_controller/unique.rs` | Unique constraint 2-phase protocol |
-| `src/cluster/store_manager/constraint_ops.rs` | FK reverse index integration, rebuild on constraint add |
-| `src/cluster/store_manager/outbox.rs` | CascadeOutboxPayload, CascadeRemoteOp, _cascade/ prefix |
-| `src/cluster/db/data_store.rs` | FkReverseIndex in-memory data structure |
-| `src/cluster/node_controller.rs` | Main cluster controller, message handling |
-| `src/cluster/heartbeat.rs` | Heartbeat management, node status |
-| `src/cluster/partition_map.rs` | Partition assignments |
-| `src/cluster/mqtt_transport.rs` | MQTT-based cluster transport |
-| `src/cluster/quic_transport.rs` | Direct QUIC transport (bypasses MQTT bridges) |
-| `src/cluster/message_processor.rs` | Message classification and heartbeat offloading |
-| `src/cluster/dedicated_executor.rs` | Isolated Tokio runtime for blocking tasks |
-| `src/cluster/raft/coordinator.rs` | Raft consensus coordinator |
-| `src/cluster/raft/node.rs` | Raft node state machine |
-| `src/cluster/raft/state.rs` | Raft state and commands |
-| `src/cluster/topic_index.rs` | Topic → subscriber mapping |
-| `src/cluster/topic_trie.rs` | Wildcard subscription trie |
-| `src/cluster/wildcard_store.rs` | Wildcard store wrapper |
-| `src/cluster/client_location.rs` | Client → connected node mapping |
-| `src/cluster/event_handler.rs` | MQTT event hooks for cluster |
-| `src/cluster/session.rs` | SessionData structure and store |
-| `src/cluster/store_manager.rs` | All entity stores coordination |
-| `src/cluster/protocol.rs` | Message definitions (BeBytes) |
-| `src/cluster/snapshot.rs` | Snapshot transfer protocol |
-| `src/cluster/inflight_store.rs` | QoS 1 inflight tracking |
-| `src/cluster/qos2_store.rs` | QoS 2 state machine |
-| `src/cluster/retained_store.rs` | Retained message store |
-| `src/cluster/entity.rs` | Entity name constants |
-| `src/cluster/node.rs` | NodeId type |
-| `src/cluster/partition.rs` | PartitionId type, NUM_PARTITIONS |
-| `src/cluster/epoch.rs` | Epoch type |
-| `src/cluster_agent.rs` | Cluster node startup |
-| `src/bin/mqdb.rs` | CLI entry point |
+| `crates/mqdb-cluster/src/cluster/node_controller/fk.rs` | Foreign key constraint protocol |
+| `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` | CascadeSideEffect enum, cascade execution, CAS guard |
+| `crates/mqdb-cluster/src/cluster/node_controller/pending.rs` | Pending constraint state tracking, cascade ack bookkeeping |
+| `crates/mqdb-cluster/src/cluster/node_controller/unique.rs` | Unique constraint 2-phase protocol |
+| `crates/mqdb-cluster/src/cluster/store_manager/constraint_ops.rs` | FK reverse index integration, rebuild on constraint add |
+| `crates/mqdb-cluster/src/cluster/store_manager/outbox.rs` | CascadeOutboxPayload, CascadeRemoteOp, _cascade/ prefix |
+| `crates/mqdb-cluster/src/cluster/db/data_store.rs` | FkReverseIndex in-memory data structure |
+| `crates/mqdb-cluster/src/cluster/node_controller.rs` | Main cluster controller, message handling |
+| `crates/mqdb-cluster/src/cluster/heartbeat.rs` | Heartbeat management, node status |
+| `crates/mqdb-cluster/src/cluster/partition_map.rs` | Partition assignments |
+| `crates/mqdb-cluster/src/cluster/mqtt_transport.rs` | MQTT-based cluster transport |
+| `crates/mqdb-cluster/src/cluster/quic_transport.rs` | Direct QUIC transport (bypasses MQTT bridges) |
+| `crates/mqdb-cluster/src/cluster/message_processor.rs` | Message classification and heartbeat offloading |
+| `crates/mqdb-cluster/src/cluster/dedicated_executor.rs` | Isolated Tokio runtime for blocking tasks |
+| `crates/mqdb-cluster/src/cluster/raft/coordinator.rs` | Raft consensus coordinator |
+| `crates/mqdb-cluster/src/cluster/raft/node.rs` | Raft node state machine |
+| `crates/mqdb-cluster/src/cluster/raft/state.rs` | Raft state and commands |
+| `crates/mqdb-cluster/src/cluster/topic_index.rs` | Topic → subscriber mapping |
+| `crates/mqdb-cluster/src/cluster/topic_trie.rs` | Wildcard subscription trie |
+| `crates/mqdb-cluster/src/cluster/wildcard_store.rs` | Wildcard store wrapper |
+| `crates/mqdb-cluster/src/cluster/client_location.rs` | Client → connected node mapping |
+| `crates/mqdb-cluster/src/cluster/event_handler.rs` | MQTT event hooks for cluster |
+| `crates/mqdb-cluster/src/cluster/session.rs` | SessionData structure and store |
+| `crates/mqdb-cluster/src/cluster/store_manager.rs` | All entity stores coordination |
+| `crates/mqdb-cluster/src/cluster/protocol.rs` | Message definitions (BeBytes) |
+| `crates/mqdb-cluster/src/cluster/snapshot.rs` | Snapshot transfer protocol |
+| `crates/mqdb-cluster/src/cluster/inflight_store.rs` | QoS 1 inflight tracking |
+| `crates/mqdb-cluster/src/cluster/qos2_store.rs` | QoS 2 state machine |
+| `crates/mqdb-cluster/src/cluster/retained_store.rs` | Retained message store |
+| `crates/mqdb-cluster/src/cluster/entity.rs` | Entity name constants |
+| `crates/mqdb-cluster/src/cluster/node.rs` | NodeId type |
+| `crates/mqdb-cluster/src/cluster/partition.rs` | PartitionId type, NUM_PARTITIONS |
+| `crates/mqdb-cluster/src/cluster/epoch.rs` | Epoch type |
+| `crates/mqdb-cluster/src/cluster_agent/mod.rs` | Cluster node startup |
+| `crates/mqdb-cli/src/main.rs` | CLI entry point |
 
 ---
 

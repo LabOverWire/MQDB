@@ -31,8 +31,8 @@
 - `PartitionAssignment` - Per-partition ownership info
 
 ### Files
-- `src/cluster/mod.rs`
-- `src/cluster/partition_map.rs`
+- `crates/mqdb-cluster/src/cluster/mod.rs`
+- `crates/mqdb-cluster/src/cluster/partition_map.rs`
 
 ---
 
@@ -45,8 +45,8 @@
 - Write operation types: Insert, Update, Delete
 
 ### Files
-- `src/cluster/protocol.rs`
-- `src/cluster/store_manager.rs`
+- `crates/mqdb-cluster/src/cluster/protocol.rs`
+- `crates/mqdb-cluster/src/cluster/store_manager.rs`
 
 ---
 
@@ -59,8 +59,8 @@
 - Cluster topics for different message types
 
 ### Files
-- `src/cluster/transport.rs`
-- `src/cluster/mqtt_transport.rs`
+- `crates/mqdb-cluster/src/cluster/transport.rs`
+- `crates/mqdb-cluster/src/cluster/mqtt_transport.rs`
 
 ---
 
@@ -74,8 +74,8 @@
 - Partition map updates via Raft
 
 ### Files
-- `src/cluster/raft/mod.rs`
-- `src/cluster/raft/coordinator.rs`
+- `crates/mqdb-cluster/src/cluster/raft/mod.rs`
+- `crates/mqdb-cluster/src/cluster/raft/coordinator.rs`
 
 ---
 
@@ -88,8 +88,8 @@
 - DB partitioning by entity key
 
 ### Files
-- `src/cluster/db.rs`
-- `src/cluster/db_handler.rs`
+- `crates/mqdb-cluster/src/cluster/db.rs`
+- `crates/mqdb-cluster/src/cluster/db_handler.rs`
 
 ---
 
@@ -137,7 +137,7 @@ mosquitto_pub -p 1883 -t "crosstest/hello" -m "message" -i publisher456
 ```
 
 ### Key Fix: Raft Peer Discovery
-The critical fix was in `src/cluster/raft/coordinator.rs:handle_node_alive()`:
+The critical fix was in `crates/mqdb-cluster/src/cluster/raft/coordinator.rs:handle_node_alive()`:
 ```rust
 let is_new_member = !self.cluster_members.contains(&node);
 if is_new_member {
@@ -167,24 +167,24 @@ Support wildcard patterns (+, #) across cluster.
 - [x] Efficient trie for pattern matching (`+` single-level, `#` multi-level)
 - [x] Pattern validation (# at end, no mixed wildcards)
 - [x] System topic protection ($SYS/* blocked)
-- [x] File: `src/cluster/topic_trie.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/topic_trie.rs`
 
 #### 7.2 WildcardStore Broadcast (DONE)
 - [x] WildcardStore wraps TopicTrie with serialization
 - [x] WildcardBroadcast message for cluster propagation
 - [x] Subscribe/unsubscribe broadcast to all nodes
-- [x] Files: `src/cluster/wildcard_store.rs`, `src/cluster/protocol.rs`
+- [x] Files: `crates/mqdb-cluster/src/cluster/wildcard_store.rs`, `crates/mqdb-cluster/src/cluster/protocol.rs`
 
 #### 7.3 Publish Routing Integration (DONE)
 - [x] PublishRouter.route_with_wildcards() combines exact + wildcard matches
 - [x] Deduplication by client_id with max QoS
 - [x] Cross-node forwarding based on client partition
-- [x] File: `src/cluster/publish_router.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/publish_router.rs`
 
 #### 7.4 Event Handler Integration (DONE)
 - [x] on_client_subscribe() broadcasts wildcard subscriptions
 - [x] on_client_publish() queries both TopicIndex and WildcardStore
-- [x] File: `src/cluster/event_handler.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/event_handler.rs`
 
 ### Tests
 - `pubsub_wildcard_routing` - single-node routing logic
@@ -219,14 +219,14 @@ Replicate QoS 1/2 delivery state for session continuity.
 - [x] `complete_replicated()` - completes and returns Delete ReplicationWrite
 - [x] `clear_client_with_data()` - clears all client state, returns data for replication
 - [x] `apply_replicated()` - applies Insert/Update/Delete from replica
-- [x] File: `src/cluster/qos2_store.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/qos2_store.rs`
 
 #### 8.2 InflightStore Replication (DONE)
 - [x] `add_replicated()` - adds inflight message and returns ReplicationWrite
 - [x] `acknowledge_replicated()` - acknowledges and returns Delete ReplicationWrite
 - [x] `clear_client_with_data()` - clears all client state, returns data for replication
 - [x] `apply_replicated()` - applies Insert/Delete from replica
-- [x] File: `src/cluster/inflight_store.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/inflight_store.rs`
 
 #### 8.3 StoreManager Integration (DONE)
 - [x] `start_qos2_inbound_replicated()`, `start_qos2_outbound_replicated()`
@@ -234,12 +234,12 @@ Replicate QoS 1/2 delivery state for session continuity.
 - [x] `clear_qos2_client_replicated()` - generates Delete writes for all client QoS2 state
 - [x] `add_inflight_replicated()`, `acknowledge_inflight_replicated()`
 - [x] `clear_inflight_client_replicated()` - generates Delete writes for all client inflight
-- [x] File: `src/cluster/store_manager.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/store_manager.rs`
 
 #### 8.4 Disconnect Cleanup (DONE)
 - [x] `on_client_disconnect()` uses replicated cleanup methods
 - [x] Delete operations forwarded to partition primary for replication
-- [x] File: `src/cluster/event_handler.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/event_handler.rs`
 
 ### Tests
 - `qos2_state_survives_primary_failover` - QoS2 state restored on new primary
@@ -267,26 +267,26 @@ Deliver LWT messages when client disconnects unexpectedly.
 - [x] `has_will`, `will_qos`, `will_retain`, `will_topic`, `will_payload`
 - [x] `lwt_published` flag to prevent duplicate delivery
 - [x] `lwt_token_present`, `lwt_token` for idempotent publishing
-- [x] File: `src/cluster/session.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/session.rs`
 
 #### 9.2 LwtPublisher API (DONE)
 - [x] `prepare_lwt(client_id)` - sets token, returns `LwtPrepared` with topic/payload/qos/retain
 - [x] `complete_lwt(client_id, token)` - validates token, marks `lwt_published = true`
 - [x] `recover_pending_lwts()` - finds sessions with pending LWT (token set but not published)
 - [x] Token-based idempotency prevents duplicate LWT delivery on retry
-- [x] File: `src/cluster/lwt.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/lwt.rs`
 
 #### 9.3 Event Handler Integration (DONE)
 - [x] `on_client_disconnect()` calls `prepare_lwt()` for unexpected disconnects
 - [x] LWT routed via TopicIndex + WildcardStore lookup
 - [x] Cross-node delivery via ForwardedPublish messages
 - [x] `complete_lwt()` called after routing completes
-- [x] File: `src/cluster/event_handler.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster/event_handler.rs`
 
 #### 9.4 Startup Recovery (DONE)
 - [x] `recover_pending_lwts()` called during cluster agent startup
 - [x] Pending LWTs from previous crash are re-routed and marked complete
-- [x] File: `src/cluster_agent.rs`
+- [x] File: `crates/mqdb-cluster/src/cluster_agent/mod.rs`
 
 ### Tests
 - `lwt_triggered_on_death` - single-node LWT prepare/complete flow
@@ -311,7 +311,7 @@ Handle session migration on node failure and cleanup expired sessions.
 
 ### Implementation
 
-**Session cleanup on expiry** (`cluster_agent.rs`):
+**Session cleanup on expiry** (`crates/mqdb-cluster/src/cluster_agent/mod.rs`):
 - `cleanup_expired_sessions()` returns expired sessions
 - `clear_expired_session_subscriptions()` cleans up subscriptions for each expired session
 - Removes entries from TopicIndex, WildcardStore, SubscriptionCache
@@ -349,35 +349,35 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 
 ### Implementation
 
-**HTTP API** (`src/http/server.rs`, `src/http/handlers.rs`):
+**HTTP API** (`crates/mqdb-agent/src/http/server.rs`, `crates/mqdb-agent/src/http/handlers.rs`):
 - Six endpoints: `/vault/enable`, `/vault/unlock`, `/vault/lock`, `/vault/change`, `/vault/disable`, `/vault/status`
 - Cookie-based session authentication required
 - Rate-limited unlock attempts
 
-**Cryptography** (`src/http/vault_crypto.rs`):
+**Cryptography** (`crates/mqdb-agent/src/http/vault_crypto.rs`):
 - `VaultCrypto` struct wraps AES-256-GCM key derived via PBKDF2-HMAC-SHA256
 - Per-record nonce derived from entity + record ID (deterministic, no nonce storage)
 - Recursive field-level encryption: each string leaf value encrypted independently at any JSON depth
 
-**Transform layer** (`src/vault_transform.rs`):
+**Transform layer** (`crates/mqdb-agent/src/vault_transform.rs`):
 - `vault_encrypt_fields` / `vault_decrypt_fields` for record-level operations
 - `is_vault_eligible` gates encryption to owned, non-system entities
 - `build_vault_skip_fields` excludes `id` and ownership field from encryption
 
-**Key storage** (`src/vault_keys.rs`):
+**Key storage** (`crates/mqdb-core/src/vault_keys.rs`):
 - `VaultKeyStore` maps canonical_id → `VaultCrypto` (in-memory only)
 - Keys never persisted — user must unlock after each server restart
 
-**Cluster integration** (`src/http/handlers.rs`):
+**Cluster integration** (`crates/mqdb-agent/src/http/handlers.rs`):
 - `batch_vault_operation` iterates all owned records via `update_entity` MQTT round-trips
 - Scatter-list results decrypted after aggregation from all partition owners
 - Constraint validation operates on plaintext (decrypt before validate, re-encrypt after)
 
 ### Files
-- `src/http/vault_crypto.rs`
-- `src/http/handlers.rs`
-- `src/vault_transform.rs`
-- `src/vault_keys.rs`
+- `crates/mqdb-agent/src/http/vault_crypto.rs`
+- `crates/mqdb-agent/src/http/handlers.rs`
+- `crates/mqdb-agent/src/vault_transform.rs`
+- `crates/mqdb-core/src/vault_keys.rs`
 - `examples/vault-mqtt/` (single-node demo)
 - `examples/vault-cluster/` (multi-node E2E test, 70 tests)
 

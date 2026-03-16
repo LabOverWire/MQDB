@@ -267,7 +267,7 @@ The WASM database runs entirely in the browser with no server required:
 │  │                │                   │  │
 │  │  ┌─────────────▼───────────────┐  │  │
 │  │  │    In-Memory Storage        │  │  │
-│  │  │  (mqdb::storage::Storage)   │  │  │
+│  │  │  (mqdb_core::storage::Storage)   │  │  │
 │  │  └─────────────────────────────┘  │  │
 │  └───────────────────────────────────┘  │
 └─────────────────────────────────────────┘
