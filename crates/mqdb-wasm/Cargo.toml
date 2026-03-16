@@ -11,7 +11,7 @@ repository = "https://github.com/LabOverWire/MQDB"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-mqdb = { path = "../..", default-features = false, features = ["wasm"] }
+mqdb-core = { path = "../mqdb-core", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
@@ -61,4 +61,3 @@ lto = true
 codegen-units = 1
 opt-level = "z"
 strip = true
-

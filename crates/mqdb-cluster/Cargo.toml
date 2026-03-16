@@ -1,0 +1,48 @@
+[package]
+name = "mqdb-cluster"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["LabOverWire"]
+description = "Distributed clustering, Raft consensus, and QUIC transport for MQDB"
+repository = "https://github.com/LabOverWire/MQDB"
+
+[dependencies]
+mqdb-core = { path = "../mqdb-core", features = ["fjall-backend"] }
+mqdb-agent = { path = "../mqdb-agent" }
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+glob.workspace = true
+regex.workspace = true
+flume.workspace = true
+arc-swap.workspace = true
+zeroize.workspace = true
+bebytes.workspace = true
+
+crc32fast.workspace = true
+fjall.workspace = true
+mqtt5.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+lru.workspace = true
+ring.workspace = true
+comfy-table.workspace = true
+
+quinn.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-native-certs.workspace = true
+
+[features]
+default = []
+mqtt-bridge = []
+dev-insecure = ["mqdb-agent/dev-insecure"]
+http-api = ["mqdb-agent/http-api"]
+
+[dev-dependencies]
+tempfile.workspace = true
+tracing-subscriber.workspace = true

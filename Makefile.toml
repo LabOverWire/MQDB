@@ -93,7 +93,7 @@ args = ["build", "--release"]
 [tasks.install]
 description = "Install mqdb binary from local codebase"
 command = "cargo"
-args = ["install", "--path", "."]
+args = ["install", "--path", "crates/mqdb-cli"]
 
 [tasks.clippy]
 description = "Lint all crates with pedantic warnings"

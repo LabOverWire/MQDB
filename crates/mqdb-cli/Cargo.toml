@@ -1,0 +1,45 @@
+[package]
+name = "mqdb-cli"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+authors = ["LabOverWire"]
+description = "CLI binary for MQDB"
+repository = "https://github.com/LabOverWire/MQDB"
+
+[[bin]]
+name = "mqdb"
+path = "src/main.rs"
+
+[dependencies]
+mqdb-core = { path = "../mqdb-core", features = ["fjall-backend"] }
+mqdb-agent = { path = "../mqdb-agent" }
+mqdb-cluster = { path = "../mqdb-cluster", optional = true }
+
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+flume.workspace = true
+
+tokio.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+mqtt5.workspace = true
+ring.workspace = true
+bebytes.workspace = true
+rustls = { workspace = true, optional = true }
+regex.workspace = true
+glob.workspace = true
+
+[features]
+default = ["cluster", "http-api"]
+cluster = ["dep:mqdb-cluster", "dep:rustls"]
+http-api = ["mqdb-agent/http-api"]
+dev-insecure = ["mqdb-agent/dev-insecure", "mqdb-cluster?/dev-insecure"]
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
