@@ -30,7 +30,7 @@ pub use types::{
     project_fields,
 };
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "native")]
 pub use config::DatabaseConfig;
 pub use config::{DurabilityMode, OutboxConfig, SharedSubscriptionConfig};
 pub use outbox::{Outbox, OutboxEntry};

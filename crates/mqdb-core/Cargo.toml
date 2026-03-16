@@ -1,11 +1,11 @@
 [package]
 name = "mqdb-core"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-only"
-authors = ["LabOverWire"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 description = "Core types, storage, schema, and protocol for MQDB"
-repository = "https://github.com/LabOverWire/MQDB"
 
 [dependencies]
 crc32fast.workspace = true

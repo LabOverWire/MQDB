@@ -214,9 +214,9 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 | 14 | crates/mqdb-cluster/src/cluster/protocol/, docs/distributed-design.md (Part 2) |
 | 15 | crates/mqdb-cluster/src/cluster/node_controller/unique.rs, crates/mqdb-cluster/src/cluster/node_controller/fk.rs, crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs (CascadeSideEffect), crates/mqdb-cluster/src/cluster/node_controller/pending.rs, crates/mqdb-cluster/src/cluster/db/constraint_store.rs, crates/mqdb-cluster/src/cluster/db/data_store.rs (FkReverseIndex), crates/mqdb-cluster/src/cluster/store_manager/constraint_ops.rs, crates/mqdb-cluster/src/cluster/store_manager/outbox.rs (CascadeOutboxPayload), crates/mqdb-cluster/src/cluster/protocol/fk.rs, docs/distributed-design.md |
 | 16 | crates/mqdb-agent/src/consumer_group.rs, crates/mqdb-agent/src/dispatcher.rs |
-| 17 | COMPLETE_MATRIX_DOC.md, COMPLETE_MATRIX_RESULTS.md, docs/distributed-design.md (A6.4, A6.5 benchmarks) |
-| 18 | crates/mqdb-agent/src/auth_config.rs, crates/mqdb-agent/src/topic_protection.rs, crates/mqdb-agent/src/topic_rules.rs, crates/mqdb-core/src/types.rs (OwnershipConfig, ScopeConfig), crates/mqdb-core/src/transport.rs (execute_with_sender), crates/mqdb-agent/src/agent/broker.rs, crates/mqdb-agent/src/agent/handlers.rs, crates/mqdb-cli/src/commands/auth.rs, crates/mqdb-cli/src/commands/acl.rs, crates/mqdb-agent/src/http/oauth.rs |
-| 19 | crates/mqdb-agent/src/http/vault_crypto.rs, crates/mqdb-agent/src/http/identity_crypto.rs, crates/mqdb-core/src/vault_keys.rs, crates/mqdb-agent/src/http/handlers.rs (vault endpoints, batch ops), crates/mqdb-agent/src/agent/handlers.rs (vault MQTT data path), crates/mqdb-agent/src/http/session_store.rs, crates/mqdb-agent/src/http/server.rs (vault routes), docs/docs/design/oauth-vault-future.md |
+| 17 | docs/benchmarks/matrix-spec.md, docs/benchmarks/matrix-results.md, docs/distributed-design.md (A6.4, A6.5 benchmarks) |
+| 18 | crates/mqdb-agent/src/auth_config.rs, crates/mqdb-agent/src/topic_protection.rs, crates/mqdb-agent/src/topic_rules.rs, crates/mqdb-core/src/types.rs (OwnershipConfig, ScopeConfig), crates/mqdb-core/src/transport.rs (execute_with_sender), crates/mqdb-agent/src/agent/broker.rs, crates/mqdb-agent/src/agent/handlers.rs, crates/mqdb-cli/src/commands/auth.rs, crates/mqdb-cli/src/commands/acl.rs, crates/mqdb-agent/src/http/providers/ |
+| 19 | crates/mqdb-agent/src/http/vault_crypto.rs, crates/mqdb-agent/src/http/identity_crypto.rs, crates/mqdb-core/src/vault_keys.rs, crates/mqdb-agent/src/http/handlers.rs (vault endpoints, batch ops), crates/mqdb-agent/src/agent/handlers.rs (vault MQTT data path), crates/mqdb-agent/src/http/session_store.rs, crates/mqdb-agent/src/http/server.rs (vault routes), docs/design/oauth-vault-future.md |
 | 20 | docs/cli-testing-guide.md, crates/mqdb-cli/src/ |
 | 21 | crates/mqdb-core/src/storage/memory_backend.rs, Cargo.toml (wasm feature) |
 
@@ -292,8 +292,8 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Wrote Chapter 7 first draft (`ch07-transport.md`, 4,474 words)
 - Sections: MQTT Bridges Initial Design, Bridge Topology Options, Bridge Overhead Problem, Transport Abstraction, Direct QUIC Transport, mTLS for Cluster Security, Performance Results, What Went Wrong (fire-and-forget bug), Lessons
 - Read all primary source files before writing: `transport.rs` (ClusterTransport trait, ClusterMessage enum), `quic_transport.rs` (QuicDirectTransport, bind/connect/send, wire format, mTLS config), `mqtt_transport.rs` (MqttTransport, dual clients, topic subscriptions), `cluster_agent/transport.rs` (ClusterTransportKind wrapper), `cluster_agent/config.rs` (cluster_port_offset=100)
-- Verified all benchmark data against `COMPLETE_MATRIX_RESULTS.md` (lines 157-248)
-- Verified root cause analysis data against `COMPLETE_MATRIX_DOC.md` (lines 325-416)
+- Verified all benchmark data against `docs/benchmarks/matrix-results.md` (lines 157-248)
+- Verified root cause analysis data against `docs/benchmarks/matrix-spec.md` (lines 325-416)
 - Verified bridge loop prevention against `docs/distributed-design.md` (lines 477-485)
 - Verified 35 ClusterMessage variants by counting `transport.rs:21-67`
 - Verified constants: SEND_TIMEOUT_MS=5000, INBOX_CHANNEL_CAPACITY=16384, MAX_MESSAGE_SIZE=10MB, cluster_port_offset=100
@@ -322,7 +322,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Verified response topic detection: `topic.starts_with("resp/") || topic.contains("/resp/")`
 - Verified internal client filter: `client_id.starts_with("mqdb-")` and forward client filter: `client_id.starts_with("mqdb-forward-")`
 - Verified $-topic protection in trie: `match_topic` returns empty vec for topics starting with '$'
-- Cross-referenced all four bugs (11.8, 11.9, 11.11, 11.14) against docs/distributed-design.md and HISTORICAL_SESSIONS.md
+- Cross-referenced all four bugs (11.8, 11.9, 11.11, 11.14) against docs/distributed-design.md and docs/internal/historical-sessions.md
 
 **Key decisions:**
 - 4,351 words, consistent with Ch5 (3,899), Ch6 (4,213), Ch7 (4,474). Chapter has substantial tables and diagrams that carry narrative weight beyond word count.
@@ -447,7 +447,7 @@ Each chapter draws from specific MQDB source files and documentation. This mappi
 - Wrote Chapter 19 placeholder draft (`ch19-vault-encryption.md`, 3,514 words)
 - Sections: Two Threat Models, Vault Crypto Primitives, Vault Lifecycle, In-Memory Key Management, Transparent MQTT Data Path, Identity Encryption, What Went Wrong, Lessons
 - Updated OUTLINE.md: inserted Chapter 19 in Part IV, renumbered existing Ch19 (Operations) → Ch20, Ch20 (WASM) → Ch21, updated dependency graph and page estimate
-- Read all primary source files before writing: `vault_crypto.rs` (VaultCrypto, PBKDF2, AES-256-GCM, field-level encrypt/decrypt), `identity_crypto.rs` (IdentityCrypto, HKDF dual keys, blind indexing, key wrapping), `vault_keys.rs` (VaultKeyStore, zeroized keys, write fences), `handlers.rs` (vault HTTP endpoints: enable/unlock/lock/disable/change/status, batch_vault_operation, batch_vault_re_encrypt), `agent/handlers.rs` (vault_transform_request, vault_pre_update, vault_decrypt_response, is_vault_eligible), `session_store.rs` (Session.vault_unlocked, set_vault_unlocked_by_canonical_id), `server.rs` (vault route definitions, vault_unlock_limiter), `docs/docs/design/oauth-vault-future.md` (batch atomicity, TOCTOU, identity race condition, schema initialization)
+- Read all primary source files before writing: `vault_crypto.rs` (VaultCrypto, PBKDF2, AES-256-GCM, field-level encrypt/decrypt), `identity_crypto.rs` (IdentityCrypto, HKDF dual keys, blind indexing, key wrapping), `vault_keys.rs` (VaultKeyStore, zeroized keys, write fences), `handlers.rs` (vault HTTP endpoints: enable/unlock/lock/disable/change/status, batch_vault_operation, batch_vault_re_encrypt), `agent/handlers.rs` (vault_transform_request, vault_pre_update, vault_decrypt_response, is_vault_eligible), `session_store.rs` (Session.vault_unlocked, set_vault_unlocked_by_canonical_id), `server.rs` (vault route definitions, vault_unlock_limiter), `docs/design/oauth-vault-future.md` (batch atomicity, TOCTOU, identity race condition, schema initialization)
 - Verified PBKDF2 iterations: 600,000 (vault_crypto.rs:16 and identity_crypto.rs:18)
 - Verified nonce: 12 bytes, salt: 32 bytes, key: 32 bytes, tag: 16 bytes
 - Verified AAD format: `"{entity}:{id}"` for vault, `"{entity}"` for identity

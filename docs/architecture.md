@@ -901,7 +901,7 @@ db.create("sessions", session).await?;
 
 ---
 
-### 7.2 Idempotency (`crates/mqdb-core/src/dedup.rs`)
+### 7.2 Idempotency (`crates/mqdb-agent/src/dedup.rs`)
 
 **Purpose:** Prevent duplicate operations from retries or network issues
 
