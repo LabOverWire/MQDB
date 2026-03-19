@@ -155,7 +155,7 @@ Three namespaces under `$DB/` handle non-CRUD operations:
 
 **`$DB/_sub/`** handles subscription management for the database's reactive subscription system (distinct from MQTT subscriptions): `subscribe`, `{id}/heartbeat`, `{id}/unsubscribe`.
 
-**`$DB/_admin/`** contains 22 operations organized into subnamespaces: `schema/{entity}/set` and `schema/{entity}/get` for schema management; `constraint/{entity}/add` and `constraint/{entity}/list` for constraints; `index/{entity}/add` for secondary index management; `backup`, `backup/list`, `restore` for backup management; `consumer-groups` and `consumer-groups/{name}` for consumer group inspection; `users/add`, `users/delete`, `users/list` for runtime user management; and nine ACL operations under `acl/rules/`, `acl/roles/`, and `acl/assignments/` for access control.
+**`$DB/_admin/`** contains 23 operations organized into subnamespaces: `schema/{entity}/set` and `schema/{entity}/get` for schema management; `constraint/{entity}/add` and `constraint/{entity}/list` for constraints; `index/{entity}/add` for secondary index management; `backup`, `backup/list`, `restore` for backup management; `consumer-groups` and `consumer-groups/{name}` for consumer group inspection; `users/add`, `users/delete`, `users/list` for runtime user management; nine ACL operations under `acl/rules/`, `acl/roles/`, and `acl/assignments/` for access control; and `catalog` for entity introspection.
 
 ### Event Topics
 

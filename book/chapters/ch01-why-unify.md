@@ -1,10 +1,10 @@
 # Chapter 1: Why Unify Messaging and Storage?
 
-Every distributed application needs two things: a place to store state and a way to propagate changes. In practice, this means a database and a message broker. The database holds truth. The broker moves it around.
+Every distributed application needs two things: a place to store state and a way to propagate changes. In practice, this means a database and a message broker. The database holds truth. The broker moves gossip, and sometimes the truth around.
 
 These two systems have evolved independently for decades. Relational databases perfected transactions and consistency. Message brokers — from IBM MQ to RabbitMQ to Apache Kafka — perfected asynchronous delivery and decoupling. The division of labor seems natural: one system stores, the other streams.
 
-But the seam between them is where the hardest problems live.
+But the seam between them is where the interesting problems live.
 
 This book follows the design and implementation of MQDB, a distributed reactive database that speaks MQTT natively and treats storage and messaging as a single concern. Every decision, bug, and tradeoff comes from building it. It shows the gap between concept and implementation, and the process of bridging them.
 
@@ -34,7 +34,7 @@ You cannot wrap these two independent systems in a single atomic transaction wit
 
 ### Change Data Capture
 
-One popular mitigation is Change Data Capture (CDC). It works by letting the application write to the database only. A separate process — Debezium tailing the PostgreSQL WAL, or Maxwell reading the MySQL binlog — picks up committed changes and publishes them to the broker.
+One popular mitigation is Change Data Capture (CDC). Simply put, it works by letting the application write to the database only. A separate process — Debezium tailing the PostgreSQL WAL, or Maxwell reading the MySQL binlog — picks up committed changes and publishes them to the broker.
 
 CDC eliminates dual writes. The database is the single source of truth, and events are derived from committed state. But CDC introduces its own challenges:
 
@@ -78,7 +78,7 @@ This is the question MQDB tries to answer.
 
 ## 1.2 The Core Insight
 
-At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. They differ in lifetime — a subscription persists across sessions while a record may be ephemeral — and in access patterns. But the storage mechanics are the same: serialize a value, compute a partition, write to a key.
+At the storage layer, a database write and a message broker subscription are structurally identical operations. Both are keyed writes to partitioned stores. They differ in lifetime — a record persists across sessions while a subcription may be ephemeral — and in access patterns. But the storage mechanics are the same: serialize a value, compute a partition, write to a key.
 
 When a database inserts a record, it writes a value keyed by entity and identifier:
 
@@ -98,12 +98,12 @@ When a session connects, the broker writes session state keyed by client identif
 
 ```
 key:   _sessions/client-7
-value: {"connected_node": 1, "clean_start": false}
+value: {"connected_node": 1, "clean_session": false}
 ```
 
 Strip away the domain-specific semantics, and every operation reduces to the same primitive:
 
-> Given a key, write a value. Updates overwrite existing keys. Deletes write tombstones or remove keys. Reads are the only operation that does not modify storage. Everything else is a write.
+> Given a key, write a value. Updates overwrite existing keys. Deletes write tombstones or remove keys. A read is the only operation that does not modify storage. Everything else is a write.
 
 This is the core insight. If both database records and broker state are keyed writes, then the machinery for managing them — partitioning, replication, consistency, querying — can be unified.
 
@@ -192,13 +192,13 @@ MQDB is three things layered on top of each other:
 
 At its core, MQDB is a key-value database with a document model. Records are JSON objects stored in named entities (collections). The database supports schemas with type validation, unique constraints (single and composite), foreign keys with cascade/restrict/set-null policies, not-null constraints, secondary indexes, and filter operators for queries.
 
-What makes it reactive is that every write — create, update, delete — produces an observable event. Clients subscribe to entity changes using wildcard patterns (`users/#` catches all user changes, `+/123` catches changes to ID 123 across all entities). Subscriptions can be broadcast (all consumers receive all events), load-balanced (round-robin across a consumer group), or ordered (partition-sticky routing so events for the same key always reach the same consumer).
+What makes it reactive is that every write — create, update, delete — produces an observable event. Clients subscribe to entity changes using MQTT wildcard patterns (`$DB/users/events/#` catches all user changes, `$DB/+/events/#` catches changes across all entities). Subscriptions can be broadcast (all consumers receive all events), load-balanced (round-robin across a consumer group), or ordered (partition-sticky routing so events for the same key always reach the same consumer).
 
 The reactive core also includes an outbox with configurable retry logic and a dead letter queue. This ensures that events derived from writes survive crashes without a separate relay process — because events _are_ writes.
 
 ### Layer 2: MQTT Broker
 
-The database is embedded inside a full MQTT 5.0 broker. For this, a purpose-built MQTT broker was used. In order to truly embed transactions within the MQTT pipeline, one must intercept MQTT events as they are processed by the broker. The advantage is that the protocol is the still MQTT, so standard MQTT clients connect, subscribe to topics, publish messages, and use QoS 0/1/2 delivery guarantees. The broker supports TLS, QUIC transport, password-based authentication (Argon2), SCRAM-SHA-256 challenge-response, JWT tokens (symmetric and asymmetric), and federated JWT with multiple issuers. These are necessary if the premise is to flatten the stack into a single system.
+The database is embedded inside a full MQTT 5.0 broker. For this, a purpose-built MQTT broker was used. In order to truly embed transactions within the MQTT pipeline, one must intercept MQTT events as they are processed by the broker. The advantage is that the protocol is still MQTT, so standard MQTT clients connect, subscribe to topics, publish messages, and use QoS 0/1/2 delivery guarantees. The broker supports TLS, QUIC transport, password-based authentication (Argon2), SCRAM-SHA-256 challenge-response, JWT tokens (symmetric and asymmetric), and federated JWT with multiple issuers. These are necessary if the premise is to flatten the stack into a single system.
 
 The broker and the database share a single storage layer. MQTT session state (subscriptions, QoS inflight messages, retained messages) and database records live in the same key-value store, managed by the same replication pipeline. This sharing is what eliminates the two-system problem.
 
@@ -217,7 +217,7 @@ These three layers map to three deployment modes:
 ```rust
 let db = Database::open("./data/mydb").await?;
 let user = json!({"name": "Alice", "email": "alice@example.com"});
-let created = db.create("users".into(), user, None, None, &ScopeConfig::default()).await?;
+let created = db.create("users".into(), user, None, None, None, &ScopeConfig::default()).await?;
 ```
 
 **Standalone Agent.** A single-node process running the MQTT broker with the embedded database. Clients connect via MQTT and perform database operations through the `$DB/` topic namespace. Authentication, ACLs, and topic protection are available. This mode suits single-server deployments where MQTT integration is needed but distribution is not.
@@ -257,7 +257,7 @@ A more recent wave inverts the architecture entirely: instead of making the serv
 
 **Zero** (from Rocicorp, the Replicache team) distributes the backend all the way to the UI's main thread. Client-side queries run against a local cache and return results in the next frame. Mutations flow back to Postgres through a sync server. The developer experience is that of an embedded database, but Postgres remains the source of truth.
 
-**Ditto** is the closest spiritual cousin to MQDB in the physical world. Devices form ad-hoc mesh networks over Bluetooth, peer-to-peer WiFi, and LAN, using CRDTs for conflict resolution. It is cloud-optional — a "Big Peer" server component exists but is not required for device-to-device sync. Ditto has real production deployments (Chick-fil-A's POS systems, airline operations for Delta and Japan Airlines) and raised $82M in Series B funding in 2025. The difference from MQDB: Ditto is transport-agnostic targeting mobile and edge; MQDB is MQTT-native targeting a unified protocol from sensor to browser to server cluster.
+**Ditto** is the closest spiritual cousin to MQDB in the physical world. Devices form ad-hoc mesh networks over Bluetooth, peer-to-peer WiFi, and LAN, using CRDTs for conflict resolution. It is cloud-optional — a "Big Peer" server component exists but is not required for device-to-device sync. The difference from MQDB: Ditto targets offline first mobile and edge with a custom SQL based interface; MQDB is MQTT-native targeting a unified protocol from sensor to browser to server cluster.
 
 All of these converge on one idea: the UI should be a reactive function of local state, and network sync should be an implementation detail.
 
@@ -307,19 +307,11 @@ But the architecture does not preclude SQL. The storage layer already supports s
 
 ### Eventual Consistency
 
-MQDB replicates data asynchronously. The primary acknowledges the client without waiting for replicas to confirm. This is eventual consistency, and it fits a reactive data model: clients subscribe to change events rather than polling, so the data arrives when it arrives. Chapter 4 explains why replica staleness is less of a concern than it sounds, and Chapter 5 covers the replication pipeline in detail.
+In cluster mode, MQDB replicates data asynchronously. The primary acknowledges the client without waiting for replicas to confirm. This is eventual consistency, and it fits a reactive data model: clients subscribe to change events rather than polling, so the data arrives when it arrives. Chapter 4 explains why replica staleness is less of a concern than it sounds, and Chapter 5 covers the replication pipeline in detail.
 
 For users who need stronger durability guarantees — acknowledged writes surviving node failure — the infrastructure for synchronous replication exists in the codebase (a quorum tracker that returns a notification channel for quorum confirmation). Sync replication is a planned opt-in upgrade, not the default.
 
 Chapter 5 covers the replication pipeline, sequence ordering, and gap catchup in detail.
-
-### Fixed Partition Count
-
-MQDB uses 256 fixed partitions. This number never changes. There is no partition splitting, and no dynamic scaling of the partition count.
-
-256 was chosen as a balance between granularity and overhead. With 3 nodes, each node handles ~85 primary partitions — enough for balanced distribution. With 16 nodes, each handles 16. With a replication factor of 2, each partition requires two distinct nodes (one primary, one replica), yielding 512 total role assignments. Beyond ~256 nodes, some nodes would have no primary partitions; beyond ~512, some nodes would have no role at all.
-
-The fixed count is a deliberate tradeoff between horizontal scaling and synchronization overhead. Every heartbeat carries a 256-bit bitmap of partition assignments. Raft consensus tracks a fixed-size partition map. Rebalancing moves whole partitions between nodes. All of this is O(256) — constant, regardless of data size. Dynamic partition splitting (as in CockroachDB's ranges or DynamoDB's automatic splitting) would let MQDB scale beyond 256 nodes, but the partition map, heartbeat protocol, and rebalancing logic would all grow with the data, not just the cluster size. For the target deployment — 3 to 16 node clusters — 256 fixed partitions provide fine-grained distribution with bounded control plane overhead.
 
 ### No Cross-Partition Transactions
 

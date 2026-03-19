@@ -146,7 +146,7 @@ The event loop is a biased `tokio::select!` with 12 branches, each representing 
 | Priority | Branch | Frequency | Purpose |
 |----------|--------|-----------|---------|
 | 1 | tick_interval | 10ms | Send tick to processor, apply partition map changes |
-| 2 | rx_batch | Per tick (~100ms) | Apply heartbeat updates, handle dead nodes |
+| 2 | rx_batch | Per tick (~10ms) | Apply heartbeat updates, handle dead nodes |
 | 3 | rx_main_queue | Continuous | Process cluster messages |
 | 4 | ttl_cleanup | 60s | Remove TTL-expired entities |
 | 5 | cleanup_interval | 3600s | Session expiry, idempotency cleanup |
