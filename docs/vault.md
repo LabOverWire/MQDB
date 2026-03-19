@@ -28,14 +28,15 @@ Vault keys exist only in process memory. When the server restarts, all keys are 
 
 Vault encryption recurses through the entire JSON structure of each record:
 
-**Encrypted** — every string value at any depth:
+**Encrypted** — every leaf value at any depth:
 ```
 Before:  {"name": "Alice", "profile": {"city": "Paris", "age": 30}, "tags": ["personal", "draft"]}
-After:   {"name": "base64(...)", "profile": {"city": "base64(...)", "age": 30}, "tags": ["base64(...)", "base64(...)"]}
+After:   {"name": "base64(...)", "profile": {"city": "base64(...)", "age": "base64(...)"}, "tags": ["base64(...)", "base64(...)"]}
 ```
 
-**Not encrypted** — non-string values at any depth:
-- Numbers, booleans, and null remain cleartext (preserves queryability for filters and sorting)
+Non-string values (numbers, booleans, null) are serialized with a `\x01` prefix before encryption. On decryption, the prefix signals type restoration — a number decrypts back to a number, not a string.
+
+**Not encrypted** — structural metadata:
 - Object structure (keys, nesting) and array lengths remain visible
 
 **Skipped fields:**
