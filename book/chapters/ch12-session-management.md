@@ -238,7 +238,7 @@ Sessions with a non-zero `session_expiry_interval` expire when the client has be
 - If `session_expiry_interval` is 0 → not expired. In MQDB, zero means "persist indefinitely" — the session survives across disconnects without expiring. This is the persistent session default.
 - Otherwise, expired when `now - last_seen > session_expiry_interval * 1000` (the interval is in seconds, timestamps are in milliseconds).
 
-The `handle_session_cleanup` function runs periodically in the cluster agent's event loop. In addition to session expiry, it also handles cleanup for three other time-sensitive subsystems: idempotency records (from deduplication), stale consumer group offsets, and expired unique constraint reservations. All four cleanup operations share the same timer tick — a pragmatic choice that avoids maintaining four separate timers for what are all essentially "find expired entries and remove them" operations.
+The `handle_session_cleanup` function runs periodically in the cluster agent's event loop. In addition to session expiry, it also handles cleanup for three other time-sensitive subsystems: idempotency records (from deduplication), stale consumer offsets, and expired unique constraint reservations. All four cleanup operations share the same timer tick — a pragmatic choice that avoids maintaining four separate timers for what are all essentially "find expired entries and remove them" operations.
 
 For sessions specifically, the function calls `cleanup_expired_sessions(now)` on the `SessionStore`, which atomically removes all expired sessions and returns them. For each expired session, `clear_expired_session_subscriptions()` performs a cascade of replicated cleanup operations:
 

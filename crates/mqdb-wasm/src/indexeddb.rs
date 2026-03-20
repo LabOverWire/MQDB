@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use js_sys::Uint8Array;
-use mqdb::error::{Error, Result};
-use mqdb::storage::{AsyncBatchOperations, AsyncStorageBackend};
+use mqdb_core::error::{Error, Result};
+use mqdb_core::storage::{AsyncBatchOperations, AsyncStorageBackend};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;

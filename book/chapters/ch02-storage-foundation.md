@@ -25,7 +25,7 @@ Why a flat keyspace instead of separate column families or tables? Because the a
 
 ### Lexicographic Ordering
 
-The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A range scan between `idx/users/age/{encoded_30}` and `idx/users/age/{encoded_65}` returns all user IDs with ages in that range — provided the numeric encoding preserves sort order in byte representation, which is the subject of the next subsection. Every query the database supports reduces to either a point lookup, a prefix scan, or a range scan over sorted bytes.
+The key encoding is designed so that lexicographic byte ordering produces meaningful results. A prefix scan on `data/users/` returns all users. A prefix scan on `idx/users/email/alice@example.com/` returns all user IDs with that email. A range scan between `idx/users/age/{encoded_30}` and `idx/users/age/{encoded_65}` returns all user IDs with ages in that range — the numeric encoding preserves sort order in byte representation, as described in the next subsection. Every query the database supports reduces to either a point lookup, a prefix scan, or a range scan over sorted bytes.
 
 This works because the key encoding function for data keys follows a rigid structure:
 
@@ -107,7 +107,7 @@ The `id` field lives in the storage key, not in the JSON blob. When an entity is
 
 ## 2.2 Pluggable Storage Backends
 
-The storage layer is defined by a trait, not a concrete type. The storage trait declares seven operations:
+The storage layer is defined by a trait, not a concrete type. The storage trait declares ten operations:
 
 ```rust
 pub trait StorageBackend: Send + Sync {
@@ -115,6 +115,10 @@ pub trait StorageBackend: Send + Sync {
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
     fn remove(&self, key: &[u8]) -> Result<()>;
     fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize>;
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>>;
+    fn prefix_scan_batch(&self, prefix: &[u8], batch_size: usize,
+        after_key: Option<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
     fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
     fn batch(&self) -> Box<dyn BatchOperations>;
     fn flush(&self) -> Result<()>;
@@ -127,7 +131,7 @@ Three implementations exist:
 
 **Memory** is a sorted map behind a read-write lock. It provides the same sort order as Fjall — the map iterates in sorted key order, just like an LSM-tree. Prefix scans use range iteration with a predicate. This backend runs in tests and in WASM where filesystem access is unavailable.
 
-**Encrypted** is a decorator that wraps any other backend. It uses AES-256-GCM for per-value encryption with a key derived from a passphrase via PBKDF2 (600,000 iterations of HMAC-SHA256). Each value gets a fresh 12-byte random nonce. The storage key itself is used as Associated Authenticated Data (AAD) for the GCM cipher — meaning a value encrypted under key `data/users/42` cannot be decrypted if someone moves it to key `data/users/99`. On first open, the backend generates a random 32-byte salt, stores it at `_crypto/salt`, encrypts a known plaintext (`"mqdb"`) and stores it at `_crypto/check`. On subsequent opens, it re-derives the key and attempts to decrypt the check value — a wrong passphrase fails immediately rather than silently producing garbage on later reads.
+**Encrypted** is a decorator that wraps any other backend. It uses AES-256-GCM for per-value encryption with a key derived from a passphrase via PBKDF2. Each value gets a fresh 12-byte random nonce. The storage key itself is used as Associated Authenticated Data (AAD) for the GCM cipher — meaning a value encrypted under key `data/users/42` cannot be decrypted if someone moves it to key `data/users/99`. On first open, the backend generates a random 32-byte salt, stores it at `_crypto/salt`, encrypts a known plaintext and stores it at `_crypto/check`. On subsequent opens, it re-derives the key and attempts to decrypt the check value — a wrong passphrase fails immediately rather than silently producing garbage on later reads.
 
 ### The Batch Contract
 
@@ -172,14 +176,14 @@ pub struct Database {
 }
 ```
 
-The open method is the entry point. It opens storage (encrypted or plain, depending on config), loads schemas and constraints from metadata keys, loads subscriptions from storage, and spawns up to three background tasks: the outbox processor (retries failed event dispatches), TTL cleanup (scans for expired records), and consumer timeout cleanup (evicts stale members from consumer groups). A watch channel coordinates shutdown — sending a signal triggers all background tasks to exit their loops.
+The open method is the entry point. It opens storage (encrypted or plain, depending on config), loads schemas and constraints from metadata keys, loads subscriptions from storage, and spawns three background tasks: the outbox processor (retries failed event dispatches), TTL cleanup (scans for expired records), and consumer timeout cleanup (evicts stale members from consumer groups). A watch channel coordinates shutdown — sending a signal triggers all background tasks to exit their loops.
 
 ### The Create Path
 
 Walking through the create path reveals the atomicity model:
 
 1. **Apply schema defaults.** If a schema exists for this entity, insert any missing fields that have default values defined.
-2. **Generate or accept ID.** If the input JSON contains an `id` field, use it. Otherwise, generate a sequential ID by reading a per-entity counter from metadata, incrementing it, and writing it back. A mutex serializes ID generation to prevent duplicates.
+2. **Generate or accept ID.** If the input JSON contains an `id` field, use it. Otherwise, generate a hash-based ID: hash the entity name, payload bytes, node ID, and current nanosecond timestamp using `DefaultHasher`, then iterate suffixes 0..1000 to find one where the resulting ID maps to the target partition via CRC32. The format is `{hash:016x}-{suffix:04x}`. If no suffix maps correctly within 1000 attempts, a fallback format embeds the partition number directly.
 3. **Handle TTL.** If a TTL is present, compute an expiration timestamp and remove the TTL field. The TTL cleanup task will delete the record after expiration.
 4. **Inject version.** Set the version counter to 1. Every update increments this field, enabling optimistic concurrency on updates via the expect-value precondition.
 5. **Validate schema.** If a schema exists, verify all required fields are present and all provided values match their declared types.
@@ -364,12 +368,15 @@ Chapter 1 described the two-system problem: data and events served by separate s
 The outbox manages entries under a dedicated key prefix. Enqueueing an event adds a stored entry to the batch:
 
 ```rust
-pub fn enqueue_event(&self, batch: &mut BatchWriter, operation_id: &str, event: &ChangeEvent) {
+pub fn enqueue_events(&self, batch: &mut BatchWriter, operation_id: &str, events: &[ChangeEvent]) {
     let key = format!("_outbox/{operation_id}");
     let stored = StoredOutboxEntry {
-        events: vec![event.clone()],
+        events: events.to_vec(),
         retry_count: 0,
-        created_at: now_unix_secs(),
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
         dispatched_count: 0,
     };
     batch.insert(key.into_bytes(), serde_json::to_vec(&stored).unwrap_or_default());

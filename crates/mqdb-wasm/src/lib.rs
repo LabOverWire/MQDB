@@ -20,8 +20,8 @@ pub use cursor::WasmCursor;
 pub use indexeddb::{IndexedDbBackend, IndexedDbBatch};
 
 use indexeddb::IndexedDbBackend as IdbBackend;
-use mqdb::storage::{AsyncStorageBackend, Storage};
-use mqdb::{
+use mqdb_core::storage::{AsyncStorageBackend, Storage};
+use mqdb_core::{
     AdminOperation, ChangeEvent, FieldDefinition, FieldType, Filter, OnDeleteAction, Operation,
     Pagination, Request, Schema, SortDirection, SortOrder, build_request, match_pattern,
     parse_admin_topic, parse_db_topic,
@@ -69,7 +69,7 @@ impl WasmDatabase {
     #[allow(clippy::missing_errors_doc)]
     pub async fn open_encrypted(db_name: &str, passphrase: &str) -> Result<WasmDatabase, JsValue> {
         use crypto::{CHECK_KEY, CHECK_PLAINTEXT, CryptoHandle, SALT_KEY, generate_salt};
-        use mqdb::storage::AsyncStorageBackend;
+        use mqdb_core::storage::AsyncStorageBackend;
 
         let backend = IdbBackend::open(db_name)
             .await

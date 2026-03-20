@@ -263,7 +263,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mqdb"
+name = "mqdb-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -271,16 +271,12 @@ dependencies = [
  "crc32fast",
  "flume",
  "glob",
- "js-sys",
  "regex",
  "serde",
  "serde_json",
  "thiserror",
  "tracing",
  "uuid",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
  "zeroize",
 ]
 
@@ -291,7 +287,7 @@ dependencies = [
  "console_error_panic_hook",
  "futures-channel",
  "js-sys",
- "mqdb",
+ "mqdb-core",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

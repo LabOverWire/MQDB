@@ -58,7 +58,7 @@ The replication factor is capped at the number of available nodes. A single-node
 
 **Phase 2: Add missing replicas.** After moving primaries, some partitions may lack replicas — either because the cluster previously had too few nodes for the desired replication factor, or because the primary moves in Phase 1 changed the replica configuration. This phase scans all partitions that were not touched in Phase 1, finds those with fewer replicas than desired (RF - 1), and assigns new replicas from available nodes.
 
-**Phase 3: Redistribute replicas.** Even after Phases 1 and 2, replica distribution can be uneven. Some nodes may hold far more replicas than others — particularly a new node that joined with no partitions. This phase identifies underweight nodes (replica count below half the ideal) and overloaded nodes (replica count above ideal), then moves replicas from overloaded to underweight by swapping the overloaded node out of a partition's replica list and substituting the underweight node.
+**Phase 3: Redistribute replicas.** Even after Phases 1 and 2, replica distribution can be uneven. Some nodes may hold far more replicas than others — particularly a new node that joined with no partitions. This phase identifies underweight nodes (replica count at or below half the ideal) and overloaded nodes (replica count above ideal), then moves replicas from overloaded to underweight by swapping the overloaded node out of a partition's replica list and substituting the underweight node.
 
 A concrete example: consider a 2-node cluster where Nodes 1 and 2 each hold 128 primaries and 128 replicas. Node 3 joins. The rebalancer runs twice — once immediately, and once after a 30-second periodic balance check — to achieve a balanced distribution.
 
