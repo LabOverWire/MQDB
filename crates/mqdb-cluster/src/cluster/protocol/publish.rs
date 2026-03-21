@@ -43,7 +43,7 @@ impl ForwardedPublish {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| d.as_micros() as u64);
 
         Self {
             origin_node,
