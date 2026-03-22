@@ -207,7 +207,7 @@ impl MessageProcessor {
 
         let mut hasher = DefaultHasher::new();
         fwd.origin_node.hash(&mut hasher);
-        fwd.timestamp_ms.hash(&mut hasher);
+        fwd.timestamp_us.hash(&mut hasher);
         fwd.topic.hash(&mut hasher);
         fwd.payload.hash(&mut hasher);
         hasher.finish()

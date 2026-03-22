@@ -24,7 +24,7 @@ pub struct ForwardedPublish {
     pub retain: bool,
     pub payload: Vec<u8>,
     pub targets: Vec<ForwardTarget>,
-    pub timestamp_ms: u64,
+    pub timestamp_us: u64,
 }
 
 impl ForwardedPublish {
@@ -41,7 +41,7 @@ impl ForwardedPublish {
         targets: Vec<ForwardTarget>,
     ) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp_ms = SystemTime::now()
+        let timestamp_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_micros() as u64);
 
@@ -52,7 +52,7 @@ impl ForwardedPublish {
             retain,
             payload,
             targets,
-            timestamp_ms,
+            timestamp_us,
         }
     }
 
@@ -68,7 +68,7 @@ impl ForwardedPublish {
 
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.origin_node.get().to_be_bytes());
-        buf.extend_from_slice(&self.timestamp_ms.to_be_bytes());
+        buf.extend_from_slice(&self.timestamp_us.to_be_bytes());
         buf.extend_from_slice(&(topic_bytes.len() as u16).to_be_bytes());
         buf.extend_from_slice(topic_bytes);
         buf.push(self.qos);
@@ -99,7 +99,7 @@ impl ForwardedPublish {
         }
 
         let origin_node = u16::from_be_bytes([bytes[1], bytes[2]]);
-        let timestamp_ms = u64::from_be_bytes([
+        let timestamp_us = u64::from_be_bytes([
             bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
         ]);
         let topic_len = u16::from_be_bytes([bytes[11], bytes[12]]) as usize;
@@ -169,7 +169,7 @@ impl ForwardedPublish {
             retain,
             payload,
             targets,
-            timestamp_ms,
+            timestamp_us,
         })
     }
 }

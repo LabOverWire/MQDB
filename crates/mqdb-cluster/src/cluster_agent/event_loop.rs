@@ -153,6 +153,9 @@ impl ClusteredAgent {
             }
         }
 
+        if let Some(task) = _local_publish_task {
+            task.abort();
+        }
         broker_handle.abort();
         Ok(())
     }
@@ -570,7 +573,9 @@ impl ClusteredAgent {
         semaphore: &Arc<tokio::sync::Semaphore>,
         req: crate::cluster::LocalPublishRequest,
     ) {
-        let permit = Arc::clone(semaphore).acquire_owned().await;
+        let Ok(permit) = Arc::clone(semaphore).acquire_owned().await else {
+            return;
+        };
         let client = admin_client.clone();
         tokio::spawn(async move {
             let mut options = mqtt5::PublishOptions {
