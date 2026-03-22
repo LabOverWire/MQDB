@@ -17,7 +17,8 @@ use bebytes::BeBytes;
 use mqtt5::QoS;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
-    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, RetainedSetEvent,
+    ClientSubscribeEvent, ClientUnsubscribeEvent, MessageDeliveredEvent, PublishAction,
+    RetainedSetEvent,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -371,7 +372,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
     fn on_client_publish<'a>(
         &'a self,
         event: ClientPublishEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
         let node_id = self.node_id;
         Box::pin(async move {
             debug!(
@@ -384,12 +385,12 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
 
             if event.client_id.starts_with("mqdb-forward-") {
                 trace!("skipping forwarded publish from internal client");
-                return;
+                return PublishAction::Continue;
             }
 
             if event.topic.starts_with("_mqdb/") {
                 trace!("skipping internal cluster topic");
-                return;
+                return PublishAction::Continue;
             }
 
             if event.topic.starts_with("$DB/") {
@@ -397,7 +398,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     self.vault_key_store.read_fence(uid).await;
                 }
                 self.handle_db_publish(node_id, &event).await;
-                return;
+                return PublishAction::Handled;
             }
 
             self.route_and_forward_publish(node_id, &event).await;
@@ -419,6 +420,8 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     ctrl.write_or_forward(write).await;
                 }
             }
+
+            PublishAction::Continue
         })
     }
 

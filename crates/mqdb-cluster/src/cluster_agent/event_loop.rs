@@ -100,7 +100,7 @@ impl ClusteredAgent {
 
         let rx_local_publish = self.take_local_publish_receiver().await;
 
-        let _local_publish_task = if let Some(rx) = rx_local_publish {
+        let local_publish_task = if let Some(rx) = rx_local_publish {
             let client = admin_client.clone();
             Some(tokio::spawn(Self::run_local_publish_loop(client, rx)))
         } else {
@@ -153,7 +153,7 @@ impl ClusteredAgent {
             }
         }
 
-        if let Some(task) = _local_publish_task {
+        if let Some(task) = local_publish_task {
             task.abort();
         }
         broker_handle.abort();
