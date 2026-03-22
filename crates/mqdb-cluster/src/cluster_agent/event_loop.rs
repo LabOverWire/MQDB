@@ -100,6 +100,13 @@ impl ClusteredAgent {
 
         let rx_local_publish = self.take_local_publish_receiver().await;
 
+        let _local_publish_task = if let Some(rx) = rx_local_publish {
+            let client = admin_client.clone();
+            Some(tokio::spawn(Self::run_local_publish_loop(client, rx)))
+        } else {
+            None
+        };
+
         let _http_task = self.spawn_http_task(service_username, service_password);
 
         self.recover_pending_lwts().await;
@@ -139,14 +146,6 @@ impl ClusteredAgent {
                 Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
                 }
-                Some(Ok(req)) = async {
-                    match &rx_local_publish {
-                        Some(rx) => Some(rx.recv_async().await),
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    Self::handle_local_publish(&admin_client, req, rx_local_publish.as_ref()).await;
-                }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
                     break;
@@ -154,6 +153,9 @@ impl ClusteredAgent {
             }
         }
 
+        if let Some(task) = _local_publish_task {
+            task.abort();
+        }
         broker_handle.abort();
         Ok(())
     }
@@ -550,46 +552,46 @@ impl ClusteredAgent {
         }
     }
 
-    async fn handle_local_publish(
-        admin_client: &mqtt5::MqttClient,
-        req: crate::cluster::LocalPublishRequest,
-        rx_local_publish: Option<&flume::Receiver<crate::cluster::LocalPublishRequest>>,
+    async fn run_local_publish_loop(
+        admin_client: mqtt5::MqttClient,
+        rx: flume::Receiver<crate::cluster::LocalPublishRequest>,
     ) {
-        const BATCH_SIZE: u32 = 64;
-        let mut options = mqtt5::PublishOptions {
-            qos: mqtt5::QoS::from(req.qos),
-            retain: req.retain,
-            ..Default::default()
-        };
-        options.properties.user_properties = req.user_properties;
-        if let Err(e) = admin_client
-            .publish_with_options(&req.topic, req.payload, options)
-            .await
-        {
-            warn!(error = %e, topic = %req.topic, "failed to publish local request");
-        }
+        const MAX_CONCURRENT: usize = 256;
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
-        if let Some(rx) = rx_local_publish {
-            let mut count = 1u32;
+        while let Ok(req) = rx.recv_async().await {
+            Self::spawn_local_publish(&admin_client, &semaphore, req).await;
+
             while let Ok(req) = rx.try_recv() {
-                let mut options = mqtt5::PublishOptions {
-                    qos: mqtt5::QoS::from(req.qos),
-                    retain: req.retain,
-                    ..Default::default()
-                };
-                options.properties.user_properties = req.user_properties;
-                if let Err(e) = admin_client
-                    .publish_with_options(&req.topic, req.payload, options)
-                    .await
-                {
-                    warn!(error = %e, topic = %req.topic, "failed to publish local request");
-                }
-                count += 1;
-                if count.is_multiple_of(BATCH_SIZE) {
-                    tokio::task::yield_now().await;
-                }
+                Self::spawn_local_publish(&admin_client, &semaphore, req).await;
             }
         }
+    }
+
+    async fn spawn_local_publish(
+        admin_client: &mqtt5::MqttClient,
+        semaphore: &Arc<tokio::sync::Semaphore>,
+        req: crate::cluster::LocalPublishRequest,
+    ) {
+        let Ok(permit) = Arc::clone(semaphore).acquire_owned().await else {
+            return;
+        };
+        let client = admin_client.clone();
+        tokio::spawn(async move {
+            let mut options = mqtt5::PublishOptions {
+                qos: mqtt5::QoS::from(req.qos),
+                retain: req.retain,
+                ..Default::default()
+            };
+            options.properties.user_properties = req.user_properties;
+            if let Err(e) = client
+                .publish_with_options(&req.topic, req.payload, options)
+                .await
+            {
+                warn!(error = %e, topic = %req.topic, "failed to publish local request");
+            }
+            drop(permit);
+        });
     }
 
     async fn recover_pending_outbox(&self) {

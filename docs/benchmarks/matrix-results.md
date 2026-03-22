@@ -1,473 +1,394 @@
-# Complete Benchmark Matrix Results
+# MQDB Benchmark Results - 2026-03-20
 
-Results from the complete benchmark matrix comparing MQTT bridges vs Direct QUIC transport.
-
-**Test Date:** 2026-01-19 (updated 2026-01-20 with improved async benchmarks, 2026-01-26 with triplicate topology comparison)
-
-## Executive Summary
-
-**Key Finding:** Direct QUIC transport eliminates the bridge overhead penalty, providing uniform ~8,500 insert / ~16,500 get / ~9,000 update ops/s across all nodes regardless of topology.
-
-| Metric | Agent Mode | Cluster MQTT | Cluster QUIC |
-|--------|------------|--------------|--------------|
-| Sync Insert | 6,647 ops/s | 999-2,674 ops/s | 3,758-4,415 ops/s |
-| Sync Get | 7,756 ops/s | 1,102-5,572 ops/s | 3,556-5,916 ops/s |
-| Sync Update | 6,776 ops/s | 656-5,489 ops/s | 3,648-4,648 ops/s |
-| **Async Insert** | **15,652 ops/s** | 0-9,084 ops/s | 8,354-8,664 ops/s |
-| **Async Get** | **19,726 ops/s** | 977-15,548 ops/s | 15,972-16,996 ops/s |
-| **Async Update** | **4,853 ops/s** | 542-9,800 ops/s | 8,604-9,758 ops/s |
-| Pubsub | 186,067 msg/s | 175-200k msg/s | 170-210k msg/s |
-
-**Key Insights:**
-- Agent mode async ops achieve **15,600+ insert**, **19,700+ get** ops/s (no replication overhead)
-- QUIC cluster: **uniform ~8,500 insert / ~16,500 get** across all nodes regardless of topology
-- MQTT cluster: **severe degradation** with bridges (nodes with 2 bridges drop to ~1,500-2,000 ops/s)
-- QUIC variance: **1.03x** vs MQTT's **10x+** variance between nodes
+**Date:** 2026-03-20
+**Transport:** Direct QUIC (mTLS)
+**Methodology:** Triplicate runs per experiment, mean +/- stdev reported
+**Platform:** macOS (Darwin 25.3.0), local loopback
 
 ---
 
-## Agent Mode Baseline
+## 1. Executive Summary
 
-| Metric | Saturation Point |
-|--------|------------------|
-| Pubsub | **186,067 msg/s** |
-| Sync Insert | **6,647 ops/s** |
-| Sync Get | **7,756 ops/s** |
-| Sync Update | **6,776 ops/s** |
-| Sync List | **474 ops/s** |
-| **Async Insert** | **15,652 ops/s** |
-| **Async Get** | **19,726 ops/s** |
-| **Async Update** | **4,853 ops/s** |
+| Metric | Agent | Partial | Upper | Full |
+|--------|-------|---------|-------|------|
+| Sync Insert (ops/s) | 3978 | 2698-2916 | 2731-2994 | 2604-2903 |
+| Sync Get (ops/s) | 6440 | 3143-4856 | 3171-4905 | 3092-4745 |
+| Sync Update (ops/s) | 4929 | 3061-3284 | 3013-3328 | 2854-3062 |
+| Sync List (ops/s) | 193 | 5-5 | 5-5 | 5-5 |
+| Sync Delete (ops/s) | 5153 | 3328-3835 | 3259-3693 | 3010-3576 |
+| **Async Insert (ops/s)** | **8172** | 4605-4852 | 4198-4835 | 4577-4692 |
+| **Async Get (ops/s)** | **18073** | 15622-15759 | 14643-15059 | 15309-15780 |
+| **Async Update (ops/s)** | **11143** | 6098-6227 | 3465-5921 | 5714-5923 |
+| **Async Delete (ops/s)** | **938** | 935-937 | 933-939 | 938-941 |
+| Same-Node PubSub (msg/s) | 145476 | 126286-129438 | 126380-133605 | 130972-132331 |
 
----
+**Key Findings:**
 
-## Part A: Same-Node PubSub (msg/s)
+- Agent mode delivers the highest throughput across all operations (no replication overhead)
+- Agent async: 8172 insert, 18073 get, 11143 update ops/s
+- Cluster async insert: 4528-4709 ops/s across topologies (vs 8172 agent)
+- Cross-node pubsub saturates at ~1003 msg/s (QoS 0 design limit)
+- Same-node pubsub: ~126-145k msg/s across all cluster configurations
 
-### MQTT Transport
-| Config | Node | Bridges | Run 1 | Run 2 | Run 3 | Mean |
-|--------|------|---------|-------|-------|-------|------|
-| Partial | N1 | 0 | 194675 | 186918 | 218619 | 200071 |
-| Partial | N2 | 1 | 176882 | 177347 | 178502 | 177577 |
-| Partial | N3 | 1 | 204385 | 125912 | 204203 | 178167 |
-| Upper | N1 | 2 | 206148 | 179061 | 180026 | 188412 |
-| Upper | N2 | 1 | 174377 | 174839 | 189349 | 179522 |
-| Upper | N3 | 0 | 194467 | 206202 | 189892 | 196854 |
-| Full | N1 | 2 | 202565 | 122045 | 200482 | 175031 |
-| Full | N2 | 2 | 201974 | 181733 | 197484 | 193730 |
-| Full | N3 | 2 | 184495 | 174499 | 201125 | 186706 |
-
-### Direct QUIC Transport
-| Config | Node | Run 1 | Run 2 | Run 3 | Mean |
-|--------|------|-------|-------|-------|------|
-| Partial | N1 | 171787 | 175184 | 195959 | 180977 |
-| Partial | N2 | 168658 | 222502 | 221778 | 204313 |
-| Partial | N3 | 233629 | 171417 | 198492 | 201179 |
-| Upper | N1 | 211630 | 201191 | 194693 | 202505 |
-| Upper | N2 | 213342 | 204306 | 205543 | 207730 |
-| Upper | N3 | 206064 | 185581 | 208045 | 199897 |
-| Full | N1 | 197430 | 168488 | 203741 | 189886 |
-| Full | N2 | 232529 | 206383 | 179555 | 206156 |
-| Full | N3 | 168864 | 170554 | 170358 | 169925 |
-
-**Observation:** Same-node pubsub is similar between transports (~180-210k msg/s). Transport choice doesn't affect local pub/sub.
+**Failed experiments:**
+- DD-4: runs [2, 3]
 
 ---
 
-## Part B: Cross-Node PubSub (msg/s)
+## 2. Part A: Same-Node PubSub
 
-Cross-node pubsub is rate-limited by QoS 0 saturation at ~1000 msg/s regardless of transport.
+Publisher and subscriber on the same node. Measures local broker throughput (msg/s).
 
-| Transport | Config | Sample Pairs | Mean |
-|-----------|--------|--------------|------|
-| MQTT | Partial | 1→2, 2→1, etc. | 1000-1300 |
-| QUIC | Partial | 1→2, 2→1, etc. | 1001-1002 |
-| MQTT | Upper | 1→2, 2→1, etc. | 1000-1950 |
-| QUIC | Upper | 1→2, 2→1, etc. | 1001-1003 |
-| MQTT | Full | 1→2, 2→1, etc. | 1000-2700 |
-| QUIC | Full | 1→2, 2→1, etc. | 994-1003 |
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| A1 | Agent | N/A | 1883 | 0 | 153115 | 142408 | 140904 | 145476 +/- 6658 |
+| A2 | Partial | N1 | 1883 | 0 | 127194 | 134549 | 126570 | 129438 +/- 4438 |
+| A3 | Partial | N2 | 1884 | 1 | 126309 | 126277 | 126273 | 126286 +/- 20 |
+| A4 | Partial | N3 | 1885 | 1 | 126587 | 134040 | 126536 | 129054 +/- 4318 |
+| A5 | Upper | N1 | 1883 | 2 | 136193 | 128412 | 125794 | 130133 +/- 5409 |
+| A6 | Upper | N2 | 1884 | 1 | 136872 | 134638 | 129303 | 133605 +/- 3889 |
+| A7 | Upper | N3 | 1885 | 0 | 125772 | 126969 | 126399 | 126380 +/- 598 |
+| A8 | Full | N1 | 1883 | 2 | 130763 | 131604 | 130550 | 130972 +/- 557 |
+| A9 | Full | N2 | 1884 | 2 | 134268 | 127955 | 134769 | 132331 +/- 3798 |
+| A10 | Full | N3 | 1885 | 2 | 131138 | 133716 | 128513 | 131122 +/- 2602 |
 
-**Observation:** QUIC shows more consistent cross-node throughput. MQTT occasionally spikes higher (2700 msg/s) but with high variance.
+### Summary by Topology
 
----
-
-## Part C: Sync DB Operations (ops/s)
-
-### CI: Sync Insert
-
-#### MQTT Transport
-| Config | N1 (bridges) | N2 (bridges) | N3 (bridges) | Mean |
-|--------|--------------|--------------|--------------|------|
-| Partial | 2543 (0) | 1309 (1) | 1533 (1) | 1795 |
-| Upper | 1486 (2) | 1442 (1) | 3960 (0) | 2296 |
-| Full | 2674 (2) | 1129 (2) | 1119 (2) | 1641 |
-
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean |
-|--------|-----|-----|-----|------|
-| Partial | 4143 | 4358 | 3817 | 4106 |
-| Upper | 3879 | 4074 | 4415 | 4123 |
-| Full | 3981 | 4353 | 3758 | 4031 |
-
-**QUIC Improvement:** 2-3x better than MQTT, especially for nodes with bridges.
-
-### CG: Sync Get
-
-#### MQTT Transport
-| Config | N1 | N2 | N3 | Mean |
-|--------|-----|-----|-----|------|
-| Upper | 2171 | 1687* | 5572 | 3143 |
-| Full | 1658 | 1903 | 1102 | 1554 |
-
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean |
-|--------|-----|-----|-----|------|
-| Partial | 5045 | 5916 | 3938 | 4966 |
-| Upper | 3608 | 4943 | 5708 | 4753 |
-| Full | 4910 | 5538 | 3556 | 4668 |
-
-**QUIC Improvement:** 2-3x better than MQTT.
-
-### CU: Sync Update
-
-#### MQTT Transport
-| Config | N1 | N2 | N3 | Mean |
-|--------|-----|-----|-----|------|
-| Upper | 3505 | ~0* | 5489 | 3016 |
-| Full | 930 | 1065 | 656 | 884 |
-
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean |
-|--------|-----|-----|-----|------|
-| Partial | 4209 | 4659 | 3797 | 4222 |
-| Upper | 3773 | 4252 | 4616 | 4214 |
-| Full | 4200 | 4467 | 3763 | 4143 |
-
-**QUIC Improvement:** 4-5x better than MQTT in Full mesh. MQTT N2 frequently timed out.
-
-### CL: Sync List
-
-List operations are inherently slow (~2-5 ops/s) in both transports due to database scan overhead.
+| Topology | Min (msg/s) | Max (msg/s) | Avg (msg/s) |
+|----------|-------------|-------------|-------------|
+| Agent | 145476 | 145476 | 145476 |
+| Partial | 126286 | 129438 | 128259 |
+| Upper | 126380 | 133605 | 130039 |
+| Full | 130972 | 132331 | 131475 |
 
 ---
 
-## Part D: Async DB Operations (ops/s) - Updated 2026-01-20
+## 3. Part B: Cross-Node PubSub
 
-*Results from improved benchmark with adaptive ramp-up and latency tracking. Values represent saturation point (maximum sustainable throughput).*
+Publisher on one node, subscriber on another. Measures cross-node forwarding (msg/s).
+Cross-node pubsub is rate-limited by QoS 0 saturation at ~1003 msg/s.
+
+### Partial Mesh
+
+| ID | Direction | Pub Port | Sub Port | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|-----------|----------|----------|-------|-------|-------|----------------|
+| B1 | N1->N2 | 1883 | 1884 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B2 | N1->N3 | 1883 | 1885 | 1004 | 1003 | 1004 | 1003 +/- 1 |
+| B3 | N2->N1 | 1884 | 1883 | 1003 | 1004 | 1003 | 1003 +/- 1 |
+| B4 | N2->N3 | 1884 | 1885 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B5 | N3->N1 | 1885 | 1883 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B6 | N3->N2 | 1885 | 1884 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+
+### Upper Mesh
+
+| ID | Direction | Pub Port | Sub Port | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|-----------|----------|----------|-------|-------|-------|----------------|
+| B7 | N1->N2 | 1883 | 1884 | 1004 | 1002 | 1003 | 1003 +/- 1 |
+| B8 | N1->N3 | 1883 | 1885 | 1003 | 1004 | 1003 | 1003 +/- 0 |
+| B9 | N2->N1 | 1884 | 1883 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B10 | N2->N3 | 1884 | 1885 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B11 | N3->N1 | 1885 | 1883 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+| B12 | N3->N2 | 1885 | 1884 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+
+### Full Mesh
+
+| ID | Direction | Pub Port | Sub Port | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|-----------|----------|----------|-------|-------|-------|----------------|
+| B13 | N1->N2 | 1883 | 1884 | 1003 | 1001 | 655 | 886 +/- 200 |
+| B14 | N1->N3 | 1883 | 1885 | 803 | 1003 | 1003 | 936 +/- 115 |
+| B15 | N2->N1 | 1884 | 1883 | 1003 | 1000 | 1003 | 1002 +/- 2 |
+| B16 | N2->N3 | 1884 | 1885 | 1001 | 1002 | 1003 | 1002 +/- 1 |
+| B17 | N3->N1 | 1885 | 1883 | 1004 | 1003 | 1003 | 1003 +/- 1 |
+| B18 | N3->N2 | 1885 | 1884 | 1003 | 1003 | 1003 | 1003 +/- 0 |
+
+### Cross-Node PubSub Summary
+
+| Topology | Mean (msg/s) | Min (msg/s) | Max (msg/s) |
+|----------|-------------|-------------|-------------|
+| Partial | 1003 | 1003 | 1003 |
+| Upper | 1003 | 1003 | 1003 |
+| Full | 972 | 886 | 1003 |
+
+---
+
+## 4. Part C: Sync DB Operations
+
+Synchronous request-response DB operations (ops/s). Each operation waits for broker acknowledgment.
+
+### Sync Insert
+
+_1000 records created_
+
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| CI-1 | Agent | N/A | 1883 | 0 | 3571 | 4187 | 4176 | 3978 +/- 353 |
+| CI-2 | Partial | N1 | 1883 | 0 | 2852 | 2889 | 2876 | 2872 +/- 19 |
+| CI-3 | Partial | N2 | 1884 | 1 | 2971 | 2828 | 2948 | 2916 +/- 77 |
+| CI-4 | Partial | N3 | 1885 | 1 | 2662 | 2694 | 2738 | 2698 +/- 38 |
+| CI-5 | Upper | N1 | 1883 | 2 | 2885 | 2908 | 2931 | 2908 +/- 23 |
+| CI-6 | Upper | N2 | 1884 | 1 | 2787 | 2673 | 2733 | 2731 +/- 57 |
+| CI-7 | Upper | N3 | 1885 | 0 | 2976 | 2995 | 3010 | 2994 +/- 17 |
+| CI-8 | Full | N1 | 1883 | 2 | 2724 | 2801 | 2758 | 2761 +/- 39 |
+| CI-9 | Full | N2 | 1884 | 2 | 3016 | 2808 | 2883 | 2903 +/- 105 |
+| CI-10 | Full | N3 | 1885 | 2 | 2630 | 2553 | 2628 | 2604 +/- 44 |
+
+### Sync Get
+
+_1000 records read (seeded 1000)_
+
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| CG-1 | Agent | N/A | 1883 | 0 | 6476 | 6421 | 6424 | 6440 +/- 31 |
+| CG-2 | Partial | N1 | 1883 | 0 | 4488 | 4391 | 4510 | 4463 +/- 64 |
+| CG-3 | Partial | N2 | 1884 | 1 | 4831 | 4781 | 4955 | 4856 +/- 90 |
+| CG-4 | Partial | N3 | 1885 | 1 | 3377 | 2805 | 3246 | 3143 +/- 300 |
+| CG-5 | Upper | N1 | 1883 | 2 | 4345 | 4247 | 4481 | 4358 +/- 117 |
+| CG-6 | Upper | N2 | 1884 | 1 | 3230 | 2802 | 3480 | 3171 +/- 343 |
+| CG-7 | Upper | N3 | 1885 | 0 | 4912 | 4975 | 4827 | 4905 +/- 75 |
+| CG-8 | Full | N1 | 1883 | 2 | 4060 | 4070 | 4270 | 4133 +/- 118 |
+| CG-9 | Full | N2 | 1884 | 2 | 4722 | 4801 | 4714 | 4745 +/- 48 |
+| CG-10 | Full | N3 | 1885 | 2 | 3166 | 2823 | 3286 | 3092 +/- 240 |
+
+### Sync Update
+
+_1000 records modified (seeded 1000)_
+
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| CU-1 | Agent | N/A | 1883 | 0 | 4985 | 4858 | 4943 | 4929 +/- 65 |
+| CU-2 | Partial | N1 | 1883 | 0 | 3047 | 3013 | 3123 | 3061 +/- 56 |
+| CU-3 | Partial | N2 | 1884 | 1 | 3265 | 3507 | 3081 | 3284 +/- 214 |
+| CU-4 | Partial | N3 | 1885 | 1 | 3139 | 3068 | 3052 | 3086 +/- 46 |
+| CU-5 | Upper | N1 | 1883 | 2 | 3177 | 3147 | 3216 | 3180 +/- 35 |
+| CU-6 | Upper | N2 | 1884 | 1 | 3035 | 2987 | 3018 | 3013 +/- 24 |
+| CU-7 | Upper | N3 | 1885 | 0 | 3340 | 3101 | 3544 | 3328 +/- 222 |
+| CU-8 | Full | N1 | 1883 | 2 | 3034 | 2988 | 3039 | 3020 +/- 28 |
+| CU-9 | Full | N2 | 1884 | 2 | 3114 | 3219 | 2853 | 3062 +/- 188 |
+| CU-10 | Full | N3 | 1885 | 2 | 2825 | 2841 | 2895 | 2854 +/- 37 |
+
+### Sync List
+
+_100 list operations (seeded 100)_
+
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| CL-1 | Agent | N/A | 1883 | 0 | 212 | 165 | 203 | 193 +/- 25 |
+| CL-2 | Partial | N1 | 1883 | 0 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-3 | Partial | N2 | 1884 | 1 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-4 | Partial | N3 | 1885 | 1 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-5 | Upper | N1 | 1883 | 2 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-6 | Upper | N2 | 1884 | 1 | 6 | 6 | 5 | 5 +/- 0 |
+| CL-7 | Upper | N3 | 1885 | 0 | 5 | 5 | 6 | 5 +/- 0 |
+| CL-8 | Full | N1 | 1883 | 2 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-9 | Full | N2 | 1884 | 2 | 5 | 5 | 5 | 5 +/- 0 |
+| CL-10 | Full | N3 | 1885 | 2 | 5 | 5 | 5 | 5 +/- 0 |
+
+### Sync Delete
+
+_1000 records removed (seeded 1000)_
+
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| CD-1 | Agent | N/A | 1883 | 0 | 5212 | 5155 | 5092 | 5153 +/- 60 |
+| CD-2 | Partial | N1 | 1883 | 0 | 3426 | 3556 | 3283 | 3422 +/- 136 |
+| CD-3 | Partial | N2 | 1884 | 1 | 3906 | 3795 | 3803 | 3835 +/- 62 |
+| CD-4 | Partial | N3 | 1885 | 1 | 3387 | 3273 | 3324 | 3328 +/- 57 |
+| CD-5 | Upper | N1 | 1883 | 2 | 3919 | 3232 | 3505 | 3552 +/- 346 |
+| CD-6 | Upper | N2 | 1884 | 1 | 3209 | 3235 | 3334 | 3259 +/- 66 |
+| CD-7 | Upper | N3 | 1885 | 0 | 3662 | 3723 | 3695 | 3693 +/- 31 |
+| CD-8 | Full | N1 | 1883 | 2 | 3767 | 3333 | 3357 | 3486 +/- 244 |
+| CD-9 | Full | N2 | 1884 | 2 | 3672 | 3588 | 3469 | 3576 +/- 102 |
+| CD-10 | Full | N3 | 1885 | 2 | 2994 | 2961 | 3076 | 3010 +/- 59 |
+
+### Sync Operations Summary by Topology
+
+Mean throughput (ops/s) averaged across all nodes in each topology:
+
+| Operation | Agent | Partial | Upper | Full |
+|-----------|-------|---------|-------|------|
+| Insert | 3978 | 2829 | 2878 | 2756 |
+| Get | 6440 | 4154 | 4144 | 3990 |
+| Update | 4929 | 3144 | 3174 | 2979 |
+| List | 193 | 5 | 5 | 5 |
+| Delete | 5153 | 3528 | 3502 | 3357 |
+
+---
+
+## 5. Part D: Async DB Operations
+
+Pipelined async operations measuring sustained throughput until saturation (ops/s).
+Uses QoS 1 for backpressure. Duration: 60s per run. Fresh DB per operation category.
 
 ### Async Insert
 
-#### MQTT Transport
-| Config | N1 (bridges) | N2 (bridges) | N3 (bridges) | Mean |
-|--------|--------------|--------------|--------------|------|
-| Partial | 9,084 (0) | 1,414 (1) | 0* (1) | 3,499 |
-| Upper | 2,128 (2) | 1,872 (1) | 7,415 (0) | 3,805 |
-| Full | 2,116 (2) | 1,196 (2) | 1,757 (2) | 1,690 |
+_60s pipelined inserts_
 
-*N3 Partial had connectivity issues
-
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean | Variance |
-|--------|-----|-----|-----|------|----------|
-| Partial | 8,472 | 8,457 | 8,531 | 8,487 | 1.009x |
-| Upper | 8,664 | 8,525 | 8,480 | 8,556 | 1.022x |
-| Full | 8,579 | 8,621 | 8,354 | 8,518 | 1.032x |
-
-**Critical Finding:**
-- MQTT: High variance based on bridge count (0-9,084 ops/s range)
-- QUIC: **Uniform ~8,500 ops/s** regardless of topology (1.03x variance)
-- Improvement for bridged nodes: **4-6x** (1,500 → 8,500 ops/s)
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| DI-1 | Agent | N/A | 1883 | 0 | 8246 | 8214 | 8057 | 8172 +/- 101 |
+| DI-2 | Partial | N1 | 1883 | 0 | 4257 | 4854 | 4704 | 4605 +/- 311 |
+| DI-3 | Partial | N2 | 1884 | 1 | 4988 | 4413 | 4607 | 4669 +/- 293 |
+| DI-4 | Partial | N3 | 1885 | 1 | 5000 | 4496 | 5059 | 4852 +/- 309 |
+| DI-5 | Upper | N1 | 1883 | 2 | 4746 | 4849 | 4910 | 4835 +/- 83 |
+| DI-6 | Upper | N2 | 1884 | 1 | 4513 | 4938 | 4205 | 4552 +/- 368 |
+| DI-7 | Upper | N3 | 1885 | 0 | 4715 | 4366 | 3513 | 4198 +/- 618 |
+| DI-8 | Full | N1 | 1883 | 2 | 4584 | 4728 | 4764 | 4692 +/- 95 |
+| DI-9 | Full | N2 | 1884 | 2 | 4512 | 4961 | 4258 | 4577 +/- 356 |
+| DI-10 | Full | N3 | 1885 | 2 | 4623 | 4966 | 4450 | 4680 +/- 263 |
 
 ### Async Get
 
-#### MQTT Transport
-| Config | N1 (bridges) | N2 (bridges) | N3 (bridges) | Mean |
-|--------|--------------|--------------|--------------|------|
-| Partial | 15,548 (0) | 1,252 (1) | 0* (1) | 5,600 |
-| Upper | 1,220 (2) | 1,262 (1) | 977 (0) | 1,153 |
-| Full | 1,314 (2) | 1,327 (2) | 1,268 (2) | 1,303 |
+_60s pipelined gets (seeded 10000)_
 
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean | Variance |
-|--------|-----|-----|-----|------|----------|
-| Partial | 16,996 | 16,445 | 15,972 | 16,471 | 1.064x |
-| Upper | 16,650 | 16,523 | 16,856 | 16,676 | 1.020x |
-| Full | 16,881 | 16,494 | 16,629 | 16,668 | 1.023x |
-
-**QUIC Improvement:** 12-14x for bridged nodes (1,300 → 16,500 ops/s)
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| DG-1 | Agent | N/A | 1883 | 0 | 18168 | 18138 | 17914 | 18073 +/- 139 |
+| DG-2 | Partial | N1 | 1883 | 0 | 15709 | 15938 | 15532 | 15726 +/- 204 |
+| DG-3 | Partial | N2 | 1884 | 1 | 15812 | 15123 | 15931 | 15622 +/- 436 |
+| DG-4 | Partial | N3 | 1885 | 1 | 15902 | 15764 | 15612 | 15759 +/- 145 |
+| DG-5 | Upper | N1 | 1883 | 2 | 14910 | 15124 | 15144 | 15059 +/- 130 |
+| DG-6 | Upper | N2 | 1884 | 1 | 14790 | 14947 | 14845 | 14861 +/- 80 |
+| DG-7 | Upper | N3 | 1885 | 0 | 14586 | 15144 | 14198 | 14643 +/- 476 |
+| DG-8 | Full | N1 | 1883 | 2 | 15652 | 15317 | 15325 | 15431 +/- 191 |
+| DG-9 | Full | N2 | 1884 | 2 | 15670 | 15777 | 15892 | 15780 +/- 111 |
+| DG-10 | Full | N3 | 1885 | 2 | 15448 | 15196 | 15283 | 15309 +/- 128 |
 
 ### Async Update
 
-#### MQTT Transport
-| Config | N1 (bridges) | N2 (bridges) | N3 (bridges) | Mean |
-|--------|--------------|--------------|--------------|------|
-| Partial | 9,800 (0) | 792 (1) | 0* (1) | 3,531 |
-| Upper | 807 (2) | 560 (1) | 8,374 (0) | 3,247 |
-| Full | 542 (2) | 584 (2) | 582 (2) | 569 |
+_60s pipelined updates (seeded 10000)_
 
-#### Direct QUIC Transport
-| Config | N1 | N2 | N3 | Mean | Variance |
-|--------|-----|-----|-----|------|----------|
-| Partial | 9,565 | 9,464 | 8,734 | 9,254 | 1.095x |
-| Upper | 9,438 | 9,537 | 8,604 | 9,193 | 1.108x |
-| Full | 9,758 | 9,478 | 8,692 | 9,309 | 1.123x |
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| DU-1 | Agent | N/A | 1883 | 0 | 10627 | 11324 | 11479 | 11143 +/- 454 |
+| DU-2 | Partial | N1 | 1883 | 0 | 6468 | 6208 | 6005 | 6227 +/- 232 |
+| DU-3 | Partial | N2 | 1884 | 1 | 6398 | 6186 | 5710 | 6098 +/- 352 |
+| DU-4 | Partial | N3 | 1885 | 1 | 6335 | 6121 | 6224 | 6227 +/- 107 |
+| DU-5 | Upper | N1 | 1883 | 2 | 5487 | 5586 | 6044 | 5706 +/- 297 |
+| DU-6 | Upper | N2 | 1884 | 1 | 6099 | 5881 | 5782 | 5921 +/- 162 |
+| DU-7 | Upper | N3 | 1885 | 0 | 5954 | 2851 | 1590 | 3465 +/- 2246 |
+| DU-8 | Full | N1 | 1883 | 2 | 5741 | 5624 | 5777 | 5714 +/- 80 |
+| DU-9 | Full | N2 | 1884 | 2 | 5808 | 5948 | 5906 | 5887 +/- 72 |
+| DU-10 | Full | N3 | 1885 | 2 | 6012 | 5868 | 5890 | 5923 +/- 78 |
 
-**QUIC Improvement:** 16x for Full mesh (569 → 9,300 ops/s)
+### Async Delete
 
----
+_60s pipelined deletes (seeded 10000)_
 
-## Analysis
+| ID | Config | Node | Port | Peers | Run 1 | Run 2 | Run 3 | Mean +/- Stdev |
+|----|--------|------|------|---------|-------|-------|-------|----------------|
+| DD-1 | Agent | N/A | 1883 | 0 | 936 | 938 | 940 | 938 +/- 2 |
+| DD-2 | Partial | N1 | 1883 | 0 | 938 | 930 | 938 | 935 +/- 5 |
+| DD-3 | Partial | N2 | 1884 | 1 | 932 | 936 | 938 | 935 +/- 3 |
+| DD-4 | Partial | N3 | 1885 | 1 | 937 | FAILED | FAILED | 937 +/- 0 *(runs [2, 3] failed)* |
+| DD-5 | Upper | N1 | 1883 | 2 | 931 | 938 | 938 | 936 +/- 4 |
+| DD-6 | Upper | N2 | 1884 | 1 | 940 | 939 | 938 | 939 +/- 1 |
+| DD-7 | Upper | N3 | 1885 | 0 | 930 | 928 | 940 | 933 +/- 6 |
+| DD-8 | Full | N1 | 1883 | 2 | 939 | 947 | 938 | 941 +/- 5 |
+| DD-9 | Full | N2 | 1884 | 2 | 940 | 941 | 939 | 940 +/- 1 |
+| DD-10 | Full | N3 | 1885 | 2 | 940 | 938 | 937 | 938 +/- 2 |
 
-### Bridge Count Impact (MQTT Only)
+### Async Operations Summary by Topology
 
-| Bridges | Async Insert | Async Get | Async Update |
-|---------|--------------|-----------|--------------|
-| 0 | 7,415-9,800 ops/s | 977-15,548 ops/s | 8,374-9,800 ops/s |
-| 1 | 792-1,872 ops/s | 1,252-1,262 ops/s | 560-792 ops/s |
-| 2 | 1,196-2,128 ops/s | 1,220-1,327 ops/s | 542-807 ops/s |
+Mean throughput (ops/s) averaged across all nodes in each topology:
 
-**Conclusion:** Each bridge reduces throughput by **5-10x** with MQTT transport.
-
-### QUIC Eliminates Bridge Penalty
-
-| Metric | MQTT Range | QUIC Range | MQTT Variance | QUIC Variance |
-|--------|------------|------------|---------------|---------------|
-| Async Insert | 0-9,084 ops/s | 8,354-8,664 ops/s | ∞ | 1.03x |
-| Async Get | 977-15,548 ops/s | 15,972-16,996 ops/s | 15.9x | 1.06x |
-| Async Update | 542-9,800 ops/s | 8,604-9,758 ops/s | 18.1x | 1.13x |
-
-**QUIC provides perfectly uniform throughput** regardless of topology or bridge configuration.
-
-### Topology Comparison (Async Insert Mean)
-
-| Topology | MQTT | QUIC | QUIC Advantage |
-|----------|------|------|----------------|
-| Partial | 3,499 | 8,487 | 2.4x |
-| Upper | 3,805 | 8,556 | 2.2x |
-| Full | 1,690 | 8,518 | **5.0x** |
-
-**Conclusion:** QUIC advantage increases with mesh density because MQTT bridge overhead compounds.
+| Operation | Agent | Partial | Upper | Full |
+|-----------|-------|---------|-------|------|
+| Insert | 8172 | 4709 | 4528 | 4650 |
+| Get | 18073 | 15703 | 14854 | 15507 |
+| Update | 11143 | 6184 | 5030 | 5842 |
+| Delete | 938 | 936 | 936 | 940 |
 
 ---
 
-## Recommendations
+## 6. Analysis
 
-1. **Use Direct QUIC** for production deployments where consistent throughput matters
-2. **MQTT bridges** remain viable for development/testing with partial mesh
-3. **Avoid full mesh with MQTT** - performance degrades significantly (5x slower than QUIC)
-4. **Upper mesh with MQTT** is acceptable only if the node without bridges handles most traffic
+### Topology Comparison
 
----
+#### Sync DB Performance
 
-## Test Configuration
+Cluster overhead ratio compared to agent mode (lower = more overhead):
 
-- **Hardware:** macOS Darwin 25.2.0
-- **Nodes:** 3-node local cluster (ports 1883, 1884, 1885)
-- **Async benchmark:** 30 seconds with adaptive ramp-up (50% initial step, slowing to 5% near saturation)
-- **Sync benchmark operations:** 1000 per run (100 for list)
-- **Topologies tested:** Partial, Upper, Full mesh
-- **Transports tested:** MQTT bridges, Direct QUIC
+| Operation | Partial/Agent | Upper/Agent | Full/Agent |
+|-----------|---------------|-------------|------------|
+| Insert | 0.71x | 0.72x | 0.69x |
+| Get | 0.64x | 0.64x | 0.62x |
+| Update | 0.64x | 0.64x | 0.60x |
+| List | 0.03x | 0.03x | 0.03x |
+| Delete | 0.68x | 0.68x | 0.65x |
 
-### Benchmark Methodology (Updated)
+#### Async DB Performance
 
-The async benchmark uses adaptive ramp-up with latency tracking:
-1. **Starts at 500 ops/s** with 50% step increases every 2 seconds
-2. **Monitors latency** (p50, p95) - slows step when latency exceeds 1.5x baseline
-3. **Detects saturation** when throughput < 90% of target OR backlog > 2 seconds
-4. **Reports saturation point** as maximum sustainable throughput
+| Operation | Partial/Agent | Upper/Agent | Full/Agent |
+|-----------|---------------|-------------|------------|
+| Insert | 0.58x | 0.55x | 0.57x |
+| Get | 0.87x | 0.82x | 0.86x |
+| Update | 0.55x | 0.45x | 0.52x |
+| Delete | 1.00x | 1.00x | 1.00x |
 
-This methodology finds true saturation in ~20-30 seconds regardless of system capacity, avoiding the artificial ceiling seen in fixed-duration benchmarks.
+#### Node Variance Within Topologies
 
----
+Coefficient of variation (stdev/mean) across nodes within each topology, for async insert:
 
-## Part E: Triplicate Topology Comparison (2026-01-26)
+| Topology | Node Means | CV |
+|----------|------------|-----|
+| Partial | 4605, 4669, 4852 | 2.72% |
+| Upper | 4835, 4552, 4198 | 7.05% |
+| Full | 4692, 4577, 4680 | 1.36% |
 
-*Fresh triplicate benchmarks comparing Partial Mesh vs Full Mesh with Direct QUIC transport. Statistical analysis included.*
+### Performance Characteristics
 
-### Per-Node Statistics (mean ± stdev)
+1. **Agent mode** delivers the highest throughput as expected (no replication overhead)
+2. **Cluster sync operations** run at approximately 55-75% of agent mode throughput
+3. **Cluster async operations** show more variation:
+   - Get remains high (~85% of agent) since reads hit local storage
+   - Insert/Update show replication cost (~55-60% of agent)
+   - Delete is consistent at ~938 ops/s across all configurations
+4. **Cross-node pubsub** is uniformly ~1003 msg/s (QoS 0 saturation limit)
+5. **Same-node pubsub** is minimally affected by cluster membership (~126-145k vs ~145k agent)
+6. **List operations** are the slowest category and show dramatic difference between agent (~193 ops/s) and cluster (~5 ops/s)
 
-#### Insert (ops/s)
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 3,965 ± 193 | 4,492 ± 752 | +13.3% |
-| Node 2 | 4,367 ± 117 | 5,092 ± 959 | +16.6% |
-| Node 3 | 4,029 ± 30 | 4,396 ± 851 | +9.1% |
+### Notable Anomalies
 
-#### Get (ops/s)
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 4,864 ± 421 | 5,736 ± 845 | +17.9% |
-| Node 2 | 5,655 ± 154 | 6,592 ± 1,138 | +16.6% |
-| Node 3 | 3,576 ± 117 | 4,809 ± 1,856 | +34.5% |
-
-#### Update (ops/s)
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 4,400 ± 33 | 5,069 ± 1,120 | +15.2% |
-| Node 2 | 4,775 ± 109 | 5,742 ± 1,317 | +20.2% |
-| Node 3 | 3,849 ± 168 | 4,815 ± 1,423 | +25.1% |
-
-#### Delete (ops/s)
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 4,775 ± 61 | 5,593 ± 1,211 | +17.1% |
-| Node 2 | 5,347 ± 97 | 6,509 ± 1,833 | +21.7% |
-| Node 3 | 2,763 ± 92 | 4,190 ± 2,548 | +51.7% |
-
-#### PubSub (msg/s)
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 215,900 ± 17,594 | 228,242 ± 17,015 | +5.7% |
-| Node 2 | 215,806 ± 19,071 | 205,669 ± 2,701 | -4.7% |
-| Node 3 | 215,595 ± 15,397 | 205,540 ± 3,773 | -4.7% |
-
-### Cluster Aggregate Statistics (sum of all 3 nodes)
-
-| Operation | Partial Mesh | Full Mesh | Diff | Winner |
-|-----------|--------------|-----------|------|--------|
-| Insert | 12,361 ± 331 ops/s | 13,981 ± 2,550 ops/s | +13.1% | Full |
-| Get | 14,095 ± 549 ops/s | 17,137 ± 3,836 ops/s | +21.6% | Full |
-| Update | 13,024 ± 195 ops/s | 15,625 ± 3,849 ops/s | +20.0% | Full |
-| List | 52 ± 1 ops/s | 67 ± 24 ops/s | +29.0% | Full |
-| Delete | 12,884 ± 148 ops/s | 16,293 ± 5,591 ops/s | +26.5% | Full |
-| PubSub | 647,301 ± 20,135 msg/s | 639,451 ± 20,884 msg/s | -1.2% | Partial |
-
-**Summary:** Full mesh wins 5/6 operations, Partial wins PubSub marginally.
-
-### Statistical Significance (t-test)
-
-| Operation | t-statistic | Significant? |
-|-----------|-------------|--------------|
-| Insert | 1.09 | NO |
-| Get | 1.36 | NO |
-| Update | 1.17 | NO |
-| List | 1.10 | NO |
-| Delete | 1.06 | NO |
-| PubSub | -0.47 | NO |
-
-*Critical value: |t| > 2.78 for p < 0.05 with df=4*
-
-**None of the differences are statistically significant** due to high variance in Full Mesh results.
-
-### Raw Run Data
-
-#### Partial Mesh (Cluster Totals)
-| Run | Insert | Get | Update | List | Delete | PubSub |
-|-----|--------|-----|--------|------|--------|--------|
-| 1 | 11,983 | 13,506 | 12,842 | 52 | 12,772 | 627,640 |
-| 2 | 12,498 | 14,593 | 13,000 | 51 | 12,829 | 646,383 |
-| 3 | 12,601 | 14,185 | 13,229 | 52 | 13,052 | 667,879 |
-
-#### Full Mesh (Cluster Totals)
-| Run | Insert | Get | Update | List | Delete | PubSub |
-|-----|--------|-----|--------|------|--------|--------|
-| 1 | 12,490 | 15,137 | 13,466 | 53 | 13,006 | 650,676 |
-| 2 | 16,925 | 21,560 | 20,069 | 94 | 22,748 | 652,322 |
-| 3 | 12,528 | 14,714 | 13,340 | 53 | 13,124 | 615,355 |
-
-### Analysis
-
-**Key Observation:** Full Mesh Run 2 was an outlier with 35-75% higher throughput than other runs. This inflated Full Mesh's mean but also created high variance (stddev 2,500-5,500 vs Partial's 100-550), making statistical significance impossible to establish.
-
-| Metric | Partial Mesh | Full Mesh |
-|--------|--------------|-----------|
-| Mean Performance | Lower | Higher (+13-27%) |
-| Consistency (CV) | **Very Low (1-4%)** | High (18-43%) |
-| Predictability | **Excellent** | Variable |
-
-### Recommendation
-
-**Use Partial Mesh for predictable performance.** While Full Mesh *can* achieve higher throughput (as seen in Run 2), results are inconsistent. Partial Mesh provides stable, reproducible performance with minimal variance between runs.
+- **DD-4 (Partial N3 async delete):** Runs 2 and 3 failed
+- **DU-7 (Upper N3 async update):** Mean 3465 ops/s, significantly lower than other nodes (possible resource contention)
+- **B13 (Full N1->N2 pubsub):** Run 3 showed degraded throughput (655 msg/s)
+- **B14 (Full N1->N3 pubsub):** Run 1 showed degraded throughput (803 msg/s)
 
 ---
 
-## Part F: Triplicate Async Topology Comparison (2026-01-26)
+## 7. Test Configuration
 
-*Fresh triplicate async benchmarks comparing Partial Mesh vs Full Mesh with Direct QUIC transport. Async mode uses adaptive ramp-up to find saturation point.*
+| Parameter | Value |
+|-----------|-------|
+| Date | 2026-03-20 |
+| Platform | macOS (Darwin 25.3.0) |
+| Network | Local loopback (127.0.0.1) |
+| Transport | Direct QUIC with mTLS |
+| Cluster Size | 3 nodes |
+| Replication Factor | 2 (primary + replica) |
+| Partitions | 256 |
+| PubSub Duration | 10s per run |
+| Sync Operations | 1000 ops (100 for list) |
+| Async Duration | 60s per run |
+| Async QoS | 1 (with PUBACK backpressure) |
+| Replications | 3 runs per experiment (triplicates) |
+| Isolation | Fresh DB per async operation category |
 
-### Per-Node Statistics (mean ± stdev) - Saturation Point ops/s
+### Configurations Tested
 
-#### Async Insert
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 9,531 ± 27 | 9,570 ± 98 | +0.4% |
-| Node 2 | 9,500 ± 303 | 9,672 ± 69 | +1.8% |
-| Node 3 | 9,540 ± 79 | 9,666 ± 80 | +1.3% |
+| Config | Topology | Peers per Node |
+|--------|----------|------------------|
+| Agent | Standalone | N/A |
+| Partial | N1: 0, N2: 1 (->N1), N3: 1 (->N1) | 0, 1, 1 |
+| Upper | N1: 2 (->N2,N3), N2: 1 (->N3), N3: 0 | 2, 1, 0 |
+| Full | All nodes connect to all others | 2, 2, 2 |
 
-#### Async Get
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 16,782 ± 71 | 16,740 ± 426 | -0.3% |
-| Node 2 | 16,728 ± 515 | 17,043 ± 98 | +1.9% |
-| Node 3 | 16,999 ± 190 | 16,726 ± 199 | -1.6% |
+### Experiment Count
 
-#### Async Update
-| Node | Partial Mesh | Full Mesh | Difference |
-|------|--------------|-----------|------------|
-| Node 1 | 10,238 ± 257 | 10,677 ± 90 | +4.3% |
-| Node 2 | 9,474 ± 671 | 10,611 ± 165 | +12.0% |
-| Node 3 | 10,841 ± 260 | 10,685 ± 296 | -1.4% |
-
-### Cluster Aggregate Statistics (sum of all 3 nodes)
-
-| Operation | Partial Mesh | Full Mesh | Diff | Winner |
-|-----------|--------------|-----------|------|--------|
-| Insert | 28,571 ± 404 ops/s | 28,909 ± 208 ops/s | +1.2% | Full |
-| Get | 50,510 ± 647 ops/s | 50,509 ± 617 ops/s | -0.0% | Partial |
-| Update | 30,553 ± 293 ops/s | 31,973 ± 400 ops/s | +4.6% | Full |
-
-**Summary:** Full mesh wins 2/3 operations (Insert, Update), Partial wins Get by negligible margin.
-
-### Statistical Significance (t-test)
-
-| Operation | t-statistic | Significant? |
-|-----------|-------------|--------------|
-| Insert | 1.29 | NO |
-| Get | -0.00 | NO |
-| Update | 4.96 | **YES** |
-
-*Critical value: |t| > 2.78 for p < 0.05 with df=4*
-
-**Only Async Update shows statistically significant difference** - Full Mesh is ~4.6% faster with p < 0.05.
-
-### Raw Run Data
-
-#### Partial Mesh (Cluster Totals)
-| Run | Insert | Get | Update |
-|-----|--------|-----|--------|
-| 1 | 28,957 | 50,894 | 30,372 |
-| 2 | 28,606 | 49,763 | 30,396 |
-| 3 | 28,151 | 50,872 | 30,891 |
-
-#### Full Mesh (Cluster Totals)
-| Run | Insert | Get | Update |
-|-----|--------|-----|--------|
-| 1 | 28,792 | 50,606 | 32,189 |
-| 2 | 28,785 | 49,849 | 31,511 |
-| 3 | 29,149 | 51,072 | 32,218 |
-
-### Variance Analysis (Coefficient of Variation)
-
-| Operation | Partial CV | Full CV | More Consistent |
-|-----------|------------|---------|-----------------|
-| Insert | 1.4% | 0.7% | Full |
-| Get | 1.3% | 1.2% | Full |
-| Update | 1.0% | 1.3% | Partial |
-
-### Analysis
-
-**Key Observation:** Unlike the sync benchmarks where Full Mesh showed high variance due to an outlier run, async benchmarks show **both topologies are highly consistent** (CV 0.7-1.4%).
-
-| Metric | Partial Mesh | Full Mesh |
-|--------|--------------|-----------|
-| Insert Performance | 28,571 ops/s | 28,909 ops/s (+1.2%) |
-| Get Performance | 50,510 ops/s | 50,509 ops/s (equal) |
-| Update Performance | 30,553 ops/s | 31,973 ops/s (+4.6%) |
-| Consistency | Excellent | Excellent |
-
-### Recommendation
-
-**For async workloads, topology choice has minimal impact.** Both Partial and Full Mesh achieve essentially identical throughput (~29k insert, ~50k get, ~31k update ops/s). The only statistically significant difference is a 4.6% advantage for Full Mesh on updates, which may not be operationally meaningful.
-
-**Choose based on operational preferences:**
-- **Partial Mesh:** Fewer connections, simpler network topology
-- **Full Mesh:** Marginally better update performance, fully redundant connectivity
+| Part | Experiments | Runs (incl. failed) |
+|------|-------------|---------------------|
+| A: Same-Node PubSub | 10 | 30 |
+| B: Cross-Node PubSub | 18 | 54 |
+| C: Sync DB | 50 | 150 |
+| D: Async DB | 40 | 120 |
+| **Total** | **118** | **354** |

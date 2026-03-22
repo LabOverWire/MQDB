@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use mqtt5::QoS;
 use mqtt5::client::MqttClient;
 use mqtt5::types::ConnectOptions;
 use serde_json::json;
@@ -220,6 +221,7 @@ pub(crate) async fn cmd_bench_pubsub(
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let payload: Arc<[u8]> = vec![0u8; args.size].into();
+    let qos = QoS::from(args.qos);
     let warmup_duration = Duration::from_secs(args.warmup);
     let measure_duration = Duration::from_secs(args.duration);
 
@@ -256,7 +258,11 @@ pub(crate) async fn cmd_bench_pubsub(
                 } else {
                     topic_base.clone()
                 };
-                if client.publish(&topic, payload.to_vec()).await.is_ok() {
+                if client
+                    .publish_qos(&topic, payload.to_vec(), qos)
+                    .await
+                    .is_ok()
+                {
                     metrics.messages_sent.fetch_add(1, Ordering::Relaxed);
                 }
                 topic_idx = topic_idx.wrapping_add(1);
