@@ -59,7 +59,7 @@ After EACH async benchmark:
 
 | Config | Command | Bridge Distribution |
 |--------|---------|---------------------|
-| Agent | `mqdb agent start --db /tmp/mqdb-bench-agent --bind 127.0.0.1:1883 --anonymous` | N/A |
+| Agent | `mqdb agent start --db /tmp/mqdb-bench-agent --bind 127.0.0.1:1883 --passwd passwd.txt --admin-users bench` | N/A |
 | Partial | `mqdb dev start-cluster --nodes 3 --clean --topology partial` | N1: 0, N2: 1, N3: 1 |
 | Upper | `mqdb dev start-cluster --nodes 3 --clean --topology upper` | N1: 2, N2: 1, N3: 0 |
 | Full | `mqdb dev start-cluster --nodes 3 --clean --topology full` | N1: 2, N2: 2, N3: 2 |
@@ -255,7 +255,7 @@ For each of DI, DG, DU, DD:
 ```bash
 # Start fresh
 rm -rf /tmp/mqdb-bench-agent
-mqdb agent start --db /tmp/mqdb-bench-agent --bind 127.0.0.1:1883 --anonymous &
+mqdb agent start --db /tmp/mqdb-bench-agent --bind 127.0.0.1:1883 --passwd passwd.txt --admin-users bench &
 sleep 5
 
 # A: PubSub

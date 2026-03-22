@@ -52,8 +52,14 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
 
     if args.seed > 0 {
         println!("Seeding {} records...", args.seed);
-        let client = MqttClient::new("bench-db-seeder".to_string());
-        client.connect(&args.conn.broker).await?;
+        let seeder_id = "bench-db-seeder".to_string();
+        let client = MqttClient::new(seeder_id.clone());
+        if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
+            let opts = ConnectOptions::new(seeder_id).with_credentials(user.clone(), pass.clone());
+            Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
+        } else {
+            client.connect(&args.conn.broker).await?;
+        }
 
         for i in 0..args.seed {
             let id = id_counter.fetch_add(1, Ordering::Relaxed);
@@ -496,8 +502,18 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
             .map(|ids| ids.clone())
             .unwrap_or_default();
         if !ids_to_cleanup.is_empty() {
-            let client = MqttClient::new("bench-cleanup");
-            if client.connect(&args.conn.broker).await.is_ok() {
+            let cleanup_id = "bench-cleanup".to_string();
+            let client = MqttClient::new(cleanup_id.clone());
+            let connected = if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
+                let opts =
+                    ConnectOptions::new(cleanup_id).with_credentials(user.clone(), pass.clone());
+                Box::pin(client.connect_with_options(&args.conn.broker, opts))
+                    .await
+                    .is_ok()
+            } else {
+                client.connect(&args.conn.broker).await.is_ok()
+            };
+            if connected {
                 for id in &ids_to_cleanup {
                     let topic = format!("$DB/{}/{id}/delete", args.entity);
                     let _ = client.publish(&topic, b"{}".to_vec()).await;
