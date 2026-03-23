@@ -394,6 +394,11 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             }
 
             if event.topic.starts_with("$DB/") {
+                let rest = &event.topic.as_ref()[4..];
+                let first_segment = rest.split('/').next().unwrap_or("");
+                if matches!(first_segment, "_health" | "_admin" | "_sub" | "_resp") {
+                    return PublishAction::Continue;
+                }
                 if let Some(uid) = event.user_id.as_deref() {
                     self.vault_key_store.read_fence(uid).await;
                 }
