@@ -3,7 +3,7 @@
 
 use mqdb_agent::Database;
 use mqdb_core::config::DatabaseConfig;
-use mqdb_core::types::ScopeConfig;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{Filter, FilterOp};
 use serde_json::json;
 use std::collections::HashSet;
@@ -99,7 +99,14 @@ async fn test_concurrent_delete_and_read() {
         let db_clone = db.clone();
         let handle = tokio::spawn(async move {
             let _ = db_clone
-                .delete("users".into(), id, None, None, &ScopeConfig::default())
+                .delete(
+                    "users".into(),
+                    id,
+                    None,
+                    None,
+                    &ScopeConfig::default(),
+                    &OwnershipConfig::default(),
+                )
                 .await;
         });
         handles.push(handle);

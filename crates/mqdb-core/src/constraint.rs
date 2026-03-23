@@ -5,6 +5,7 @@ use crate::entity::Entity;
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::storage::{BatchWriter, Storage};
+use crate::types::OwnershipConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -169,6 +170,18 @@ pub enum DeleteOperation {
     SetNull(SetNullOperation),
 }
 
+pub struct OwnershipContext<'a> {
+    pub sender: &'a str,
+    pub ownership: &'a OwnershipConfig,
+}
+
+struct CrossOwnedRef {
+    entity: String,
+    id: String,
+    field: String,
+    owner: String,
+}
+
 pub struct ConstraintManager {
     constraints: HashMap<String, Vec<Constraint>>,
 }
@@ -242,20 +255,40 @@ impl ConstraintManager {
         &self,
         entity: &Entity,
         storage: &Storage,
+        ownership_ctx: Option<&OwnershipContext<'_>>,
     ) -> Result<Vec<DeleteOperation>> {
         use std::collections::HashSet;
         let mut all_operations = Vec::new();
         let mut visited = HashSet::new();
-        self.collect_delete_operations(entity, storage, &mut all_operations, &mut visited)?;
+        let mut cross_owned = Vec::new();
+        self.collect_delete_operations(
+            entity,
+            storage,
+            &mut all_operations,
+            &mut visited,
+            &mut cross_owned,
+            ownership_ctx,
+        )?;
+
+        self.classify_cross_owned_danglers(
+            entity,
+            &cross_owned,
+            &mut all_operations,
+            ownership_ctx,
+        )?;
+
         Ok(all_operations)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collect_delete_operations(
         &self,
         entity: &Entity,
         storage: &Storage,
         all_operations: &mut Vec<DeleteOperation>,
         visited: &mut std::collections::HashSet<String>,
+        cross_owned: &mut Vec<CrossOwnedRef>,
+        ownership_ctx: Option<&OwnershipContext<'_>>,
     ) -> Result<()> {
         let entity_key = format!("{}/{}", entity.name, entity.id);
         if visited.contains(&entity_key) {
@@ -293,6 +326,17 @@ impl ConstraintManager {
                             &entity.id,
                         )?;
                         for id in referencing {
+                            if Self::is_cross_owned(
+                                storage,
+                                &fk.source_entity,
+                                &fk.source_field,
+                                &id,
+                                ownership_ctx,
+                                cross_owned,
+                            )? {
+                                continue;
+                            }
+
                             let cascade_key = keys::encode_data_key(&fk.source_entity, &id);
                             if let Some(cascade_data) = storage.get(&cascade_key)? {
                                 let cascade_entity = Entity::deserialize(
@@ -305,6 +349,8 @@ impl ConstraintManager {
                                     storage,
                                     all_operations,
                                     visited,
+                                    cross_owned,
+                                    ownership_ctx,
                                 )?;
                             }
                             all_operations.push(DeleteOperation::Cascade(CascadeOperation {
@@ -333,6 +379,94 @@ impl ConstraintManager {
         }
 
         Ok(())
+    }
+
+    fn is_cross_owned(
+        storage: &Storage,
+        source_entity: &str,
+        source_field: &str,
+        ref_id: &str,
+        ownership_ctx: Option<&OwnershipContext<'_>>,
+        cross_owned: &mut Vec<CrossOwnedRef>,
+    ) -> Result<bool> {
+        let Some(ctx) = ownership_ctx else {
+            return Ok(false);
+        };
+
+        if ctx.ownership.is_admin(ctx.sender) {
+            return Ok(false);
+        }
+
+        let Some(owner_field) = ctx.ownership.owner_field(source_entity) else {
+            return Ok(false);
+        };
+
+        let key = keys::encode_data_key(source_entity, ref_id);
+        let Some(data) = storage.get(&key)? else {
+            return Ok(false);
+        };
+        let entity = Entity::deserialize(source_entity.to_string(), ref_id.to_string(), &data)?;
+        let owner = entity
+            .data
+            .get(owner_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if owner == ctx.sender {
+            return Ok(false);
+        }
+
+        cross_owned.push(CrossOwnedRef {
+            entity: source_entity.to_string(),
+            id: ref_id.to_string(),
+            field: source_field.to_string(),
+            owner: owner.to_string(),
+        });
+        Ok(true)
+    }
+
+    fn classify_cross_owned_danglers(
+        &self,
+        root_entity: &Entity,
+        cross_owned: &[CrossOwnedRef],
+        all_operations: &mut Vec<DeleteOperation>,
+        ownership_ctx: Option<&OwnershipContext<'_>>,
+    ) -> Result<()> {
+        if ownership_ctx.is_none() || cross_owned.is_empty() {
+            return Ok(());
+        }
+
+        for co in cross_owned {
+            if self.has_not_null_constraint(&co.entity, &co.field) {
+                return Err(Error::CascadeBlocked(Box::new(
+                    crate::error::CascadeBlockedInfo {
+                        entity: root_entity.name.clone(),
+                        id: root_entity.id.clone(),
+                        blocked_entity: co.entity.clone(),
+                        blocked_id: co.id.clone(),
+                        blocked_field: co.field.clone(),
+                        blocked_owner: co.owner.clone(),
+                    },
+                )));
+            }
+
+            all_operations.push(DeleteOperation::SetNull(SetNullOperation {
+                entity: co.entity.clone(),
+                id: co.id.clone(),
+                field: co.field.clone(),
+            }));
+        }
+
+        Ok(())
+    }
+
+    fn has_not_null_constraint(&self, entity: &str, field: &str) -> bool {
+        let Some(constraints) = self.constraints.get(entity) else {
+            return false;
+        };
+        constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::NotNull(nn) if nn.field == field))
     }
 
     fn validate_not_null(entity: &Entity, constraint: &NotNullConstraint) -> Result<()> {

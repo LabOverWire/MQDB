@@ -265,6 +265,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 let continuation = pending.continuation;
                 let (del_entity, del_id) = continuation.entity_id();
                 let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
+                let sender_owned = continuation.sender_ref().map(String::from);
                 drop(ctrl);
                 let (restrict_error, side_effects) =
                     super::super::node_controller::fk::collect_recursive_cascade(
@@ -273,6 +274,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                         &del_id,
                         local_results,
                         pending_lookups,
+                        sender_owned.as_deref(),
                     )
                     .await;
                 let mut ctrl = self.controller.write().await;

@@ -790,7 +790,10 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let (local_results, pending_remote) = match self.start_fk_reverse_lookup(entity, id).await {
+        let (local_results, pending_remote) = match self
+            .start_fk_reverse_lookup(entity, id, request.sender.as_deref())
+            .await
+        {
             Ok(pair) => pair,
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
@@ -806,6 +809,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             from,
                             entity: entity.to_string(),
                             id: id.to_string(),
+                            sender: request.sender.clone(),
                             response_topic: request.response_topic.clone(),
                             correlation_data: request.correlation_data.clone(),
                         },
@@ -893,50 +897,61 @@ impl<T: ClusterTransport> NodeController<T> {
                             });
                         }
                     }
+                    for cross_id in &r.cross_owned_ids {
+                        self.push_set_null_effect(&mut effects, r, cross_id);
+                    }
                 }
                 OnDeleteAction::SetNull => {
                     for child_id in &r.referencing_ids {
-                        let partition = data_partition(&r.source_entity, child_id);
-                        if self.is_primary_for_partition(partition) {
-                            let Some(existing) = self.db_get(&r.source_entity, child_id) else {
-                                continue;
-                            };
-                            let Ok(mut data) =
-                                serde_json::from_slice::<serde_json::Value>(&existing.data)
-                            else {
-                                continue;
-                            };
-                            if let Some(obj) = data.as_object_mut() {
-                                obj.insert(r.source_field.clone(), serde_json::Value::Null);
-                                let v = obj
-                                    .get("_version")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or(0);
-                                obj.insert(
-                                    "_version".to_string(),
-                                    serde_json::Value::Number((v + 1).into()),
-                                );
-                            }
-                            let updated_data = serde_json::to_vec(&data).unwrap_or_default();
-                            effects.push(CascadeSideEffect::LocalSetNull {
-                                entity: r.source_entity.clone(),
-                                id: child_id.clone(),
-                                updated_data,
-                            });
-                        } else {
-                            effects.push(CascadeSideEffect::RemoteSetNull {
-                                partition,
-                                entity: r.source_entity.clone(),
-                                id: child_id.clone(),
-                                field: r.source_field.clone(),
-                                expected_value: r.target_id.clone(),
-                            });
-                        }
+                        self.push_set_null_effect(&mut effects, r, child_id);
                     }
                 }
             }
         }
         effects
+    }
+
+    fn push_set_null_effect(
+        &self,
+        effects: &mut Vec<CascadeSideEffect>,
+        r: &super::fk::FkReverseLookupResult,
+        child_id: &str,
+    ) {
+        use crate::cluster::db::data_partition;
+        let partition = data_partition(&r.source_entity, child_id);
+        if self.is_primary_for_partition(partition) {
+            let Some(existing) = self.db_get(&r.source_entity, child_id) else {
+                return;
+            };
+            let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
+                return;
+            };
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert(r.source_field.clone(), serde_json::Value::Null);
+                let v = obj
+                    .get("_version")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                obj.insert(
+                    "_version".to_string(),
+                    serde_json::Value::Number((v + 1).into()),
+                );
+            }
+            let updated_data = serde_json::to_vec(&data).unwrap_or_default();
+            effects.push(CascadeSideEffect::LocalSetNull {
+                entity: r.source_entity.clone(),
+                id: child_id.to_string(),
+                updated_data,
+            });
+        } else {
+            effects.push(CascadeSideEffect::RemoteSetNull {
+                partition,
+                entity: r.source_entity.clone(),
+                id: child_id.to_string(),
+                field: r.source_field.clone(),
+                expected_value: r.target_id.clone(),
+            });
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1919,6 +1934,7 @@ impl<T: ClusterTransport> NodeController<T> {
             id,
             response_topic,
             correlation_data,
+            ..
         } = continuation
         else {
             return;

@@ -153,6 +153,7 @@ pub enum FkDeleteContinuation {
         from: NodeId,
         entity: String,
         id: String,
+        sender: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -163,6 +164,13 @@ impl FkDeleteContinuation {
         match self {
             Self::DeleteFromDbHandler { entity, id, .. }
             | Self::DeleteFromNodeController { entity, id, .. } => (entity, id),
+        }
+    }
+
+    pub fn sender_ref(&self) -> Option<&str> {
+        match self {
+            Self::DeleteFromDbHandler { sender, .. }
+            | Self::DeleteFromNodeController { sender, .. } => sender.as_deref(),
         }
     }
 }

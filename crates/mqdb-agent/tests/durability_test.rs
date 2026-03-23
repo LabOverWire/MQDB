@@ -3,7 +3,7 @@
 
 use mqdb_agent::Database;
 use mqdb_core::config::{DatabaseConfig, DurabilityMode};
-use mqdb_core::types::ScopeConfig;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{Filter, FilterOp};
 use serde_json::json;
 use tempfile::TempDir;
@@ -122,6 +122,7 @@ async fn test_index_consistency_after_crash_during_delete() {
             None,
             None,
             &ScopeConfig::default(),
+            &OwnershipConfig::default(),
         )
         .await
         .unwrap();

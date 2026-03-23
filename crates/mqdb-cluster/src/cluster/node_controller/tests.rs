@@ -1045,7 +1045,10 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
-    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    let (local_results, _pending) = ctrl
+        .start_fk_reverse_lookup("users", "u1", None)
+        .await
+        .unwrap();
     assert!(
         local_results.is_empty(),
         "stale replica data should not appear in FK reverse lookup"
@@ -1090,7 +1093,10 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         .await
         .unwrap();
 
-    let (local_results, _pending) = ctrl.start_fk_reverse_lookup("users", "u1").await.unwrap();
+    let (local_results, _pending) = ctrl
+        .start_fk_reverse_lookup("users", "u1", None)
+        .await
+        .unwrap();
     assert_eq!(local_results.len(), 1);
     assert_eq!(local_results[0].referencing_ids.len(), 1);
     assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
@@ -1151,7 +1157,7 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
 
     assert_eq!(ctrl.db_list("posts").len(), 2);
 
-    let result = ctrl.start_fk_reverse_lookup("users", "u1").await;
+    let result = ctrl.start_fk_reverse_lookup("users", "u1", None).await;
     match result {
         Err(ref msg) => assert!(
             msg.contains("prevents deletion"),
@@ -1194,7 +1200,10 @@ async fn circular_fk_cascade_terminates() {
     ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
     ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
 
-    let (local, _pending) = ctrl.start_fk_reverse_lookup("alpha", "a1").await.unwrap();
+    let (local, _pending) = ctrl
+        .start_fk_reverse_lookup("alpha", "a1", None)
+        .await
+        .unwrap();
 
     let result = ctrl.collect_local_cascade("alpha", "a1", local);
     assert!(
@@ -1258,7 +1267,10 @@ async fn three_way_circular_fk_cascade_terminates() {
     ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
     ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
 
-    let (local, _pending) = ctrl.start_fk_reverse_lookup("aaa", "a1").await.unwrap();
+    let (local, _pending) = ctrl
+        .start_fk_reverse_lookup("aaa", "a1", None)
+        .await
+        .unwrap();
     let result = ctrl.collect_local_cascade("aaa", "a1", local);
     assert!(
         result.is_ok(),

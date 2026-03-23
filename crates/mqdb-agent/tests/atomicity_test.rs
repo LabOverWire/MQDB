@@ -3,7 +3,7 @@
 
 use mqdb_agent::Database;
 use mqdb_agent::database::CallerContext;
-use mqdb_core::types::ScopeConfig;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{Filter, FilterOp};
 use serde_json::json;
 use std::sync::Arc;
@@ -365,6 +365,7 @@ async fn test_delete_operations_are_atomic() {
                     None,
                     None,
                     &ScopeConfig::default(),
+                    &OwnershipConfig::default(),
                 )
                 .await
         });

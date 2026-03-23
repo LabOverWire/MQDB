@@ -924,7 +924,7 @@ impl DbRequestHandler {
         let correlation_data = mqtt_ctx.correlation_data;
 
         let (local_results, pending_remote) =
-            match controller.start_fk_reverse_lookup(entity, id).await {
+            match controller.start_fk_reverse_lookup(entity, id, sender).await {
                 Ok(pair) => pair,
                 Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
             };

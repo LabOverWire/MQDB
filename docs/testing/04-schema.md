@@ -254,3 +254,132 @@ mqdb delete authors 1
 ```
 
 **Expected in Terminal 1:** Update events for each set-null post showing `author_id: null`
+
+---
+
+## 6. Owner-Aware Cascade Delete
+
+When ownership is configured, cascade deletes respect entity ownership. Cross-owned entities
+(owned by a different user than the one performing the delete) are excluded from the delete set.
+Their FK field is set to null instead — unless a NotNull constraint blocks the operation entirely.
+
+These tests require authentication. All commands below assume the broker was started with
+`--passwd` and `--ownership`.
+
+### Setup
+
+```bash
+mqdb passwd alice -b alice -f /tmp/cascade-passwd
+mqdb passwd bob -b bob -f /tmp/cascade-passwd
+mqdb passwd admin -b admin -f /tmp/cascade-passwd
+
+mqdb agent start --db /tmp/mqdb-cascade --bind 127.0.0.1:1883 \
+    --passwd /tmp/cascade-passwd \
+    --ownership "projects=userId,tasks=userId" \
+    --admin-users admin
+```
+
+Create the FK constraint and seed data:
+
+```bash
+mqdb constraint add tasks --fk "projectId:projects:id:cascade" \
+    --broker 127.0.0.1:1883 --user admin --pass admin
+
+mqdb create projects --data '{"name": "P1", "userId": "alice"}' \
+    --user alice --pass alice
+# Note project ID → <pid>
+
+mqdb create tasks --data '{"name": "Alice Task", "userId": "alice", "projectId": "<pid>"}' \
+    --user alice --pass alice
+
+mqdb create tasks --data '{"name": "Bob Task", "userId": "bob", "projectId": "<pid>"}' \
+    --user bob --pass bob
+# Note bob's task ID → <btid>
+```
+
+### Same-Owner Cascade
+
+Alice deletes her project. Alice's task (same owner) is cascade deleted.
+
+```bash
+mqdb delete projects <pid> --user alice --pass alice
+mqdb list tasks --user alice --pass alice
+```
+
+**Expected:** Alice's task is deleted. Bob's task survives with `projectId: null`.
+
+### Cross-Owner Cascade with Null FK
+
+```bash
+mqdb read tasks <btid> --user bob --pass bob
+```
+
+**Expected:** Bob's task still exists. Its `projectId` field is `null` and `_version` is `2`.
+
+### Cross-Owner Cascade Blocked by NotNull
+
+Re-seed the data (fresh broker), then add a NotNull constraint on the FK field:
+
+```bash
+mqdb constraint add tasks --not-null projectId \
+    --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+Now alice tries to delete her project while bob's task has a non-nullable FK:
+
+```bash
+mqdb delete projects <pid> --user alice --pass alice
+```
+
+**Expected error:**
+```
+cascade blocked: tasks/<btid> owned by 'bob' has non-nullable FK field 'projectId'
+```
+
+The delete is rejected entirely — no entities are modified.
+
+### Admin Bypass (Blind Cascade)
+
+Admin users bypass ownership filtering. The cascade deletes all referencing entities regardless
+of who owns them.
+
+```bash
+mqdb delete projects <pid> --user admin --pass admin
+mqdb list tasks --user admin --pass admin
+```
+
+**Expected:** All tasks are deleted (both alice's and bob's). Admin cascade is blind.
+
+### Unowned Entity Always Cascades
+
+If the referencing entity has no ownership configured, it is always included in the cascade
+regardless of the sender. Start a broker with ownership only on projects (not tasks):
+
+```bash
+mqdb agent start --db /tmp/mqdb-cascade-unowned --bind 127.0.0.1:1883 \
+    --passwd /tmp/cascade-passwd \
+    --ownership "projects=userId"
+```
+
+```bash
+mqdb constraint add tasks --fk "projectId:projects:id:cascade" \
+    --user admin --pass admin
+mqdb create projects --data '{"name": "P1", "userId": "alice"}' \
+    --user alice --pass alice
+mqdb create tasks --data '{"name": "T1", "projectId": "<pid>"}' \
+    --user bob --pass bob
+
+mqdb delete projects <pid> --user alice --pass alice
+mqdb list tasks --user admin --pass admin
+```
+
+**Expected:** Task is deleted. Entities without ownership config are always cascade-eligible.
+
+### Verification Checklist
+
+- [ ] Same-owner cascade: entities owned by sender are deleted
+- [ ] Cross-owner cascade: entities owned by other users survive with FK set to null
+- [ ] Cross-owner + NotNull: delete is blocked with 409
+- [ ] Admin cascade: blind (deletes all regardless of owner)
+- [ ] Unowned entity: always included in cascade
+- [ ] ChangeEvents: cross-owner survivors emit Update events (FK nulled), not Delete events

@@ -9,6 +9,8 @@ use mqdb_core::keys;
 use mqdb_core::types::ScopeConfig;
 use serde_json::Value;
 
+use mqdb_core::types::OwnershipConfig;
+
 pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
     pub client_id: Option<&'a str>,
@@ -257,8 +259,9 @@ impl Database {
         sender: Option<&str>,
         client_id: Option<&str>,
         scope_config: &ScopeConfig,
+        ownership: &OwnershipConfig,
     ) -> Result<()> {
-        use mqdb_core::constraint::DeleteOperation;
+        use mqdb_core::constraint::{DeleteOperation, OwnershipContext};
 
         let key = keys::encode_data_key(&entity_name, &id);
 
@@ -269,8 +272,19 @@ impl Database {
 
         let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
 
+        let ownership_ctx = sender
+            .filter(|_| !ownership.is_empty())
+            .map(|s| OwnershipContext {
+                sender: s,
+                ownership,
+            });
+
         let constraint_manager = self.constraint_manager.read().await;
-        let delete_ops = constraint_manager.validate_delete(&existing_entity, &self.storage)?;
+        let delete_ops = constraint_manager.validate_delete(
+            &existing_entity,
+            &self.storage,
+            ownership_ctx.as_ref(),
+        )?;
         drop(constraint_manager);
 
         let mut batch = self.storage.batch();

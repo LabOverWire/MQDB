@@ -125,7 +125,7 @@ impl Database {
                 }
                 let id_clone = id.clone();
                 match self
-                    .delete(entity, id, sender, client_id, scope_config)
+                    .delete(entity, id, sender, client_id, scope_config, ownership)
                     .await
                 {
                     Ok(()) => Response::ok(serde_json::json!({
