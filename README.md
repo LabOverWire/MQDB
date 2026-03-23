@@ -14,6 +14,7 @@ Per-entity atomicity with constraint enforcement and correlation ID dedup.
 - Schemas with type validation, required fields, and default values
 - Unique constraints (single and composite), not-null constraints
 - Foreign keys with CASCADE, RESTRICT, and SET NULL delete policies
+- Owner-aware cascade: cross-owned entities survive deletion with FK set to null
 
 Secondary indexes accelerate equality lookups. Ten filter operators cover the rest.
 
@@ -291,6 +292,11 @@ db.add_foreign_key(
 | `OnDeleteAction::Cascade` | Automatically delete referencing entities |
 | `OnDeleteAction::Restrict` | Prevent deletion if references exist |
 | `OnDeleteAction::SetNull` | Set foreign key field to null |
+
+When ownership is configured, cascade deletes are owner-aware. Entities owned by the
+deleting user are deleted normally. Cross-owned entities are excluded from the cascade — their
+FK field is set to null instead. If the FK field has a NotNull constraint, the entire delete
+is blocked. Admin users bypass ownership and perform a full blind cascade.
 
 ### Constraint Examples
 
@@ -617,7 +623,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | Authentication | Full | Password, SCRAM, JWT, federated JWT, rate limiting |
 | Backups | Partial | Per-node only (no cluster-wide snapshot) |
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
-| Foreign key constraints | Full | Distributed existence checks, cascade/set-null with ack-wait, in-memory reverse index |
+| Foreign key constraints | Full | Distributed existence checks, owner-aware cascade/set-null with ack-wait, in-memory reverse index |
 | NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
 | Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
