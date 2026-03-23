@@ -4,7 +4,7 @@
 use mqdb_agent::Database;
 use mqdb_agent::database::CallerContext;
 use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
-use mqdb_core::types::ScopeConfig;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{ChangeEvent, Error, OnDeleteAction, Operation};
 use serde_json::json;
 use std::sync::Arc;
@@ -541,7 +541,14 @@ async fn test_foreign_key_restrict_delete() {
     .unwrap();
 
     let result = db
-        .delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .delete(
+            "users".into(),
+            user_id,
+            None,
+            None,
+            &ScopeConfig::default(),
+            &OwnershipConfig::default(),
+        )
         .await;
 
     assert!(matches!(result, Err(Error::ForeignKeyRestrict { .. })));
@@ -600,7 +607,14 @@ async fn test_foreign_key_cascade_delete_simple() {
     .unwrap();
 
     let result = db
-        .delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .delete(
+            "users".into(),
+            user_id,
+            None,
+            None,
+            &ScopeConfig::default(),
+            &OwnershipConfig::default(),
+        )
         .await;
     assert!(result.is_ok());
 
@@ -688,7 +702,14 @@ async fn test_foreign_key_cascade_delete_multilevel() {
     .unwrap();
 
     let result = db
-        .delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .delete(
+            "users".into(),
+            user_id,
+            None,
+            None,
+            &ScopeConfig::default(),
+            &OwnershipConfig::default(),
+        )
         .await;
     assert!(result.is_ok());
 
@@ -762,7 +783,14 @@ async fn test_foreign_key_set_null() {
     .unwrap();
 
     let result = db
-        .delete("users".into(), user_id, None, None, &ScopeConfig::default())
+        .delete(
+            "users".into(),
+            user_id,
+            None,
+            None,
+            &ScopeConfig::default(),
+            &OwnershipConfig::default(),
+        )
         .await;
     assert!(result.is_ok());
 
@@ -1145,9 +1173,16 @@ async fn test_cascade_delete_emits_change_events() {
 
     while rx.try_recv().is_ok() {}
 
-    db.delete("users".into(), user_id, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.delete(
+        "users".into(),
+        user_id,
+        None,
+        None,
+        &ScopeConfig::default(),
+        &OwnershipConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let mut events: Vec<ChangeEvent> = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -1227,9 +1262,16 @@ async fn test_set_null_emits_update_change_events() {
 
     while rx.try_recv().is_ok() {}
 
-    db.delete("users".into(), user_id, None, None, &ScopeConfig::default())
-        .await
-        .unwrap();
+    db.delete(
+        "users".into(),
+        user_id,
+        None,
+        None,
+        &ScopeConfig::default(),
+        &OwnershipConfig::default(),
+    )
+    .await
+    .unwrap();
 
     let mut events: Vec<ChangeEvent> = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -1262,4 +1304,508 @@ async fn test_set_null_emits_update_change_events() {
         assert_eq!(data["author_id"], json!(null));
         assert_eq!(data["_version"], json!(2));
     }
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_same_owner_deletes() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "userId": "alice", "projectId": project_id.clone()});
+    db.create(
+        "tasks".into(),
+        task,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        Some("alice"),
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 0, "same-owner task should be cascade deleted");
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_cross_owner_survives_with_null_fk() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "userId": "bob", "projectId": project_id.clone()});
+    let created_task = db
+        .create(
+            "tasks".into(),
+            task,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let task_id = created_task["id"].as_str().unwrap().to_string();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        Some("alice"),
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "cross-owned task should survive");
+
+    let surviving = db
+        .read("tasks".into(), task_id, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        surviving["projectId"],
+        json!(null),
+        "FK field should be set to null"
+    );
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_cross_owner_blocked_by_not_null() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    db.add_not_null("tasks".into(), "projectId".into())
+        .await
+        .unwrap();
+
+    let task = json!({"name": "T1", "userId": "bob", "projectId": project_id.clone()});
+    db.create(
+        "tasks".into(),
+        task,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let result = db
+        .delete(
+            "projects".into(),
+            project_id,
+            Some("alice"),
+            None,
+            &ScopeConfig::default(),
+            &ownership,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::CascadeBlocked(_))),
+        "should be blocked by cross-owned entity with NotNull FK"
+    );
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_admin_bypasses_ownership() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let mut ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+    ownership.add_admin_user("admin".to_string());
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "userId": "bob", "projectId": project_id.clone()});
+    db.create(
+        "tasks".into(),
+        task,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        Some("admin"),
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 0, "admin should blind cascade all entities");
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_no_sender_blind() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "userId": "bob", "projectId": project_id.clone()});
+    db.create(
+        "tasks".into(),
+        task,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        None,
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 0, "no sender means blind cascade");
+}
+
+#[tokio::test]
+async fn test_owner_aware_cascade_unowned_entity_always_cascades() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "projectId": project_id.clone()});
+    db.create(
+        "tasks".into(),
+        task,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        Some("alice"),
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        tasks.len(),
+        0,
+        "unowned entity should always be cascade deleted"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_owner_aware_cascade_mixed_ownership_multilevel() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId,subtasks=userId").unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+    db.add_foreign_key(
+        "subtasks".into(),
+        "taskId".into(),
+        "tasks".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let alice_task = json!({"name": "AT1", "userId": "alice", "projectId": project_id.clone()});
+    let created_alice_task = db
+        .create(
+            "tasks".into(),
+            alice_task,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let alice_task_id = created_alice_task["id"].as_str().unwrap().to_string();
+
+    let bob_task = json!({"name": "BT1", "userId": "bob", "projectId": project_id.clone()});
+    let created_bob_task = db
+        .create(
+            "tasks".into(),
+            bob_task,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let bob_task_id = created_bob_task["id"].as_str().unwrap().to_string();
+
+    let subtask = json!({"name": "S1", "userId": "alice", "taskId": alice_task_id.clone()});
+    db.create(
+        "subtasks".into(),
+        subtask,
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    db.delete(
+        "projects".into(),
+        project_id,
+        Some("alice"),
+        None,
+        &ScopeConfig::default(),
+        &ownership,
+    )
+    .await
+    .unwrap();
+
+    let tasks = db
+        .list("tasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "bob's task should survive");
+    assert_eq!(tasks[0]["id"], bob_task_id);
+    assert_eq!(
+        tasks[0]["projectId"],
+        json!(null),
+        "bob's task FK should be null"
+    );
+
+    let alice_tasks: Vec<_> = tasks.iter().filter(|t| t["userId"] == "alice").collect();
+    assert_eq!(alice_tasks.len(), 0, "alice's task should be deleted");
+
+    let subtasks = db
+        .list("subtasks".into(), vec![], vec![], None, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        subtasks.len(),
+        0,
+        "alice's subtask should cascade from alice's task"
+    );
 }

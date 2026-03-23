@@ -83,6 +83,34 @@ pub enum Error {
 
     #[error("forbidden: {0}")]
     Forbidden(String),
+
+    #[error("cascade blocked: cannot delete {0} - cross-owned entity has non-nullable FK field")]
+    CascadeBlocked(Box<CascadeBlockedInfo>),
+}
+
+#[derive(Debug)]
+pub struct CascadeBlockedInfo {
+    pub entity: String,
+    pub id: String,
+    pub blocked_entity: String,
+    pub blocked_id: String,
+    pub blocked_field: String,
+    pub blocked_owner: String,
+}
+
+impl std::fmt::Display for CascadeBlockedInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}/{} by {}/{} (field '{}', owner '{}')",
+            self.entity,
+            self.id,
+            self.blocked_entity,
+            self.blocked_id,
+            self.blocked_field,
+            self.blocked_owner
+        )
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

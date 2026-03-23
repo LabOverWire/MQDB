@@ -4,7 +4,7 @@
 use mqdb_agent::Database;
 use mqdb_agent::database::CallerContext;
 use mqdb_core::config::{DatabaseConfig, DurabilityMode};
-use mqdb_core::types::ScopeConfig;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{Filter, FilterOp};
 use serde_json::json;
 use std::sync::Arc;
@@ -150,6 +150,7 @@ async fn test_recovery_after_many_operations() {
                     None,
                     None,
                     &ScopeConfig::default(),
+                    &OwnershipConfig::default(),
                 )
                 .await
                 .unwrap();
@@ -436,6 +437,7 @@ async fn test_recovery_after_delete_operations() {
                 None,
                 None,
                 &ScopeConfig::default(),
+                &OwnershipConfig::default(),
             )
             .await
             .unwrap();

@@ -73,6 +73,7 @@ async fn test_crud_operations() {
         None,
         None,
         &ScopeConfig::default(),
+        &OwnershipConfig::default(),
     )
     .await
     .unwrap();

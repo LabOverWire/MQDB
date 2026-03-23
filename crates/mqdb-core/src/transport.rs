@@ -155,6 +155,13 @@ impl From<Error> for Response {
                 ErrorCode::Conflict,
                 format!("not null violation: {entity}.{field}"),
             ),
+            Error::CascadeBlocked(info) => (
+                ErrorCode::Conflict,
+                format!(
+                    "cascade blocked: {}/{} owned by '{}' has non-nullable FK field '{}'",
+                    info.blocked_entity, info.blocked_id, info.blocked_owner, info.blocked_field
+                ),
+            ),
             Error::Conflict(msg) => (ErrorCode::Conflict, format!("conflict: {msg}")),
             _ => {
                 tracing::error!(error = %e, "internal error in client request");
