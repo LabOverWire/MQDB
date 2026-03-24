@@ -11,3 +11,4 @@ test_certs/
 .playwright-mcp/
 benchmark_results/
 Cargo.lock
+book/

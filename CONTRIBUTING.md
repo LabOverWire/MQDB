@@ -4,7 +4,7 @@ Thank you for your interest in contributing to MQDB. This document explains how 
 
 ## How to Contribute
 
-1. Check the [issue tracker](https://github.com/laboverwire/mqdb/issues) for open issues or create a new one to discuss your idea
+1. Check the [issue tracker](https://github.com/LabOverWire/MQDB/issues) for open issues or create a new one to discuss your idea
 2. Fork the repository and create a feature branch
 3. Make your changes following the code standards below
 4. Submit a pull request
@@ -22,7 +22,7 @@ All contributors must sign our [Contributor License Agreement](CLA.md) before an
 ## Development Setup
 
 ```bash
-git clone https://github.com/laboverwire/mqdb.git
+git clone https://github.com/LabOverWire/MQDB.git
 cd mqdb
 cargo make dev
 ```
