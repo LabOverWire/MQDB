@@ -11,7 +11,7 @@ use mqdb_core::VaultKeyStore;
 use mqdb_core::constraint::Constraint;
 use mqdb_core::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use mqdb_core::transport::{Request, Response};
-use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
 use mqtt5::client::MqttClient;
@@ -251,9 +251,10 @@ async fn vault_pre_update(
     id: &str,
     delta: Value,
 ) -> Result<(Request, Option<(Value, Value)>), Response> {
-    if let Some(uid) = params.sender_uid
-        && !params.ownership.is_admin(uid)
-        && let Some(owner_field) = params.ownership.entity_owner_fields.get(entity)
+    if let OwnershipDecision::Check {
+        owner_field,
+        sender: uid,
+    } = params.ownership.evaluate(entity, params.sender_uid)
         && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
     {
         return Err(e.into());

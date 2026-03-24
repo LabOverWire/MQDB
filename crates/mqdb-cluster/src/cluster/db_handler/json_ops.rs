@@ -13,7 +13,7 @@ use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use super::helpers::{self, parse_projection};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS};
+use mqdb_core::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision};
 use serde_json::{Value, json};
 
 pub(super) enum JsonOpResult {
@@ -118,9 +118,10 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                if let Some(uid) = sender
-                    && !self.ownership.is_admin(uid)
-                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = self.ownership.evaluate(entity, sender)
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
@@ -131,9 +132,10 @@ impl DbRequestHandler {
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
                 let stripped_payload;
-                let effective_payload = if let Some(uid) = sender
-                    && !self.ownership.is_admin(uid)
-                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                let effective_payload = if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = self.ownership.evaluate(entity, sender)
                 {
                     if let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
@@ -181,9 +183,10 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonDelete { entity, id } => {
-                if let Some(uid) = sender
-                    && !self.ownership.is_admin(uid)
-                    && let Some(owner_field) = self.ownership.owner_field(entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = self.ownership.evaluate(entity, sender)
                     && let Some(err) =
                         self.check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
@@ -1093,20 +1096,20 @@ impl DbRequestHandler {
             return Some(err);
         }
 
-        if let Some(uid) = sender
-            && !self.ownership.is_admin(uid)
-            && let Some(owner_field) = self.ownership.owner_field(entity)
+        let ownership_check = self.ownership.evaluate(entity, sender);
+        if let OwnershipDecision::Check {
+            owner_field,
+            sender: uid,
+        } = &ownership_check
         {
             filters.push(mqdb_core::Filter::new(
-                owner_field.to_string(),
+                (*owner_field).to_string(),
                 mqdb_core::FilterOp::Eq,
-                Value::String(uid.to_string()),
+                Value::String((*uid).to_string()),
             ));
         }
 
-        let sender_needs_filter = sender.is_some_and(|uid| !self.ownership.is_admin(uid))
-            && self.ownership.owner_field(entity).is_some();
-        let scatter_payload = if sender_needs_filter {
+        let scatter_payload = if matches!(ownership_check, OwnershipDecision::Check { .. }) {
             let mut data: Value = if payload.is_empty() {
                 json!({})
             } else {
