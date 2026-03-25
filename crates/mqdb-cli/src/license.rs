@@ -3,7 +3,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use mqdb_core::license::{LicenseFeature, LicenseInfo, LicenseTier};
+use mqdb_core::license::{LicenseFeatures, LicenseInfo, LicenseTier};
 use ring::digest;
 use ring::signature;
 use std::path::Path;
@@ -56,11 +56,6 @@ pub(crate) fn verify_license_file(path: &Path) -> Result<LicenseInfo, String> {
     verify_license_token_with_key(token.trim(), &key)
 }
 
-pub(crate) fn verify_license_token(token: &str) -> Result<LicenseInfo, String> {
-    let key = unwrap_licensing_key()?;
-    verify_license_token_with_key(token, &key)
-}
-
 fn verify_license_token_with_key(
     token: &str,
     public_key_bytes: &[u8],
@@ -109,6 +104,16 @@ fn verify_license_token_with_key(
 }
 
 fn parse_license_payload(payload: &serde_json::Value) -> Result<LicenseInfo, String> {
+    let issuer = payload
+        .get("iss")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("missing 'iss' in payload")?;
+    if issuer != "laboverwire" {
+        return Err(format!(
+            "invalid issuer: expected 'laboverwire', got '{issuer}'"
+        ));
+    }
+
     let customer = payload
         .get("sub")
         .and_then(serde_json::Value::as_str)
@@ -139,13 +144,15 @@ fn parse_license_payload(payload: &serde_json::Value) -> Result<LicenseInfo, Str
         .get("features")
         .and_then(serde_json::Value::as_array)
         .map(|arr| {
-            arr.iter()
-                .filter_map(|v| match v.as_str()? {
-                    "vault" => Some(LicenseFeature::Vault),
-                    "cluster" => Some(LicenseFeature::Cluster),
-                    _ => None,
-                })
-                .collect()
+            let mut feats = LicenseFeatures::default();
+            for v in arr {
+                match v.as_str() {
+                    Some("vault") => feats.vault = true,
+                    Some("cluster") => feats.cluster = true,
+                    _ => {}
+                }
+            }
+            feats
         })
         .unwrap_or_default();
 
@@ -176,7 +183,7 @@ pub(crate) fn enforce_license(
         let Some(lic) = license else {
             return Err("vault encryption requires a Pro or Enterprise license (--license)".into());
         };
-        if !lic.has_feature(LicenseFeature::Vault) {
+        if !lic.features.vault {
             return Err("your license does not include vault encryption".into());
         }
     }
@@ -184,7 +191,7 @@ pub(crate) fn enforce_license(
         let Some(lic) = license else {
             return Err("clustering requires an Enterprise license (--license)".into());
         };
-        if !lic.has_feature(LicenseFeature::Cluster) {
+        if !lic.features.cluster {
             return Err("your license does not include clustering".into());
         }
     }
@@ -245,8 +252,8 @@ mod tests {
             verify_license_token_with_key(&token, &public_key).expect("verify should succeed");
         assert_eq!(info.customer, "test@example.com");
         assert_eq!(info.tier, LicenseTier::Enterprise);
-        assert!(info.has_feature(LicenseFeature::Vault));
-        assert!(info.has_feature(LicenseFeature::Cluster));
+        assert!(info.features.vault);
+        assert!(info.features.cluster);
         assert!(!info.trial);
         assert!(!info.is_expired());
     }
@@ -349,7 +356,10 @@ mod tests {
         let info = LicenseInfo {
             customer: "test@example.com".into(),
             tier: LicenseTier::Pro,
-            features: vec![LicenseFeature::Vault],
+            features: LicenseFeatures {
+                vault: true,
+                cluster: false,
+            },
             expires_at: u64::MAX,
             trial: false,
         };
@@ -361,11 +371,57 @@ mod tests {
         let info = LicenseInfo {
             customer: "test@example.com".into(),
             tier: LicenseTier::Pro,
-            features: vec![LicenseFeature::Vault],
+            features: LicenseFeatures {
+                vault: true,
+                cluster: false,
+            },
             expires_at: u64::MAX,
             trial: false,
         };
         let result = enforce_license(Some(&info), false, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wrong_issuer_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "not-laboverwire",
+            "iat": now,
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid issuer"));
+    }
+
+    #[test]
+    fn missing_issuer_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iat": now,
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing 'iss'"));
     }
 }

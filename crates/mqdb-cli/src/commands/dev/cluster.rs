@@ -83,7 +83,8 @@ pub(crate) fn cmd_dev_start_cluster(
         }
 
         if let Some(lic_path) = license {
-            cmd.args(["--license", lic_path.to_str().unwrap_or("")]);
+            let lic_str = lic_path.to_str().ok_or("license path is not valid UTF-8")?;
+            cmd.args(["--license", lic_str]);
         }
 
         let peers: Vec<String> = match topology_name {

@@ -442,30 +442,15 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
 fn dispatch_license(action: LicenseAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         LicenseAction::Verify { license: path } => {
-            let token = std::fs::read_to_string(&path)
-                .map_err(|e| format!("failed to read license file '{}': {e}", path.display()))?;
-            match license::verify_license_token(token.trim()) {
-                Ok(info) => {
-                    println!("Customer:   {}", info.customer);
-                    println!("Tier:       {}", info.tier);
-                    println!(
-                        "Features:   {}",
-                        info.features
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    println!("Trial:      {}", info.trial);
-                    println!("Expires at: {} (unix)", info.expires_at);
-                    println!("Days left:  {}", info.days_remaining());
-                    println!("Status:     valid");
-                }
-                Err(e) => {
-                    eprintln!("License invalid: {e}");
-                    std::process::exit(1);
-                }
-            }
+            let info = license::verify_license_file(&path)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("Customer:   {}", info.customer);
+            println!("Tier:       {}", info.tier);
+            println!("Features:   {}", info.features);
+            println!("Trial:      {}", info.trial);
+            println!("Expires at: {} (unix)", info.expires_at);
+            println!("Days left:  {}", info.days_remaining());
+            println!("Status:     valid");
         }
     }
     Ok(())

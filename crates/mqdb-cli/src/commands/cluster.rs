@@ -86,10 +86,6 @@ pub(crate) async fn cmd_cluster_start(
     config = config.with_bind_address(args.bind);
     config = config.with_stores_durability(stores_durability);
 
-    if let Some(info) = license_info {
-        config = config.with_license_info(info);
-    }
-
     if let Some(name) = args.node_name {
         config = config.with_node_name(name);
     }
