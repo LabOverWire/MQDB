@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::MAX_LIST_RESULTS;
+use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipDecision};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -516,11 +516,15 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn check_forwarded_ownership(&self, request: &JsonDbRequest) -> Option<Vec<u8>> {
-        let sender = request.sender.as_deref()?;
-        if self.ownership.is_admin(sender) {
+        let OwnershipDecision::Check {
+            owner_field,
+            sender: uid,
+        } = self
+            .ownership
+            .evaluate(&request.entity, request.sender.as_deref())
+        else {
             return None;
-        }
-        let owner_field = self.ownership.owner_field(&request.entity)?;
+        };
         let id = request.id.as_deref()?;
         if !matches!(
             request.op,
@@ -533,7 +537,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return Some(Self::json_error(403, "permission denied"));
         };
         let owner_value = data.get(owner_field).and_then(serde_json::Value::as_str);
-        if owner_value != Some(sender) {
+        if owner_value != Some(uid) {
             return Some(Self::json_error(403, "permission denied"));
         }
         None

@@ -3,7 +3,7 @@
 
 use crate::database::{CallerContext, Database};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
-use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
 
 fn value_from_unit(_: ()) -> Value {
@@ -68,9 +68,10 @@ impl Database {
                 includes,
                 projection,
             } => {
-                if let Some(uid) = sender
-                    && !ownership.is_admin(uid)
-                    && let Some(owner_field) = ownership.owner_field(&entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = ownership.evaluate(&entity, sender)
                     && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
                 {
                     return e.into();
@@ -85,9 +86,10 @@ impl Database {
                 id,
                 mut fields,
             } => {
-                if let Some(uid) = sender
-                    && !ownership.is_admin(uid)
-                    && let Some(owner_field) = ownership.owner_field(&entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = ownership.evaluate(&entity, sender)
                 {
                     if let Err(e) = self.check_ownership(&entity, &id, owner_field, uid) {
                         return e.into();
@@ -116,9 +118,10 @@ impl Database {
                 }
             }
             Request::Delete { entity, id } => {
-                if let Some(uid) = sender
-                    && !ownership.is_admin(uid)
-                    && let Some(owner_field) = ownership.owner_field(&entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = ownership.evaluate(&entity, sender)
                     && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
                 {
                     return e.into();
@@ -149,9 +152,10 @@ impl Database {
                 {
                     return e.into();
                 }
-                if let Some(uid) = sender
-                    && !ownership.is_admin(uid)
-                    && let Some(owner_field) = ownership.owner_field(&entity)
+                if let OwnershipDecision::Check {
+                    owner_field,
+                    sender: uid,
+                } = ownership.evaluate(&entity, sender)
                 {
                     filters.push(mqdb_core::Filter::new(
                         owner_field.to_string(),

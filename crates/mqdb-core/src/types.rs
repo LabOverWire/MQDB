@@ -134,6 +134,35 @@ impl OwnershipConfig {
     pub fn is_empty(&self) -> bool {
         self.entity_owner_fields.is_empty()
     }
+
+    #[must_use]
+    pub fn evaluate<'a, 'b>(
+        &'a self,
+        entity: &str,
+        sender: Option<&'b str>,
+    ) -> OwnershipDecision<'a, 'b> {
+        let Some(uid) = sender else {
+            return OwnershipDecision::Allowed;
+        };
+        if self.is_admin(uid) {
+            return OwnershipDecision::Allowed;
+        }
+        match self.owner_field(entity) {
+            Some(field) => OwnershipDecision::Check {
+                owner_field: field,
+                sender: uid,
+            },
+            None => OwnershipDecision::Allowed,
+        }
+    }
+}
+
+pub enum OwnershipDecision<'a, 'b> {
+    Allowed,
+    Check {
+        owner_field: &'a str,
+        sender: &'b str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
