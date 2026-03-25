@@ -399,6 +399,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             no_bridge_out,
             passwd,
             ownership,
+            license,
         } => commands::dev::cmd_dev_start_cluster(
             nodes,
             clean,
@@ -413,6 +414,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             no_bridge_out,
             passwd.as_deref(),
             ownership.as_deref(),
+            license.as_deref(),
         )?,
         DevAction::Bench {
             scenario,
