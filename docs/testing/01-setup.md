@@ -91,6 +91,7 @@ mqdb agent start --db ./data/testdb --passwd ./passwd.txt --acl ./acl.txt \
 | `--ownership` | Ownership config: `entity=field` pairs | (none) |
 | `--event-scope` | Scope events by entity field | (none) |
 | `--passphrase-file` | File-at-rest encryption passphrase | (none) |
+| `--license` | Path to license key file (required for vault/cluster) | (none) |
 
 **Authentication:**
 

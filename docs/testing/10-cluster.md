@@ -109,6 +109,7 @@ Cluster mode supports all agent authentication and OAuth options (see Section 1)
 | `--durability-ms` | Fsync interval in ms (periodic mode) | `10` |
 | `--bridge-out` | Use outgoing-only bridge direction | `false` |
 | `--cluster-port-offset` | Port offset for cluster listener | `100` |
+| `--license` | Path to license key file (required for clustering) | (none) |
 
 ### Testing Without Persistence
 

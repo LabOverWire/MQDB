@@ -7,6 +7,7 @@
 ### Prerequisites
 
 Vault requires:
+- A Pro or Enterprise license with the `vault` feature (`--license /path/to/license.key`)
 - Build with `dev-insecure` feature for dev-login: `cargo build --release --features dev-insecure`
 - `--ownership` flag for at least one entity
 - `--http-bind` for the vault HTTP API
@@ -29,7 +30,8 @@ mqdb agent start --db /tmp/vault-test/db --bind 127.0.0.1:1883 \
     --http-bind 127.0.0.1:3000 \
     --passwd /tmp/vault-test/passwd.txt --jwt-algorithm hs256 --jwt-key /tmp/vault-test/jwt.key \
     --jwt-audience vault-test --oauth-client-secret /tmp/vault-test/oauth-secret.txt \
-    --ownership notes=userId --admin-users vault-user --no-rate-limit
+    --ownership notes=userId --admin-users vault-user --no-rate-limit \
+    --license /path/to/license.key
 ```
 
 ### Test 1: Login and Enable Vault
