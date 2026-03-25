@@ -32,6 +32,7 @@ bebytes.workspace = true
 rustls = { workspace = true, optional = true }
 regex.workspace = true
 glob.workspace = true
+base64.workspace = true
 
 [features]
 default = ["cluster", "http-api"]

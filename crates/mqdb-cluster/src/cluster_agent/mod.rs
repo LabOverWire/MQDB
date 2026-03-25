@@ -121,6 +121,7 @@ pub struct ClusterConfig {
     pub ownership: mqdb_core::types::OwnershipConfig,
     pub scope_config: mqdb_core::types::ScopeConfig,
     pub passphrase: Option<String>,
+    pub license_info: Option<mqdb_core::license::LicenseInfo>,
 }
 
 pub struct ClusteredAgent {

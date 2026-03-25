@@ -36,12 +36,38 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
+    pub(crate) license: Option<PathBuf>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn cmd_cluster_start(
     args: ClusterStartArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb_core::config::DurabilityMode;
+
+    let license_info = if let Some(ref license_path) = args.license {
+        match crate::license::verify_license_file(license_path) {
+            Ok(info) => {
+                tracing::info!(
+                    customer = %info.customer,
+                    tier = %info.tier,
+                    trial = info.trial,
+                    days_remaining = info.days_remaining(),
+                    "license validated"
+                );
+                Some(info)
+            }
+            Err(e) => {
+                return Err(format!("license validation failed: {e}").into());
+            }
+        }
+    } else {
+        None
+    };
+
+    let needs_vault = args.passphrase_file.is_some();
+    crate::license::enforce_license(license_info.as_ref(), needs_vault, true)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let peer_configs = parse_peer_configs(&args.peers)?;
 
@@ -59,6 +85,10 @@ pub(crate) async fn cmd_cluster_start(
     let mut config = ClusterConfig::new(args.node_id, db_path.clone(), peer_configs);
     config = config.with_bind_address(args.bind);
     config = config.with_stores_durability(stores_durability);
+
+    if let Some(info) = license_info {
+        config = config.with_license_info(info);
+    }
 
     if let Some(name) = args.node_name {
         config = config.with_node_name(name);

@@ -35,6 +35,7 @@ pub struct MqdbAgent {
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
+    pub(super) license_info: Option<mqdb_core::license::LicenseInfo>,
 }
 
 impl MqdbAgent {
@@ -59,6 +60,7 @@ impl MqdbAgent {
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            license_info: None,
         }
     }
 
@@ -169,6 +171,12 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_scope_config(mut self, config: mqdb_core::types::ScopeConfig) -> Self {
         self.scope_config = Arc::new(config);
+        self
+    }
+
+    #[must_use]
+    pub fn with_license_info(mut self, info: mqdb_core::license::LicenseInfo) -> Self {
+        self.license_info = Some(info);
         self
     }
 

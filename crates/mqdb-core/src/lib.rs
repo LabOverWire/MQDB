@@ -9,6 +9,7 @@ pub mod error;
 pub mod events;
 pub mod index;
 pub mod keys;
+pub mod license;
 pub mod outbox;
 pub mod partition;
 pub mod protocol;
