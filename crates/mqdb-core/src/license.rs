@@ -54,20 +54,43 @@ impl std::fmt::Display for LicenseTier {
 
 impl std::fmt::Display for LicenseFeatures {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut first = true;
-        if self.vault {
-            write!(f, "vault")?;
-            first = false;
+        match (self.vault, self.cluster) {
+            (true, true) => write!(f, "vault, cluster"),
+            (true, false) => write!(f, "vault"),
+            (false, true) => write!(f, "cluster"),
+            (false, false) => write!(f, "none"),
         }
-        if self.cluster {
-            if !first {
-                write!(f, ", ")?;
-            }
-            write!(f, "cluster")?;
-        }
-        if first {
-            write!(f, "none")?;
-        }
-        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn features_display_all_combinations() {
+        let both = LicenseFeatures {
+            vault: true,
+            cluster: true,
+        };
+        assert_eq!(both.to_string(), "vault, cluster");
+
+        let vault_only = LicenseFeatures {
+            vault: true,
+            cluster: false,
+        };
+        assert_eq!(vault_only.to_string(), "vault");
+
+        let cluster_only = LicenseFeatures {
+            vault: false,
+            cluster: true,
+        };
+        assert_eq!(cluster_only.to_string(), "cluster");
+
+        let none = LicenseFeatures {
+            vault: false,
+            cluster: false,
+        };
+        assert_eq!(none.to_string(), "none");
     }
 }
