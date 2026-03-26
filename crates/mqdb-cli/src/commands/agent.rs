@@ -75,6 +75,10 @@ pub(crate) async fn cmd_agent_start(
         .with_bind_address(args.bind)
         .with_auth_setup(auth_setup);
 
+    if let Some(ref info) = license_info {
+        agent = agent.with_license_expiry(info.expires_at);
+    }
+
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         agent = agent.with_quic_certs(cert, key);
     }

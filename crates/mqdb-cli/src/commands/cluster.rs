@@ -146,6 +146,9 @@ pub(crate) async fn cmd_cluster_start(
             .map_err(|e| format!("invalid --event-scope: {e}"))?;
         config = config.with_scope_config(scope_config);
     }
+    if let Some(ref info) = license_info {
+        config = config.with_license_expiry(info.expires_at);
+    }
     if let Some(ref pf) = args.passphrase_file {
         let passphrase = std::fs::read_to_string(pf)
             .map_err(|e| format!("failed to read passphrase file: {e}"))?;

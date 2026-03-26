@@ -84,6 +84,7 @@ impl ClusteredAgent {
             tokio::time::Instant::now() + Duration::from_secs(30),
             Duration::from_secs(30),
         );
+        let mut license_check_interval = interval(Duration::from_secs(3600));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -145,6 +146,9 @@ impl ClusteredAgent {
                 }
                 Ok(req) = admin_rx.recv_async() => {
                     self.handle_admin_request(&admin_client, req).await;
+                }
+                _ = license_check_interval.tick() => {
+                    self.handle_license_check();
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
@@ -551,6 +555,18 @@ impl ClusteredAgent {
                 remaining = synced.len(),
                 "cleaned up stale retained sync entries"
             );
+        }
+    }
+
+    fn handle_license_check(&self) {
+        if let Some(expires_at) = self.license_expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(u64::MAX, |d| d.as_secs());
+            if now > expires_at {
+                tracing::error!("license has expired — shutting down");
+                let _ = self.shutdown_tx.send(());
+            }
         }
     }
 

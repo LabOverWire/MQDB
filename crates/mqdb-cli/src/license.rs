@@ -41,9 +41,7 @@ fn unwrap_licensing_key() -> Result<[u8; 65], String> {
     let computed = ctx.finish();
 
     if computed.as_ref() != KEY_INTEGRITY_DIGEST {
-        return Err(
-            "license verification key integrity check failed — binary may be tampered".into(),
-        );
+        return Err("license verification key integrity check failed".into());
     }
 
     Ok(key)
@@ -135,6 +133,15 @@ fn parse_license_payload(payload: &serde_json::Value) -> Result<LicenseInfo, Str
         .and_then(serde_json::Value::as_u64)
         .ok_or("missing 'exp' in payload")?;
 
+    if let Some(nbf) = payload.get("nbf").and_then(serde_json::Value::as_u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(u64::MAX, |d| d.as_secs());
+        if now < nbf {
+            return Err(format!("license not yet valid (nbf={nbf})"));
+        }
+    }
+
     let trial = payload
         .get("trial")
         .and_then(serde_json::Value::as_bool)
@@ -155,6 +162,10 @@ fn parse_license_payload(payload: &serde_json::Value) -> Result<LicenseInfo, Str
             feats
         })
         .unwrap_or_default();
+
+    if tier == LicenseTier::Pro && features.cluster {
+        return Err("invalid license: pro tier cannot include cluster feature".into());
+    }
 
     let info = LicenseInfo {
         customer,
@@ -423,5 +434,76 @@ mod tests {
         let result = verify_license_token_with_key(&token, &public_key);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing 'iss'"));
+    }
+
+    #[test]
+    fn pro_with_cluster_feature_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now,
+            "exp": now + 86400,
+            "tier": "pro",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("pro tier cannot include cluster")
+        );
+    }
+
+    #[test]
+    fn not_yet_valid_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now,
+            "nbf": now + 86400,
+            "exp": now + 172_800,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not yet valid"));
+    }
+
+    #[test]
+    fn nbf_in_past_accepted() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now - 3600,
+            "nbf": now - 3600,
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_ok());
     }
 }

@@ -37,6 +37,7 @@ impl ClusterConfig {
             ownership: mqdb_core::types::OwnershipConfig::default(),
             scope_config: mqdb_core::types::ScopeConfig::default(),
             passphrase: None,
+            license_expires_at: None,
         }
     }
 
@@ -200,6 +201,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_passphrase(mut self, passphrase: String) -> Self {
         self.passphrase = Some(passphrase);
+        self
+    }
+
+    #[must_use]
+    pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
+        self.license_expires_at = Some(expires_at);
         self
     }
 }

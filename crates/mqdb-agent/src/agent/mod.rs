@@ -35,6 +35,7 @@ pub struct MqdbAgent {
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
+    pub(super) license_expires_at: Option<u64>,
 }
 
 impl MqdbAgent {
@@ -59,6 +60,7 @@ impl MqdbAgent {
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            license_expires_at: None,
         }
     }
 
@@ -173,6 +175,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
+        self.license_expires_at = Some(expires_at);
+        self
+    }
+
+    #[must_use]
     pub fn ownership_config_arc(&self) -> Arc<mqdb_core::types::OwnershipConfig> {
         Arc::clone(&self.ownership_config)
     }
@@ -231,6 +239,7 @@ impl MqdbAgent {
             service_username.as_ref(),
             service_password.as_ref(),
         );
+        let license_task = self.spawn_license_check_task();
 
         broker.run().await?;
 
@@ -239,6 +248,9 @@ impl MqdbAgent {
         let _ = event_task.await;
         if let Some(http) = http_task {
             let _ = http.await;
+        }
+        if let Some(lic) = license_task {
+            let _ = lic.await;
         }
 
         Ok(())

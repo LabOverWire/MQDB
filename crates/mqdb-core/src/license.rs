@@ -27,7 +27,7 @@ impl LicenseInfo {
     pub fn is_expired(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+            .map_or(u64::MAX, |d| d.as_secs());
         now > self.expires_at
     }
 
@@ -35,7 +35,7 @@ impl LicenseInfo {
     pub fn days_remaining(&self) -> i64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+            .map_or(u64::MAX, |d| d.as_secs());
         if now > self.expires_at {
             return 0;
         }

@@ -236,6 +236,7 @@ impl ClusteredAgent {
             scope_config: Arc::new(config.scope_config),
             auth_providers: None,
             vault_key_store,
+            license_expires_at: config.license_expires_at,
         })
     }
 
