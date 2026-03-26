@@ -14,6 +14,7 @@ use super::db::DbAction;
 use super::db::{BackupAction, ConstraintAction, ConsumerGroupAction, IndexAction, SchemaAction};
 #[cfg(feature = "cluster")]
 use super::dev::DevAction;
+use super::license::LicenseAction;
 
 #[derive(Parser)]
 #[command(name = "mqdb")]
@@ -260,6 +261,11 @@ Examples:
     Bench {
         #[command(subcommand)]
         action: BenchAction,
+    },
+    #[command(about = "Manage license keys")]
+    License {
+        #[command(subcommand)]
+        action: LicenseAction,
     },
 }
 

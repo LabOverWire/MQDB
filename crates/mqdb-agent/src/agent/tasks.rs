@@ -13,6 +13,33 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 impl MqdbAgent {
+    pub(super) fn spawn_license_check_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+        let expires_at = self.license_expires_at?;
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let shutdown_tx = self.shutdown_tx.clone();
+        Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(u64::MAX, |d| d.as_secs());
+                        if now > expires_at {
+                            tracing::error!("license has expired — shutting down");
+                            let _ = shutdown_tx.send(());
+                            break;
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        break;
+                    }
+                }
+            }
+        }))
+    }
+
     pub(super) fn spawn_handler_task(
         &self,
         bind_addr: SocketAddr,

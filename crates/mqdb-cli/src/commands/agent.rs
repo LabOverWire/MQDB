@@ -23,6 +23,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
+    pub(crate) license: Option<PathBuf>,
 }
 
 pub(crate) async fn cmd_agent_start(
@@ -44,10 +45,39 @@ pub(crate) async fn cmd_agent_start(
     }
     let db = Database::open_with_config(config).await?;
 
+    let license_info = if let Some(ref license_path) = args.license {
+        match crate::license::verify_license_file(license_path) {
+            Ok(info) => {
+                tracing::info!(
+                    customer = %info.customer,
+                    tier = %info.tier,
+                    trial = info.trial,
+                    days_remaining = info.days_remaining(),
+                    "license validated"
+                );
+                Some(info)
+            }
+            Err(e) => {
+                tracing::warn!("license validation failed: {e} — running in free tier");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let needs_vault = args.passphrase_file.is_some();
+    crate::license::enforce_license(license_info.as_ref(), needs_vault, false)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
     let auth_setup = build_auth_setup_config(&args.auth)?;
     let mut agent = MqdbAgent::new(db)
         .with_bind_address(args.bind)
         .with_auth_setup(auth_setup);
+
+    if let Some(ref info) = license_info {
+        agent = agent.with_license_expiry(info.expires_at);
+    }
 
     if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
         agent = agent.with_quic_certs(cert, key);

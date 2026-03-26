@@ -37,6 +37,7 @@ pub(crate) fn cmd_dev_start_cluster(
     no_bridge_out: bool,
     passwd: Option<&Path>,
     ownership: Option<&str>,
+    license: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if clean {
         println!("Cleaning existing databases...");
@@ -79,6 +80,11 @@ pub(crate) fn cmd_dev_start_cluster(
 
         if let Some(ownership_spec) = ownership {
             cmd.args(["--ownership", ownership_spec]);
+        }
+
+        if let Some(lic_path) = license {
+            let lic_str = lic_path.to_str().ok_or("license path is not valid UTF-8")?;
+            cmd.args(["--license", lic_str]);
         }
 
         let peers: Vec<String> = match topology_name {

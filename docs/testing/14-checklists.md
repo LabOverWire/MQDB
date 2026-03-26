@@ -145,6 +145,14 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Internal (no sender) bypasses ownership
 - [ ] Ownership works across cluster nodes
 
+### License Enforcement
+- [ ] `mqdb license verify` accepts valid token
+- [ ] `mqdb license verify` rejects expired token
+- [ ] `mqdb license verify` rejects tampered token
+- [ ] Agent with vault requires license
+- [ ] Cluster mode requires enterprise license
+- [ ] Invalid license falls back to free tier (agent)
+
 ### Monitoring
 - [ ] Health endpoint returns correct status
 - [ ] Health updates on node failure
@@ -194,6 +202,15 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Filter+sort consistent across all nodes
 - [ ] No duplicate records in results
 - [ ] Pagination works in cluster mode
+
+### License Verification (Section 39-42)
+- [ ] `mqdb license verify` shows valid license details
+- [ ] Expired license rejected
+- [ ] Tampered token rejected
+- [ ] Agent + vault + valid license starts
+- [ ] Agent + vault without license fails
+- [ ] Cluster + enterprise license starts
+- [ ] Cluster without license fails
 
 ### Agent vs Cluster Format (Section 38)
 - [ ] Create response format identical

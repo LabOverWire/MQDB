@@ -97,6 +97,8 @@ pub(crate) enum DevAction {
             help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
         )]
         ownership: Option<String>,
+        #[arg(long, help = "Path to license key file")]
+        license: Option<PathBuf>,
     },
     #[command(about = "Run benchmarks with auto-start and result saving")]
     Bench {

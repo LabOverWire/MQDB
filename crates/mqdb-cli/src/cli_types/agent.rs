@@ -51,6 +51,8 @@ pub(crate) enum AgentAction {
         event_scope: Option<String>,
         #[arg(long, help = "Path to file containing encryption passphrase")]
         passphrase_file: Option<PathBuf>,
+        #[arg(long, help = "Path to license key file")]
+        license: Option<PathBuf>,
     },
     #[command(about = "Check broker connectivity status")]
     Status {
@@ -134,6 +136,8 @@ pub(crate) struct ClusterStartFields {
     pub(crate) event_scope: Option<String>,
     #[arg(long, help = "Path to file containing encryption passphrase")]
     pub(crate) passphrase_file: Option<PathBuf>,
+    #[arg(long, help = "Path to license key file")]
+    pub(crate) license: Option<PathBuf>,
 }
 
 #[cfg(feature = "cluster")]

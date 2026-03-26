@@ -121,6 +121,7 @@ pub struct ClusterConfig {
     pub ownership: mqdb_core::types::OwnershipConfig,
     pub scope_config: mqdb_core::types::ScopeConfig,
     pub passphrase: Option<String>,
+    pub license_expires_at: Option<u64>,
 }
 
 pub struct ClusteredAgent {
@@ -161,6 +162,7 @@ pub struct ClusteredAgent {
     scope_config: Arc<mqdb_core::types::ScopeConfig>,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
     vault_key_store: Arc<VaultKeyStore>,
+    license_expires_at: Option<u64>,
 }
 
 impl ClusteredAgent {

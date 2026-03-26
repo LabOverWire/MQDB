@@ -4,10 +4,11 @@
 mod cli_types;
 mod commands;
 mod common;
+mod license;
 
 use cli_types::{
     AclAction, AgentAction, BackupAction, BenchAction, Cli, Commands, ConstraintAction,
-    ConsumerGroupAction, IndexAction, SchemaAction,
+    ConsumerGroupAction, IndexAction, LicenseAction, SchemaAction,
 };
 #[cfg(feature = "cluster")]
 use cli_types::{ClusterAction, DbAction, DevAction};
@@ -73,6 +74,7 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         #[cfg(feature = "cluster")]
         Commands::Dev { action } => dispatch_dev(action).await?,
         Commands::Bench { action } => dispatch_bench(action).await?,
+        Commands::License { action } => dispatch_license(action)?,
         crud @ (Commands::Create { .. }
         | Commands::Read { .. }
         | Commands::Update { .. }
@@ -178,6 +180,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
             ownership,
             event_scope,
             passphrase_file,
+            license,
         } => {
             cmd_agent_start(AgentStartArgs {
                 bind,
@@ -192,6 +195,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 ownership,
                 event_scope,
                 passphrase_file,
+                license,
             })
             .await
         }
@@ -226,6 +230,7 @@ async fn dispatch_cluster(action: ClusterAction) -> Result<(), Box<dyn std::erro
                 ownership: fields.ownership,
                 event_scope: fields.event_scope,
                 passphrase_file: fields.passphrase_file,
+                license: fields.license,
             }))
             .await
         }
@@ -394,6 +399,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             no_bridge_out,
             passwd,
             ownership,
+            license,
         } => commands::dev::cmd_dev_start_cluster(
             nodes,
             clean,
@@ -408,6 +414,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             no_bridge_out,
             passwd.as_deref(),
             ownership.as_deref(),
+            license.as_deref(),
         )?,
         DevAction::Bench {
             scenario,
@@ -428,6 +435,23 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             db,
         } => commands::dev_bench::cmd_dev_profile(&scenario, &tool, duration, output, &db)?,
         DevAction::Baseline { action } => commands::dev_bench::cmd_dev_baseline(action)?,
+    }
+    Ok(())
+}
+
+fn dispatch_license(action: LicenseAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        LicenseAction::Verify { license: path } => {
+            let info = license::verify_license_file(&path)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("Customer:   {}", info.customer);
+            println!("Tier:       {}", info.tier);
+            println!("Features:   {}", info.features);
+            println!("Trial:      {}", info.trial);
+            println!("Expires at: {} (unix)", info.expires_at);
+            println!("Days left:  {}", info.days_remaining());
+            println!("Status:     valid");
+        }
     }
     Ok(())
 }

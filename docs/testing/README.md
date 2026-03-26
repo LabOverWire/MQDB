@@ -20,3 +20,4 @@ The guide is split into focused subdocuments for efficient reference:
 | [12-benchmarks.md](12-benchmarks.md)       | Benchmarking and health endpoint                                            |
 | [13-http-api.md](13-http-api.md)           | OAuth/identity, admin MQTT endpoints, advanced options                      |
 | [14-checklists.md](14-checklists.md)       | Quick test, complete verification, and additions checklists                 |
+| [15-license.md](15-license.md)             | License key verification and enforcement                                   |

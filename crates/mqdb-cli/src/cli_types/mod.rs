@@ -8,6 +8,7 @@ mod bench;
 mod db;
 #[cfg(feature = "cluster")]
 mod dev;
+mod license;
 
 pub(crate) use agent::AgentAction;
 #[cfg(feature = "cluster")]
@@ -25,3 +26,4 @@ pub(crate) use db::{
 };
 #[cfg(feature = "cluster")]
 pub(crate) use dev::{DevAction, DevBaselineAction, DevBenchScenario};
+pub(crate) use license::LicenseAction;
