@@ -95,7 +95,7 @@ jobs:
 
       - name: Generate bindings
         if: steps.npm-check.outputs.skip != 'true'
-        run: wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/mqdb_wasm.wasm
+        run: wasm-bindgen --target web --out-dir pkg crates/mqdb-wasm/target/wasm32-unknown-unknown/release/mqdb_wasm.wasm
 
       - name: Create package.json
         if: steps.npm-check.outputs.skip != 'true'
