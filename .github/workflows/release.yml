@@ -78,10 +78,6 @@ jobs:
         if: steps.npm-check.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
 
-      - name: Install wasm-bindgen-cli
-        if: steps.npm-check.outputs.skip != 'true'
-        run: cargo install wasm-bindgen-cli
-
       - name: Setup Node.js
         if: steps.npm-check.outputs.skip != 'true'
         uses: actions/setup-node@v4
@@ -92,6 +88,12 @@ jobs:
       - name: Build WASM
         if: steps.npm-check.outputs.skip != 'true'
         run: cargo build --target wasm32-unknown-unknown --release --manifest-path crates/mqdb-wasm/Cargo.toml
+
+      - name: Install matching wasm-bindgen-cli
+        if: steps.npm-check.outputs.skip != 'true'
+        run: |
+          WB_VERSION=$(cargo metadata --manifest-path crates/mqdb-wasm/Cargo.toml --format-version 1 | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print([p['version'] for p in pkgs if p['name']=='wasm-bindgen'][0])")
+          cargo install wasm-bindgen-cli --version "$WB_VERSION"
 
       - name: Generate bindings
         if: steps.npm-check.outputs.skip != 'true'
