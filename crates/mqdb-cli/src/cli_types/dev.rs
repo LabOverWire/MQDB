@@ -52,6 +52,8 @@ pub(crate) enum DevAction {
         all: bool,
         #[arg(long, default_value = "3", help = "Number of cluster nodes")]
         nodes: u8,
+        #[arg(long, help = "Path to license key file (required for ownership tests)")]
+        license: Option<PathBuf>,
     },
     StartCluster {
         #[arg(long, default_value = "3", help = "Number of cluster nodes to start")]

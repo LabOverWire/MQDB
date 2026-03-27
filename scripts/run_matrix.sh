@@ -5,6 +5,11 @@ MQDB="./target/release/mqdb"
 RESULTS_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$RESULTS_DIR"
 
+LICENSE_ARG=""
+if [ -n "$MQDB_LICENSE" ]; then
+    LICENSE_ARG="--license $MQDB_LICENSE"
+fi
+
 log() {
     echo "[$(date +%H:%M:%S)] $1" | tee -a "$RESULTS_DIR/log.txt"
 }
@@ -100,7 +105,7 @@ case "$1" in
         topo_upper=$(echo $topo | tr '[:lower:]' '[:upper:]')
         log "=== ${topo_upper} QUIC ==="
         $MQDB dev kill 2>/dev/null || true
-        $MQDB dev start-cluster --nodes 3 --clean --topology $topo
+        $MQDB dev start-cluster --nodes 3 --clean --topology $topo $LICENSE_ARG
         sleep 8
 
         for run in 1 2 3; do
@@ -134,7 +139,7 @@ case "$1" in
             log "Restarting for async $op"
             $MQDB dev kill 2>/dev/null || true
             sleep 2
-            $MQDB dev start-cluster --nodes 3 --clean --topology $topo
+            $MQDB dev start-cluster --nodes 3 --clean --topology $topo $LICENSE_ARG
             sleep 8
             for run in 1 2 3; do
                 for port in 1883 1884 1885; do

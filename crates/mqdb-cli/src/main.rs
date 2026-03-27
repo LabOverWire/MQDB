@@ -373,6 +373,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             stress_constraints,
             all,
             nodes,
+            license,
         } => commands::dev::cmd_dev_test(
             pubsub,
             db,
@@ -384,6 +385,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             stress_constraints,
             all,
             nodes,
+            license.as_deref(),
         ),
         DevAction::StartCluster {
             nodes,
