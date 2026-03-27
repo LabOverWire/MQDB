@@ -15,6 +15,21 @@ MQDB uses ECDSA P-256 signed license tokens to gate commercial features (vault e
 
 Without a license, MQDB runs in free tier (MQTT broker + DB, no vault, no clustering).
 
+**Token format:** ES256 (ECDSA P-256 with SHA-256) signed JWT with the following claims:
+
+| Claim | Required | Description |
+|-------|----------|-------------|
+| `iss` | yes | Issuer — must be `laboverwire` |
+| `sub` | yes | Customer identifier (email) |
+| `iat` | yes | Issued-at timestamp — must not be >60s in the future |
+| `exp` | yes | Expiration timestamp — `exp - iat` must be ≤ 5 years |
+| `nbf` | no | Not-before timestamp — if present, must be ≤ current time |
+| `tier` | yes | `pro` or `enterprise` |
+| `features` | no | Array of `vault`, `cluster` — pro tier cannot include `cluster` |
+| `trial` | no | Boolean, defaults to false |
+
+**Runtime behavior:** Both agent and cluster check license expiry every hour while running. If expired, the process logs an error and shuts down.
+
 ---
 
 ## 39. Verify License File
@@ -184,6 +199,48 @@ mqdb license verify --license /tmp/bad.key
 
 **Expected:** `License invalid: invalid license format: expected header.payload.signature`
 
+### Missing Issuer
+
+Token without `iss` claim:
+
+**Expected:** `License invalid: missing 'iss' in payload`
+
+### Wrong Issuer
+
+Token with `iss` set to anything other than `laboverwire`:
+
+**Expected:** `License invalid: invalid issuer: expected 'laboverwire', got '...'`
+
+### Missing `iat`
+
+Token without `iat` claim:
+
+**Expected:** `License invalid: missing 'iat' in payload`
+
+### Future `iat`
+
+Token with `iat` more than 60 seconds in the future:
+
+**Expected:** `License invalid: license iat is in the future (iat=...)`
+
+### Duration Exceeds 5 Years
+
+Token where `exp - iat` exceeds 157,680,000 seconds (5 years):
+
+**Expected:** `License invalid: license expiry exceeds maximum allowed duration (5 years)`
+
+### Not Yet Valid (`nbf` in future)
+
+Token with `nbf` set to a future timestamp:
+
+**Expected:** `License invalid: license not yet valid (nbf=...)`
+
+### Pro Tier with Cluster Feature
+
+Token with `tier: pro` and `features: ["vault", "cluster"]`:
+
+**Expected:** `License invalid: invalid license: pro tier cannot include cluster feature`
+
 ---
 
 ## Verification Checklist
@@ -194,15 +251,24 @@ mqdb license verify --license /tmp/bad.key
 - [ ] Tampered token rejected with signature error
 - [ ] Malformed token rejected with format error
 - [ ] Wrong algorithm rejected
+- [ ] Missing issuer rejected
+- [ ] Wrong issuer rejected
+- [ ] Missing `iat` rejected
+- [ ] Future `iat` (>60s ahead) rejected
+- [ ] Duration >5 years rejected
+- [ ] `nbf` in future rejected
+- [ ] Pro tier with cluster feature rejected
 
 ### Agent License Enforcement
 - [ ] Agent + vault + valid license starts successfully
 - [ ] Agent + vault without license fails with tier error
 - [ ] Agent with invalid license warns and continues in free tier
 - [ ] Agent with invalid license + vault fails enforcement
+- [ ] Agent shuts down when license expires at runtime (hourly check)
 
 ### Cluster License Enforcement
 - [ ] Cluster + enterprise license starts successfully
 - [ ] Cluster without license fails with tier error
 - [ ] Cluster with invalid license hard fails (unlike agent which warns)
 - [ ] Cluster with pro license (no cluster feature) fails
+- [ ] Cluster shuts down when license expires at runtime (hourly check)

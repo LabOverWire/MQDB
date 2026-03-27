@@ -24,19 +24,24 @@ pub struct LicenseFeatures {
 
 impl LicenseInfo {
     #[must_use]
-    pub fn is_expired(&self) -> bool {
+    pub fn check_runtime_expiry(expires_at: u64) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(u64::MAX, |d| d.as_secs());
-        now > self.expires_at
+        now > expires_at
+    }
+
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        Self::check_runtime_expiry(self.expires_at)
     }
 
     #[must_use]
     pub fn days_remaining(&self) -> i64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(u64::MAX, |d| d.as_secs());
-        if now > self.expires_at {
+            .map_or(0, |d| d.as_secs());
+        if now == 0 || now > self.expires_at {
             return 0;
         }
         i64::try_from((self.expires_at - now) / 86400).unwrap_or(i64::MAX)

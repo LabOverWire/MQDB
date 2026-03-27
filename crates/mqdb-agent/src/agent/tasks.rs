@@ -23,10 +23,7 @@ impl MqdbAgent {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(u64::MAX, |d| d.as_secs());
-                        if now > expires_at {
+                        if mqdb_core::license::LicenseInfo::check_runtime_expiry(expires_at) {
                             tracing::error!("license has expired — shutting down");
                             let _ = shutdown_tx.send(());
                             break;

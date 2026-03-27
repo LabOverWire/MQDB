@@ -149,9 +149,16 @@ Run through this checklist to verify MQDB works completely:
 - [ ] `mqdb license verify` accepts valid token
 - [ ] `mqdb license verify` rejects expired token
 - [ ] `mqdb license verify` rejects tampered token
+- [ ] Missing `iat` rejected
+- [ ] Future `iat` rejected
+- [ ] Duration >5 years rejected
+- [ ] Wrong issuer rejected
+- [ ] Pro tier with cluster feature rejected
 - [ ] Agent with vault requires license
 - [ ] Cluster mode requires enterprise license
 - [ ] Invalid license falls back to free tier (agent)
+- [ ] Runtime expiry check shuts down agent after license expires
+- [ ] Runtime expiry check shuts down cluster node after license expires
 
 ### Monitoring
 - [ ] Health endpoint returns correct status
@@ -207,10 +214,18 @@ Run through this checklist to verify MQDB works completely:
 - [ ] `mqdb license verify` shows valid license details
 - [ ] Expired license rejected
 - [ ] Tampered token rejected
+- [ ] Missing `iat` rejected
+- [ ] Future `iat` rejected
+- [ ] Duration >5 years rejected
+- [ ] Wrong/missing issuer rejected
+- [ ] `nbf` in future rejected
+- [ ] Pro + cluster feature rejected
 - [ ] Agent + vault + valid license starts
 - [ ] Agent + vault without license fails
 - [ ] Cluster + enterprise license starts
 - [ ] Cluster without license fails
+- [ ] Runtime expiry shuts down agent
+- [ ] Runtime expiry shuts down cluster node
 
 ### Agent vs Cluster Format (Section 38)
 - [ ] Create response format identical

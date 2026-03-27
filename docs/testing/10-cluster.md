@@ -10,6 +10,10 @@ Cluster mode runs a distributed MQDB with Raft consensus for partition managemen
 > The cluster automatically routes operations to the appropriate partition.
 > For direct partition access, use the low-level `mqdb db` commands (Section 12).
 >
+> **License:** Cluster mode requires an Enterprise license. All `mqdb cluster start` and
+> `mqdb dev start-cluster` commands must include `--license /path/to/license.key`. Without a
+> valid Enterprise license, cluster startup will fail immediately.
+>
 > **Authentication:** `mqdb dev start-cluster` auto-generates credentials `admin`/`admin` and
 > sets `--admin-users admin` on all nodes. All CLI commands against a dev cluster require
 > `--user admin --pass admin`. Manual `mqdb cluster start` without `--passwd` allows unauthenticated
@@ -19,7 +23,8 @@ Cluster mode runs a distributed MQDB with Raft consensus for partition managemen
 
 ```bash
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
-  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --license /path/to/license.key
 ```
 
 **Expected behavior:**
@@ -39,7 +44,8 @@ mqdb cluster start \
   --bind 127.0.0.1:1883 \
   --db /tmp/mqdb-node1 \
   --peers 2@127.0.0.1:1884,3@127.0.0.1:1885 \
-  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --license /path/to/license.key
 ```
 
 **Terminal 2 (Node 2):**
@@ -49,7 +55,8 @@ mqdb cluster start \
   --bind 127.0.0.1:1884 \
   --db /tmp/mqdb-node2 \
   --peers 1@127.0.0.1:1883,3@127.0.0.1:1885 \
-  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --license /path/to/license.key
 ```
 
 **Terminal 3 (Node 3):**
@@ -59,7 +66,8 @@ mqdb cluster start \
   --bind 127.0.0.1:1885 \
   --db /tmp/mqdb-node3 \
   --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
-  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --license /path/to/license.key
 ```
 
 **Expected behavior:**
@@ -86,7 +94,8 @@ mqdb cluster start \
   --peers 2@127.0.0.1:1884 \
   --quic-cert test_certs/server.pem \
   --quic-key test_certs/server.key \
-  --quic-ca test_certs/ca.pem
+  --quic-ca test_certs/ca.pem \
+  --license /path/to/license.key
 ```
 
 ### Cluster Options Reference
@@ -118,7 +127,7 @@ For quick tests where data doesn't need to survive restarts:
 ```bash
 mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test \
   --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
-  --no-persist-stores
+  --license /path/to/license.key --no-persist-stores
 ```
 
 ### Check Cluster Status
@@ -394,6 +403,7 @@ mqdb dev start-cluster --no-quic
 | `--no-bridge-out` | Use Both bridge direction even for full topology | `false` |
 | `--passwd` | Path to password file (auto-generated if omitted) | (auto) |
 | `--ownership` | Ownership config: `entity=field` pairs | (none) |
+| `--license` | Path to license key file (required for clustering) | (none) |
 
 ### Run Built-in Tests
 
@@ -408,7 +418,7 @@ mqdb dev test --constraints         # Constraint tests
 mqdb dev test --wildcards           # Wildcard subscriptions
 mqdb dev test --retained            # Retained messages
 mqdb dev test --lwt                 # Last Will & Testament
-mqdb dev test --ownership           # Ownership enforcement (self-contained, see Section 22)
+mqdb dev test --ownership --license /path/to/license.key  # Ownership (self-contained, see Section 22)
 mqdb dev test --stress-constraints  # Constraint stress tests
 
 # Specify node count
@@ -417,7 +427,8 @@ mqdb dev test --all --nodes 5
 
 > **Note:** `--ownership` is excluded from `--all` because it manages its own authenticated cluster.
 > It kills any running cluster, starts a fresh one with password auth and `--ownership` config,
-> runs ownership tests, then kills the cluster.
+> runs ownership tests, then kills the cluster. It requires `--license` to provide a valid
+> Enterprise license for the cluster nodes it spawns.
 
 ### Dev Bench (Benchmarking with Auto-Start)
 

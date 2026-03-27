@@ -2,6 +2,10 @@
 
 [Back to index](README.md)
 
+> **License:** All cluster tests require an Enterprise license. Pass `--license /path/to/license.key`
+> to every `mqdb dev start-cluster` and `mqdb cluster start` command. Examples below omit `--license`
+> for brevity — add it to every cluster start invocation.
+
 ## 12. Cluster DB Debug Commands
 
 The `mqdb db` command provides low-level access to cluster-mode database operations using the binary BeBytes protocol.
@@ -248,7 +252,8 @@ mqdb create partition_test --data '{"during": "partition"}' \
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-test-3 \
   --peers 1@127.0.0.1:1883 \
   --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
-  --passwd /tmp/mqdb-test-passwd --admin-users admin &
+  --passwd /tmp/mqdb-test-passwd --admin-users admin \
+  --license /path/to/license.key &
 
 # 6. Wait for rejoin
 sleep 5

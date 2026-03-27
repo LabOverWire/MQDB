@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,7 @@ pub(crate) fn cmd_dev_test(
     stress_constraints: bool,
     all: bool,
     nodes: u8,
+    license: Option<&Path>,
 ) {
     let run_all = all
         || (!pubsub
@@ -105,7 +106,7 @@ pub(crate) fn cmd_dev_test(
     }
 
     if ownership {
-        run_test_ownership(nodes, &ports);
+        run_test_ownership(nodes, &ports, license);
     }
 
     if stress_constraints {
@@ -600,7 +601,7 @@ fn wait_for_auth_cluster(nodes: u8, timeout_secs: u64) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-fn run_test_ownership(nodes: u8, _ports: &[u16]) {
+fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
     println!("=== Ownership Enforcement Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
@@ -658,6 +659,12 @@ fn run_test_ownership(nodes: u8, _ports: &[u16]) {
             "--ownership",
             &ownership_spec,
         ]);
+
+        if let Some(lic_path) = license
+            && let Some(lic_str) = lic_path.to_str()
+        {
+            cmd.args(["--license", lic_str]);
+        }
 
         let peers: Vec<String> = (1..node_id)
             .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))

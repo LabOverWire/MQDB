@@ -8,25 +8,27 @@ use ring::digest;
 use ring::signature;
 use std::path::Path;
 
+const MAX_LICENSE_DURATION_SECS: u64 = 5 * 365 * 86400;
+
 const OBFUSCATION_MASK: [u8; 65] = [
-    0x24, 0x93, 0x65, 0x18, 0x62, 0x33, 0xa1, 0x56, 0xd3, 0x93, 0xfb, 0x87, 0x62, 0x9b, 0x68, 0x0b,
-    0xa4, 0x0b, 0xac, 0x10, 0x32, 0xf8, 0x1d, 0x85, 0xc5, 0x17, 0x41, 0x4a, 0xaa, 0x63, 0xa7, 0xcc,
-    0x94, 0xca, 0x63, 0x1a, 0x89, 0x51, 0x7a, 0xaa, 0x1b, 0x1a, 0xbd, 0xe1, 0xc7, 0xd3, 0x68, 0xfa,
-    0x98, 0x22, 0x15, 0x96, 0xdc, 0x9b, 0xd5, 0x89, 0x86, 0xa7, 0x97, 0xae, 0xf8, 0xe1, 0x6d, 0x0c,
-    0xa4,
+    0xb9, 0xa2, 0xba, 0xd2, 0xd9, 0xdf, 0x81, 0x9d, 0x9b, 0x73, 0x44, 0xa2, 0x0d, 0x9a, 0x22, 0x90,
+    0x52, 0x67, 0xbd, 0xd3, 0xd3, 0xb8, 0x73, 0xd3, 0x09, 0x5f, 0xfc, 0x9e, 0x49, 0xd7, 0xf5, 0x1d,
+    0x30, 0x7f, 0x39, 0xe3, 0xbe, 0x27, 0x93, 0x24, 0x5d, 0x6c, 0xfb, 0x35, 0x64, 0xcc, 0xa2, 0x48,
+    0xf7, 0xf7, 0x5f, 0x26, 0x63, 0x08, 0xb9, 0x8e, 0xa1, 0x71, 0xc6, 0xf8, 0x84, 0x27, 0xed, 0x6c,
+    0xe0,
 ];
 
 const WRAPPED_PUBLIC_KEY: [u8; 65] = [
-    0x20, 0x6c, 0xb9, 0x8b, 0xbd, 0xe5, 0xc9, 0x03, 0x8c, 0x69, 0x2d, 0x33, 0xde, 0x2f, 0xcf, 0x05,
-    0x6b, 0x46, 0xe2, 0x09, 0x62, 0x3f, 0x48, 0x4e, 0x2c, 0x0a, 0xce, 0x72, 0x9d, 0x22, 0xaa, 0x37,
-    0xd5, 0x3d, 0xe7, 0xfe, 0xa2, 0x7e, 0x48, 0x78, 0xd1, 0x6b, 0xc7, 0xe4, 0x78, 0x35, 0x62, 0x12,
-    0x7a, 0x2e, 0xb0, 0xb6, 0xf9, 0x0b, 0x86, 0x9d, 0x62, 0x65, 0xc2, 0xe1, 0x3c, 0x28, 0x8b, 0x26,
-    0x01,
+    0xbd, 0x5d, 0x66, 0x41, 0x06, 0x09, 0xe9, 0xc8, 0xc4, 0x89, 0x92, 0x16, 0xb1, 0x2e, 0x85, 0x9e,
+    0x9d, 0x2a, 0xf3, 0xca, 0x83, 0x7f, 0x26, 0x18, 0xe0, 0x42, 0x73, 0xa6, 0x7e, 0x96, 0xf8, 0xe6,
+    0x71, 0x88, 0xbd, 0x07, 0x95, 0x08, 0xa1, 0xf6, 0x97, 0x1d, 0x81, 0x30, 0xdb, 0x2a, 0xa8, 0xa0,
+    0x15, 0xfb, 0xfa, 0x06, 0x46, 0x98, 0xea, 0x9a, 0x45, 0xb3, 0x93, 0xb7, 0x40, 0xee, 0x0b, 0x46,
+    0x45,
 ];
 
 const KEY_INTEGRITY_DIGEST: [u8; 32] = [
-    0x3e, 0xb7, 0x9d, 0x91, 0x98, 0x00, 0x5b, 0xb4, 0xc0, 0xb3, 0x27, 0x63, 0xd2, 0xab, 0x5a, 0x1d,
-    0x8c, 0xab, 0xeb, 0x4a, 0x18, 0x57, 0x4e, 0xaf, 0x68, 0x75, 0x36, 0xfa, 0xa8, 0xb5, 0x45, 0x50,
+    0x9f, 0x6c, 0xa7, 0x27, 0x61, 0x9c, 0x89, 0x61, 0x6e, 0xa2, 0xa0, 0x1b, 0xc6, 0x6f, 0x25, 0x2f,
+    0x32, 0x40, 0xa9, 0x32, 0x64, 0xf9, 0x65, 0xb0, 0x48, 0x30, 0x6f, 0x9e, 0x54, 0x3b, 0x26, 0xf6,
 ];
 
 fn unwrap_licensing_key() -> Result<[u8; 65], String> {
@@ -133,13 +135,27 @@ fn parse_license_payload(payload: &serde_json::Value) -> Result<LicenseInfo, Str
         .and_then(serde_json::Value::as_u64)
         .ok_or("missing 'exp' in payload")?;
 
-    if let Some(nbf) = payload.get("nbf").and_then(serde_json::Value::as_u64) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(u64::MAX, |d| d.as_secs());
-        if now < nbf {
-            return Err(format!("license not yet valid (nbf={nbf})"));
-        }
+    let iat = payload
+        .get("iat")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("missing 'iat' in payload")?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(u64::MAX, |d| d.as_secs());
+
+    if iat > now + 60 {
+        return Err(format!("license iat is in the future (iat={iat})"));
+    }
+
+    if expires_at > iat + MAX_LICENSE_DURATION_SECS {
+        return Err("license expiry exceeds maximum allowed duration (5 years)".into());
+    }
+
+    if let Some(nbf) = payload.get("nbf").and_then(serde_json::Value::as_u64)
+        && now < nbf
+    {
+        return Err(format!("license not yet valid (nbf={nbf})"));
     }
 
     let trial = payload
@@ -505,5 +521,91 @@ mod tests {
         let token = sign_token(&key_pair, &payload);
         let result = verify_license_token_with_key(&token, &public_key);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn missing_iat_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing 'iat'"));
+    }
+
+    #[test]
+    fn future_iat_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now + 3600,
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("iat is in the future"));
+    }
+
+    #[test]
+    fn valid_iat_accepted() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now - 60,
+            "exp": now + 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn exp_too_far_rejected() {
+        let (key_pair, public_key) = test_keypair();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let payload = serde_json::json!({
+            "sub": "test@example.com",
+            "iss": "laboverwire",
+            "iat": now,
+            "exp": now + 6 * 365 * 86400,
+            "tier": "enterprise",
+            "features": ["vault", "cluster"],
+            "trial": false,
+        });
+        let token = sign_token(&key_pair, &payload);
+        let result = verify_license_token_with_key(&token, &public_key);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("maximum allowed duration"));
     }
 }
