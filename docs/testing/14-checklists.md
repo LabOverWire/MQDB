@@ -164,6 +164,14 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Health endpoint returns correct status
 - [ ] Health updates on node failure
 
+### OpenTelemetry (requires `--features opentelemetry` build)
+- [ ] Agent starts with `--otlp-endpoint` and connects to collector
+- [ ] Agent starts without `--otlp-endpoint` (no behavioral change)
+- [ ] CRUD operations produce spans with entity name and record ID
+- [ ] Schema/constraint changes produce spans
+- [ ] Span hierarchy: `database_operation` → `execute_with_sender` → operation
+- [ ] W3C traceparent propagation from MQTT message to DB spans
+
 ### Performance
 - [ ] `mqdb bench pubsub` runs successfully
 - [ ] `mqdb bench db` runs successfully

@@ -113,6 +113,14 @@ mqdb agent start --db ./data/testdb --passwd ./passwd.txt --acl ./acl.txt \
 | `--rate-limit-window-secs` | Rate limit window in seconds | `60` |
 | `--rate-limit-lockout-secs` | Lockout duration in seconds | `300` |
 
+**Observability (requires `--features opentelemetry` build):**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--otlp-endpoint` | OTLP collector endpoint (enables OTel tracing) | (none) |
+| `--otel-service-name` | Service name for OTel traces | `mqdb` |
+| `--otel-sampling-ratio` | Sampling ratio 0.0-1.0 | `0.1` |
+
 **Transport:**
 
 | Option | Description | Default |
