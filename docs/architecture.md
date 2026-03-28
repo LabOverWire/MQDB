@@ -1913,7 +1913,7 @@ The architecture is designed for extensibility. Key extension points:
 - Query language (filter system in `crates/mqdb-agent/src/database/mod.rs`)
 - Additional constraint types (framework in place via `crates/mqdb-cluster/src/cluster/db/constraint_store.rs`)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
+See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 
 ---
 
