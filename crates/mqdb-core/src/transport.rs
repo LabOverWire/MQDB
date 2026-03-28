@@ -62,6 +62,21 @@ pub enum Request {
     },
 }
 
+impl Request {
+    #[must_use]
+    pub fn operation_label(&self) -> &'static str {
+        match self {
+            Request::Create { .. } => "create",
+            Request::Read { .. } => "read",
+            Request::Update { .. } => "update",
+            Request::Delete { .. } => "delete",
+            Request::List { .. } => "list",
+            Request::Subscribe { .. } => "subscribe",
+            Request::Unsubscribe { .. } => "unsubscribe",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
     BadRequest = 400,

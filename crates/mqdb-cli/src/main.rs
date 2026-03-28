@@ -34,15 +34,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .install_default()
         .ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let cli = Cli::parse();
     dispatch_command(cli.command).await
 }
 
+fn init_default_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+}
+
 async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(
+        &command,
+        Commands::Agent {
+            action: AgentAction::Start(_)
+        }
+    ) {
+        init_default_tracing();
+    }
+
     match command {
         Commands::Agent { action } => dispatch_agent(action).await?,
         #[cfg(feature = "cluster")]
@@ -167,35 +178,24 @@ async fn dispatch_crud(command: Commands) -> Result<(), Box<dyn std::error::Erro
 
 async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        AgentAction::Start {
-            bind,
-            db,
-            auth,
-            durability,
-            durability_ms,
-            quic_cert,
-            quic_key,
-            ws_bind,
-            oauth,
-            ownership,
-            event_scope,
-            passphrase_file,
-            license,
-        } => {
+        AgentAction::Start(fields) => {
             cmd_agent_start(AgentStartArgs {
-                bind,
-                db_path: db,
-                auth: *auth,
-                durability,
-                durability_ms,
-                quic_cert,
-                quic_key,
-                ws_bind,
-                oauth: *oauth,
-                ownership,
-                event_scope,
-                passphrase_file,
-                license,
+                bind: fields.bind,
+                db_path: fields.db,
+                auth: *fields.auth,
+                durability: fields.durability,
+                durability_ms: fields.durability_ms,
+                quic_cert: fields.quic_cert,
+                quic_key: fields.quic_key,
+                ws_bind: fields.ws_bind,
+                oauth: *fields.oauth,
+                ownership: fields.ownership,
+                event_scope: fields.event_scope,
+                passphrase_file: fields.passphrase_file,
+                license: fields.license,
+                otlp_endpoint: fields.otlp_endpoint,
+                otel_service_name: fields.otel_service_name,
+                otel_sampling_ratio: fields.otel_sampling_ratio,
             })
             .await
         }

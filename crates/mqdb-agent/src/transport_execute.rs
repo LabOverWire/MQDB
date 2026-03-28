@@ -32,6 +32,7 @@ impl Database {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip_all, fields(op = request.operation_label()))]
     pub async fn execute_with_sender(
         &self,
         request: Request,

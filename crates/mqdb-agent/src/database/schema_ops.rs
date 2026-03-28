@@ -11,6 +11,7 @@ use mqdb_core::schema::Schema;
 impl Database {
     /// # Errors
     /// Returns an error if persisting the schema fails.
+    #[tracing::instrument(skip(self, schema), fields(entity = %schema.entity))]
     pub async fn add_schema(&self, schema: Schema) -> Result<()> {
         let mut batch = self.storage.batch();
 
@@ -96,6 +97,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
+    #[tracing::instrument(skip(self), fields(entity = %entity))]
     pub async fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<()> {
         use mqdb_core::constraint::{Constraint, UniqueConstraint};
 
@@ -119,6 +121,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
+    #[tracing::instrument(skip(self), fields(entity = %entity, field = %field))]
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
         use mqdb_core::constraint::{Constraint, NotNullConstraint};
 
@@ -144,6 +147,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
+    #[tracing::instrument(skip(self), fields(source = %source_entity, target = %target_entity))]
     pub async fn add_foreign_key(
         &self,
         source_entity: String,

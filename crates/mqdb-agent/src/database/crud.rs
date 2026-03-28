@@ -20,6 +20,7 @@ pub struct CallerContext<'a> {
 impl Database {
     /// # Errors
     /// Returns an error if validation, constraint checks, or storage fails.
+    #[tracing::instrument(skip(self, data, constraint_data, scope_config), fields(entity = %entity_name))]
     pub async fn create(
         &self,
         entity_name: String,
@@ -114,6 +115,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found or deserialization fails.
+    #[tracing::instrument(skip(self, includes, projection), fields(entity = %entity_name, id = %id))]
     pub async fn read(
         &self,
         entity_name: String,
@@ -151,6 +153,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found, validation fails, or storage fails.
+    #[tracing::instrument(skip(self, fields, update_constraint_data, caller), fields(entity = %entity_name, id = %id))]
     pub async fn update(
         &self,
         entity_name: String,
@@ -252,6 +255,7 @@ impl Database {
     /// # Errors
     /// Returns an error if the entity is not found or constraint validation fails.
     #[allow(clippy::too_many_lines)]
+    #[tracing::instrument(skip(self, scope_config, ownership), fields(entity = %entity_name, id = %id))]
     pub async fn delete(
         &self,
         entity_name: String,
