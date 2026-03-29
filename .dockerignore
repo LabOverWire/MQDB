@@ -1,0 +1,14 @@
+target/
+.git/
+docs/
+book/
+test_certs/
+data/
+benchmark_results/
+.claude/
+.idea/
+pkg/
+mqtt_storage/
+.playwright-mcp/
+*.md
+!Cargo.lock

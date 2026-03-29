@@ -26,9 +26,9 @@ jobs:
       - name: Verify tag matches crate version
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          CRATE_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          CRATE_VERSION=$(grep '^version' crates/mqdb-cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           if [ "$TAG" != "$CRATE_VERSION" ]; then
-            echo "Tag v$TAG does not match workspace version $CRATE_VERSION"
+            echo "Tag v$TAG does not match mqdb-cli version $CRATE_VERSION"
             exit 1
           fi
 
