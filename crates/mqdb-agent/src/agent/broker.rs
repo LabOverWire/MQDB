@@ -85,6 +85,11 @@ impl MqdbAgent {
                 )
             };
 
+        #[cfg(feature = "opentelemetry")]
+        if let Some(ref otel_config) = self.telemetry_config {
+            config = config.with_opentelemetry(otel_config.clone());
+        }
+
         Ok((
             config,
             service_username,

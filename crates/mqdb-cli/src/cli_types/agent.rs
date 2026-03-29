@@ -8,52 +8,61 @@ use std::path::PathBuf;
 use super::auth::{AuthArgs, OAuthArgs};
 use super::base::{ConnectionArgs, DurabilityArg};
 
+#[derive(clap::Args)]
+pub(crate) struct AgentStartFields {
+    #[arg(
+        long,
+        default_value = "127.0.0.1:1883",
+        help = "Address to bind MQTT listener"
+    )]
+    pub(crate) bind: SocketAddr,
+    #[arg(long, help = "Path to database directory")]
+    pub(crate) db: PathBuf,
+    #[command(flatten)]
+    pub(crate) auth: Box<AuthArgs>,
+    #[arg(
+        long,
+        default_value = "periodic",
+        help = "Durability mode: immediate (fsync every write), periodic (fsync periodically), none (no fsync)"
+    )]
+    pub(crate) durability: DurabilityArg,
+    #[arg(
+        long,
+        default_value = "10",
+        help = "Fsync interval in ms when using periodic durability"
+    )]
+    pub(crate) durability_ms: u64,
+    #[arg(long, help = "Path to QUIC/TLS certificate file (PEM format)")]
+    pub(crate) quic_cert: Option<PathBuf>,
+    #[arg(long, help = "Path to QUIC/TLS private key file (PEM format)")]
+    pub(crate) quic_key: Option<PathBuf>,
+    #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
+    pub(crate) ws_bind: Option<SocketAddr>,
+    #[command(flatten)]
+    pub(crate) oauth: Box<OAuthArgs>,
+    #[arg(
+        long,
+        help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
+    )]
+    pub(crate) ownership: Option<String>,
+    #[arg(long, help = "Scope events by entity field (e.g. diagrams=diagramId)")]
+    pub(crate) event_scope: Option<String>,
+    #[arg(long, help = "Path to file containing encryption passphrase")]
+    pub(crate) passphrase_file: Option<PathBuf>,
+    #[arg(long, help = "Path to license key file")]
+    pub(crate) license: Option<PathBuf>,
+    #[arg(long, help = "OTLP collector endpoint (enables OpenTelemetry tracing)")]
+    pub(crate) otlp_endpoint: Option<String>,
+    #[arg(long, default_value = "mqdb", help = "Service name for OTel traces")]
+    pub(crate) otel_service_name: String,
+    #[arg(long, default_value = "0.1", help = "OTel sampling ratio 0.0-1.0")]
+    pub(crate) otel_sampling_ratio: f64,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum AgentAction {
     #[command(about = "Start a standalone MQTT broker agent")]
-    Start {
-        #[arg(
-            long,
-            default_value = "127.0.0.1:1883",
-            help = "Address to bind MQTT listener"
-        )]
-        bind: SocketAddr,
-        #[arg(long, help = "Path to database directory")]
-        db: PathBuf,
-        #[command(flatten)]
-        auth: Box<AuthArgs>,
-        #[arg(
-            long,
-            default_value = "periodic",
-            help = "Durability mode: immediate (fsync every write), periodic (fsync periodically), none (no fsync)"
-        )]
-        durability: DurabilityArg,
-        #[arg(
-            long,
-            default_value = "10",
-            help = "Fsync interval in ms when using periodic durability"
-        )]
-        durability_ms: u64,
-        #[arg(long, help = "Path to QUIC/TLS certificate file (PEM format)")]
-        quic_cert: Option<PathBuf>,
-        #[arg(long, help = "Path to QUIC/TLS private key file (PEM format)")]
-        quic_key: Option<PathBuf>,
-        #[arg(long, help = "WebSocket bind address (e.g. 0.0.0.0:8080)")]
-        ws_bind: Option<SocketAddr>,
-        #[command(flatten)]
-        oauth: Box<OAuthArgs>,
-        #[arg(
-            long,
-            help = "Ownership config: entity=field pairs (e.g. diagrams=userId)"
-        )]
-        ownership: Option<String>,
-        #[arg(long, help = "Scope events by entity field (e.g. diagrams=diagramId)")]
-        event_scope: Option<String>,
-        #[arg(long, help = "Path to file containing encryption passphrase")]
-        passphrase_file: Option<PathBuf>,
-        #[arg(long, help = "Path to license key file")]
-        license: Option<PathBuf>,
-    },
+    Start(Box<AgentStartFields>),
     #[command(about = "Check broker connectivity status")]
     Status {
         #[command(flatten)]

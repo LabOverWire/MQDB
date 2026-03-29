@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-cli"
-version.workspace = true
+version = "0.2.0"
 publish = false
 edition.workspace = true
 license.workspace = true
@@ -40,6 +40,7 @@ default = ["cluster", "http-api"]
 cluster = ["dep:mqdb-cluster", "dep:rustls"]
 http-api = ["mqdb-agent/http-api"]
 dev-insecure = ["mqdb-agent/dev-insecure", "mqdb-cluster?/dev-insecure"]
+opentelemetry = ["mqdb-agent/opentelemetry"]
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -36,6 +36,8 @@ pub struct MqdbAgent {
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
     pub(super) license_expires_at: Option<u64>,
+    #[cfg(feature = "opentelemetry")]
+    pub(super) telemetry_config: Option<mqtt5::telemetry::TelemetryConfig>,
 }
 
 impl MqdbAgent {
@@ -61,6 +63,8 @@ impl MqdbAgent {
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
             license_expires_at: None,
+            #[cfg(feature = "opentelemetry")]
+            telemetry_config: None,
         }
     }
 
@@ -177,6 +181,13 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
         self.license_expires_at = Some(expires_at);
+        self
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    #[must_use]
+    pub fn with_telemetry_config(mut self, config: mqtt5::telemetry::TelemetryConfig) -> Self {
+        self.telemetry_config = Some(config);
         self
     }
 

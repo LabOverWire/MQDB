@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-03-28
+
+Affected crates: mqdb-core, mqdb-agent, mqdb-cli.
+
+### Added
+
+- OpenTelemetry tracing with OTLP export for agent mode (`--otlp-endpoint`, `--otel-service-name`, `--otel-sampling-ratio`)
+- `#[instrument]` spans on all DB operations (create, read, update, delete, list) and schema/constraint changes
+- `Request::operation_label()` method on mqdb-core transport types
+- W3C traceparent correlation from incoming MQTT messages through to DB operation spans
+
+### Changed
+
+- Switched to independent per-crate versioning (workspace version removed)
+- Deferred tracing subscriber initialization for `agent start` to avoid conflict with mqtt-lib's OTLP subscriber
+- Extracted `AgentStartFields` struct from `AgentAction::Start` enum variant (clippy large_enum_variant fix)
+
 ## [0.1.0] - 2026-03-23
 
 Initial open-source release.

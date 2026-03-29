@@ -24,12 +24,26 @@ pub(crate) struct AgentStartArgs {
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) license: Option<PathBuf>,
+    pub(crate) otlp_endpoint: Option<String>,
+    pub(crate) otel_service_name: String,
+    pub(crate) otel_sampling_ratio: f64,
 }
 
 pub(crate) async fn cmd_agent_start(
     args: AgentStartArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb_core::config::{DatabaseConfig, DurabilityMode};
+
+    #[cfg(feature = "opentelemetry")]
+    let otel_enabled = args.otlp_endpoint.is_some();
+    #[cfg(not(feature = "opentelemetry"))]
+    let otel_enabled = false;
+
+    if !otel_enabled {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+    }
 
     let durability_mode = match args.durability {
         DurabilityArg::Immediate => DurabilityMode::Immediate,
@@ -45,26 +59,10 @@ pub(crate) async fn cmd_agent_start(
     }
     let db = Database::open_with_config(config).await?;
 
-    let license_info = if let Some(ref license_path) = args.license {
-        match crate::license::verify_license_file(license_path) {
-            Ok(info) => {
-                tracing::info!(
-                    customer = %info.customer,
-                    tier = %info.tier,
-                    trial = info.trial,
-                    days_remaining = info.days_remaining(),
-                    "license validated"
-                );
-                Some(info)
-            }
-            Err(e) => {
-                tracing::warn!("license validation failed: {e} — running in free tier");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let license_info = args
+        .license
+        .as_ref()
+        .and_then(|path| verify_and_log_license(path));
 
     let needs_vault = args.passphrase_file.is_some();
     crate::license::enforce_license(license_info.as_ref(), needs_vault, false)
@@ -97,6 +95,24 @@ pub(crate) async fn cmd_agent_start(
         let scope_config = mqdb_core::types::ScopeConfig::parse(&event_scope_spec)
             .map_err(|e| format!("invalid --event-scope: {e}"))?;
         agent = agent.with_scope_config(scope_config);
+    }
+
+    #[cfg(feature = "opentelemetry")]
+    if let Some(ref endpoint) = args.otlp_endpoint {
+        let telemetry_config = mqtt5::telemetry::TelemetryConfig::new(&args.otel_service_name)
+            .with_endpoint(endpoint)
+            .with_sampling_ratio(args.otel_sampling_ratio);
+        agent = agent.with_telemetry_config(telemetry_config);
+    }
+
+    #[cfg(not(feature = "opentelemetry"))]
+    {
+        let _ = (&args.otel_service_name, args.otel_sampling_ratio);
+        if args.otlp_endpoint.is_some() {
+            tracing::warn!(
+                "--otlp-endpoint ignored: build with --features opentelemetry to enable OTel tracing"
+            );
+        }
     }
 
     if let Some(http_bind) = args.oauth.http_bind {
@@ -361,6 +377,25 @@ fn build_identity_crypto(
             })?;
             tracing::info!("identity encryption enabled (generated and persisted key)");
             Ok(Some(crypto))
+        }
+    }
+}
+
+fn verify_and_log_license(path: &std::path::Path) -> Option<mqdb_core::license::LicenseInfo> {
+    match crate::license::verify_license_file(path) {
+        Ok(info) => {
+            tracing::info!(
+                customer = %info.customer,
+                tier = %info.tier,
+                trial = info.trial,
+                days_remaining = info.days_remaining(),
+                "license validated"
+            );
+            Some(info)
+        }
+        Err(e) => {
+            tracing::warn!("license validation failed: {e} — running in free tier");
+            None
         }
     }
 }

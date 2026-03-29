@@ -18,6 +18,7 @@ type RangeBounds = (String, Option<RangeBound>, Option<RangeBound>);
 impl Database {
     /// # Errors
     /// Returns an error if scanning, filtering, or deserialization fails.
+    #[tracing::instrument(skip(self, filters, sort, pagination, includes, projection), fields(entity = %entity_name))]
     pub async fn list(
         &self,
         entity_name: String,

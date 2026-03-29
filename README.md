@@ -519,6 +519,49 @@ mqdb agent start --db /tmp/vault-demo/db --bind 127.0.0.1:1883 \
 
 See `examples/vault-mqtt/` for a single-node demo and `examples/vault-cluster/` for a multi-node E2E test.
 
+## Observability
+
+MQDB supports OpenTelemetry tracing via OTLP export. When enabled, every database operation (create, read, update, delete, list) and schema/constraint change produces a trace span with entity name, record ID, and operation type.
+
+### Enabling OpenTelemetry
+
+Build with the `opentelemetry` feature:
+
+```bash
+cargo build --release --bin mqdb --features opentelemetry
+```
+
+Start the agent with an OTLP collector endpoint:
+
+```bash
+mqdb agent start --db ./data/mydb --passwd passwd.txt \
+    --otlp-endpoint http://localhost:4317 \
+    --otel-service-name my-service \
+    --otel-sampling-ratio 1.0
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--otlp-endpoint` | OTLP collector endpoint (enables tracing) | (none) |
+| `--otel-service-name` | Service name in traces | `mqdb` |
+| `--otel-sampling-ratio` | Sampling ratio 0.0-1.0 | `0.1` |
+
+OTel is only active when `--otlp-endpoint` is provided. Without it, the agent behaves identically to a non-OTel build.
+
+### Span Hierarchy
+
+```
+database_operation (entity, topic)
+  └── execute_with_sender (op = create|read|update|delete|list)
+        └── create / read / update / delete / list (entity, id)
+```
+
+The `database_operation` span links to the W3C `traceparent` from the incoming MQTT message, enabling end-to-end trace correlation from client through broker to database.
+
+### Compatible Backends
+
+Any OTLP-compatible collector works: Jaeger, Grafana Tempo, Datadog, Honeycomb, AWS X-Ray (via ADOT collector).
+
 ## Distributed Clustering (Native Edition)
 
 > Clustering requires the `native` feature (commercial license). Agent-only builds (`--features agent-only`) do not include cluster code.
@@ -812,7 +855,7 @@ cargo run --example parking_lot
 | Consumer group tracking | Cluster-wide group membership (currently node-local) |
 | Coordinated backup/restore | Consistent cluster-wide snapshots |
 | Reactive query language | Subscribe to expressions, not just topics |
-| Metrics and tracing | Persistence-layer observability |
+| Metrics export | Prometheus/OTLP metrics alongside traces |
 | TTL optimization | Expiration index to avoid full scans |
 | Horizontal scaling | Partition counts beyond the current 256 |
 
