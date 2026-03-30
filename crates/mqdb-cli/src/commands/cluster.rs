@@ -48,7 +48,12 @@ fn write_temp_file(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::er
     let dir = std::env::temp_dir().join("mqdb-env-secrets");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(name);
-    std::fs::write(&path, content)?;
+    let normalized = if content.ends_with('\n') {
+        content.to_string()
+    } else {
+        format!("{content}\n")
+    };
+    std::fs::write(&path, normalized)?;
     Ok(path)
 }
 
