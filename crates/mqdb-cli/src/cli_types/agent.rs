@@ -79,9 +79,9 @@ pub(crate) struct AgentStartFields {
     pub(crate) license: Option<PathBuf>,
     #[arg(long = "", env = "MQDB_LICENSE", hide = true)]
     pub(crate) license_data: Option<String>,
-    #[arg(long, env = "MQDB_QUIC_CERT", hide = true)]
+    #[arg(long = "", env = "MQDB_QUIC_CERT", hide = true)]
     pub(crate) quic_cert_data: Option<String>,
-    #[arg(long, env = "MQDB_QUIC_KEY", hide = true)]
+    #[arg(long = "", env = "MQDB_QUIC_KEY", hide = true)]
     pub(crate) quic_key_data: Option<String>,
     #[arg(
         long,
@@ -233,11 +233,11 @@ pub(crate) struct ClusterStartFields {
     pub(crate) license: Option<PathBuf>,
     #[arg(long = "", env = "MQDB_LICENSE", hide = true)]
     pub(crate) license_data: Option<String>,
-    #[arg(long, env = "MQDB_QUIC_CERT", hide = true)]
+    #[arg(long = "", env = "MQDB_QUIC_CERT", hide = true)]
     pub(crate) quic_cert_data: Option<String>,
-    #[arg(long, env = "MQDB_QUIC_KEY", hide = true)]
+    #[arg(long = "", env = "MQDB_QUIC_KEY", hide = true)]
     pub(crate) quic_key_data: Option<String>,
-    #[arg(long, env = "MQDB_QUIC_CA", hide = true)]
+    #[arg(long = "", env = "MQDB_QUIC_CA", hide = true)]
     pub(crate) quic_ca_data: Option<String>,
 }
 
