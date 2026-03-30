@@ -52,8 +52,12 @@ fn unwrap_licensing_key() -> Result<[u8; 65], String> {
 pub(crate) fn verify_license_file(path: &Path) -> Result<LicenseInfo, String> {
     let token = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read license file '{}': {e}", path.display()))?;
+    verify_license_token(token.trim())
+}
+
+pub(crate) fn verify_license_token(token: &str) -> Result<LicenseInfo, String> {
     let key = unwrap_licensing_key()?;
-    verify_license_token_with_key(token.trim(), &key)
+    verify_license_token_with_key(token, &key)
 }
 
 fn verify_license_token_with_key(
