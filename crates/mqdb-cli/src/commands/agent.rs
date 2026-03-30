@@ -8,6 +8,9 @@ use std::sync::Arc;
 use mqdb_agent::{Database, MqdbAgent};
 
 use crate::cli_types::{AuthArgs, ConnectionArgs, DurabilityArg, JwtAlgorithmArg, OAuthArgs};
+use crate::commands::env_secret::{
+    resolve_federated_jwt_content, resolve_passphrase, resolve_path_or_data,
+};
 use crate::common::connect_client;
 
 pub(crate) struct AgentStartArgs {
@@ -31,45 +34,6 @@ pub(crate) struct AgentStartArgs {
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) otel_service_name: String,
     pub(crate) otel_sampling_ratio: f64,
-}
-
-fn write_temp_file(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let dir = std::env::temp_dir().join("mqdb-env-secrets");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(name);
-    let normalized = if content.ends_with('\n') {
-        content.to_string()
-    } else {
-        format!("{content}\n")
-    };
-    std::fs::write(&path, normalized)?;
-    Ok(path)
-}
-
-fn resolve_path_or_data(
-    file: Option<PathBuf>,
-    data: Option<&str>,
-    temp_name: &str,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    if let Some(content) = data {
-        return Ok(Some(write_temp_file(temp_name, content)?));
-    }
-    Ok(file)
-}
-
-fn resolve_passphrase(
-    file: Option<&PathBuf>,
-    data: Option<&str>,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if let Some(content) = data {
-        return Ok(Some(content.trim().to_string()));
-    }
-    if let Some(pf) = file {
-        let passphrase = std::fs::read_to_string(pf)
-            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
-        return Ok(Some(passphrase.trim().to_string()));
-    }
-    Ok(None)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -112,7 +76,11 @@ pub(crate) async fn cmd_agent_start(
     crate::license::enforce_license(license_info.as_ref(), needs_vault, false)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    let auth_setup = build_auth_setup_config(&args.auth)?;
+    let federated_content = resolve_federated_jwt_content(
+        args.auth.federated_jwt_config_data.as_deref(),
+        args.auth.federated_jwt_config.as_ref(),
+    );
+    let auth_setup = build_auth_setup_config(&args.auth, federated_content.as_deref())?;
     let mut agent = MqdbAgent::new(db)
         .with_bind_address(args.bind)
         .with_auth_setup(auth_setup);
@@ -172,6 +140,7 @@ pub(crate) async fn cmd_agent_start(
             http_bind,
             &args.auth,
             &args.oauth,
+            federated_content.as_deref(),
             ownership_for_http,
             &args.db_path,
         )?;
@@ -201,6 +170,7 @@ pub(crate) async fn cmd_agent_status(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_auth_setup_config(
     auth: &AuthArgs,
+    federated_content: Option<&str>,
 ) -> Result<mqdb_agent::auth_config::AuthSetupConfig, Box<dyn std::error::Error>> {
     use mqtt5::broker::config::{JwtAlgorithm, JwtConfig, RateLimitConfig};
 
@@ -220,16 +190,6 @@ pub(crate) fn build_auth_setup_config(
         auth.jwt_key_data.as_deref(),
         "jwt_key",
     )?;
-
-    let federated_content = auth
-        .federated_jwt_config_data
-        .as_deref()
-        .map(String::from)
-        .or_else(|| {
-            auth.federated_jwt_config
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-        });
 
     let jwt_config = if let Some(alg) = auth.jwt_algorithm {
         let key_path = jwt_key_path
@@ -264,7 +224,7 @@ pub(crate) fn build_auth_setup_config(
         None
     };
 
-    let federated_jwt_config = if let Some(ref content) = federated_content {
+    let federated_jwt_config = if let Some(content) = federated_content {
         let config: mqtt5::broker::config::FederatedJwtConfig = serde_json::from_str(content)?;
         Some(config)
     } else {
@@ -317,6 +277,7 @@ pub(crate) fn build_http_config(
     http_bind: SocketAddr,
     auth: &AuthArgs,
     oauth: &OAuthArgs,
+    federated_content: Option<&str>,
     ownership_config: std::sync::Arc<mqdb_core::types::OwnershipConfig>,
     db_path: &Path,
 ) -> Result<mqdb_agent::http::HttpServerConfig, Box<dyn std::error::Error>> {
@@ -337,17 +298,7 @@ pub(crate) fn build_http_config(
         .into());
     }
 
-    let federated_content = auth
-        .federated_jwt_config_data
-        .as_deref()
-        .map(String::from)
-        .or_else(|| {
-            auth.federated_jwt_config
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-        });
-
-    let client_id = if let Some(ref content) = federated_content {
+    let client_id = if let Some(content) = federated_content {
         let config: serde_json::Value = serde_json::from_str(content)?;
         config
             .get("providers")

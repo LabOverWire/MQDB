@@ -10,6 +10,9 @@ use serde_json::json;
 
 use super::agent::{build_auth_setup_config, build_http_config};
 use crate::cli_types::{AuthArgs, ConnectionArgs, DurabilityArg, OAuthArgs, OutputFormat};
+use crate::commands::env_secret::{
+    resolve_federated_jwt_content, resolve_passphrase, resolve_path_or_data,
+};
 use crate::common::{execute_request, output_response};
 
 #[allow(clippy::struct_excessive_bools)]
@@ -44,30 +47,6 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) license_data: Option<String>,
 }
 
-fn write_temp_file(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let dir = std::env::temp_dir().join("mqdb-env-secrets");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(name);
-    let normalized = if content.ends_with('\n') {
-        content.to_string()
-    } else {
-        format!("{content}\n")
-    };
-    std::fs::write(&path, normalized)?;
-    Ok(path)
-}
-
-fn resolve_path_or_data(
-    file: Option<PathBuf>,
-    data: Option<&str>,
-    temp_name: &str,
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    if let Some(content) = data {
-        return Ok(Some(write_temp_file(temp_name, content)?));
-    }
-    Ok(file)
-}
-
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn cmd_cluster_start(
     args: ClusterStartArgs,
@@ -99,15 +78,10 @@ pub(crate) async fn cmd_cluster_start(
         None
     };
 
-    let passphrase = if let Some(ref data) = args.passphrase_data {
-        Some(data.trim().to_string())
-    } else if let Some(ref pf) = args.passphrase_file {
-        let content = std::fs::read_to_string(pf)
-            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
-        Some(content.trim().to_string())
-    } else {
-        None
-    };
+    let passphrase = resolve_passphrase(
+        args.passphrase_file.as_ref(),
+        args.passphrase_data.as_deref(),
+    )?;
 
     let needs_vault = passphrase.is_some();
     crate::license::enforce_license(license_info.as_ref(), needs_vault, true)
@@ -131,7 +105,11 @@ pub(crate) async fn cmd_cluster_start(
         args.auth.acl_data.as_deref(),
         "cluster_acl",
     )?;
-    let auth_setup = build_auth_setup_config(&args.auth)?;
+    let federated_content = resolve_federated_jwt_content(
+        args.auth.federated_jwt_config_data.as_deref(),
+        args.auth.federated_jwt_config.as_ref(),
+    );
+    let auth_setup = build_auth_setup_config(&args.auth, federated_content.as_deref())?;
 
     let db_path = args.db_path;
     let mut config = ClusterConfig::new(args.node_id, db_path.clone(), peer_configs);
@@ -202,6 +180,7 @@ pub(crate) async fn cmd_cluster_start(
             http_bind,
             &args.auth,
             &args.oauth,
+            federated_content.as_deref(),
             ownership_arc.clone(),
             &db_path,
         )?;

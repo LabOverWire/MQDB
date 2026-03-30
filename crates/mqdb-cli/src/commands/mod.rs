@@ -13,3 +13,4 @@ pub(crate) mod crud;
 pub(crate) mod dev;
 #[cfg(feature = "cluster")]
 pub(crate) mod dev_bench;
+pub(crate) mod env_secret;
