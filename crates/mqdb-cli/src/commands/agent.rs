@@ -18,17 +18,61 @@ pub(crate) struct AgentStartArgs {
     pub(crate) durability_ms: u64,
     pub(crate) quic_cert: Option<PathBuf>,
     pub(crate) quic_key: Option<PathBuf>,
+    pub(crate) quic_cert_data: Option<String>,
+    pub(crate) quic_key_data: Option<String>,
     pub(crate) ws_bind: Option<SocketAddr>,
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
+    pub(crate) passphrase_data: Option<String>,
     pub(crate) license: Option<PathBuf>,
+    pub(crate) license_data: Option<String>,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) otel_service_name: String,
     pub(crate) otel_sampling_ratio: f64,
 }
 
+fn write_temp_file(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join("mqdb-env-secrets");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
+    let normalized = if content.ends_with('\n') {
+        content.to_string()
+    } else {
+        format!("{content}\n")
+    };
+    std::fs::write(&path, normalized)?;
+    Ok(path)
+}
+
+fn resolve_path_or_data(
+    file: Option<PathBuf>,
+    data: Option<&str>,
+    temp_name: &str,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if let Some(content) = data {
+        return Ok(Some(write_temp_file(temp_name, content)?));
+    }
+    Ok(file)
+}
+
+fn resolve_passphrase(
+    file: Option<&PathBuf>,
+    data: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if let Some(content) = data {
+        return Ok(Some(content.trim().to_string()));
+    }
+    if let Some(pf) = file {
+        let passphrase = std::fs::read_to_string(pf)
+            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
+        return Ok(Some(passphrase.trim().to_string()));
+    }
+    Ok(None)
+}
+
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn cmd_agent_start(
     args: AgentStartArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -52,19 +96,19 @@ pub(crate) async fn cmd_agent_start(
     };
 
     let mut config = DatabaseConfig::new(&args.db_path).with_durability(durability_mode);
-    if let Some(ref pf) = args.passphrase_file {
-        let passphrase = std::fs::read_to_string(pf)
-            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
-        config = config.with_passphrase(passphrase.trim().to_string());
+    let passphrase = resolve_passphrase(
+        args.passphrase_file.as_ref(),
+        args.passphrase_data.as_deref(),
+    )?;
+    if let Some(ref pp) = passphrase {
+        config = config.with_passphrase(pp.clone());
     }
     let db = Database::open_with_config(config).await?;
 
-    let license_info = args
-        .license
-        .as_ref()
-        .and_then(|path| verify_and_log_license(path));
+    let license_info =
+        verify_and_log_license(args.license.as_deref(), args.license_data.as_deref());
 
-    let needs_vault = args.passphrase_file.is_some();
+    let needs_vault = passphrase.is_some();
     crate::license::enforce_license(license_info.as_ref(), needs_vault, false)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -77,7 +121,14 @@ pub(crate) async fn cmd_agent_start(
         agent = agent.with_license_expiry(info.expires_at);
     }
 
-    if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
+    let quic_cert = resolve_path_or_data(
+        args.quic_cert,
+        args.quic_cert_data.as_deref(),
+        "quic_cert.pem",
+    )?;
+    let quic_key =
+        resolve_path_or_data(args.quic_key, args.quic_key_data.as_deref(), "quic_key.pem")?;
+    if let (Some(cert), Some(key)) = (quic_cert, quic_key) {
         agent = agent.with_quic_certs(cert, key);
     }
     if let Some(ws_addr) = args.ws_bind {
@@ -147,14 +198,41 @@ pub(crate) async fn cmd_agent_status(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn build_auth_setup_config(
     auth: &AuthArgs,
 ) -> Result<mqdb_agent::auth_config::AuthSetupConfig, Box<dyn std::error::Error>> {
     use mqtt5::broker::config::{JwtAlgorithm, JwtConfig, RateLimitConfig};
 
+    let passwd_path =
+        resolve_path_or_data(auth.passwd.clone(), auth.passwd_data.as_deref(), "passwd")?;
+    let acl_path = resolve_path_or_data(auth.acl.clone(), auth.acl_data.as_deref(), "acl")?;
+    let scram_path =
+        resolve_path_or_data(auth.scram_file.clone(), auth.scram_data.as_deref(), "scram")?;
+    let cert_auth_path = resolve_path_or_data(
+        auth.cert_auth_file.clone(),
+        auth.cert_auth_data.as_deref(),
+        "cert_auth",
+    )?;
+
+    let jwt_key_path = resolve_path_or_data(
+        auth.jwt_key.clone(),
+        auth.jwt_key_data.as_deref(),
+        "jwt_key",
+    )?;
+
+    let federated_content = auth
+        .federated_jwt_config_data
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            auth.federated_jwt_config
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+        });
+
     let jwt_config = if let Some(alg) = auth.jwt_algorithm {
-        let key_path = auth
-            .jwt_key
+        let key_path = jwt_key_path
             .clone()
             .ok_or("--jwt-key is required when --jwt-algorithm is set")?;
         let algorithm = match alg {
@@ -186,9 +264,8 @@ pub(crate) fn build_auth_setup_config(
         None
     };
 
-    let federated_jwt_config = if let Some(ref path) = auth.federated_jwt_config {
-        let content = std::fs::read_to_string(path)?;
-        let config: mqtt5::broker::config::FederatedJwtConfig = serde_json::from_str(&content)?;
+    let federated_jwt_config = if let Some(ref content) = federated_content {
+        let config: mqtt5::broker::config::FederatedJwtConfig = serde_json::from_str(content)?;
         Some(config)
     } else {
         None
@@ -211,11 +288,11 @@ pub(crate) fn build_auth_setup_config(
     let allow_anonymous = false;
 
     if !auth.admin_users.is_empty()
-        && auth.passwd.is_none()
-        && auth.scram_file.is_none()
+        && passwd_path.is_none()
+        && scram_path.is_none()
         && jwt_config.is_none()
         && federated_jwt_config.is_none()
-        && auth.cert_auth_file.is_none()
+        && cert_auth_path.is_none()
     {
         return Err(
             "--admin-users requires an authentication method (--passwd, --scram-file, --jwt-algorithm, --federated-jwt-config, or --cert-auth-file)".into()
@@ -223,13 +300,13 @@ pub(crate) fn build_auth_setup_config(
     }
 
     Ok(mqdb_agent::auth_config::AuthSetupConfig {
-        password_file: auth.passwd.clone(),
-        acl_file: auth.acl.clone(),
+        password_file: passwd_path,
+        acl_file: acl_path,
         allow_anonymous,
-        scram_file: auth.scram_file.clone(),
+        scram_file: scram_path,
         jwt_config,
         federated_jwt_config,
-        cert_auth_file: auth.cert_auth_file.clone(),
+        cert_auth_file: cert_auth_path,
         rate_limit,
         no_rate_limit: auth.no_rate_limit,
         admin_users: auth.admin_users.iter().cloned().collect(),
@@ -243,14 +320,14 @@ pub(crate) fn build_http_config(
     ownership_config: std::sync::Arc<mqdb_core::types::OwnershipConfig>,
     db_path: &Path,
 ) -> Result<mqdb_agent::http::HttpServerConfig, Box<dyn std::error::Error>> {
-    let jwt_key_path = auth
-        .jwt_key
-        .as_ref()
-        .ok_or("--jwt-key is required for OAuth JWT signing")?;
-    let jwt_key_bytes = std::fs::read_to_string(jwt_key_path)?
-        .trim()
-        .as_bytes()
-        .to_vec();
+    let jwt_key_content = if let Some(ref data) = auth.jwt_key_data {
+        data.trim().to_string()
+    } else if let Some(ref path) = auth.jwt_key {
+        std::fs::read_to_string(path)?.trim().to_string()
+    } else {
+        return Err("--jwt-key is required for OAuth JWT signing".into());
+    };
+    let jwt_key_bytes = jwt_key_content.as_bytes().to_vec();
 
     if jwt_key_bytes.len() < 32 {
         return Err(format!(
@@ -260,9 +337,18 @@ pub(crate) fn build_http_config(
         .into());
     }
 
-    let client_id = if let Some(ref fed_config_path) = auth.federated_jwt_config {
-        let content = std::fs::read_to_string(fed_config_path)?;
-        let config: serde_json::Value = serde_json::from_str(&content)?;
+    let federated_content = auth
+        .federated_jwt_config_data
+        .as_deref()
+        .map(String::from)
+        .or_else(|| {
+            auth.federated_jwt_config
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+        });
+
+    let client_id = if let Some(ref content) = federated_content {
+        let config: serde_json::Value = serde_json::from_str(content)?;
         config
             .get("providers")
             .and_then(|p| p.as_array())
@@ -284,9 +370,12 @@ pub(crate) fn build_http_config(
 
     let mut registry = mqdb_agent::http::ProviderRegistry::new();
 
-    let google_secret = match oauth.oauth_client_secret.as_ref() {
-        Some(path) => std::fs::read_to_string(path)?.trim().to_string(),
-        None => return Err("--oauth-client-secret is required when --http-bind is set".into()),
+    let google_secret = if let Some(ref data) = oauth.oauth_client_secret_data {
+        data.trim().to_string()
+    } else if let Some(ref path) = oauth.oauth_client_secret {
+        std::fs::read_to_string(path)?.trim().to_string()
+    } else {
+        return Err("--oauth-client-secret is required when --http-bind is set".into());
     };
 
     registry.register(mqdb_agent::http::Provider::Google(
@@ -340,6 +429,15 @@ fn build_identity_crypto(
         tracing::info!("dev-insecure: identity encryption disabled");
         return Ok(None);
     }
+
+    if let Some(ref data) = oauth.identity_key_data {
+        let key_bytes = data.as_bytes();
+        let crypto = mqdb_agent::http::IdentityCrypto::from_external_key(key_bytes)
+            .map_err(|e| format!("invalid identity key: {e}"))?;
+        tracing::info!("identity encryption enabled (external key via env)");
+        return Ok(Some(crypto));
+    }
+
     if let Some(ref key_path) = oauth.identity_key_file {
         let key_bytes = std::fs::read(key_path).map_err(|e| {
             format!(
@@ -381,8 +479,19 @@ fn build_identity_crypto(
     }
 }
 
-fn verify_and_log_license(path: &std::path::Path) -> Option<mqdb_core::license::LicenseInfo> {
-    match crate::license::verify_license_file(path) {
+fn verify_and_log_license(
+    path: Option<&std::path::Path>,
+    data: Option<&str>,
+) -> Option<mqdb_core::license::LicenseInfo> {
+    let result = if let Some(content) = data {
+        crate::license::verify_license_token(content.trim())
+    } else if let Some(p) = path {
+        crate::license::verify_license_file(p)
+    } else {
+        return None;
+    };
+
+    match result {
         Ok(info) => {
             tracing::info!(
                 customer = %info.customer,

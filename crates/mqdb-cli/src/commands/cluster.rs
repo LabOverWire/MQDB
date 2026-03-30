@@ -23,6 +23,9 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) quic_cert: Option<PathBuf>,
     pub(crate) quic_key: Option<PathBuf>,
     pub(crate) quic_ca: Option<PathBuf>,
+    pub(crate) quic_cert_data: Option<String>,
+    pub(crate) quic_key_data: Option<String>,
+    pub(crate) quic_ca_data: Option<String>,
     pub(crate) no_quic: bool,
     pub(crate) no_persist_stores: bool,
     pub(crate) durability: DurabilityArg,
@@ -36,7 +39,33 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
+    pub(crate) passphrase_data: Option<String>,
     pub(crate) license: Option<PathBuf>,
+    pub(crate) license_data: Option<String>,
+}
+
+fn write_temp_file(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = std::env::temp_dir().join("mqdb-env-secrets");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(name);
+    let normalized = if content.ends_with('\n') {
+        content.to_string()
+    } else {
+        format!("{content}\n")
+    };
+    std::fs::write(&path, normalized)?;
+    Ok(path)
+}
+
+fn resolve_path_or_data(
+    file: Option<PathBuf>,
+    data: Option<&str>,
+    temp_name: &str,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if let Some(content) = data {
+        return Ok(Some(write_temp_file(temp_name, content)?));
+    }
+    Ok(file)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -45,8 +74,13 @@ pub(crate) async fn cmd_cluster_start(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mqdb_core::config::DurabilityMode;
 
-    let license_info = if let Some(ref license_path) = args.license {
-        match crate::license::verify_license_file(license_path) {
+    let license_info = if args.license_data.is_some() || args.license.is_some() {
+        let result = if let Some(ref content) = args.license_data {
+            crate::license::verify_license_token(content.trim())
+        } else {
+            crate::license::verify_license_file(args.license.as_ref().unwrap())
+        };
+        match result {
             Ok(info) => {
                 tracing::info!(
                     customer = %info.customer,
@@ -65,7 +99,17 @@ pub(crate) async fn cmd_cluster_start(
         None
     };
 
-    let needs_vault = args.passphrase_file.is_some();
+    let passphrase = if let Some(ref data) = args.passphrase_data {
+        Some(data.trim().to_string())
+    } else if let Some(ref pf) = args.passphrase_file {
+        let content = std::fs::read_to_string(pf)
+            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
+        Some(content.trim().to_string())
+    } else {
+        None
+    };
+
+    let needs_vault = passphrase.is_some();
     crate::license::enforce_license(license_info.as_ref(), needs_vault, true)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -77,8 +121,16 @@ pub(crate) async fn cmd_cluster_start(
         DurabilityArg::None => DurabilityMode::None,
     };
 
-    let passwd_file = args.auth.passwd.clone();
-    let acl_file = args.auth.acl.clone();
+    let passwd_file = resolve_path_or_data(
+        args.auth.passwd.clone(),
+        args.auth.passwd_data.as_deref(),
+        "cluster_passwd",
+    )?;
+    let acl_file = resolve_path_or_data(
+        args.auth.acl.clone(),
+        args.auth.acl_data.as_deref(),
+        "cluster_acl",
+    )?;
     let auth_setup = build_auth_setup_config(&args.auth)?;
 
     let db_path = args.db_path;
@@ -96,10 +148,27 @@ pub(crate) async fn cmd_cluster_start(
         config = config.with_acl_file(af);
     }
     config = config.with_auth_setup(auth_setup);
-    if let (Some(cert), Some(key)) = (args.quic_cert, args.quic_key) {
+
+    let quic_cert = resolve_path_or_data(
+        args.quic_cert,
+        args.quic_cert_data.as_deref(),
+        "cluster_quic_cert.pem",
+    )?;
+    let quic_key = resolve_path_or_data(
+        args.quic_key,
+        args.quic_key_data.as_deref(),
+        "cluster_quic_key.pem",
+    )?;
+    let quic_ca = resolve_path_or_data(
+        args.quic_ca,
+        args.quic_ca_data.as_deref(),
+        "cluster_quic_ca.pem",
+    )?;
+
+    if let (Some(cert), Some(key)) = (quic_cert, quic_key) {
         config = config.with_quic_certs(cert, key);
     }
-    if let Some(ca) = args.quic_ca {
+    if let Some(ca) = quic_ca {
         config = config.with_quic_ca(ca);
     }
     if args.no_quic {
@@ -149,10 +218,8 @@ pub(crate) async fn cmd_cluster_start(
     if let Some(ref info) = license_info {
         config = config.with_license_expiry(info.expires_at);
     }
-    if let Some(ref pf) = args.passphrase_file {
-        let passphrase = std::fs::read_to_string(pf)
-            .map_err(|e| format!("failed to read passphrase file: {e}"))?;
-        config = config.with_passphrase(passphrase.trim().to_string());
+    if let Some(ref pp) = passphrase {
+        config = config.with_passphrase(pp.clone());
     }
 
     let mut agent = ClusteredAgent::new(config)?;

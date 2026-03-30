@@ -20,11 +20,31 @@ Binary location: `target/release/mqdb`
 
 ### Environment Variables
 
+All CLI flags for `mqdb agent start` and `mqdb cluster start` can be set via `MQDB_*` environment variables. CLI flags take precedence when both are set. See the [README](../../README.md#environment-variables) for the full reference.
+
+**Client commands** (used by `create`, `read`, `list`, etc.):
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MQDB_BROKER` | MQTT broker address | `127.0.0.1:1883` |
 | `MQDB_USER` | Authentication username | (none) |
 | `MQDB_PASS` | Authentication password | (none) |
+
+**Server-side** (used by `agent start` / `cluster start`):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MQDB_BIND` | MQTT listener address | `127.0.0.1:1883` |
+| `MQDB_DB` | Database directory path | (required) |
+| `MQDB_PASSWD_FILE` | Path to password file | (none) |
+| `MQDB_PASSWD` | Password file content (inline) | (none) |
+| `MQDB_ACL_FILE` | Path to ACL file | (none) |
+| `MQDB_ACL` | ACL file content (inline) | (none) |
+| `MQDB_ADMIN_USERS` | Comma-separated admin usernames | (none) |
+| `MQDB_PASSPHRASE` | Encryption passphrase (inline) | (none) |
+| `MQDB_LICENSE` | License token (inline) | (none) |
+
+For file-path flags, each `MQDB_*_FILE` variable accepts a path and the corresponding `MQDB_*` (without `_FILE`) accepts inline content. Inline takes precedence.
 
 ### Terminal Setup
 
@@ -80,69 +100,71 @@ mqdb agent start --db ./data/testdb --passwd ./passwd.txt --acl ./acl.txt \
 
 ### Agent Start Options Reference
 
+All options can be set via `MQDB_*` environment variables. File-path options have both a `*_FILE` env var (path) and a plain env var (inline content).
+
 **Core:**
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--db` | Database directory path | (required) |
-| `--bind` | MQTT listener address | `127.0.0.1:1883` |
-| `--durability` | `immediate`, `periodic`, or `none` | `periodic` |
-| `--durability-ms` | Fsync interval in ms (periodic mode) | `10` |
-| `--ownership` | Ownership config: `entity=field` pairs | (none) |
-| `--event-scope` | Scope events by entity field | (none) |
-| `--passphrase-file` | File-at-rest encryption passphrase | (none) |
-| `--license` | Path to license key file (required for vault/cluster) | (none) |
+| Option | Env Var | Description | Default |
+|--------|---------|-------------|---------|
+| `--db` | `MQDB_DB` | Database directory path | (required) |
+| `--bind` | `MQDB_BIND` | MQTT listener address | `127.0.0.1:1883` |
+| `--durability` | `MQDB_DURABILITY` | `immediate`, `periodic`, or `none` | `periodic` |
+| `--durability-ms` | `MQDB_DURABILITY_MS` | Fsync interval in ms (periodic mode) | `10` |
+| `--ownership` | `MQDB_OWNERSHIP` | Ownership config: `entity=field` pairs | (none) |
+| `--event-scope` | `MQDB_EVENT_SCOPE` | Scope events by entity field | (none) |
+| `--passphrase-file` | `MQDB_PASSPHRASE_FILE` / `MQDB_PASSPHRASE` | Encryption passphrase | (none) |
+| `--license` | `MQDB_LICENSE_FILE` / `MQDB_LICENSE` | License key | (none) |
 
 **Authentication:**
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--passwd` | Path to password file | (none) |
-| `--acl` | Path to ACL file | (none) |
-| `--scram-file` | Path to SCRAM-SHA-256 credentials file | (none) |
-| `--jwt-algorithm` | JWT algorithm: `hs256`, `rs256`, `es256` | (none) |
-| `--jwt-key` | Path to JWT secret/key file | (none) |
-| `--jwt-issuer` | JWT issuer claim | (none) |
-| `--jwt-audience` | JWT audience claim | (none) |
-| `--jwt-clock-skew` | JWT clock skew tolerance in seconds | `60` |
-| `--federated-jwt-config` | Path to federated JWT config JSON (conflicts with `--jwt-algorithm`) | (none) |
-| `--cert-auth-file` | Path to certificate auth file | (none) |
-| `--admin-users` | Comma-separated list of admin usernames | (none) |
-| `--no-rate-limit` | Disable authentication rate limiting | `false` |
-| `--rate-limit-max-attempts` | Max failed auth attempts before lockout | `5` |
-| `--rate-limit-window-secs` | Rate limit window in seconds | `60` |
-| `--rate-limit-lockout-secs` | Lockout duration in seconds | `300` |
+| Option | Env Var | Description | Default |
+|--------|---------|-------------|---------|
+| `--passwd` | `MQDB_PASSWD_FILE` / `MQDB_PASSWD` | Password file | (none) |
+| `--acl` | `MQDB_ACL_FILE` / `MQDB_ACL` | ACL file | (none) |
+| `--scram-file` | `MQDB_SCRAM_FILE` / `MQDB_SCRAM` | SCRAM-SHA-256 credentials | (none) |
+| `--jwt-algorithm` | `MQDB_JWT_ALGORITHM` | JWT algorithm: `hs256`, `rs256`, `es256` | (none) |
+| `--jwt-key` | `MQDB_JWT_KEY_FILE` / `MQDB_JWT_KEY` | JWT secret/key | (none) |
+| `--jwt-issuer` | `MQDB_JWT_ISSUER` | JWT issuer claim | (none) |
+| `--jwt-audience` | `MQDB_JWT_AUDIENCE` | JWT audience claim | (none) |
+| `--jwt-clock-skew` | `MQDB_JWT_CLOCK_SKEW` | JWT clock skew tolerance in seconds | `60` |
+| `--federated-jwt-config` | `MQDB_FEDERATED_JWT_CONFIG_FILE` / `MQDB_FEDERATED_JWT_CONFIG` | Federated JWT config JSON | (none) |
+| `--cert-auth-file` | `MQDB_CERT_AUTH_FILE` / `MQDB_CERT_AUTH` | Certificate auth file | (none) |
+| `--admin-users` | `MQDB_ADMIN_USERS` | Comma-separated admin usernames | (none) |
+| `--no-rate-limit` | `MQDB_NO_RATE_LIMIT` | Disable auth rate limiting | `false` |
+| `--rate-limit-max-attempts` | `MQDB_RATE_LIMIT_MAX_ATTEMPTS` | Max failed auth attempts | `5` |
+| `--rate-limit-window-secs` | `MQDB_RATE_LIMIT_WINDOW_SECS` | Rate limit window (seconds) | `60` |
+| `--rate-limit-lockout-secs` | `MQDB_RATE_LIMIT_LOCKOUT_SECS` | Lockout duration (seconds) | `300` |
 
 **Observability (requires `--features opentelemetry` build):**
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--otlp-endpoint` | OTLP collector endpoint (enables OTel tracing) | (none) |
-| `--otel-service-name` | Service name for OTel traces | `mqdb` |
-| `--otel-sampling-ratio` | Sampling ratio 0.0-1.0 | `0.1` |
+| Option | Env Var | Description | Default |
+|--------|---------|-------------|---------|
+| `--otlp-endpoint` | `MQDB_OTLP_ENDPOINT` | OTLP collector endpoint | (none) |
+| `--otel-service-name` | `MQDB_OTEL_SERVICE_NAME` | Service name for traces | `mqdb` |
+| `--otel-sampling-ratio` | `MQDB_OTEL_SAMPLING_RATIO` | Sampling ratio 0.0-1.0 | `0.1` |
 
 **Transport:**
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--quic-cert` | TLS certificate (PEM) for MQTT-over-TLS | (none) |
-| `--quic-key` | TLS private key (PEM) for MQTT-over-TLS | (none) |
-| `--ws-bind` | WebSocket bind address (e.g. `0.0.0.0:8080`) | (none) |
+| Option | Env Var | Description | Default |
+|--------|---------|-------------|---------|
+| `--quic-cert` | `MQDB_QUIC_CERT_FILE` / `MQDB_QUIC_CERT` | TLS certificate (PEM) | (none) |
+| `--quic-key` | `MQDB_QUIC_KEY_FILE` / `MQDB_QUIC_KEY` | TLS private key (PEM) | (none) |
+| `--ws-bind` | `MQDB_WS_BIND` | WebSocket bind address | (none) |
 
 **OAuth/Identity:**
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--http-bind` | HTTP server for OAuth (e.g. `0.0.0.0:8081`) | (none) |
-| `--oauth-client-secret` | Path to Google OAuth client secret | (none) |
-| `--oauth-redirect-uri` | OAuth redirect URI | `http://localhost:{port}/oauth/callback` |
-| `--oauth-frontend-redirect` | Browser redirect after OAuth completes | (none) |
-| `--ticket-expiry-secs` | Ticket JWT expiry in seconds | `30` |
-| `--cookie-secure` | Set Secure flag on session cookies (HTTPS) | `false` |
-| `--cors-origin` | CORS allowed origin for auth endpoints | (none) |
-| `--ticket-rate-limit` | Max ticket requests per minute per IP | `10` |
-| `--trust-proxy` | Trust X-Forwarded-For header | `false` |
-| `--identity-key-file` | 32-byte identity encryption key file | (auto-generated) |
+| Option | Env Var | Description | Default |
+|--------|---------|-------------|---------|
+| `--http-bind` | `MQDB_HTTP_BIND` | HTTP server for OAuth | (none) |
+| `--oauth-client-secret` | `MQDB_OAUTH_CLIENT_SECRET_FILE` / `MQDB_OAUTH_CLIENT_SECRET` | OAuth client secret | (none) |
+| `--oauth-redirect-uri` | `MQDB_OAUTH_REDIRECT_URI` | OAuth redirect URI | auto |
+| `--oauth-frontend-redirect` | `MQDB_OAUTH_FRONTEND_REDIRECT` | Browser redirect after OAuth | (none) |
+| `--ticket-expiry-secs` | `MQDB_TICKET_EXPIRY_SECS` | Ticket JWT expiry (seconds) | `30` |
+| `--cookie-secure` | `MQDB_COOKIE_SECURE` | Secure flag on session cookies | `false` |
+| `--cors-origin` | `MQDB_CORS_ORIGIN` | CORS allowed origin | (none) |
+| `--ticket-rate-limit` | `MQDB_TICKET_RATE_LIMIT` | Max ticket requests/min/IP | `10` |
+| `--trust-proxy` | `MQDB_TRUST_PROXY` | Trust X-Forwarded-For header | `false` |
+| `--identity-key-file` | `MQDB_IDENTITY_KEY_FILE` / `MQDB_IDENTITY_KEY` | Identity encryption key | (auto) |
 
 ---
 
