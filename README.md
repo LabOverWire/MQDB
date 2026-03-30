@@ -686,11 +686,134 @@ cargo build --release --bin mqdb
 
 ### Environment Variables
 
+Every CLI flag can be set via environment variable. This is the primary configuration method for Docker and ECS deployments. CLI flags take precedence over env vars when both are set.
+
+**Client commands** (create, read, list, watch, etc.):
+
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MQDB_BROKER` | Broker address | `127.0.0.1:1883` |
 | `MQDB_USER` | Username for authentication | — |
 | `MQDB_PASS` | Password for authentication | — |
+
+**Agent/cluster server** (`mqdb agent start`, `mqdb cluster start`):
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_BIND` | MQTT listener address | `127.0.0.1:1883` (agent), `0.0.0.0:1883` (cluster) |
+| `MQDB_DB` | Database directory path | (required) |
+| `MQDB_DURABILITY` | `immediate`, `periodic`, or `none` | `periodic` |
+| `MQDB_DURABILITY_MS` | Fsync interval in ms | `10` |
+| `MQDB_OWNERSHIP` | Ownership config (`entity=field` pairs) | — |
+| `MQDB_EVENT_SCOPE` | Scope events by entity field | — |
+| `MQDB_WS_BIND` | WebSocket bind address | — |
+
+**Authentication:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_PASSWD_FILE` | Path to password file | — |
+| `MQDB_PASSWD` | Password file content (inline) | — |
+| `MQDB_ACL_FILE` | Path to ACL file | — |
+| `MQDB_ACL` | ACL file content (inline) | — |
+| `MQDB_SCRAM_FILE` | Path to SCRAM credentials file | — |
+| `MQDB_SCRAM` | SCRAM file content (inline) | — |
+| `MQDB_JWT_ALGORITHM` | JWT algorithm: `hs256`, `rs256`, `es256` | — |
+| `MQDB_JWT_KEY_FILE` | Path to JWT key file | — |
+| `MQDB_JWT_KEY` | JWT key content (inline) | — |
+| `MQDB_JWT_ISSUER` | JWT issuer claim | — |
+| `MQDB_JWT_AUDIENCE` | JWT audience claim | — |
+| `MQDB_JWT_CLOCK_SKEW` | JWT clock skew tolerance (seconds) | `60` |
+| `MQDB_FEDERATED_JWT_CONFIG_FILE` | Path to federated JWT config | — |
+| `MQDB_FEDERATED_JWT_CONFIG` | Federated JWT config JSON (inline) | — |
+| `MQDB_CERT_AUTH_FILE` | Path to certificate auth file | — |
+| `MQDB_CERT_AUTH` | Certificate auth content (inline) | — |
+| `MQDB_ADMIN_USERS` | Comma-separated admin usernames | — |
+| `MQDB_NO_RATE_LIMIT` | Disable auth rate limiting | `false` |
+
+**Encryption and licensing:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_PASSPHRASE_FILE` | Path to encryption passphrase file | — |
+| `MQDB_PASSPHRASE` | Encryption passphrase (inline) | — |
+| `MQDB_LICENSE_FILE` | Path to license key file | — |
+| `MQDB_LICENSE` | License token (inline) | — |
+
+**TLS/QUIC transport:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_QUIC_CERT_FILE` | Path to TLS certificate (PEM) | — |
+| `MQDB_QUIC_CERT` | TLS certificate content (inline) | — |
+| `MQDB_QUIC_KEY_FILE` | Path to TLS private key (PEM) | — |
+| `MQDB_QUIC_KEY` | TLS private key content (inline) | — |
+| `MQDB_QUIC_CA_FILE` | Path to CA certificate (cluster only) | — |
+| `MQDB_QUIC_CA` | CA certificate content (inline, cluster only) | — |
+
+**OAuth/Identity:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_HTTP_BIND` | HTTP server for OAuth | — |
+| `MQDB_OAUTH_CLIENT_SECRET_FILE` | Path to OAuth client secret file | — |
+| `MQDB_OAUTH_CLIENT_SECRET` | OAuth client secret (inline) | — |
+| `MQDB_OAUTH_REDIRECT_URI` | OAuth redirect URI | auto |
+| `MQDB_OAUTH_FRONTEND_REDIRECT` | Browser redirect after OAuth | — |
+| `MQDB_COOKIE_SECURE` | Secure flag on session cookies | `false` |
+| `MQDB_CORS_ORIGIN` | CORS allowed origin | — |
+| `MQDB_IDENTITY_KEY_FILE` | Path to identity encryption key | auto |
+| `MQDB_IDENTITY_KEY` | Identity encryption key (inline) | auto |
+
+**Cluster-only:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_NODE_ID` | Unique node ID (1-65535) | (required) |
+| `MQDB_NODE_NAME` | Human-readable node name | — |
+| `MQDB_PEERS` | Peer nodes (`id@host:port,...`) | — |
+| `MQDB_NO_QUIC` | Disable QUIC transport | `false` |
+| `MQDB_BRIDGE_OUT` | Outgoing-only bridge direction | `false` |
+| `MQDB_CLUSTER_PORT_OFFSET` | Cluster listener port offset | `100` |
+
+**Observability:**
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MQDB_OTLP_ENDPOINT` | OTLP collector endpoint | — |
+| `MQDB_OTEL_SERVICE_NAME` | Service name for traces | `mqdb` |
+| `MQDB_OTEL_SAMPLING_RATIO` | Sampling ratio 0.0-1.0 | `0.1` |
+
+**Inline content vs file paths:** For secrets and certificates, each `*_FILE` variable accepts a file path while the corresponding variable without `_FILE` accepts the raw content directly. The inline content variables are designed for container deployments where secrets are injected as environment variable values rather than mounted files. When both are set, the inline content takes precedence.
+
+### Docker Deployment
+
+All configuration is done via environment variables — no config files needed:
+
+```bash
+docker run -d \
+  -e MQDB_DB=/data \
+  -e MQDB_BIND=0.0.0.0:1883 \
+  -e MQDB_PASSWD="admin:\$argon2id\$..." \
+  -e MQDB_ADMIN_USERS=admin \
+  -v mqdb-data:/data \
+  -p 1883:1883 \
+  mqdb:latest agent start
+```
+
+For secrets injected by ECS/Kubernetes, use the inline variables:
+
+```bash
+docker run -d \
+  -e MQDB_DB=/data \
+  -e MQDB_BIND=0.0.0.0:1883 \
+  -e MQDB_JWT_ALGORITHM=hs256 \
+  -e MQDB_JWT_KEY="$JWT_SECRET" \
+  -e MQDB_PASSPHRASE="$VAULT_PASSPHRASE" \
+  -e MQDB_LICENSE="$LICENSE_TOKEN" \
+  -p 1883:1883 \
+  mqdb:latest agent start
+```
 
 ### Authentication in CLI Commands
 
