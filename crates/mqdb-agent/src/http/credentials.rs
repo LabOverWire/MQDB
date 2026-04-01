@@ -11,14 +11,12 @@ use super::identity_crypto::IdentityCrypto;
 #[derive(Debug)]
 pub enum CredentialError {
     HashingFailed(String),
-    VerificationFailed(String),
 }
 
 impl std::fmt::Display for CredentialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::HashingFailed(e) => write!(f, "password hashing failed: {e}"),
-            Self::VerificationFailed(e) => write!(f, "password verification failed: {e}"),
         }
     }
 }
@@ -48,13 +46,13 @@ pub fn hash_password(password: &str) -> Result<String, CredentialError> {
     Ok(hash.to_string())
 }
 
-/// # Errors
-/// Returns `CredentialError::VerificationFailed` if the hash is malformed or verification fails.
-pub fn verify_password(hash: &str, password: &str) -> Result<bool, CredentialError> {
-    let parsed =
-        PasswordHash::new(hash).map_err(|e| CredentialError::VerificationFailed(e.to_string()))?;
+#[must_use]
+pub fn verify_password(hash: &str, password: &str) -> bool {
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
-    Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
+    argon2.verify_password(password.as_bytes(), &parsed).is_ok()
 }
 
 #[must_use]
@@ -85,7 +83,7 @@ pub fn validate_password(password: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         s.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
@@ -102,8 +100,8 @@ mod tests {
     fn hash_and_verify_roundtrip() {
         let hash = hash_password("test_password_123").unwrap();
         assert!(hash.starts_with("$argon2id$"));
-        assert!(verify_password(&hash, "test_password_123").unwrap());
-        assert!(!verify_password(&hash, "wrong_password").unwrap());
+        assert!(verify_password(&hash, "test_password_123"));
+        assert!(!verify_password(&hash, "wrong_password"));
     }
 
     #[test]

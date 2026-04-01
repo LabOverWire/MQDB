@@ -226,7 +226,7 @@ pub async fn handle_authorize(state: &ServerState, query: &str) -> HttpResponse 
     if rng.fill(&mut state_bytes).is_err() {
         return json_response(500, &json!({"error": "failed to generate state"}));
     }
-    let oauth_state = hex::encode(state_bytes);
+    let oauth_state = super::credentials::hex_encode(&state_bytes);
 
     {
         let mut cache = state.pkce_cache.lock().await;
@@ -2084,7 +2084,7 @@ pub async fn handle_register(state: &ServerState, body: &[u8], client_ip: &str) 
     let cors = state.cors_origin.as_deref();
 
     if !state.email_auth {
-        return json_response(404, &json!({"error": "not found"}));
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
     let body_value: serde_json::Value = match serde_json::from_slice(body) {
@@ -2225,7 +2225,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
     let cors = state.cors_origin.as_deref();
 
     if !state.email_auth {
-        return json_response(404, &json!({"error": "not found"}));
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
     let body_value: serde_json::Value = match serde_json::from_slice(body) {
@@ -2271,22 +2271,15 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         return json_response_with_credentials(401, &json!({"error": "invalid credentials"}), cors);
     };
 
-    match credentials::verify_password(stored_hash, password) {
-        Ok(true) => {}
-        _ => {
-            return json_response_with_credentials(
-                401,
-                &json!({"error": "invalid credentials"}),
-                cors,
-            );
-        }
+    if !credentials::verify_password(stored_hash, password) {
+        return json_response_with_credentials(401, &json!({"error": "invalid credentials"}), cors);
     }
 
     let Some(canonical_id) = cred_record.get("id").and_then(|v| v.as_str()) else {
         return json_response_with_credentials(500, &json!({"error": "login failed"}), cors);
     };
 
-    let (display_name, display_email) = if let Some(mut ident) =
+    let (display_name, display_email, verified) = if let Some(mut ident) =
         read_entity(&state.mqtt_client, "_identities", canonical_id).await
     {
         if let Some(ref crypto) = state.identity_crypto {
@@ -2304,9 +2297,13 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
             .get("primary_email")
             .and_then(|v| v.as_str())
             .map(String::from);
-        (n, e)
+        let ev = ident
+            .get("email_verified")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        (n, e, ev)
     } else {
-        (None, Some(email.to_string()))
+        (None, Some(email.to_string()), false)
     };
 
     let identity = ProviderIdentity {
@@ -2315,7 +2312,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         email: display_email.clone(),
         name: display_name.clone(),
         picture: None,
-        email_verified: false,
+        email_verified: verified,
     };
     let jwt = mint_callback_jwt(state, canonical_id, &identity);
 
@@ -2358,7 +2355,7 @@ pub async fn handle_verify_start(
     let cors = state.cors_origin.as_deref();
 
     if !state.email_auth {
-        return json_response(404, &json!({"error": "not found"}));
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
     let (_, session) = match require_session(state, headers) {
@@ -2508,7 +2505,7 @@ pub async fn handle_verify_submit(
     let cors = state.cors_origin.as_deref();
 
     if !state.email_auth {
-        return json_response(404, &json!({"error": "not found"}));
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
     let (_, session) = match require_session(state, headers) {
@@ -2677,7 +2674,7 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
     let cors = state.cors_origin.as_deref();
 
     if !state.email_auth {
-        return json_response(404, &json!({"error": "not found"}));
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
     let (_, session) = match require_session(state, headers) {
@@ -2928,12 +2925,7 @@ fn generate_verification_code() -> Option<String> {
 
 fn hash_code(code: &str) -> String {
     let d = digest::digest(&digest::SHA256, code.as_bytes());
-    let mut s = String::with_capacity(64);
-    for &b in d.as_ref() {
-        s.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
-        s.push(char::from(b"0123456789abcdef"[(b & 0x0F) as usize]));
-    }
-    s
+    credentials::hex_encode(d.as_ref())
 }
 
 async fn expire_pending_challenges(state: &ServerState, target_hash: &str) {
@@ -2968,17 +2960,6 @@ fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
-}
-
-mod hex {
-    pub fn encode(bytes: [u8; 32]) -> String {
-        let mut s = String::with_capacity(64);
-        for b in bytes {
-            s.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
-            s.push(char::from(b"0123456789abcdef"[(b & 0x0F) as usize]));
-        }
-        s
-    }
 }
 
 #[cfg(test)]
@@ -3029,7 +3010,10 @@ mod tests {
     #[test]
     fn now_unix_returns_reasonable_timestamp() {
         let ts = now_unix();
-        assert!(ts > 1_700_000_000);
-        assert!(ts < 2_000_000_000);
+        let expected = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(ts >= expected - 1 && ts <= expected + 1);
     }
 }
