@@ -2311,7 +2311,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
 
     let identity = ProviderIdentity {
         provider: "email",
-        provider_sub: String::new(),
+        provider_sub: canonical_id.to_string(),
         email: display_email.clone(),
         name: display_name.clone(),
         picture: None,
@@ -2323,7 +2323,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         jwt,
         canonical_id: canonical_id.to_string(),
         provider: "email".to_string(),
-        provider_sub: String::new(),
+        provider_sub: canonical_id.to_string(),
         email: display_email.clone(),
         name: display_name.clone(),
         picture: None,
@@ -2354,7 +2354,6 @@ pub async fn handle_verify_start(
     state: &ServerState,
     headers: &HeaderMap,
     body: &[u8],
-    client_ip: &str,
 ) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
 
@@ -2487,8 +2486,6 @@ pub async fn handle_verify_start(
     {
         warn!(error = %e, "failed to publish verification challenge notification");
     }
-
-    let _ = client_ip;
 
     json_response_with_credentials(
         200,
@@ -2832,6 +2829,18 @@ pub async fn process_receipt_delivered(state: &ServerState, challenge_id: &str) 
 }
 
 pub async fn process_receipt_failed(state: &ServerState, challenge_id: &str) {
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return;
+    };
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" && status != "delivered" {
+        return;
+    }
     update_entity(
         &state.mqtt_client,
         "_verification_challenges",

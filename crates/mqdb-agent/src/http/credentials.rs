@@ -53,9 +53,8 @@ pub fn hash_password(password: &str) -> Result<String, CredentialError> {
 pub fn verify_password(hash: &str, password: &str) -> Result<bool, CredentialError> {
     let parsed =
         PasswordHash::new(hash).map_err(|e| CredentialError::VerificationFailed(e.to_string()))?;
-    Ok(Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok())
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
+    Ok(argon2.verify_password(password.as_bytes(), &parsed).is_ok())
 }
 
 #[must_use]

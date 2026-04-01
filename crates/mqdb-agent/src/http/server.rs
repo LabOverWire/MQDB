@@ -241,8 +241,7 @@ async fn handle_request(
                 .await
                 .map(http_body_util::Collected::to_bytes)
                 .unwrap_or_default();
-            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
-            handlers::handle_verify_start(&state, &headers, &body, &ip).await
+            handlers::handle_verify_start(&state, &headers, &body).await
         }
         (&Method::POST, "/auth/verify/submit") => {
             let body = req
