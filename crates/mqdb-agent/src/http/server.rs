@@ -37,6 +37,7 @@ pub struct HttpServerConfig {
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
     pub vault_unlock_rate_limit: u32,
+    pub email_auth: bool,
 }
 
 pub struct HttpServer {
@@ -81,14 +82,23 @@ impl HttpServer {
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
             vault_unlock_limiter: RateLimiter::new(self.config.vault_unlock_rate_limit),
+            login_rate_limiter: RateLimiter::new(10),
+            register_rate_limiter: RateLimiter::new(5),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,
             vault_key_store,
+            email_auth: self.config.email_auth,
+            verify_rate_limiter: RateLimiter::new(3),
         });
 
         initialize_identity_constraints(&state).await;
+
+        if state.email_auth {
+            spawn_receipt_handler(Arc::clone(&state)).await;
+            spawn_challenge_cleanup(Arc::clone(&state));
+        }
 
         loop {
             tokio::select! {
@@ -142,6 +152,7 @@ fn client_ip(
     peer_addr.ip().to_string()
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     state: Arc<ServerState>,
@@ -171,9 +182,22 @@ async fn handle_request(
     let response = match (&method, path.as_str()) {
         (
             &Method::OPTIONS,
-            "/auth/ticket" | "/auth/logout" | "/auth/session" | "/auth/unlink" | "/oauth/refresh"
-            | "/vault/enable" | "/vault/unlock" | "/vault/lock" | "/vault/disable"
-            | "/vault/change" | "/vault/status",
+            "/auth/ticket"
+            | "/auth/logout"
+            | "/auth/session"
+            | "/auth/unlink"
+            | "/oauth/refresh"
+            | "/auth/register"
+            | "/auth/login"
+            | "/auth/verify/start"
+            | "/auth/verify/submit"
+            | "/auth/verify/status"
+            | "/vault/enable"
+            | "/vault/unlock"
+            | "/vault/lock"
+            | "/vault/disable"
+            | "/vault/change"
+            | "/vault/status",
         ) => handlers::handle_options_with_credentials(state.cors_origin.as_deref()),
         (&Method::OPTIONS, _) => handlers::handle_options(),
         (&Method::GET, "/health") => handlers::handle_health(&state),
@@ -193,6 +217,44 @@ async fn handle_request(
         }
         (&Method::POST, "/auth/logout") => handlers::handle_logout(&state, &headers),
         (&Method::GET, "/auth/session") => handlers::handle_session_status(&state, &headers),
+        (&Method::POST, "/auth/register") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_register(&state, &body, &ip).await
+        }
+        (&Method::POST, "/auth/login") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_login(&state, &body, &ip).await
+        }
+        (&Method::POST, "/auth/verify/start") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_verify_start(&state, &headers, &body, &ip).await
+        }
+        (&Method::POST, "/auth/verify/submit") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_verify_submit(&state, &headers, &body).await
+        }
+        (&Method::GET, "/auth/verify/status") => {
+            handlers::handle_verify_status(&state, &headers).await
+        }
         (&Method::POST, "/auth/unlink") => {
             let body = req
                 .collect()
@@ -255,13 +317,88 @@ async fn initialize_identity_constraints(state: &ServerState) {
     } else {
         "primary_email"
     };
+    publish_unique_constraint(state, "_identities", unique_field).await;
+
+    if state.email_auth {
+        publish_unique_constraint(state, "_credentials", "email_hash").await;
+        publish_unique_constraint(state, "_verification_challenges", "target_hash").await;
+    }
+}
+
+async fn spawn_receipt_handler(state: Arc<ServerState>) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, Vec<u8>)>(64);
+
+    let receipt_topic = "$DB/_verify/receipts/#";
+    let sub_result = state
+        .mqtt_client
+        .subscribe(receipt_topic, move |msg: mqtt5::types::Message| {
+            let tx = tx.clone();
+            let topic = msg.topic.clone();
+            let payload = msg.payload.clone();
+            tokio::spawn(async move {
+                let _ = tx.send((topic, payload)).await;
+            });
+        })
+        .await;
+
+    if sub_result.is_err() {
+        warn!("failed to subscribe to verification receipt topic");
+        return;
+    }
+    info!("verification receipt handler started");
+
+    tokio::spawn(async move {
+        while let Some((topic, payload)) = rx.recv().await {
+            let challenge_id = topic.strip_prefix("$DB/_verify/receipts/").unwrap_or("");
+            if challenge_id.is_empty() {
+                continue;
+            }
+            let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+                warn!(challenge_id, "invalid receipt payload");
+                continue;
+            };
+            let receipt_status = receipt.get("status").and_then(|v| v.as_str()).unwrap_or("");
+
+            match receipt_status {
+                "delivered" => {
+                    handlers::process_receipt_delivered(&state, challenge_id).await;
+                }
+                "failed" => {
+                    handlers::process_receipt_failed(&state, challenge_id).await;
+                }
+                "verified" => {
+                    handlers::process_receipt_verified(&state, challenge_id).await;
+                }
+                other => {
+                    warn!(challenge_id, status = other, "unknown receipt status");
+                }
+            }
+        }
+    });
+}
+
+fn spawn_challenge_cleanup(state: Arc<ServerState>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            handlers::cleanup_expired_challenges(&state).await;
+        }
+    });
+}
+
+async fn publish_unique_constraint(state: &ServerState, entity: &str, field: &str) {
     let payload = serde_json::json!({
         "type": "unique",
-        "fields": [unique_field],
+        "fields": [field],
     });
     let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    let topic = "$DB/_admin/constraint/_identities/add";
-    let response_topic = format!("_mqdb/http_resp/{}", std::process::id());
+    let topic = format!("$DB/_admin/constraint/{entity}/add");
+    let response_topic = format!(
+        "_mqdb/http_resp/constraint_{}_{}",
+        entity,
+        std::process::id()
+    );
 
     let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -279,7 +416,7 @@ async fn initialize_identity_constraints(state: &ServerState) {
         .await
         .is_err()
     {
-        warn!("failed to subscribe for constraint init response");
+        warn!(entity, "failed to subscribe for constraint init response");
         return;
     }
 
@@ -293,11 +430,11 @@ async fn initialize_identity_constraints(state: &ServerState) {
     };
     if state
         .mqtt_client
-        .publish_with_options(topic, payload_bytes, options)
+        .publish_with_options(&topic, payload_bytes, options)
         .await
         .is_err()
     {
-        warn!("failed to publish _identities unique constraint");
+        warn!(entity, "failed to publish unique constraint");
         let _ = state.mqtt_client.unsubscribe(&response_topic).await;
         return;
     }
@@ -310,17 +447,14 @@ async fn initialize_identity_constraints(state: &ServerState) {
             if let Ok(resp) = serde_json::from_slice::<serde_json::Value>(&payload) {
                 let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
                 if status == "ok" || status == "error" {
-                    info!(
-                        field = unique_field,
-                        "initialized unique constraint on _identities"
-                    );
+                    info!(entity, field, "initialized unique constraint");
                 } else {
-                    warn!(response = %resp, "unexpected constraint init response");
+                    warn!(entity, response = %resp, "unexpected constraint init response");
                 }
             }
         }
         _ => {
-            warn!("timeout waiting for _identities constraint init response");
+            warn!(entity, "timeout waiting for constraint init response");
         }
     }
 }
