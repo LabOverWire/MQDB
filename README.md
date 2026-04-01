@@ -467,6 +467,8 @@ MQDB supports multiple authentication methods, configurable via agent/cluster st
 
 **Federated JWT** (`--federated-jwt-config`): Multiple JWT issuers with per-issuer keys and validation rules, configured via a JSON file.
 
+**Email/password** (`--email-auth`): Built-in email/password registration and login via the HTTP API. Requires `--http-bind`. Includes a provider-agnostic email verification protocol — MQDB publishes verification challenges over MQTT, and external verifier clients (email sender, SMS gateway, etc.) subscribe, deliver proof out-of-band, and report delivery receipts.
+
 **Rate limiting** (enabled by default): Protects against brute-force attacks. Configurable via `--rate-limit-max-attempts`, `--rate-limit-window-secs`, `--rate-limit-lockout-secs`. Disable with `--no-rate-limit`.
 
 ```bash
@@ -483,7 +485,32 @@ mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
 # Agent with federated JWT (multiple issuers)
 mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
     --federated-jwt-config jwt_providers.json --acl acl.txt
+
+# Agent with email/password registration and verification
+mqdb agent start --bind 0.0.0.0:1883 --db ./data/mydb \
+    --http-bind 0.0.0.0:3000 --email-auth \
+    --jwt-algorithm hs256 --jwt-key secret.key --passwd passwd.txt
 ```
+
+### Auth HTTP API
+
+When `--http-bind` is set, the following HTTP endpoints are available:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/auth/register` | Register with email and password (requires `--email-auth`) |
+| POST | `/auth/login` | Login with email and password (requires `--email-auth`) |
+| POST | `/auth/ticket` | Exchange session cookie for a short-lived MQTT JWT |
+| GET | `/auth/session` | Check current session status |
+| POST | `/auth/logout` | Destroy the session |
+| POST | `/auth/verify/start` | Start email verification challenge (requires `--email-auth`) |
+| POST | `/auth/verify/submit` | Submit verification code |
+| GET | `/auth/verify/status` | Check email verification state |
+| GET | `/oauth/authorize` | Start OAuth flow (requires OAuth provider config) |
+| GET | `/oauth/callback` | OAuth callback |
+| POST | `/oauth/refresh` | Refresh OAuth token |
+
+All auth endpoints use cookie-based sessions. The `/auth/ticket` endpoint exchanges a valid session for a JWT that can be used to authenticate MQTT connections.
 
 ## Vault Encryption
 
@@ -764,6 +791,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_CORS_ORIGIN` | CORS allowed origin | — |
 | `MQDB_IDENTITY_KEY_FILE` | Path to identity encryption key | auto |
 | `MQDB_IDENTITY_KEY` | Identity encryption key (inline) | auto |
+| `MQDB_EMAIL_AUTH` | Enable email/password registration and login | `false` |
 
 **Cluster-only:**
 

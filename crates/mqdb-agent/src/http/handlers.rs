@@ -2971,3 +2971,56 @@ mod hex {
         s
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_code_is_six_digits() {
+        for _ in 0..100 {
+            let code = generate_verification_code().unwrap();
+            assert_eq!(code.len(), 6);
+            assert!(code.chars().all(|c| c.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn verification_codes_are_not_constant() {
+        let codes: std::collections::HashSet<String> = (0..20)
+            .filter_map(|_| generate_verification_code())
+            .collect();
+        assert!(codes.len() > 1);
+    }
+
+    #[test]
+    fn hash_code_produces_64_char_hex() {
+        let h = hash_code("123456");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_code_is_deterministic() {
+        assert_eq!(hash_code("539666"), hash_code("539666"));
+    }
+
+    #[test]
+    fn hash_code_differs_for_different_inputs() {
+        assert_ne!(hash_code("000000"), hash_code("000001"));
+    }
+
+    #[test]
+    fn hash_code_known_sha256() {
+        let h = hash_code("000000");
+        let expected = "91b4d142823f7d20c5f08df69122de43f35f057a988d9619f6d3138485c9a203";
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn now_unix_returns_reasonable_timestamp() {
+        let ts = now_unix();
+        assert!(ts > 1_700_000_000);
+        assert!(ts < 2_000_000_000);
+    }
+}

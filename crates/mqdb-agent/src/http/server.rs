@@ -321,7 +321,6 @@ async fn initialize_identity_constraints(state: &ServerState) {
 
     if state.email_auth {
         publish_unique_constraint(state, "_credentials", "email_hash").await;
-        publish_unique_constraint(state, "_verification_challenges", "target_hash").await;
     }
 }
 

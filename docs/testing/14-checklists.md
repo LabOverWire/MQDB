@@ -172,6 +172,16 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Span hierarchy: `database_operation` → `execute_with_sender` → operation
 - [ ] W3C traceparent propagation from MQTT message to DB spans
 
+### Email Verification (Section 27)
+- [ ] Verify start creates challenge and publishes notification
+- [ ] Verify submit accepts correct code
+- [ ] Verify submit rejects wrong code with attempts tracking
+- [ ] Verify status shows email_verified and pending challenge
+- [ ] Rate limiting enforced on verify endpoints
+- [ ] Delivery/failure/attestation receipts update challenge status
+- [ ] Expired challenges rejected on submit
+- [ ] Periodic cleanup expires stale challenges
+
 ### Performance
 - [ ] `mqdb bench pubsub` runs successfully
 - [ ] `mqdb bench db` runs successfully
