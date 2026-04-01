@@ -170,6 +170,12 @@ pub(crate) struct OAuthArgs {
     pub(crate) identity_key_file: Option<PathBuf>,
     #[arg(long = "", env = "MQDB_IDENTITY_KEY", hide = true)]
     pub(crate) identity_key_data: Option<String>,
+    #[arg(
+        long,
+        env = "MQDB_EMAIL_AUTH",
+        help = "Enable email/password registration and login"
+    )]
+    pub(crate) email_auth: bool,
 }
 
 #[derive(Subcommand)]

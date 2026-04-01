@@ -1323,6 +1323,7 @@ name = "mqdb-agent"
 version = "0.2.0"
 dependencies = [
  "arc-swap",
+ "argon2",
  "base64",
  "comfy-table",
  "fjall",

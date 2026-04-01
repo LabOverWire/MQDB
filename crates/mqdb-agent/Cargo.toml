@@ -39,6 +39,7 @@ jsonwebtoken = { workspace = true, optional = true }
 
 opentelemetry = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+argon2 = { version = "0.5.3", optional = true }
 
 [features]
 default = ["http-api"]
@@ -50,6 +51,7 @@ http-api = [
     "dep:reqwest",
     "dep:base64",
     "dep:jsonwebtoken",
+    "dep:argon2",
 ]
 dev-insecure = []
 opentelemetry = [
