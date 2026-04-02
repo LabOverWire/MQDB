@@ -157,6 +157,141 @@ and all `/vault/*` endpoints.
 
 ---
 
+## 27. Email Verification Protocol
+
+The HTTP server provides email verification via a provider-agnostic MQTT-based protocol.
+These endpoints require `--email-auth` and `--http-bind`.
+
+### Prerequisites
+
+```bash
+mqdb passwd admin -b admin123 -f /tmp/verify-test/passwd.txt
+openssl rand -base64 32 > /tmp/verify-test/jwt.key
+
+mqdb agent start --db /tmp/verify-test/db --bind 127.0.0.1:1883 \
+    --http-bind 127.0.0.1:3000 \
+    --passwd /tmp/verify-test/passwd.txt --admin-users admin \
+    --jwt-algorithm hs256 --jwt-key /tmp/verify-test/jwt.key \
+    --email-auth
+```
+
+### Register a User
+
+```bash
+SESSION=$(curl -s -c - -X POST http://127.0.0.1:3000/auth/register \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"user@example.com","password":"testpass123","name":"Test User"}' \
+    | grep session | awk '{print $NF}')
+```
+
+### Check Verification Status (Pre-Verification)
+
+```bash
+curl -s -b "session=$SESSION" http://127.0.0.1:3000/auth/verify/status
+```
+
+Expected: `{"email_verified":false,"pending_challenge":null}`
+
+### Start Verification Challenge
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/verify/start \
+    -H 'Content-Type: application/json' \
+    -d '{"method":"email"}'
+```
+
+Expected:
+```json
+{"challenge_id":"<uuid>","expires_in":600,"method":"email","status":"challenge_created"}
+```
+
+Save the `challenge_id` for the next step.
+
+### Observe Challenge Notification (Verifier Side)
+
+In a separate terminal, subscribe as admin to receive the challenge notification:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_verify/challenges/email' -v -C 1
+```
+
+Expected payload contains `challenge_id`, `target` (plaintext email), `code` (6-digit), and `expires_at`.
+Note the `code` for the submit step.
+
+### Submit Verification Code
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/verify/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<uuid>","code":"<6-digit-code>"}'
+```
+
+Expected on correct code: `{"status":"verified"}`
+Expected on wrong code: HTTP 401 `{"attempts_remaining":4,"error":"invalid code"}`
+
+### Check Verification Status (Post-Verification)
+
+```bash
+curl -s -b "session=$SESSION" http://127.0.0.1:3000/auth/verify/status
+```
+
+Expected: `{"email_verified":true,"pending_challenge":null}`
+
+### Rate Limiting
+
+```bash
+for i in 1 2 3 4; do
+    curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/verify/start \
+        -H 'Content-Type: application/json' -d '{}'
+done
+```
+
+Expected: Fourth request returns HTTP 429 `{"error":"too many verification requests, try again later"}`
+
+### Wrong Code Attempts
+
+Start a new challenge after the rate limit window resets, then submit wrong codes:
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/verify/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<uuid>","code":"000000"}'
+```
+
+Expected: HTTP 401 `{"attempts_remaining":4,"error":"invalid code"}`
+
+After 5 wrong attempts: HTTP 400 `{"error":"too many attempts"}`
+
+### Delivery Receipt (Verifier → MQDB)
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_verify/receipts/<challenge_id>' \
+    -m '{"status":"delivered"}'
+```
+
+Expected: Challenge status updates to `"delivered"` (visible via verify/status endpoint).
+
+### Verification Checklist
+
+- [ ] `POST /auth/verify/start` creates challenge and returns challenge_id
+- [ ] Challenge notification published to `$DB/_verify/challenges/{method}`
+- [ ] Notification contains plaintext target, code, and expiry
+- [ ] `POST /auth/verify/submit` validates code (SHA-256 comparison)
+- [ ] Correct code sets challenge status to `verified` and identity `email_verified=true`
+- [ ] Wrong code decrements attempts remaining
+- [ ] 5 wrong attempts fails the challenge
+- [ ] Expired challenge returns error on submit
+- [ ] `GET /auth/verify/status` shows `email_verified` and pending challenge info
+- [ ] Rate limiting enforced (3 requests/min per canonical_id)
+- [ ] Delivery receipt updates challenge to `delivered`
+- [ ] Failure receipt updates challenge to `failed`
+- [ ] Attestation receipt (attestation mode) sets `verified` + `email_verified=true`
+- [ ] Periodic cleanup expires stale challenges
+
+---
+
 ## 28. Additional Admin MQTT Endpoints
 
 ### Entity Catalog

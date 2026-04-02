@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::cookies::{build_delete_cookie_header, build_set_cookie_header, parse_session_id};
+use super::credentials;
 use super::identity_crypto::IdentityCrypto;
 use super::jwt_signer::{JwtSigningConfig, sign_jwt, verify_jwt_ignore_expiry};
 use super::pkce::PkceCache;
@@ -58,11 +59,15 @@ pub struct ServerState {
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
     pub vault_unlock_limiter: RateLimiter,
+    pub login_rate_limiter: RateLimiter,
+    pub register_rate_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
     pub trust_proxy: bool,
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Arc<VaultKeyStore>,
+    pub email_auth: bool,
+    pub verify_rate_limiter: RateLimiter,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -221,7 +226,7 @@ pub async fn handle_authorize(state: &ServerState, query: &str) -> HttpResponse 
     if rng.fill(&mut state_bytes).is_err() {
         return json_response(500, &json!({"error": "failed to generate state"}));
     }
-    let oauth_state = hex::encode(state_bytes);
+    let oauth_state = super::credentials::hex_encode(&state_bytes);
 
     {
         let mut cache = state.pkce_cache.lock().await;
@@ -2074,6 +2079,663 @@ async fn resume_pending_migration(
     })
 }
 
+#[allow(clippy::too_many_lines)]
+pub async fn handle_register(state: &ServerState, body: &[u8], client_ip: &str) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(email) = body_value.get("email").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing email field"}), cors);
+    };
+    let Some(password) = body_value.get("password").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing password field"}),
+            cors,
+        );
+    };
+    let name = body_value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    if !credentials::validate_email(email) {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "invalid email format"}),
+            cors,
+        );
+    }
+    if let Err(msg) = credentials::validate_password(password) {
+        return json_response_with_credentials(400, &json!({"error": msg}), cors);
+    }
+
+    if !state.register_rate_limiter.check_and_record(client_ip) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many registration attempts, try again later"}),
+            cors,
+        );
+    }
+
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+    let filter = format!("email_hash={email_hash}");
+    if let Some(existing) = list_entities(&state.mqtt_client, "_credentials", &filter).await
+        && !existing.is_empty()
+    {
+        return json_response_with_credentials(
+            409,
+            &json!({"error": "email already registered"}),
+            cors,
+        );
+    }
+
+    let password_hash = match credentials::hash_password(password) {
+        Ok(h) => h,
+        Err(e) => {
+            error!(error = %e, "password hashing failed");
+            return json_response_with_credentials(
+                500,
+                &json!({"error": "registration failed"}),
+                cors,
+            );
+        }
+    };
+
+    let provider_sub = uuid_v4();
+    let identity = ProviderIdentity {
+        provider: "email",
+        provider_sub: provider_sub.clone(),
+        email: Some(email.to_string()),
+        name: name.clone(),
+        picture: None,
+        email_verified: false,
+    };
+    let link_key = format!("email:{provider_sub}");
+
+    let canonical_id = match resolve_or_create_identity(state, &identity, &link_key).await {
+        Ok(id) => id,
+        Err(e) => {
+            error!(error = %e, "identity resolution failed during registration");
+            return json_response_with_credentials(
+                500,
+                &json!({"error": "registration failed"}),
+                cors,
+            );
+        }
+    };
+
+    let cred_data = json!({
+        "id": canonical_id,
+        "password_hash": password_hash,
+        "email_hash": email_hash,
+        "created_at": chrono_now_iso(),
+    });
+    if create_entity_with_response(&state.mqtt_client, "_credentials", &cred_data)
+        .await
+        .is_none()
+    {
+        error!("failed to store credentials for {}", canonical_id);
+        return json_response_with_credentials(500, &json!({"error": "registration failed"}), cors);
+    }
+
+    let jwt = mint_callback_jwt(state, &canonical_id, &identity);
+    let Some(session_id) = state.session_store.create(NewSession {
+        jwt,
+        canonical_id: canonical_id.clone(),
+        provider: "email".to_string(),
+        provider_sub,
+        email: Some(email.to_string()),
+        name: name.clone(),
+        picture: None,
+    }) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "session creation failed"}),
+            cors,
+        );
+    };
+
+    let cookie = build_set_cookie_header(&session_id, state.cookie_secure, 86400);
+    json_response_with_cookie(
+        200,
+        &json!({
+            "canonical_id": canonical_id,
+            "email": email,
+            "name": name,
+            "provider": "email",
+        }),
+        &cookie,
+        cors,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(email) = body_value.get("email").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing email field"}), cors);
+    };
+    let Some(password) = body_value.get("password").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing password field"}),
+            cors,
+        );
+    };
+
+    if !state.login_rate_limiter.check_and_record(client_ip) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many login attempts, try again later"}),
+            cors,
+        );
+    }
+
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+    let filter = format!("email_hash={email_hash}");
+    let cred_record = match list_entities(&state.mqtt_client, "_credentials", &filter).await {
+        Some(records) if !records.is_empty() => records.into_iter().next().unwrap_or_default(),
+        _ => {
+            return json_response_with_credentials(
+                401,
+                &json!({"error": "invalid credentials"}),
+                cors,
+            );
+        }
+    };
+
+    let Some(stored_hash) = cred_record.get("password_hash").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(401, &json!({"error": "invalid credentials"}), cors);
+    };
+
+    if !credentials::verify_password(stored_hash, password) {
+        return json_response_with_credentials(401, &json!({"error": "invalid credentials"}), cors);
+    }
+
+    let Some(canonical_id) = cred_record.get("id").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(500, &json!({"error": "login failed"}), cors);
+    };
+
+    let (display_name, display_email, verified) = if let Some(mut ident) =
+        read_entity(&state.mqtt_client, "_identities", canonical_id).await
+    {
+        if let Some(ref crypto) = state.identity_crypto {
+            crypto.decrypt_json_fields(
+                "_identities",
+                &mut ident,
+                &["primary_email", "display_name"],
+            );
+        }
+        let n = ident
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let e = ident
+            .get("primary_email")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let ev = ident
+            .get("email_verified")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        (n, e, ev)
+    } else {
+        (None, Some(email.to_string()), false)
+    };
+
+    let identity = ProviderIdentity {
+        provider: "email",
+        provider_sub: canonical_id.to_string(),
+        email: display_email.clone(),
+        name: display_name.clone(),
+        picture: None,
+        email_verified: verified,
+    };
+    let jwt = mint_callback_jwt(state, canonical_id, &identity);
+
+    let Some(session_id) = state.session_store.create(NewSession {
+        jwt,
+        canonical_id: canonical_id.to_string(),
+        provider: "email".to_string(),
+        provider_sub: canonical_id.to_string(),
+        email: display_email.clone(),
+        name: display_name.clone(),
+        picture: None,
+    }) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "session creation failed"}),
+            cors,
+        );
+    };
+
+    let cookie = build_set_cookie_header(&session_id, state.cookie_secure, 86400);
+    json_response_with_cookie(
+        200,
+        &json!({
+            "canonical_id": canonical_id,
+            "email": display_email,
+            "name": display_name,
+            "provider": "email",
+        }),
+        &cookie,
+        cors,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_verify_start(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let (_, session) = match require_session(state, headers) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let canonical_id = session.canonical_id.clone();
+
+    if !state.verify_rate_limiter.check_and_record(&canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many verification requests, try again later"}),
+            cors,
+        );
+    }
+
+    let body_value: serde_json::Value = serde_json::from_slice(body).unwrap_or(json!({}));
+    let method = body_value
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("email");
+
+    let mode = body_value
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("code");
+    if mode != "code" && mode != "attestation" {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "mode must be 'code' or 'attestation'"}),
+            cors,
+        );
+    }
+
+    let Some(mut identity) = read_entity(&state.mqtt_client, "_identities", &canonical_id).await
+    else {
+        return json_response_with_credentials(404, &json!({"error": "identity not found"}), cors);
+    };
+
+    if let Some(ref crypto) = state.identity_crypto {
+        crypto.decrypt_json_fields("_identities", &mut identity, &["primary_email"]);
+    }
+
+    let Some(email) = identity
+        .get("primary_email")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+    else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "no email associated with identity"}),
+            cors,
+        );
+    };
+
+    let target_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), &email);
+
+    expire_pending_challenges(state, &target_hash).await;
+
+    let challenge_id = uuid_v4();
+    let now = now_unix();
+    let expires_at = now + 600;
+
+    let (code, code_hash) = if mode == "code" {
+        let Some(c) = generate_verification_code() else {
+            return json_response_with_credentials(
+                500,
+                &json!({"error": "failed to generate verification code"}),
+                cors,
+            );
+        };
+        let h = hash_code(&c);
+        (Some(c), Some(h))
+    } else {
+        (None, None)
+    };
+
+    let challenge_data = json!({
+        "id": challenge_id,
+        "canonical_id": canonical_id,
+        "method": method,
+        "target_hash": target_hash,
+        "code_hash": code_hash,
+        "status": "pending",
+        "mode": mode,
+        "attempts": 0,
+        "max_attempts": 5,
+        "created_at": now.to_string(),
+        "expires_at": expires_at.to_string(),
+    });
+
+    if create_entity_with_response(
+        &state.mqtt_client,
+        "_verification_challenges",
+        &challenge_data,
+    )
+    .await
+    .is_none()
+    {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to create verification challenge"}),
+            cors,
+        );
+    }
+
+    let mut notification = json!({
+        "challenge_id": challenge_id,
+        "method": method,
+        "mode": mode,
+        "target": email,
+        "expires_at": expires_at.to_string(),
+    });
+    if let Some(ref c) = code {
+        notification["code"] = serde_json::Value::String(c.clone());
+    }
+
+    let notify_topic = format!("$DB/_verify/challenges/{method}");
+    let notify_payload = serde_json::to_vec(&notification).unwrap_or_default();
+    if let Err(e) = state
+        .mqtt_client
+        .publish(&notify_topic, notify_payload)
+        .await
+    {
+        warn!(error = %e, "failed to publish verification challenge notification");
+    }
+
+    json_response_with_credentials(
+        200,
+        &json!({
+            "status": "challenge_created",
+            "challenge_id": challenge_id,
+            "expires_in": 600,
+            "method": method,
+        }),
+        cors,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_verify_submit(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let (_, session) = match require_session(state, headers) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let canonical_id = session.canonical_id.clone();
+
+    if !state.verify_rate_limiter.check_and_record(&canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many verification requests, try again later"}),
+            cors,
+        );
+    }
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(challenge_id) = body_value.get("challenge_id").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing challenge_id field"}),
+            cors,
+        );
+    };
+
+    let Some(submitted_code) = body_value.get("code").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing code field"}), cors);
+    };
+
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return json_response_with_credentials(404, &json!({"error": "challenge not found"}), cors);
+    };
+
+    let challenge_canonical = challenge
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if challenge_canonical != canonical_id {
+        return json_response_with_credentials(
+            403,
+            &json!({"error": "challenge belongs to another user"}),
+            cors,
+        );
+    }
+
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" && status != "delivered" {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": format!("challenge is {status}")}),
+            cors,
+        );
+    }
+
+    let challenge_mode = challenge
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("code");
+    if challenge_mode != "code" {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "challenge is attestation mode, code submission not supported"}),
+            cors,
+        );
+    }
+
+    let expires_at = challenge
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if expires_at > 0 && now_unix() >= expires_at {
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "expired"}),
+        )
+        .await;
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "challenge has expired"}),
+            cors,
+        );
+    }
+
+    let attempts = challenge
+        .get("attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let max_attempts = challenge
+        .get("max_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(5);
+    if attempts >= max_attempts {
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "failed"}),
+        )
+        .await;
+        return json_response_with_credentials(400, &json!({"error": "too many attempts"}), cors);
+    }
+
+    let new_attempts = attempts + 1;
+    let submitted_hash = hash_code(submitted_code);
+    let stored_hash = challenge
+        .get("code_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if submitted_hash != stored_hash {
+        let new_status = if new_attempts >= max_attempts {
+            "failed"
+        } else {
+            status
+        };
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"attempts": new_attempts, "status": new_status}),
+        )
+        .await;
+        let remaining = max_attempts.saturating_sub(new_attempts);
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "invalid code", "attempts_remaining": remaining}),
+            cors,
+        );
+    }
+
+    update_entity(
+        &state.mqtt_client,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "verified", "attempts": new_attempts}),
+    )
+    .await;
+
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        &canonical_id,
+        &json!({"email_verified": true}),
+    )
+    .await;
+
+    json_response_with_credentials(200, &json!({"status": "verified"}), cors)
+}
+
+pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let (_, session) = match require_session(state, headers) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let canonical_id = &session.canonical_id;
+
+    let identity = read_entity(&state.mqtt_client, "_identities", canonical_id).await;
+    let email_verified = identity
+        .as_ref()
+        .and_then(|i| i.get("email_verified"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let filter = format!("canonical_id={canonical_id}");
+    let pending_challenge = if let Some(challenges) =
+        list_entities(&state.mqtt_client, "_verification_challenges", &filter).await
+    {
+        let now = now_unix();
+        challenges.into_iter().find(|c| {
+            let s = c.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            let exp = c
+                .get("expires_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            (s == "pending" || s == "delivered") && (exp == 0 || exp > now)
+        })
+    } else {
+        None
+    };
+
+    let challenge_info = pending_challenge.map(|c| {
+        let expires_at = c
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let expires_in = expires_at.saturating_sub(now_unix());
+        json!({
+            "challenge_id": c.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+            "method": c.get("method").and_then(|v| v.as_str()).unwrap_or(""),
+            "status": c.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+            "expires_in": expires_in,
+            "attempts": c.get("attempts").and_then(serde_json::Value::as_u64).unwrap_or(0),
+            "max_attempts": c.get("max_attempts").and_then(serde_json::Value::as_u64).unwrap_or(5),
+        })
+    });
+
+    json_response_with_credentials(
+        200,
+        &json!({
+            "email_verified": email_verified,
+            "pending_challenge": challenge_info,
+        }),
+        cors,
+    )
+}
+
 #[cfg(feature = "dev-insecure")]
 pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse {
     let cors = state.cors_origin.as_deref();
@@ -2141,13 +2803,217 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
     )
 }
 
-mod hex {
-    pub fn encode(bytes: [u8; 32]) -> String {
-        let mut s = String::with_capacity(64);
-        for b in bytes {
-            s.push(char::from(b"0123456789abcdef"[(b >> 4) as usize]));
-            s.push(char::from(b"0123456789abcdef"[(b & 0x0F) as usize]));
+pub async fn process_receipt_delivered(state: &ServerState, challenge_id: &str) {
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return;
+    };
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" {
+        return;
+    }
+    update_entity(
+        &state.mqtt_client,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "delivered"}),
+    )
+    .await;
+}
+
+pub async fn process_receipt_failed(state: &ServerState, challenge_id: &str) {
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return;
+    };
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" && status != "delivered" {
+        return;
+    }
+    update_entity(
+        &state.mqtt_client,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "failed"}),
+    )
+    .await;
+}
+
+pub async fn process_receipt_verified(state: &ServerState, challenge_id: &str) {
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return;
+    };
+    let mode = challenge.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    if mode != "attestation" {
+        warn!(
+            challenge_id,
+            "receipt 'verified' only valid for attestation mode"
+        );
+        return;
+    }
+    update_entity(
+        &state.mqtt_client,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "verified"}),
+    )
+    .await;
+
+    if let Some(canonical_id) = challenge.get("canonical_id").and_then(|v| v.as_str()) {
+        update_entity(
+            &state.mqtt_client,
+            "_identities",
+            canonical_id,
+            &json!({"email_verified": true}),
+        )
+        .await;
+    }
+}
+
+pub async fn cleanup_expired_challenges(state: &ServerState) {
+    for status_filter in &["status=pending", "status=delivered"] {
+        let Some(challenges) = list_entities(
+            &state.mqtt_client,
+            "_verification_challenges",
+            status_filter,
+        )
+        .await
+        else {
+            continue;
+        };
+        let now = now_unix();
+        for challenge in challenges {
+            let expires_at = challenge
+                .get("expires_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            if expires_at == 0 || expires_at > now {
+                continue;
+            }
+            let Some(id) = challenge.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            update_entity(
+                &state.mqtt_client,
+                "_verification_challenges",
+                id,
+                &json!({"status": "expired"}),
+            )
+            .await;
         }
-        s
+    }
+}
+
+fn generate_verification_code() -> Option<String> {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 4];
+    rng.fill(&mut bytes).ok()?;
+    let num = u32::from_be_bytes(bytes) % 1_000_000;
+    Some(format!("{num:06}"))
+}
+
+fn hash_code(code: &str) -> String {
+    let d = digest::digest(&digest::SHA256, code.as_bytes());
+    credentials::hex_encode(d.as_ref())
+}
+
+async fn expire_pending_challenges(state: &ServerState, target_hash: &str) {
+    let filter = format!("target_hash={target_hash}");
+    let Some(challenges) =
+        list_entities(&state.mqtt_client, "_verification_challenges", &filter).await
+    else {
+        return;
+    };
+    for challenge in challenges {
+        let status = challenge
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if status != "pending" && status != "delivered" {
+            continue;
+        }
+        let Some(id) = challenge.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            id,
+            &json!({"status": "expired"}),
+        )
+        .await;
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verification_code_is_six_digits() {
+        for _ in 0..100 {
+            let code = generate_verification_code().unwrap();
+            assert_eq!(code.len(), 6);
+            assert!(code.chars().all(|c| c.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn verification_codes_are_not_constant() {
+        let codes: std::collections::HashSet<String> = (0..20)
+            .filter_map(|_| generate_verification_code())
+            .collect();
+        assert!(codes.len() > 1);
+    }
+
+    #[test]
+    fn hash_code_produces_64_char_hex() {
+        let h = hash_code("123456");
+        assert_eq!(h.len(), 64);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn hash_code_is_deterministic() {
+        assert_eq!(hash_code("539666"), hash_code("539666"));
+    }
+
+    #[test]
+    fn hash_code_differs_for_different_inputs() {
+        assert_ne!(hash_code("000000"), hash_code("000001"));
+    }
+
+    #[test]
+    fn hash_code_known_sha256() {
+        let h = hash_code("000000");
+        let expected = "91b4d142823f7d20c5f08df69122de43f35f057a988d9619f6d3138485c9a203";
+        assert_eq!(h, expected);
+    }
+
+    #[test]
+    fn now_unix_returns_reasonable_timestamp() {
+        let ts = now_unix();
+        let expected = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(ts >= expected - 1 && ts <= expected + 1);
     }
 }

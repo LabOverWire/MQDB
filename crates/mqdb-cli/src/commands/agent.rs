@@ -298,53 +298,61 @@ pub(crate) fn build_http_config(
         .into());
     }
 
-    let client_id = if let Some(content) = federated_content {
-        let config: serde_json::Value = serde_json::from_str(content)?;
-        config
-            .get("providers")
-            .and_then(|p| p.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|p| p.get("audience"))
-            .and_then(|a| a.as_str())
-            .map(String::from)
-            .ok_or("federated JWT config must have providers[0].audience for OAuth client_id")?
-    } else if let Some(ref aud) = auth.jwt_audience {
-        aud.clone()
-    } else {
-        return Err("--jwt-audience or --federated-jwt-config required for OAuth client_id".into());
-    };
-
-    let redirect_uri = oauth.oauth_redirect_uri.as_ref().map_or_else(
-        || format!("http://localhost:{}/oauth/callback", http_bind.port()),
-        String::from,
-    );
-
     let mut registry = mqdb_agent::http::ProviderRegistry::new();
 
-    let google_secret = if let Some(ref data) = oauth.oauth_client_secret_data {
-        data.trim().to_string()
+    let google_secret_content = if let Some(ref data) = oauth.oauth_client_secret_data {
+        Some(data.trim().to_string())
     } else if let Some(ref path) = oauth.oauth_client_secret {
-        std::fs::read_to_string(path)?.trim().to_string()
+        Some(std::fs::read_to_string(path)?.trim().to_string())
     } else {
-        return Err("--oauth-client-secret is required when --http-bind is set".into());
+        None
     };
 
-    registry.register(mqdb_agent::http::Provider::Google(
-        mqdb_agent::http::GoogleProvider::new(mqdb_agent::http::ProviderConfig {
-            client_id: client_id.clone(),
-            client_secret: google_secret,
-            redirect_uri,
-        }),
-    ));
+    let client_id = if let Some(content) = federated_content {
+        let config: serde_json::Value = serde_json::from_str(content)?;
+        Some(
+            config
+                .get("providers")
+                .and_then(|p| p.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|p| p.get("audience"))
+                .and_then(|a| a.as_str())
+                .map(String::from)
+                .ok_or(
+                    "federated JWT config must have providers[0].audience for OAuth client_id",
+                )?,
+        )
+    } else if let Some(ref aud) = auth.jwt_audience {
+        Some(aud.clone())
+    } else if google_secret_content.is_some() {
+        return Err("--jwt-audience or --federated-jwt-config required for OAuth client_id".into());
+    } else if oauth.email_auth {
+        None
+    } else {
+        return Err(
+            "--oauth-client-secret or --email-auth is required when --http-bind is set".into(),
+        );
+    };
+
+    if let Some(ref secret) = google_secret_content {
+        let redirect_uri = oauth.oauth_redirect_uri.as_ref().map_or_else(
+            || format!("http://localhost:{}/oauth/callback", http_bind.port()),
+            String::from,
+        );
+        registry.register(mqdb_agent::http::Provider::Google(
+            mqdb_agent::http::GoogleProvider::new(mqdb_agent::http::ProviderConfig {
+                client_id: client_id.clone().unwrap_or_default(),
+                client_secret: secret.clone(),
+                redirect_uri,
+            }),
+        ));
+    }
 
     let issuer = auth
         .jwt_issuer
         .clone()
         .unwrap_or_else(|| "mqdb".to_string());
-    let audience = auth
-        .jwt_audience
-        .clone()
-        .or_else(|| Some(client_id.clone()));
+    let audience = auth.jwt_audience.clone().or(client_id);
 
     let identity_crypto = build_identity_crypto(oauth, db_path)?;
 
@@ -368,6 +376,7 @@ pub(crate) fn build_http_config(
         ownership_config,
         vault_key_store: None,
         vault_unlock_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
+        email_auth: oauth.email_auth,
     })
 }
 

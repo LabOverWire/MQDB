@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 mod cookies;
+mod credentials;
 mod handlers;
 pub mod identity_crypto;
 mod jwt_signer;
