@@ -268,7 +268,7 @@ After 5 wrong attempts: HTTP 400 `{"error":"too many attempts"}`
 ```bash
 mosquitto_pub -h 127.0.0.1 -p 1883 -u admin -P admin123 \
     -t '$DB/_verify/receipts/<challenge_id>' \
-    -m '{"challenge_id":"<uuid>","status":"delivered"}'
+    -m '{"status":"delivered"}'
 ```
 
 Expected: Challenge status updates to `"delivered"` (visible via verify/status endpoint).

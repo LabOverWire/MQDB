@@ -504,8 +504,8 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 | GET | `/auth/session` | Check current session status |
 | POST | `/auth/logout` | Destroy the session |
 | POST | `/auth/verify/start` | Start email verification challenge (requires `--email-auth`) |
-| POST | `/auth/verify/submit` | Submit verification code |
-| GET | `/auth/verify/status` | Check email verification state |
+| POST | `/auth/verify/submit` | Submit verification code (requires `--email-auth`) |
+| GET | `/auth/verify/status` | Check email verification state (requires `--email-auth`) |
 | GET | `/oauth/authorize` | Start OAuth flow (requires OAuth provider config) |
 | GET | `/oauth/callback` | OAuth callback |
 | POST | `/oauth/refresh` | Refresh OAuth token |
