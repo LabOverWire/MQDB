@@ -1158,8 +1158,7 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         "vault_migration_status": "pending",
         "vault_migration_mode": "encrypt",
     });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
-        .await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
 
     let batch = crate::vault_ops::batch_vault_operation_db(
         ctx.db,
@@ -1337,8 +1336,7 @@ async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> R
         "vault_migration_status": "pending",
         "vault_migration_mode": "decrypt",
     });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
-        .await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
 
     let batch = crate::vault_ops::batch_vault_operation_db(
         ctx.db,
@@ -1356,8 +1354,7 @@ async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> R
         "vault_migration_status": "complete",
         "vault_migration_mode": null,
     });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &identity_update)
-        .await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &identity_update).await;
 
     let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1452,8 +1449,7 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         "vault_old_check": check_token,
         "vault_old_salt": old_salt_b64_encoded,
     });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
-        .await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
 
     let batch = crate::vault_ops::batch_vault_re_encrypt_db(
         ctx.db,

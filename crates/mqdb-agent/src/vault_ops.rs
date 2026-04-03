@@ -3,8 +3,8 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use mqdb_core::{Filter, FilterOp, VaultKeyStore};
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::{Filter, FilterOp, VaultKeyStore};
 use mqtt5::client::MqttClient;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
@@ -384,9 +384,15 @@ pub async fn update_entity_db(db: &Database, entity: &str, id: &str, data: &Valu
         client_id: None,
         scope_config: &scope,
     };
-    db.update(entity.to_string(), id.to_string(), data.clone(), None, &caller)
-        .await
-        .is_ok()
+    db.update(
+        entity.to_string(),
+        id.to_string(),
+        data.clone(),
+        None,
+        &caller,
+    )
+    .await
+    .is_ok()
 }
 
 pub async fn list_entities_db(db: &Database, entity: &str, filter: &str) -> Option<Vec<Value>> {
