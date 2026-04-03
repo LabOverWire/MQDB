@@ -58,6 +58,11 @@ impl ClusteredAgent {
             Self::handle_consumer_group_list()
         } else if let Some(name) = req.topic.strip_prefix("$DB/_admin/consumer-groups/") {
             Self::handle_consumer_group_show(name)
+        } else if req.topic.starts_with("$DB/_vault/") {
+            Response::error(
+                ErrorCode::Forbidden,
+                "vault admin not supported in cluster mode",
+            )
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/") {
             self.handle_user_acl_request(rest, &req.payload, &req.topic)
                 .await

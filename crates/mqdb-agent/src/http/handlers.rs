@@ -1904,27 +1904,7 @@ pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> Ht
     json_response_with_credentials(200, &body, cors)
 }
 
-enum VaultMode {
-    Encrypt,
-    Decrypt,
-}
-
-struct BatchResult {
-    succeeded: usize,
-    failed: usize,
-    entities_skipped: Vec<String>,
-}
-
-fn extract_record_data(record: &serde_json::Value) -> serde_json::Value {
-    if let Some(inner) = record.get("data").filter(|v| v.is_object()) {
-        return inner.clone();
-    }
-    let mut data = record.clone();
-    if let Some(obj) = data.as_object_mut() {
-        obj.remove("id");
-    }
-    data
-}
+use crate::vault_ops::{self, BatchResult, MigrationResumeResult, VaultMode};
 
 async fn batch_vault_operation(
     state: &ServerState,
@@ -1932,35 +1912,14 @@ async fn batch_vault_operation(
     crypto: &VaultCrypto,
     mode: VaultMode,
 ) -> BatchResult {
-    let mut result = BatchResult {
-        succeeded: 0,
-        failed: 0,
-        entities_skipped: Vec::new(),
-    };
-    for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
-        let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
-        };
-        for record in records {
-            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let mut data = extract_record_data(&record);
-            let skip: Vec<&str> = vec![owner_field.as_str()];
-            match mode {
-                VaultMode::Encrypt => crypto.encrypt_record(entity, id, &mut data, &skip),
-                VaultMode::Decrypt => crypto.decrypt_record(entity, id, &mut data, &skip),
-            }
-            if update_entity(&state.mqtt_client, entity, id, &data).await {
-                result.succeeded += 1;
-            } else {
-                result.failed += 1;
-            }
-        }
-    }
-    result
+    vault_ops::batch_vault_operation(
+        &state.mqtt_client,
+        &state.ownership_config,
+        canonical_id,
+        crypto,
+        mode,
+    )
+    .await
 }
 
 async fn batch_vault_re_encrypt(
@@ -1969,39 +1928,14 @@ async fn batch_vault_re_encrypt(
     old_crypto: &VaultCrypto,
     new_crypto: &VaultCrypto,
 ) -> BatchResult {
-    let mut result = BatchResult {
-        succeeded: 0,
-        failed: 0,
-        entities_skipped: Vec::new(),
-    };
-    for (entity, owner_field) in &state.ownership_config.entity_owner_fields {
-        let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = list_entities(&state.mqtt_client, entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
-        };
-        for record in records {
-            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let mut data = extract_record_data(&record);
-            let skip: Vec<&str> = vec![owner_field.as_str()];
-            old_crypto.decrypt_record(entity, id, &mut data, &skip);
-            new_crypto.encrypt_record(entity, id, &mut data, &skip);
-            if update_entity(&state.mqtt_client, entity, id, &data).await {
-                result.succeeded += 1;
-            } else {
-                result.failed += 1;
-            }
-        }
-    }
-    result
-}
-
-struct MigrationResumeResult {
-    mode: String,
-    succeeded: usize,
-    failed: usize,
+    vault_ops::batch_vault_re_encrypt(
+        &state.mqtt_client,
+        &state.ownership_config,
+        canonical_id,
+        old_crypto,
+        new_crypto,
+    )
+    .await
 }
 
 async fn resume_pending_migration(
@@ -2011,72 +1945,17 @@ async fn resume_pending_migration(
     identity: &serde_json::Value,
     passphrase: &str,
 ) -> Option<MigrationResumeResult> {
-    let status = identity
-        .get("vault_migration_status")
-        .and_then(|v| v.as_str())?;
-    if status != "pending" {
-        return None;
-    }
-    let mode = identity
-        .get("vault_migration_mode")
-        .and_then(|v| v.as_str())?;
-
-    let batch = match mode {
-        "encrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Encrypt).await,
-        "decrypt" => batch_vault_operation(state, canonical_id, crypto, VaultMode::Decrypt).await,
-        "re_encrypt" => {
-            let Some(old_salt_b64) = identity.get("vault_old_salt").and_then(|v| v.as_str()) else {
-                warn!("vault re_encrypt resume failed: old salt missing from identity");
-                return None;
-            };
-            let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
-                warn!("vault re_encrypt resume failed: old salt decode error");
-                return None;
-            };
-            let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
-            batch_vault_re_encrypt(state, canonical_id, &old_crypto, crypto).await
-        }
-        _ => return None,
-    };
-
-    let migration_done = json!({
-        "vault_migration_status": "complete",
-        "vault_migration_mode": null,
-        "vault_old_check": null,
-        "vault_old_salt": null,
-    });
-    update_entity(
+    vault_ops::resume_pending_migration(
         &state.mqtt_client,
-        "_identities",
+        &state.ownership_config,
+        &state.vault_key_store,
+        Some(&state.session_store),
         canonical_id,
-        &migration_done,
+        crypto,
+        identity,
+        passphrase,
     )
-    .await;
-
-    if mode == "decrypt" {
-        let disable_vault = json!({
-            "vault_enabled": false,
-            "vault_salt": null,
-            "vault_check": null,
-        });
-        update_entity(
-            &state.mqtt_client,
-            "_identities",
-            canonical_id,
-            &disable_vault,
-        )
-        .await;
-        state
-            .session_store
-            .set_vault_unlocked_by_canonical_id(canonical_id, false);
-        state.vault_key_store.remove(canonical_id);
-    }
-
-    Some(MigrationResumeResult {
-        mode: mode.to_string(),
-        succeeded: batch.succeeded,
-        failed: batch.failed,
-    })
+    .await
 }
 
 #[allow(clippy::too_many_lines)]

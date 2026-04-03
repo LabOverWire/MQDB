@@ -17,6 +17,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     #[must_use]
+    #[allow(clippy::missing_panics_doc)]
     pub fn new(max_requests_per_minute: u32) -> Self {
         Self {
             requests: RwLock::new(LruCache::new(

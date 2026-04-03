@@ -83,6 +83,7 @@ pub enum ErrorCode {
     Forbidden = 403,
     NotFound = 404,
     Conflict = 409,
+    RateLimited = 429,
     Internal = 500,
 }
 
@@ -99,6 +100,7 @@ impl ErrorCode {
             ErrorCode::Forbidden => 7,
             ErrorCode::NotFound => 5,
             ErrorCode::Conflict => 6,
+            ErrorCode::RateLimited => 8,
             ErrorCode::Internal => 13,
         }
     }

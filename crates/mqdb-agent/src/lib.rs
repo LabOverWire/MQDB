@@ -20,6 +20,8 @@ pub mod transport_execute;
 #[cfg(feature = "http-api")]
 pub mod http;
 #[cfg(feature = "http-api")]
+pub mod vault_ops;
+#[cfg(feature = "http-api")]
 pub mod vault_transform;
 
 pub use agent::MqdbAgent;
