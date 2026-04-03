@@ -1123,7 +1123,7 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
     };
 
     let Some(identity) =
-        crate::vault_ops::read_entity(ctx.client, "_identities", canonical_id).await
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1158,11 +1158,11 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         "vault_migration_status": "pending",
         "vault_migration_mode": "encrypt",
     });
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &migration_start)
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
         .await;
 
-    let batch = crate::vault_ops::batch_vault_operation(
-        ctx.client,
+    let batch = crate::vault_ops::batch_vault_operation_db(
+        ctx.db,
         ctx.ownership,
         canonical_id,
         &crypto,
@@ -1171,7 +1171,7 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
     .await;
 
     let migration_done = json!({"vault_migration_status": "complete"});
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &migration_done).await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_done).await;
 
     let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1204,7 +1204,7 @@ async fn handle_vault_unlock_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
     }
 
     let Some(identity) =
-        crate::vault_ops::read_entity(ctx.client, "_identities", canonical_id).await
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1239,11 +1239,10 @@ async fn handle_vault_unlock_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
     let _fence = ctx.vault_key_store.acquire_fence(canonical_id).await;
     ctx.vault_key_store.set(canonical_id, key_bytes);
 
-    let resume_result = crate::vault_ops::resume_pending_migration(
-        ctx.client,
+    let resume_result = crate::vault_ops::resume_pending_migration_db(
+        ctx.db,
         ctx.ownership,
         ctx.vault_key_store,
-        None,
         canonical_id,
         &crypto,
         &identity,
@@ -1302,7 +1301,7 @@ async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> R
     }
 
     let Some(identity) =
-        crate::vault_ops::read_entity(ctx.client, "_identities", canonical_id).await
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1338,11 +1337,11 @@ async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> R
         "vault_migration_status": "pending",
         "vault_migration_mode": "decrypt",
     });
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &migration_start)
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
         .await;
 
-    let batch = crate::vault_ops::batch_vault_operation(
-        ctx.client,
+    let batch = crate::vault_ops::batch_vault_operation_db(
+        ctx.db,
         ctx.ownership,
         canonical_id,
         &crypto,
@@ -1357,7 +1356,7 @@ async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> R
         "vault_migration_status": "complete",
         "vault_migration_mode": null,
     });
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &identity_update)
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &identity_update)
         .await;
 
     let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
@@ -1400,7 +1399,7 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
     }
 
     let Some(identity) =
-        crate::vault_ops::read_entity(ctx.client, "_identities", canonical_id).await
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1453,11 +1452,11 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         "vault_old_check": check_token,
         "vault_old_salt": old_salt_b64_encoded,
     });
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &migration_start)
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start)
         .await;
 
-    let batch = crate::vault_ops::batch_vault_re_encrypt(
-        ctx.client,
+    let batch = crate::vault_ops::batch_vault_re_encrypt_db(
+        ctx.db,
         ctx.ownership,
         canonical_id,
         &old_crypto,
@@ -1471,7 +1470,7 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         "vault_old_check": null,
         "vault_old_salt": null,
     });
-    crate::vault_ops::update_entity(ctx.client, "_identities", canonical_id, &migration_done).await;
+    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_done).await;
 
     let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
     if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -1489,7 +1488,7 @@ async fn handle_vault_status_mqtt(ctx: &AdminContext<'_>) -> Response {
         return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
     };
 
-    let identity = crate::vault_ops::read_entity(ctx.client, "_identities", canonical_id).await;
+    let identity = crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await;
     let vault_enabled = identity
         .as_ref()
         .and_then(|i| i.get("vault_enabled"))

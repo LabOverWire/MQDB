@@ -3,14 +3,15 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use mqdb_core::VaultKeyStore;
-use mqdb_core::types::OwnershipConfig;
+use mqdb_core::{Filter, FilterOp, VaultKeyStore};
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqtt5::client::MqttClient;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::database::{CallerContext, Database};
 use crate::http::SessionStore;
 use crate::http::vault_crypto::VaultCrypto;
 
@@ -360,6 +361,180 @@ pub async fn resume_pending_migration(
         if let Some(ss) = session_store {
             ss.set_vault_unlocked_by_canonical_id(canonical_id, false);
         }
+        vault_key_store.remove(canonical_id);
+    }
+
+    Some(MigrationResumeResult {
+        mode: mode.to_string(),
+        succeeded: batch.succeeded,
+        failed: batch.failed,
+    })
+}
+
+pub async fn read_entity_db(db: &Database, entity: &str, id: &str) -> Option<Value> {
+    db.read(entity.to_string(), id.to_string(), vec![], None)
+        .await
+        .ok()
+}
+
+pub async fn update_entity_db(db: &Database, entity: &str, id: &str, data: &Value) -> bool {
+    let scope = ScopeConfig::default();
+    let caller = CallerContext {
+        sender: None,
+        client_id: None,
+        scope_config: &scope,
+    };
+    db.update(entity.to_string(), id.to_string(), data.clone(), None, &caller)
+        .await
+        .is_ok()
+}
+
+pub async fn list_entities_db(db: &Database, entity: &str, filter: &str) -> Option<Vec<Value>> {
+    let filters = if let Some((field, value)) = filter.split_once('=') {
+        vec![Filter::new(
+            field.to_string(),
+            FilterOp::Eq,
+            Value::String(value.to_string()),
+        )]
+    } else {
+        vec![]
+    };
+    db.list(entity.to_string(), filters, vec![], None, vec![], None)
+        .await
+        .ok()
+}
+
+pub async fn batch_vault_operation_db(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    canonical_id: &str,
+    crypto: &VaultCrypto,
+    mode: VaultMode,
+) -> BatchResult {
+    let mut result = BatchResult {
+        succeeded: 0,
+        failed: 0,
+        entities_skipped: Vec::new(),
+    };
+    for (entity, owner_field) in &ownership.entity_owner_fields {
+        let filter = format!("{owner_field}={canonical_id}");
+        let Some(records) = list_entities_db(db, entity, &filter).await else {
+            result.entities_skipped.push(entity.clone());
+            continue;
+        };
+        for record in records {
+            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut data = extract_record_data(&record);
+            let skip: Vec<&str> = vec![owner_field.as_str()];
+            match mode {
+                VaultMode::Encrypt => crypto.encrypt_record(entity, id, &mut data, &skip),
+                VaultMode::Decrypt => crypto.decrypt_record(entity, id, &mut data, &skip),
+            }
+            if update_entity_db(db, entity, id, &data).await {
+                result.succeeded += 1;
+            } else {
+                result.failed += 1;
+            }
+        }
+    }
+    result
+}
+
+pub async fn batch_vault_re_encrypt_db(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    canonical_id: &str,
+    old_crypto: &VaultCrypto,
+    new_crypto: &VaultCrypto,
+) -> BatchResult {
+    let mut result = BatchResult {
+        succeeded: 0,
+        failed: 0,
+        entities_skipped: Vec::new(),
+    };
+    for (entity, owner_field) in &ownership.entity_owner_fields {
+        let filter = format!("{owner_field}={canonical_id}");
+        let Some(records) = list_entities_db(db, entity, &filter).await else {
+            result.entities_skipped.push(entity.clone());
+            continue;
+        };
+        for record in records {
+            let Some(id) = record.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let mut data = extract_record_data(&record);
+            let skip: Vec<&str> = vec![owner_field.as_str()];
+            old_crypto.decrypt_record(entity, id, &mut data, &skip);
+            new_crypto.encrypt_record(entity, id, &mut data, &skip);
+            if update_entity_db(db, entity, id, &data).await {
+                result.succeeded += 1;
+            } else {
+                result.failed += 1;
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn resume_pending_migration_db(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    vault_key_store: &VaultKeyStore,
+    canonical_id: &str,
+    crypto: &VaultCrypto,
+    identity: &Value,
+    passphrase: &str,
+) -> Option<MigrationResumeResult> {
+    let status = identity
+        .get("vault_migration_status")
+        .and_then(|v| v.as_str())?;
+    if status != "pending" {
+        return None;
+    }
+    let mode = identity
+        .get("vault_migration_mode")
+        .and_then(|v| v.as_str())?;
+
+    let batch = match mode {
+        "encrypt" => {
+            batch_vault_operation_db(db, ownership, canonical_id, crypto, VaultMode::Encrypt).await
+        }
+        "decrypt" => {
+            batch_vault_operation_db(db, ownership, canonical_id, crypto, VaultMode::Decrypt).await
+        }
+        "re_encrypt" => {
+            let Some(old_salt_b64) = identity.get("vault_old_salt").and_then(|v| v.as_str()) else {
+                warn!("vault re_encrypt resume failed: old salt missing from identity");
+                return None;
+            };
+            let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
+                warn!("vault re_encrypt resume failed: old salt decode error");
+                return None;
+            };
+            let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
+            batch_vault_re_encrypt_db(db, ownership, canonical_id, &old_crypto, crypto).await
+        }
+        _ => return None,
+    };
+
+    let migration_done = json!({
+        "vault_migration_status": "complete",
+        "vault_migration_mode": null,
+        "vault_old_check": null,
+        "vault_old_salt": null,
+    });
+    update_entity_db(db, "_identities", canonical_id, &migration_done).await;
+
+    if mode == "decrypt" {
+        let disable_vault = json!({
+            "vault_enabled": false,
+            "vault_salt": null,
+            "vault_check": null,
+        });
+        update_entity_db(db, "_identities", canonical_id, &disable_vault).await;
         vault_key_store.remove(canonical_id);
     }
 
