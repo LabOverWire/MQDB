@@ -15,6 +15,7 @@ use crate::database::{CallerContext, Database};
 use crate::http::SessionStore;
 use crate::http::vault_crypto::VaultCrypto;
 
+#[derive(Clone, Copy)]
 pub enum VaultMode {
     Encrypt,
     Decrypt,
