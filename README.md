@@ -420,7 +420,7 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
 
-Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exception: `$DB/_health` is always accessible.
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_verify/*` are accessible to any authenticated user.
 
 #### Admin User Configuration
 
@@ -518,7 +518,7 @@ Per-user transparent encryption at rest. Each user derives an AES-256-GCM key fr
 
 All JSON leaf values at any depth are encrypted, including strings, numbers, booleans, and nulls inside nested objects and arrays. Non-string types are serialized before encryption and restored to their original types on decryption. Keys starting with `_` (system metadata) are skipped at all depths; the ownership field and `id` are skipped at the top level only.
 
-Vault encryption requires the `--ownership` flag on at least one entity and an HTTP server for the vault API.
+Vault encryption requires the `--ownership` flag on at least one entity.
 
 ### Vault HTTP API
 
@@ -531,9 +531,24 @@ Vault encryption requires the `--ownership` flag on at least one entity and an H
 | POST | `/vault/disable` | Decrypt all records and remove vault key permanently |
 | GET | `/vault/status` | Check vault state (`vault_enabled`, `unlocked`) |
 
-All vault endpoints require an authenticated HTTP session (cookie-based). Enable/unlock/change/disable require a JSON body with `passphrase` (and `old_passphrase`/`new_passphrase` for change).
+All HTTP vault endpoints require an authenticated session (cookie-based). Enable/unlock/change/disable require a JSON body with `passphrase` (and `old_passphrase`/`new_passphrase` for change).
 
-Vault works in both agent and cluster modes. In cluster mode, vault decrypt operations are forwarded to the node that owns the partition, with responses routed back transparently.
+### Vault MQTT API
+
+Vault operations are also available over MQTT 5.0 request-response, using the `response_topic` publish property. User identity is resolved from the `x-mqtt-sender` user property (set automatically for JWT-authenticated connections).
+
+| Topic | Payload | Description |
+|-------|---------|-------------|
+| `$DB/_vault/enable` | `{"passphrase": "..."}` | Derive key, encrypt all owned records |
+| `$DB/_vault/unlock` | `{"passphrase": "..."}` | Re-derive key, resume transparent decryption |
+| `$DB/_vault/lock` | `{}` | Remove key from memory |
+| `$DB/_vault/change` | `{"old_passphrase": "...", "new_passphrase": "..."}` | Re-encrypt all records with new key |
+| `$DB/_vault/disable` | `{"passphrase": "..."}` | Decrypt all records, remove vault |
+| `$DB/_vault/status` | `{}` | Check vault state |
+
+The MQTT and HTTP vault paths share the same rate limiter for unlock attempts.
+
+Vault works in both agent and cluster modes. In cluster mode, vault decrypt operations are forwarded to the node that owns the partition, with responses routed back transparently. MQTT vault admin topics are not supported in cluster mode.
 
 ### Example
 

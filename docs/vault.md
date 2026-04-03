@@ -55,13 +55,12 @@ Vault encryption preserves the record's shape. An observer can see key names, ne
 
 ## Prerequisites
 
-Vault requires three things:
+Vault requires two things:
 
 1. **Ownership** on at least one entity: `--ownership notes=userId`
-2. **HTTP server** running: `--http-bind 127.0.0.1:3000`
-3. **Authentication** configured (password file, SCRAM, or OAuth)
+2. **Authentication** configured (password file, SCRAM, JWT, or OAuth)
 
-Without ownership, no entities are vault-eligible and the vault endpoints have no effect.
+The HTTP server (`--http-bind`) is required for the HTTP vault API but not for the MQTT vault API. Without ownership, no entities are vault-eligible and the vault endpoints have no effect.
 
 ## Vault lifecycle
 
@@ -90,8 +89,6 @@ stateDiagram-v2
 
 ## HTTP API
 
-All vault operations are HTTP endpoints. There are no MQTT-level vault commands.
-
 | Method | Endpoint | Body | Description |
 |--------|----------|------|-------------|
 | POST | `/vault/enable` | `{"passphrase": "..."}` | Derive key, encrypt all owned records |
@@ -103,9 +100,28 @@ All vault operations are HTTP endpoints. There are no MQTT-level vault commands.
 
 All endpoints require an authenticated HTTP session (cookie-based via OAuth or dev-login). Enable, unlock, change, and disable return HTTP 401 on wrong passphrase. Unlock returns HTTP 429 when rate-limited.
 
-## MQTT behavior with vault
+## MQTT API
 
-MQTT clients do not interact with the vault directly. The vault operates transparently on the MQTT data path:
+Vault operations are also available over MQTT 5.0 request-response. Set the `response_topic` publish property to receive the response. The user's identity is resolved from the `x-mqtt-sender` user property (set automatically for JWT-authenticated connections).
+
+| Topic | Payload | Description |
+|-------|---------|-------------|
+| `$DB/_vault/enable` | `{"passphrase": "..."}` | Derive key, encrypt all owned records |
+| `$DB/_vault/unlock` | `{"passphrase": "..."}` | Re-derive key, resume transparent decryption |
+| `$DB/_vault/lock` | `{}` | Remove key from memory |
+| `$DB/_vault/disable` | `{"passphrase": "..."}` | Decrypt all records, remove vault |
+| `$DB/_vault/change` | `{"old_passphrase": "...", "new_passphrase": "..."}` | Re-encrypt all records with new key |
+| `$DB/_vault/status` | `{}` | Returns `{"status": "ok", "data": {"vault_enabled": bool, "unlocked": bool}}` |
+
+Responses follow the standard MQDB response envelope: `{"status": "ok", "data": {...}}` on success, `{"status": "error", "code": N, "message": "..."}` on failure.
+
+The MQTT vault path shares the same rate limiter as the HTTP path — unlock attempts are limited to 10 per user per minute across both transports. Wrong passphrase returns error code 401 (Unauthorized), rate limiting returns error code 429 (RateLimited).
+
+The `$DB/_vault/*` topics are exempt from internal entity topic protection, so any authenticated user can publish to them without admin privileges.
+
+## MQTT data path behavior
+
+Apart from the vault admin topics above, the vault operates transparently on the MQTT data path:
 
 **Create.** When you publish to `$DB/notes/create`, the server checks if you have a vault key. If so, it recursively encrypts all string leaf values before writing to storage. The response returns plaintext (the server decrypts before responding).
 
