@@ -36,6 +36,7 @@ pub(super) struct MessageContext<'a> {
     pub scope_config: &'a ScopeConfig,
     pub auth_providers: Option<&'a ComprehensiveAuthProvider>,
     pub vault_key_store: &'a VaultKeyStore,
+    pub vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     pub vault_unlock_limiter: &'a RateLimiter,
 }
@@ -63,6 +64,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             ownership,
             scope_config,
             vault_key_store,
+            vault_min_passphrase_length: ctx.vault_min_passphrase_length,
             #[cfg(feature = "http-api")]
             vault_unlock_limiter: ctx.vault_unlock_limiter,
         };
@@ -363,6 +365,7 @@ struct AdminContext<'a> {
     ownership: &'a OwnershipConfig,
     scope_config: &'a ScopeConfig,
     vault_key_store: &'a VaultKeyStore,
+    vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     vault_unlock_limiter: &'a RateLimiter,
 }
@@ -1122,6 +1125,14 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase field");
     };
 
+    let min_len = ctx.vault_min_passphrase_length;
+    if min_len > 0 && passphrase.len() < min_len {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            format!("passphrase must be at least {min_len} characters"),
+        );
+    }
+
     let Some(identity) =
         crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
@@ -1387,6 +1398,14 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
             "missing new_passphrase field",
         );
     };
+
+    let min_len = ctx.vault_min_passphrase_length;
+    if min_len > 0 && new_passphrase.len() < min_len {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            format!("passphrase must be at least {min_len} characters"),
+        );
+    }
 
     if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
         return Response::error(

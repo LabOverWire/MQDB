@@ -31,6 +31,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) passphrase_data: Option<String>,
     pub(crate) license: Option<PathBuf>,
     pub(crate) license_data: Option<String>,
+    pub(crate) vault_min_passphrase_length: usize,
     pub(crate) otlp_endpoint: Option<String>,
     pub(crate) otel_service_name: String,
     pub(crate) otel_sampling_ratio: f64,
@@ -83,7 +84,8 @@ pub(crate) async fn cmd_agent_start(
     let auth_setup = build_auth_setup_config(&args.auth, federated_content.as_deref())?;
     let mut agent = MqdbAgent::new(db)
         .with_bind_address(args.bind)
-        .with_auth_setup(auth_setup);
+        .with_auth_setup(auth_setup)
+        .with_vault_min_passphrase_length(args.vault_min_passphrase_length);
 
     if let Some(ref info) = license_info {
         agent = agent.with_license_expiry(info.expires_at);
@@ -136,7 +138,7 @@ pub(crate) async fn cmd_agent_start(
 
     if let Some(http_bind) = args.oauth.http_bind {
         let ownership_for_http = agent.ownership_config_arc();
-        let http_config = build_http_config(
+        let mut http_config = build_http_config(
             http_bind,
             &args.auth,
             &args.oauth,
@@ -144,6 +146,7 @@ pub(crate) async fn cmd_agent_start(
             ownership_for_http,
             &args.db_path,
         )?;
+        http_config.vault_min_passphrase_length = args.vault_min_passphrase_length;
         if !http_config.cookie_secure {
             tracing::warn!(
                 "session cookies will be sent without Secure flag — use --cookie-secure in production"
@@ -376,6 +379,7 @@ pub(crate) fn build_http_config(
         ownership_config,
         vault_key_store: None,
         vault_unlock_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
+        vault_min_passphrase_length: 0,
         email_auth: oauth.email_auth,
     })
 }

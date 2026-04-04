@@ -8,7 +8,7 @@ TEST_DIR="/tmp/vault-mqtt-admin-test"
 AGENT_PID=""
 PASS=0
 FAIL=0
-TOTAL=26
+TOTAL=28
 
 cleanup() {
     if [[ -n "$AGENT_PID" ]]; then
@@ -158,6 +158,7 @@ RUST_LOG=mqdb=debug "$MQDB_BIN" agent start \
     --ownership notes=userId \
     --admin-users "$OBSERVER_USER" \
     --no-rate-limit \
+    --vault-min-passphrase-length 8 \
     > "$TEST_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 
@@ -194,21 +195,28 @@ assert_eq "vault_enabled is false" "$(json_field "$RESP" "data.vault_enabled")" 
 assert_eq "unlocked is false" "$(json_field "$RESP" "data.unlocked")" "false"
 
 echo ""
-echo "--- Test 2: vault enable ---"
+echo "--- Test 2: vault enable with short passphrase rejected ---"
+RESP=$(mqtt_vault "enable" '{"passphrase":"ab"}')
+echo "  Response: $RESP"
+assert_eq "short passphrase rejected" "$(json_field "$RESP" "status")" "error"
+assert_eq "error message" "$(json_field "$RESP" "message")" "passphrase must be at least 8 characters"
+
+echo ""
+echo "--- Test 3: vault enable ---"
 RESP=$(mqtt_vault "enable" "{\"passphrase\":\"$PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "enable ok" "$(json_field "$RESP" "status")" "ok"
 assert_eq "status enabled" "$(json_field "$RESP" "data.status")" "enabled"
 
 echo ""
-echo "--- Test 3: vault status (enabled + unlocked) ---"
+echo "--- Test 4: vault status (enabled + unlocked) ---"
 RESP=$(mqtt_vault "status" "{}")
 echo "  Response: $RESP"
 assert_eq "vault_enabled is true" "$(json_field "$RESP" "data.vault_enabled")" "true"
 assert_eq "unlocked is true" "$(json_field "$RESP" "data.unlocked")" "true"
 
 echo ""
-echo "--- Test 4: create note (vault unlocked — plaintext response) ---"
+echo "--- Test 5: create note (vault unlocked — plaintext response) ---"
 RESP=$("$MQDB_BIN" create notes --broker 127.0.0.1:$PORT --user "$CANONICAL_ID" --pass "$MQTT_PASS" \
     -d "{\"title\":\"Secret Note\",\"body\":\"Top secret content\",\"userId\":\"$CANONICAL_ID\"}" 2>/dev/null)
 echo "  Response: $RESP"
@@ -224,14 +232,14 @@ fi
 echo "  Record ID: $RECORD_ID"
 
 echo ""
-echo "--- Test 5: vault lock (via MQTT) ---"
+echo "--- Test 6: vault lock (via MQTT) ---"
 RESP=$(mqtt_vault "lock" "{}")
 echo "  Response: $RESP"
 assert_eq "lock ok" "$(json_field "$RESP" "status")" "ok"
 assert_eq "status locked" "$(json_field "$RESP" "data.status")" "locked"
 
 echo ""
-echo "--- Test 6: read note (vault locked — ciphertext) ---"
+echo "--- Test 7: read note (vault locked — ciphertext) ---"
 RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:$PORT --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
 echo "  Response: $RESP"
 LOCKED_TITLE=$(json_field "$RESP" "data.title")
@@ -239,59 +247,59 @@ assert_neq "locked title is ciphertext" "$LOCKED_TITLE" "Secret Note"
 assert_min_length "locked title is base64" "$LOCKED_TITLE" 20
 
 echo ""
-echo "--- Test 7: vault unlock (via MQTT) ---"
+echo "--- Test 8: vault unlock (via MQTT) ---"
 RESP=$(mqtt_vault "unlock" "{\"passphrase\":\"$PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "unlock ok" "$(json_field "$RESP" "status")" "ok"
 assert_eq "status unlocked" "$(json_field "$RESP" "data.status")" "unlocked"
 
 echo ""
-echo "--- Test 8: read note (vault unlocked — plaintext restored) ---"
+echo "--- Test 9: read note (vault unlocked — plaintext restored) ---"
 RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:$PORT --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
 echo "  Response: $RESP"
 assert_eq "plaintext title restored" "$(json_field "$RESP" "data.title")" "Secret Note"
 
 echo ""
-echo "--- Test 9: vault change passphrase (via MQTT) ---"
+echo "--- Test 10: vault change passphrase (via MQTT) ---"
 RESP=$(mqtt_vault "change" "{\"old_passphrase\":\"$PASSPHRASE\",\"new_passphrase\":\"$NEW_PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "change ok" "$(json_field "$RESP" "status")" "ok"
 assert_eq "status changed" "$(json_field "$RESP" "data.status")" "changed"
 
 echo ""
-echo "--- Test 10: lock + old passphrase rejected ---"
+echo "--- Test 11: lock + old passphrase rejected ---"
 mqtt_vault "lock" "{}" > /dev/null
 RESP=$(mqtt_vault "unlock" "{\"passphrase\":\"$PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "old passphrase rejected" "$(json_field "$RESP" "message")" "incorrect passphrase"
 
 echo ""
-echo "--- Test 11: new passphrase unlocks ---"
+echo "--- Test 12: new passphrase unlocks ---"
 RESP=$(mqtt_vault "unlock" "{\"passphrase\":\"$NEW_PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "new passphrase unlocks" "$(json_field "$RESP" "data.status")" "unlocked"
 
 echo ""
-echo "--- Test 12: read note after passphrase change (plaintext) ---"
+echo "--- Test 13: read note after passphrase change (plaintext) ---"
 RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:$PORT --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
 echo "  Response: $RESP"
 assert_eq "title still decrypts" "$(json_field "$RESP" "data.title")" "Secret Note"
 
 echo ""
-echo "--- Test 13: vault disable (via MQTT) ---"
+echo "--- Test 14: vault disable (via MQTT) ---"
 RESP=$(mqtt_vault "disable" "{\"passphrase\":\"$NEW_PASSPHRASE\"}")
 echo "  Response: $RESP"
 assert_eq "disable ok" "$(json_field "$RESP" "status")" "ok"
 assert_eq "status disabled" "$(json_field "$RESP" "data.status")" "disabled"
 
 echo ""
-echo "--- Test 14: read note after disable (plaintext, no encryption) ---"
+echo "--- Test 15: read note after disable (plaintext, no encryption) ---"
 RESP=$("$MQDB_BIN" read notes "$RECORD_ID" --broker 127.0.0.1:$PORT --user "$CANONICAL_ID" --pass "$MQTT_PASS" 2>/dev/null)
 echo "  Response: $RESP"
 assert_eq "plaintext after disable" "$(json_field "$RESP" "data.title")" "Secret Note"
 
 echo ""
-echo "--- Test 15: vault status (disabled) ---"
+echo "--- Test 16: vault status (disabled) ---"
 RESP=$(mqtt_vault "status" "{}")
 echo "  Response: $RESP"
 assert_eq "vault_enabled is false after disable" "$(json_field "$RESP" "data.vault_enabled")" "false"

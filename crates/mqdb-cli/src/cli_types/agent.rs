@@ -85,6 +85,13 @@ pub(crate) struct AgentStartFields {
     pub(crate) quic_key_data: Option<String>,
     #[arg(
         long,
+        env = "MQDB_VAULT_MIN_PASSPHRASE_LENGTH",
+        default_value = "0",
+        help = "Minimum passphrase length for vault enable/change (0 = no minimum)"
+    )]
+    pub(crate) vault_min_passphrase_length: usize,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]

@@ -197,6 +197,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 passphrase_data: fields.passphrase_data,
                 license: fields.license,
                 license_data: fields.license_data,
+                vault_min_passphrase_length: fields.vault_min_passphrase_length,
                 otlp_endpoint: fields.otlp_endpoint,
                 otel_service_name: fields.otel_service_name,
                 otel_sampling_ratio: fields.otel_sampling_ratio,

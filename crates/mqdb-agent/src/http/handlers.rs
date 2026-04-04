@@ -66,6 +66,7 @@ pub struct ServerState {
     pub identity_crypto: Option<IdentityCrypto>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Arc<VaultKeyStore>,
+    pub vault_min_passphrase_length: usize,
     pub email_auth: bool,
     pub verify_rate_limiter: RateLimiter,
 }
@@ -1418,6 +1419,15 @@ pub async fn handle_vault_enable(
         );
     };
 
+    let min_len = state.vault_min_passphrase_length;
+    if min_len > 0 && passphrase.len() < min_len {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": format!("passphrase must be at least {min_len} characters")}),
+            cors,
+        );
+    }
+
     let canonical_id = &session.canonical_id;
 
     let Some(identity) = read_entity(&state.mqtt_client, "_identities", canonical_id).await else {
@@ -1763,6 +1773,15 @@ pub async fn handle_vault_change(
             cors,
         );
     };
+
+    let min_len = state.vault_min_passphrase_length;
+    if min_len > 0 && new_passphrase.len() < min_len {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": format!("passphrase must be at least {min_len} characters")}),
+            cors,
+        );
+    }
 
     let canonical_id = &session.canonical_id;
 
