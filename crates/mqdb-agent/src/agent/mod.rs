@@ -16,6 +16,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::info;
 
+#[cfg(feature = "http-api")]
+use crate::http::rate_limiter::RateLimiter;
+
 pub use mqdb_core::protocol::{
     AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic,
 };
@@ -35,6 +38,9 @@ pub struct MqdbAgent {
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
+    #[cfg(feature = "http-api")]
+    pub(super) vault_unlock_limiter: Arc<RateLimiter>,
+    pub(super) vault_min_passphrase_length: usize,
     pub(super) license_expires_at: Option<u64>,
     #[cfg(feature = "opentelemetry")]
     pub(super) telemetry_config: Option<mqtt5::telemetry::TelemetryConfig>,
@@ -62,6 +68,9 @@ impl MqdbAgent {
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            #[cfg(feature = "http-api")]
+            vault_unlock_limiter: Arc::new(RateLimiter::new(10)),
+            vault_min_passphrase_length: 0,
             license_expires_at: None,
             #[cfg(feature = "opentelemetry")]
             telemetry_config: None,
@@ -181,6 +190,12 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
         self.license_expires_at = Some(expires_at);
+        self
+    }
+
+    #[must_use]
+    pub fn with_vault_min_passphrase_length(mut self, len: usize) -> Self {
+        self.vault_min_passphrase_length = len;
         self
     }
 

@@ -156,7 +156,11 @@ fn is_internal_entity_topic(topic: &str) -> bool {
         return false;
     }
     let rest = &topic[4..];
-    if rest.starts_with('_') && !rest.starts_with("_health") {
+    if rest.starts_with('_')
+        && !rest.starts_with("_health")
+        && !rest.starts_with("_vault")
+        && !rest.starts_with("_verify")
+    {
         let entity = rest.split('/').next().unwrap_or("");
         !entity.is_empty() && entity.starts_with('_')
     } else {
@@ -483,5 +487,34 @@ mod tests {
     fn check_access_health_endpoint_allowed() {
         assert_eq!(check_topic_access("$DB/_health", true, false), Ok(()));
         assert_eq!(check_topic_access("$DB/_health", false, false), Ok(()));
+    }
+
+    #[test]
+    fn check_access_vault_endpoints_allowed() {
+        assert_eq!(check_topic_access("$DB/_vault/enable", true, false), Ok(()));
+        assert_eq!(check_topic_access("$DB/_vault/unlock", true, false), Ok(()));
+        assert_eq!(check_topic_access("$DB/_vault/lock", true, false), Ok(()));
+        assert_eq!(
+            check_topic_access("$DB/_vault/disable", true, false),
+            Ok(())
+        );
+        assert_eq!(check_topic_access("$DB/_vault/change", true, false), Ok(()));
+        assert_eq!(check_topic_access("$DB/_vault/status", true, false), Ok(()));
+    }
+
+    #[test]
+    fn check_access_verify_endpoints_allowed() {
+        assert_eq!(
+            check_topic_access("$DB/_verify/challenges/email", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/challenges/email", false, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/confirm", true, false),
+            Ok(())
+        );
     }
 }

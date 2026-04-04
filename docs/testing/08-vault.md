@@ -154,6 +154,16 @@ curl -s -b /tmp/vault-test/cookies.txt http://127.0.0.1:3000/vault/status
 
 Expected after disable: `{"unlocked":false,"vault_enabled":false}`.
 
+### Test 10: MQTT Vault Admin API
+
+Run the automated E2E script:
+
+```bash
+./examples/vault-mqtt-admin/run.sh
+```
+
+This runs 16 tests (28 assertions) covering the full vault lifecycle over MQTT `$DB/_vault/*` topics: status, enable, lock, unlock, change passphrase, disable, short passphrase rejection (`--vault-min-passphrase-length`), and CRUD during locked/unlocked states.
+
 ### Cluster Mode Vault Testing
 
 Use the automated E2E script:
@@ -191,6 +201,13 @@ This runs 70 tests covering:
 - [ ] Old passphrase rejected after change (HTTP 401)
 - [ ] Disable decrypts all records back to plaintext
 - [ ] Vault status reflects current state
+
+**MQTT Vault Admin:**
+- [ ] All 6 vault topics work over MQTT request-response (`$DB/_vault/*`)
+- [ ] Short passphrase rejected when `--vault-min-passphrase-length` configured
+- [ ] Wrong passphrase returns error code 401
+- [ ] Rate limiting returns error code 429
+- [ ] All 28 E2E assertions pass (`examples/vault-mqtt-admin/run.sh`)
 
 **Cluster Mode:**
 - [ ] Cross-node vault decrypt works (read from non-primary node)

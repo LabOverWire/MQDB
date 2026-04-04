@@ -56,6 +56,9 @@ impl MqdbAgent {
         };
         let scope_config = Arc::clone(&self.scope_config);
         let vault_key_store = Arc::clone(&self.vault_key_store);
+        let vault_min_passphrase_length = self.vault_min_passphrase_length;
+        #[cfg(feature = "http-api")]
+        let vault_unlock_limiter = Arc::clone(&self.vault_unlock_limiter);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -119,6 +122,9 @@ impl MqdbAgent {
                                 scope_config: &scope_config,
                                 auth_providers: auth_providers.as_deref(),
                                 vault_key_store: &vault_key_store,
+                                vault_min_passphrase_length,
+                                #[cfg(feature = "http-api")]
+                                vault_unlock_limiter: &vault_unlock_limiter,
                             };
                             handle_message(&ctx, message).await;
                         } else {

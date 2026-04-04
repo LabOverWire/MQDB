@@ -577,6 +577,7 @@ pub(super) async fn subscribe_admin_topics(
         ("$SYS/mqdb/cluster/#", "admin topics"),
         ("$DB/_health", "health topic"),
         ("$DB/_admin/#", "db admin topics"),
+        ("$DB/_vault/#", "vault admin topics"),
     ] {
         let tx = tx.clone();
         client

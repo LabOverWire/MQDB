@@ -72,6 +72,12 @@ pub enum AdminOperation {
     AclAssignmentList,
     IndexAdd { entity: String },
     Catalog,
+    VaultEnable,
+    VaultUnlock,
+    VaultLock,
+    VaultDisable,
+    VaultChange,
+    VaultStatus,
 }
 
 type ListOptions = (
@@ -98,6 +104,18 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
             [id, "unsubscribe"] => Some(AdminOperation::Unsubscribe {
                 sub_id: (*id).to_string(),
             }),
+            _ => None,
+        };
+    }
+
+    if let Some(rest) = topic.strip_prefix("$DB/_vault/") {
+        return match rest {
+            "enable" => Some(AdminOperation::VaultEnable),
+            "unlock" => Some(AdminOperation::VaultUnlock),
+            "lock" => Some(AdminOperation::VaultLock),
+            "disable" => Some(AdminOperation::VaultDisable),
+            "change" => Some(AdminOperation::VaultChange),
+            "status" => Some(AdminOperation::VaultStatus),
             _ => None,
         };
     }
@@ -451,6 +469,35 @@ mod tests {
     fn test_parse_admin_topic_catalog() {
         let op = parse_admin_topic("$DB/_admin/catalog").unwrap();
         assert!(matches!(op, AdminOperation::Catalog));
+    }
+
+    #[test]
+    fn test_parse_vault_topics() {
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/enable"),
+            Some(AdminOperation::VaultEnable)
+        ));
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/unlock"),
+            Some(AdminOperation::VaultUnlock)
+        ));
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/lock"),
+            Some(AdminOperation::VaultLock)
+        ));
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/disable"),
+            Some(AdminOperation::VaultDisable)
+        ));
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/change"),
+            Some(AdminOperation::VaultChange)
+        ));
+        assert!(matches!(
+            parse_admin_topic("$DB/_vault/status"),
+            Some(AdminOperation::VaultStatus)
+        ));
+        assert!(parse_admin_topic("$DB/_vault/unknown").is_none());
     }
 
     #[test]

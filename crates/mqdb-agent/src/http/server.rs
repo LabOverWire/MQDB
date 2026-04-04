@@ -37,6 +37,7 @@ pub struct HttpServerConfig {
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
     pub vault_unlock_rate_limit: u32,
+    pub vault_min_passphrase_length: usize,
     pub email_auth: bool,
 }
 
@@ -89,6 +90,7 @@ impl HttpServer {
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,
             vault_key_store,
+            vault_min_passphrase_length: self.config.vault_min_passphrase_length,
             email_auth: self.config.email_auth,
             verify_rate_limiter: RateLimiter::new(3),
         });
