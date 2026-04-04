@@ -69,6 +69,7 @@ pub struct ServerState {
     pub vault_min_passphrase_length: usize,
     pub email_auth: bool,
     pub verify_rate_limiter: RateLimiter,
+    pub password_change_rate_limiter: RateLimiter,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -2632,6 +2633,126 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
         }),
         cors,
     )
+}
+
+pub async fn handle_password_change(
+    state: &ServerState,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let (_, session) = match require_session(state, headers) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+
+    let canonical_id = session.canonical_id.clone();
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(current_password) = body_value.get("current_password").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing current_password field"}),
+            cors,
+        );
+    };
+
+    let Some(new_password) = body_value.get("new_password").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing new_password field"}),
+            cors,
+        );
+    };
+
+    if let Err(e) = credentials::validate_password(new_password) {
+        return json_response_with_credentials(400, &json!({"error": e}), cors);
+    }
+
+    if !state
+        .password_change_rate_limiter
+        .check_and_record(&canonical_id)
+    {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many password change attempts, try again later"}),
+            cors,
+        );
+    }
+
+    let identity = read_entity(&state.mqtt_client, "_identities", &canonical_id).await;
+    let email_verified = identity
+        .as_ref()
+        .and_then(|i| i.get("email_verified"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !email_verified {
+        return json_response_with_credentials(
+            403,
+            &json!({"error": "email must be verified before changing password"}),
+            cors,
+        );
+    }
+
+    let Some(cred) = read_entity(&state.mqtt_client, "_credentials", &canonical_id).await else {
+        return json_response_with_credentials(
+            404,
+            &json!({"error": "no credentials found (OAuth-only account)"}),
+            cors,
+        );
+    };
+
+    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "credential record is corrupt"}),
+            cors,
+        );
+    };
+
+    if !credentials::verify_password(stored_hash, current_password) {
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect current password"}),
+            cors,
+        );
+    }
+
+    let new_hash = match credentials::hash_password(new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            error!(error = %e, "password hashing failed during password change");
+            return json_response_with_credentials(500, &json!({"error": "internal error"}), cors);
+        }
+    };
+
+    if !update_entity(
+        &state.mqtt_client,
+        "_credentials",
+        &canonical_id,
+        &json!({"password_hash": new_hash}),
+    )
+    .await
+    {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to update credentials"}),
+            cors,
+        );
+    }
+
+    json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
 }
 
 #[cfg(feature = "dev-insecure")]

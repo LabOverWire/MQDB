@@ -160,6 +160,7 @@ fn is_internal_entity_topic(topic: &str) -> bool {
         && !rest.starts_with("_health")
         && !rest.starts_with("_vault")
         && !rest.starts_with("_verify")
+        && !rest.starts_with("_auth")
     {
         let entity = rest.split('/').next().unwrap_or("");
         !entity.is_empty() && entity.starts_with('_')
@@ -500,6 +501,18 @@ mod tests {
         );
         assert_eq!(check_topic_access("$DB/_vault/change", true, false), Ok(()));
         assert_eq!(check_topic_access("$DB/_vault/status", true, false), Ok(()));
+    }
+
+    #[test]
+    fn check_access_auth_endpoints_allowed() {
+        assert_eq!(
+            check_topic_access("$DB/_auth/password/change", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_auth/password/change", false, false),
+            Ok(())
+        );
     }
 
     #[test]

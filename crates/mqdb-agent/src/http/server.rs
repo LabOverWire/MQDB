@@ -93,6 +93,7 @@ impl HttpServer {
             vault_min_passphrase_length: self.config.vault_min_passphrase_length,
             email_auth: self.config.email_auth,
             verify_rate_limiter: RateLimiter::new(3),
+            password_change_rate_limiter: RateLimiter::new(5),
         });
 
         initialize_identity_constraints(&state).await;
@@ -194,6 +195,7 @@ async fn handle_request(
             | "/auth/verify/start"
             | "/auth/verify/submit"
             | "/auth/verify/status"
+            | "/auth/password/change"
             | "/vault/enable"
             | "/vault/unlock"
             | "/vault/lock"
@@ -255,6 +257,14 @@ async fn handle_request(
         }
         (&Method::GET, "/auth/verify/status") => {
             handlers::handle_verify_status(&state, &headers).await
+        }
+        (&Method::POST, "/auth/password/change") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            handlers::handle_password_change(&state, &headers, &body).await
         }
         (&Method::POST, "/auth/unlink") => {
             let body = req
