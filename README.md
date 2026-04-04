@@ -779,6 +779,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 |----------|---------|---------|
 | `MQDB_PASSPHRASE_FILE` | Path to encryption passphrase file | — |
 | `MQDB_PASSPHRASE` | Encryption passphrase (inline) | — |
+| `MQDB_VAULT_MIN_PASSPHRASE_LENGTH` | Minimum passphrase length for vault enable/change (0 = no minimum) | `0` |
 | `MQDB_LICENSE_FILE` | Path to license key file | — |
 | `MQDB_LICENSE` | License token (inline) | — |
 

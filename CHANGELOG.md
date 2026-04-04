@@ -15,6 +15,7 @@ Affected crates: mqdb-core (0.3.0), mqdb-agent (0.4.0), mqdb-cluster (0.2.0), mq
 - Direct-DB vault operations (`_db` variants) for the MQTT handler path, avoiding deadlock from nested MQTT round-trips in the sequential message handler loop
 - `ErrorCode::RateLimited` (429) for vault unlock brute-force protection over MQTT
 - Topic protection exemptions for `$DB/_vault/*` and `$DB/_verify/*` (non-admin users can access these)
+- `--vault-min-passphrase-length` flag (env: `MQDB_VAULT_MIN_PASSPHRASE_LENGTH`, default 0) to enforce minimum passphrase length on vault enable and change operations
 
 ### Changed
 
