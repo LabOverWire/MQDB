@@ -12,6 +12,7 @@ use mqdb_core::constraint::Constraint;
 use mqdb_core::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use mqdb_core::transport::{Request, Response};
 use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
+use mqtt5::QoS;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
 use mqtt5::client::MqttClient;
@@ -27,6 +28,29 @@ use crate::http::rate_limiter::RateLimiter;
 use mqtt5::telemetry::propagation;
 
 use tracing::Instrument;
+
+async fn publish_response(
+    client: &MqttClient,
+    response_topic: &str,
+    correlation_data: Option<&[u8]>,
+    payload: Vec<u8>,
+) {
+    let props = mqtt5::types::PublishProperties {
+        correlation_data: correlation_data.map(Vec::from),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        qos: QoS::AtLeastOnce,
+        properties: props,
+        ..Default::default()
+    };
+    if let Err(e) = client
+        .publish_with_options(response_topic, payload, options)
+        .await
+    {
+        error!("Failed to publish response to {response_topic}: {e}");
+    }
+}
 
 pub(super) struct MessageContext<'a> {
     pub db: &'a Database,
@@ -84,7 +108,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             if let Some(response_topic) = &message.properties.response_topic {
                 let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
                 if let Ok(payload) = serde_json::to_vec(&response) {
-                    let _ = client.publish_qos1(response_topic, payload).await;
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
                 }
             }
             return;
@@ -137,7 +167,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                 if let Some(response_topic) = &message.properties.response_topic
                     && let Ok(payload) = serde_json::to_vec(&err_response)
                 {
-                    let _ = client.publish_qos1(response_topic, payload).await;
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
                 }
                 return;
             }
@@ -200,9 +236,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish response to {}: {}", response_topic, e);
-                }
+                publish_response(
+                    client,
+                    response_topic,
+                    message.properties.correlation_data.as_deref(),
+                    payload,
+                )
+                .await;
             }
             Err(e) => {
                 error!("Failed to serialize response: {}", e);
@@ -370,6 +410,7 @@ struct AdminContext<'a> {
     vault_unlock_limiter: &'a RateLimiter,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
     let payload: Value = if ctx.message.payload.is_empty() {
         Value::Null
@@ -380,7 +421,13 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
                 if let Some(response_topic) = &ctx.message.properties.response_topic {
                     let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
                     if let Ok(payload) = serde_json::to_vec(&response) {
-                        let _ = ctx.client.publish_qos1(response_topic, payload).await;
+                        publish_response(
+                            ctx.client,
+                            response_topic,
+                            ctx.message.properties.correlation_data.as_deref(),
+                            payload,
+                        )
+                        .await;
                     }
                 }
                 return;
@@ -459,9 +506,13 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
     if let Some(response_topic) = &ctx.message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = ctx.client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish admin response to {response_topic}: {e}");
-                }
+                publish_response(
+                    ctx.client,
+                    response_topic,
+                    ctx.message.properties.correlation_data.as_deref(),
+                    payload,
+                )
+                .await;
             }
             Err(e) => {
                 error!("Failed to serialize admin response: {e}");

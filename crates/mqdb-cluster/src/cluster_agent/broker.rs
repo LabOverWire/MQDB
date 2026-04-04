@@ -585,6 +585,7 @@ pub(super) async fn subscribe_admin_topics(
                 let req = AdminRequest {
                     topic: msg.topic.clone(),
                     response_topic: msg.properties.response_topic.clone(),
+                    correlation_data: msg.properties.correlation_data.clone(),
                     payload: msg.payload.clone(),
                 };
                 let _ = tx.try_send(req);

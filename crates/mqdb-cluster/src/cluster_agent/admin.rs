@@ -79,7 +79,18 @@ impl ClusteredAgent {
         };
 
         let payload = serde_json::to_vec(&response).unwrap_or_default();
-        if let Err(e) = client.publish(&response_topic, payload).await {
+        let props = mqtt5::types::PublishProperties {
+            correlation_data: req.correlation_data,
+            ..Default::default()
+        };
+        let options = mqtt5::PublishOptions {
+            properties: props,
+            ..Default::default()
+        };
+        if let Err(e) = client
+            .publish_with_options(&response_topic, payload, options)
+            .await
+        {
             warn!(error = %e, "failed to send admin response");
         }
     }
