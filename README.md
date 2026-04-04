@@ -420,7 +420,7 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
 
-Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_verify/*` are accessible to any authenticated user.
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, `$DB/_verify/*`, and `$DB/_auth/*` are accessible to any authenticated user.
 
 #### Admin User Configuration
 
@@ -512,6 +512,14 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 | POST | `/oauth/refresh` | Refresh OAuth token |
 
 All auth endpoints use cookie-based sessions. The `/auth/ticket` endpoint exchanges a valid session for a JWT that can be used to authenticate MQTT connections.
+
+### Password Change MQTT API
+
+Password change is also available over MQTT 5.0 request-response for JWT-authenticated users:
+
+| Topic | Payload | Description |
+|-------|---------|-------------|
+| `$DB/_auth/password/change` | `{"current_password": "...", "new_password": "..."}` | Change password (requires verified email) |
 
 ## Vault Encryption
 
