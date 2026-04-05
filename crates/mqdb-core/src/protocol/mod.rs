@@ -78,6 +78,7 @@ pub enum AdminOperation {
     VaultDisable,
     VaultChange,
     VaultStatus,
+    PasswordChange,
 }
 
 type ListOptions = (
@@ -116,6 +117,13 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
             "disable" => Some(AdminOperation::VaultDisable),
             "change" => Some(AdminOperation::VaultChange),
             "status" => Some(AdminOperation::VaultStatus),
+            _ => None,
+        };
+    }
+
+    if let Some(rest) = topic.strip_prefix("$DB/_auth/") {
+        return match rest {
+            "password/change" => Some(AdminOperation::PasswordChange),
             _ => None,
         };
     }
@@ -498,6 +506,15 @@ mod tests {
             Some(AdminOperation::VaultStatus)
         ));
         assert!(parse_admin_topic("$DB/_vault/unknown").is_none());
+    }
+
+    #[test]
+    fn test_parse_auth_topics() {
+        assert!(matches!(
+            parse_admin_topic("$DB/_auth/password/change"),
+            Some(AdminOperation::PasswordChange)
+        ));
+        assert!(parse_admin_topic("$DB/_auth/unknown").is_none());
     }
 
     #[test]

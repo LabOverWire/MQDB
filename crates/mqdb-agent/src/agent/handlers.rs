@@ -12,6 +12,7 @@ use mqdb_core::constraint::Constraint;
 use mqdb_core::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
 use mqdb_core::transport::{Request, Response};
 use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
+use mqtt5::QoS;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
 use mqtt5::client::MqttClient;
@@ -27,6 +28,29 @@ use crate::http::rate_limiter::RateLimiter;
 use mqtt5::telemetry::propagation;
 
 use tracing::Instrument;
+
+async fn publish_response(
+    client: &MqttClient,
+    response_topic: &str,
+    correlation_data: Option<&[u8]>,
+    payload: Vec<u8>,
+) {
+    let props = mqtt5::types::PublishProperties {
+        correlation_data: correlation_data.map(Vec::from),
+        ..Default::default()
+    };
+    let options = mqtt5::PublishOptions {
+        qos: QoS::AtLeastOnce,
+        properties: props,
+        ..Default::default()
+    };
+    if let Err(e) = client
+        .publish_with_options(response_topic, payload, options)
+        .await
+    {
+        error!("Failed to publish response to {response_topic}: {e}");
+    }
+}
 
 pub(super) struct MessageContext<'a> {
     pub db: &'a Database,
@@ -84,7 +108,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             if let Some(response_topic) = &message.properties.response_topic {
                 let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
                 if let Ok(payload) = serde_json::to_vec(&response) {
-                    let _ = client.publish_qos1(response_topic, payload).await;
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
                 }
             }
             return;
@@ -137,7 +167,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                 if let Some(response_topic) = &message.properties.response_topic
                     && let Ok(payload) = serde_json::to_vec(&err_response)
                 {
-                    let _ = client.publish_qos1(response_topic, payload).await;
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
                 }
                 return;
             }
@@ -200,9 +236,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish response to {}: {}", response_topic, e);
-                }
+                publish_response(
+                    client,
+                    response_topic,
+                    message.properties.correlation_data.as_deref(),
+                    payload,
+                )
+                .await;
             }
             Err(e) => {
                 error!("Failed to serialize response: {}", e);
@@ -370,6 +410,7 @@ struct AdminContext<'a> {
     vault_unlock_limiter: &'a RateLimiter,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
     let payload: Value = if ctx.message.payload.is_empty() {
         Value::Null
@@ -380,7 +421,13 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
                 if let Some(response_topic) = &ctx.message.properties.response_topic {
                     let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
                     if let Ok(payload) = serde_json::to_vec(&response) {
-                        let _ = ctx.client.publish_qos1(response_topic, payload).await;
+                        publish_response(
+                            ctx.client,
+                            response_topic,
+                            ctx.message.properties.correlation_data.as_deref(),
+                            payload,
+                        )
+                        .await;
                     }
                 }
                 return;
@@ -441,24 +488,33 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         AdminOperation::VaultChange => handle_vault_change_mqtt(ctx, &payload).await,
         #[cfg(feature = "http-api")]
         AdminOperation::VaultStatus => handle_vault_status_mqtt(ctx).await,
+        #[cfg(feature = "http-api")]
+        AdminOperation::PasswordChange => handle_password_change_mqtt(ctx, &payload).await,
         #[cfg(not(feature = "http-api"))]
         AdminOperation::VaultEnable
         | AdminOperation::VaultUnlock
         | AdminOperation::VaultLock
         | AdminOperation::VaultDisable
         | AdminOperation::VaultChange
-        | AdminOperation::VaultStatus => Response::error(
-            mqdb_core::ErrorCode::Forbidden,
-            "vault requires http-api feature",
-        ),
+        | AdminOperation::VaultStatus => {
+            Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
+        }
+        #[cfg(not(feature = "http-api"))]
+        AdminOperation::PasswordChange => {
+            Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
+        }
     };
 
     if let Some(response_topic) = &ctx.message.properties.response_topic {
         match serde_json::to_vec(&response) {
             Ok(payload) => {
-                if let Err(e) = ctx.client.publish_qos1(response_topic, payload).await {
-                    error!("Failed to publish admin response to {response_topic}: {e}");
-                }
+                publish_response(
+                    ctx.client,
+                    response_topic,
+                    ctx.message.properties.correlation_data.as_deref(),
+                    payload,
+                )
+                .await;
             }
             Err(e) => {
                 error!("Failed to serialize admin response: {e}");
@@ -1522,4 +1578,95 @@ async fn handle_vault_status_mqtt(ctx: &AdminContext<'_>) -> Response {
         body["migration_pending"] = json!(true);
     }
     Response::ok(body)
+}
+
+#[cfg(feature = "http-api")]
+async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let Some(canonical_id) = extract_sender(ctx.message) else {
+        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
+    };
+
+    let Some(current_password) = payload.get("current_password").and_then(|v| v.as_str()) else {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "missing current_password field",
+        );
+    };
+
+    let Some(new_password) = payload.get("new_password").and_then(|v| v.as_str()) else {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "missing new_password field",
+        );
+    };
+
+    if let Err(e) = crate::http::credentials::validate_password(new_password) {
+        return Response::error(mqdb_core::ErrorCode::BadRequest, e);
+    }
+
+    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many attempts, try again later",
+        );
+    }
+
+    let Some(identity) =
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
+    else {
+        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
+    };
+
+    let email_verified = identity
+        .get("email_verified")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !email_verified {
+        return Response::error(
+            mqdb_core::ErrorCode::Forbidden,
+            "email must be verified before changing password",
+        );
+    }
+
+    let Some(cred) = crate::vault_ops::read_entity_db(ctx.db, "_credentials", canonical_id).await
+    else {
+        return Response::error(
+            mqdb_core::ErrorCode::NotFound,
+            "no credentials found (OAuth-only account)",
+        );
+    };
+
+    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
+        return Response::error(
+            mqdb_core::ErrorCode::Internal,
+            "credential record is corrupt",
+        );
+    };
+
+    if !crate::http::credentials::verify_password(stored_hash, current_password) {
+        return Response::error(
+            mqdb_core::ErrorCode::Unauthorized,
+            "incorrect current password",
+        );
+    }
+
+    let new_hash = match crate::http::credentials::hash_password(new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("password hashing failed: {e}");
+            return Response::error(mqdb_core::ErrorCode::Internal, "internal error");
+        }
+    };
+
+    crate::vault_ops::update_entity_db(
+        ctx.db,
+        "_credentials",
+        canonical_id,
+        &json!({"password_hash": new_hash}),
+    )
+    .await;
+
+    Response::ok(json!({"status": "password changed"}))
 }

@@ -80,6 +80,7 @@ impl Request {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
     BadRequest = 400,
+    Unauthorized = 401,
     Forbidden = 403,
     NotFound = 404,
     Conflict = 409,
@@ -97,6 +98,7 @@ impl ErrorCode {
     pub fn as_grpc_code(self) -> i32 {
         match self {
             ErrorCode::BadRequest => 3,
+            ErrorCode::Unauthorized => 16,
             ErrorCode::Forbidden => 7,
             ErrorCode::NotFound => 5,
             ErrorCode::Conflict => 6,

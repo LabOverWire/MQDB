@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-04-04
+
+Affected crates: mqdb-core (0.4.0), mqdb-agent (0.5.0), mqdb-cluster (0.3.0), mqdb-cli (0.6.0).
+
+### Added
+
+- Password change endpoint: `POST /auth/password/change` (HTTP) and `$DB/_auth/password/change` (MQTT) for email-auth users with verified email
+- `$DB/_auth/` topic namespace for self-service auth operations, exempt from topic protection
+- MQTT 5.0 `correlation_data` echoing in all DB and admin response handlers, enabling `mqttv5 --wait-response` and standard request-response clients
+- Dedicated `password_change_rate_limiter` (HTTP) and reuse of `vault_unlock_limiter` (MQTT) for brute-force protection
+
+### Changed
+
+- Cluster mode returns explicit error for `$DB/_auth/` topics (agent-only)
+
 ## [0.5.0] - 2026-04-03
 
 Affected crates: mqdb-core (0.3.0), mqdb-agent (0.4.0), mqdb-cluster (0.2.0), mqdb-cli (0.5.0).

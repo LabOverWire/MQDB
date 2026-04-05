@@ -123,8 +123,8 @@ with `Set-Cookie: session=...` header.
 ### CORS Configuration
 
 Use `--cors-origin http://localhost:8000` to enable credentialed CORS for:
-`/auth/ticket`, `/auth/logout`, `/auth/session`, `/auth/unlink`, `/oauth/refresh`,
-and all `/vault/*` endpoints.
+`/auth/ticket`, `/auth/logout`, `/auth/session`, `/auth/unlink`, `/auth/password/change`,
+`/oauth/refresh`, and all `/vault/*` endpoints.
 
 ### OAuth CLI Options Reference
 
@@ -292,7 +292,100 @@ Expected: Challenge status updates to `"delivered"` (visible via verify/status e
 
 ---
 
-## 28. Additional Admin MQTT Endpoints
+## 28. Password Change
+
+Change password for email-auth users. Requires a valid session, verified email, and existing credentials.
+
+### Prerequisites
+
+Use the same agent setup as section 27 (Email Verification). Register a user and complete email verification first.
+
+### Change Password (HTTP)
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/password/change \
+    -H 'Content-Type: application/json' \
+    -d '{"current_password":"testpass123","new_password":"newpass456"}'
+```
+
+Expected: `{"status":"password changed"}`
+
+### Change Password (MQTT)
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_auth/password/change' -e 'resp/test' -W 5 \
+    -m '{"current_password":"testpass123","new_password":"newpass456"}'
+```
+
+Expected: `{"status":"ok","data":{"status":"password changed"}}`
+
+### Wrong Current Password
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/password/change \
+    -H 'Content-Type: application/json' \
+    -d '{"current_password":"wrong","new_password":"newpass456"}'
+```
+
+Expected: HTTP 401 `{"error":"incorrect current password"}`
+
+### New Password Too Short
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/password/change \
+    -H 'Content-Type: application/json' \
+    -d '{"current_password":"testpass123","new_password":"short"}'
+```
+
+Expected: HTTP 400 `{"error":"password must be at least 8 characters"}`
+
+### Unverified Email
+
+If email is not verified, password change is rejected:
+
+Expected: HTTP 403 `{"error":"email must be verified before changing password"}`
+
+### OAuth-Only Account (No Credentials)
+
+If the user registered via OAuth and has no password credentials:
+
+Expected: HTTP 404 `{"error":"no credentials found (OAuth-only account)"}`
+
+### Rate Limiting
+
+HTTP: 5 requests per minute per canonical_id.
+MQTT: shares the vault unlock rate limiter.
+
+### Login With New Password
+
+After changing, verify the old password no longer works and the new one does:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"user@example.com","password":"newpass456"}'
+```
+
+Expected: successful login with session cookie.
+
+### Verification Checklist
+
+- [ ] `POST /auth/password/change` returns 200 with correct current password
+- [ ] Returns 401 with wrong current password
+- [ ] Returns 400 with new password shorter than 8 characters
+- [ ] Returns 403 if email not verified
+- [ ] Returns 404 for OAuth-only account (no credentials)
+- [ ] Returns 404 when email-auth is disabled
+- [ ] Rate limited after 5 attempts per minute
+- [ ] Login works with new password after change
+- [ ] Login fails with old password after change
+- [ ] MQTT `$DB/_auth/password/change` works with same logic
+- [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
+
+---
+
+## 29. Additional Admin MQTT Endpoints
 
 ### Entity Catalog
 
@@ -335,7 +428,7 @@ Expected when not found: `{"code":404,"message":"constraint not found","status":
 
 ---
 
-## 29. Advanced Agent/Cluster Options
+## 30. Advanced Agent/Cluster Options
 
 ### WebSocket Transport
 

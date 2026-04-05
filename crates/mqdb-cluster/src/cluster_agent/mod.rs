@@ -89,6 +89,7 @@ struct MessageProcessorChannels {
 struct AdminRequest {
     topic: String,
     response_topic: Option<String>,
+    correlation_data: Option<Vec<u8>>,
     payload: Vec<u8>,
 }
 
