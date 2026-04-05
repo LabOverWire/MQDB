@@ -496,11 +496,13 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         | AdminOperation::VaultLock
         | AdminOperation::VaultDisable
         | AdminOperation::VaultChange
-        | AdminOperation::VaultStatus
-        | AdminOperation::PasswordChange => Response::error(
-            mqdb_core::ErrorCode::Forbidden,
-            "vault requires http-api feature",
-        ),
+        | AdminOperation::VaultStatus => {
+            Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
+        }
+        #[cfg(not(feature = "http-api"))]
+        AdminOperation::PasswordChange => {
+            Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
+        }
     };
 
     if let Some(response_topic) = &ctx.message.properties.response_topic {
@@ -1645,7 +1647,7 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
 
     if !crate::http::credentials::verify_password(stored_hash, current_password) {
         return Response::error(
-            mqdb_core::ErrorCode::Forbidden,
+            mqdb_core::ErrorCode::Unauthorized,
             "incorrect current password",
         );
     }
