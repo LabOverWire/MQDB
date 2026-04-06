@@ -70,6 +70,7 @@ pub struct ServerState {
     pub email_auth: bool,
     pub verify_rate_limiter: RateLimiter,
     pub password_change_rate_limiter: RateLimiter,
+    pub password_reset_rate_limiter: RateLimiter,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -2459,6 +2460,14 @@ pub async fn handle_verify_submit(
         );
     }
 
+    if challenge.get("purpose").and_then(|v| v.as_str()) == Some("password_reset") {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "cannot verify a password reset challenge via this endpoint"}),
+            cors,
+        );
+    }
+
     let status = challenge
         .get("status")
         .and_then(|v| v.as_str())
@@ -2753,6 +2762,329 @@ pub async fn handle_password_change(
     }
 
     json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_password_reset_start(
+    state: &ServerState,
+    body: &[u8],
+    client_ip: &str,
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(email) = body_value.get("email").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing email field"}), cors);
+    };
+
+    if !state
+        .password_reset_rate_limiter
+        .check_and_record(client_ip)
+    {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many requests, try again later"}),
+            cors,
+        );
+    }
+
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+
+    let creds = list_entities(
+        &state.mqtt_client,
+        "_credentials",
+        &format!("email_hash={email_hash}"),
+    )
+    .await;
+
+    let canonical_id = creds
+        .as_ref()
+        .and_then(|list| list.first())
+        .and_then(|c| c.get("id").and_then(|v| v.as_str()));
+
+    let Some(canonical_id) = canonical_id else {
+        return json_response_with_credentials(
+            200,
+            &json!({"status": "reset_started", "expires_in": 600}),
+            cors,
+        );
+    };
+    let canonical_id = canonical_id.to_string();
+
+    expire_pending_challenges(state, &email_hash).await;
+
+    let challenge_id = uuid_v4();
+    let now = now_unix();
+    let expires_at = now + 600;
+
+    let Some(code) = generate_verification_code() else {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to generate verification code"}),
+            cors,
+        );
+    };
+    let code_hash = hash_code(&code);
+
+    let challenge_data = json!({
+        "id": challenge_id,
+        "canonical_id": canonical_id,
+        "method": "email",
+        "target_hash": email_hash,
+        "code_hash": code_hash,
+        "status": "pending",
+        "mode": "code",
+        "purpose": "password_reset",
+        "attempts": 0,
+        "max_attempts": 5,
+        "created_at": now.to_string(),
+        "expires_at": expires_at.to_string(),
+    });
+
+    if create_entity_with_response(
+        &state.mqtt_client,
+        "_verification_challenges",
+        &challenge_data,
+    )
+    .await
+    .is_none()
+    {
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to create reset challenge"}),
+            cors,
+        );
+    }
+
+    let notification = json!({
+        "challenge_id": challenge_id,
+        "method": "email",
+        "mode": "code",
+        "purpose": "password_reset",
+        "target": email,
+        "code": code,
+        "expires_at": expires_at.to_string(),
+    });
+
+    let notify_payload = serde_json::to_vec(&notification).unwrap_or_default();
+    if let Err(e) = state
+        .mqtt_client
+        .publish("$DB/_verify/challenges/email", notify_payload)
+        .await
+    {
+        warn!(error = %e, "failed to publish password reset challenge notification");
+    }
+
+    json_response_with_credentials(
+        200,
+        &json!({
+            "status": "reset_started",
+            "challenge_id": challenge_id,
+            "expires_in": 600,
+        }),
+        cors,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn handle_password_reset_submit(
+    state: &ServerState,
+    body: &[u8],
+    client_ip: &str,
+) -> HttpResponse {
+    let cors = state.cors_origin.as_deref();
+
+    if !state.email_auth {
+        return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
+    }
+
+    let body_value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => {
+            return json_response_with_credentials(400, &json!({"error": "invalid JSON"}), cors);
+        }
+    };
+
+    let Some(challenge_id) = body_value.get("challenge_id").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing challenge_id field"}),
+            cors,
+        );
+    };
+
+    let Some(submitted_code) = body_value.get("code").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(400, &json!({"error": "missing code field"}), cors);
+    };
+
+    let Some(new_password) = body_value.get("new_password").and_then(|v| v.as_str()) else {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "missing new_password field"}),
+            cors,
+        );
+    };
+
+    if let Err(e) = credentials::validate_password(new_password) {
+        return json_response_with_credentials(400, &json!({"error": e}), cors);
+    }
+
+    if !state
+        .password_reset_rate_limiter
+        .check_and_record(client_ip)
+    {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many requests, try again later"}),
+            cors,
+        );
+    }
+
+    let Some(challenge) =
+        read_entity(&state.mqtt_client, "_verification_challenges", challenge_id).await
+    else {
+        return json_response_with_credentials(404, &json!({"error": "challenge not found"}), cors);
+    };
+
+    let purpose = challenge
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if purpose != "password_reset" {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "invalid challenge type"}),
+            cors,
+        );
+    }
+
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" && status != "delivered" {
+        return json_response_with_credentials(
+            400,
+            &json!({"error": format!("challenge is {status}")}),
+            cors,
+        );
+    }
+
+    let expires_at = challenge
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if expires_at > 0 && now_unix() >= expires_at {
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "expired"}),
+        )
+        .await;
+        return json_response_with_credentials(
+            400,
+            &json!({"error": "challenge has expired"}),
+            cors,
+        );
+    }
+
+    let attempts = challenge
+        .get("attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let max_attempts = challenge
+        .get("max_attempts")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(5);
+    if attempts >= max_attempts {
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "failed"}),
+        )
+        .await;
+        return json_response_with_credentials(400, &json!({"error": "too many attempts"}), cors);
+    }
+
+    let new_attempts = attempts + 1;
+    let submitted_hash = hash_code(submitted_code);
+    let stored_hash = challenge
+        .get("code_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if submitted_hash != stored_hash {
+        let new_status = if new_attempts >= max_attempts {
+            "failed"
+        } else {
+            status
+        };
+        update_entity(
+            &state.mqtt_client,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"attempts": new_attempts, "status": new_status}),
+        )
+        .await;
+        let remaining = max_attempts.saturating_sub(new_attempts);
+        return json_response_with_credentials(
+            401,
+            &json!({"error": "invalid code", "attempts_remaining": remaining}),
+            cors,
+        );
+    }
+
+    update_entity(
+        &state.mqtt_client,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "verified", "attempts": new_attempts}),
+    )
+    .await;
+
+    let canonical_id = challenge
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let new_hash = match credentials::hash_password(new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            error!(error = %e, "password hashing failed during password reset");
+            return json_response_with_credentials(500, &json!({"error": "internal error"}), cors);
+        }
+    };
+
+    update_entity(
+        &state.mqtt_client,
+        "_credentials",
+        canonical_id,
+        &json!({"password_hash": new_hash}),
+    )
+    .await;
+
+    update_entity(
+        &state.mqtt_client,
+        "_identities",
+        canonical_id,
+        &json!({"email_verified": true}),
+    )
+    .await;
+
+    json_response_with_credentials(200, &json!({"status": "password_reset"}), cors)
 }
 
 #[cfg(feature = "dev-insecure")]
