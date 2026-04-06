@@ -33,7 +33,7 @@ pub struct HttpServerConfig {
     pub cors_origin: Option<String>,
     pub ticket_rate_limit: u32,
     pub trust_proxy: bool,
-    pub identity_crypto: Option<IdentityCrypto>,
+    pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
     pub vault_unlock_rate_limit: u32,

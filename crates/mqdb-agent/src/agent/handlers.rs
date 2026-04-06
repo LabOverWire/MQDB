@@ -1,6 +1,8 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use std::sync::Arc;
+
 use crate::database::Database;
 use crate::http::VaultCrypto;
 use crate::vault_transform::{
@@ -63,6 +65,8 @@ pub(super) struct MessageContext<'a> {
     pub vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     pub vault_unlock_limiter: &'a RateLimiter,
+    #[cfg(feature = "http-api")]
+    pub identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -91,6 +95,8 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             vault_min_passphrase_length: ctx.vault_min_passphrase_length,
             #[cfg(feature = "http-api")]
             vault_unlock_limiter: ctx.vault_unlock_limiter,
+            #[cfg(feature = "http-api")]
+            identity_crypto: ctx.identity_crypto,
         };
         handle_admin_operation(&admin_ctx, admin_op).await;
         return;
@@ -408,6 +414,8 @@ struct AdminContext<'a> {
     vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     vault_unlock_limiter: &'a RateLimiter,
+    #[cfg(feature = "http-api")]
+    identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1705,20 +1713,30 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
 
-    let stored_email_hash = identity
-        .get("email_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let computed_hash = crate::http::credentials::compute_email_hash(None, email);
-    if stored_email_hash.is_empty() || computed_hash != stored_email_hash {
+    let email_lower = email.to_lowercase();
+    let email_matches = if let Some(crypto) = ctx.identity_crypto {
+        let computed = crypto.blind_index("_identities", &email_lower);
+        identity
+            .get("email_hash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored == computed)
+    } else {
+        identity
+            .get("primary_email")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored.to_lowercase() == email_lower)
+    };
+    if !email_matches {
         return Response::error(
             mqdb_core::ErrorCode::BadRequest,
             "email does not match identity",
         );
     }
 
-    let target_hash = stored_email_hash.to_string();
+    let target_hash = crate::http::credentials::compute_email_hash(
+        ctx.identity_crypto.map(std::convert::AsRef::as_ref),
+        email,
+    );
 
     if let Some(challenges) = crate::vault_ops::list_entities_db(
         ctx.db,
@@ -1993,13 +2011,33 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         }
     };
 
-    crate::vault_ops::update_entity_db(
-        ctx.db,
-        "_credentials",
-        canonical_id,
-        &json!({"password_hash": new_hash}),
-    )
-    .await;
+    let target_hash = challenge
+        .get("target_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let existing_creds =
+        crate::vault_ops::read_entity_db(ctx.db, "_credentials", canonical_id).await;
+    if existing_creds.is_some() {
+        crate::vault_ops::update_entity_db(
+            ctx.db,
+            "_credentials",
+            canonical_id,
+            &json!({"password_hash": new_hash}),
+        )
+        .await;
+    } else {
+        crate::vault_ops::create_entity_db(
+            ctx.db,
+            "_credentials",
+            &json!({
+                "id": canonical_id,
+                "password_hash": new_hash,
+                "email_hash": target_hash,
+            }),
+        )
+        .await;
+    }
 
     crate::vault_ops::update_entity_db(
         ctx.db,

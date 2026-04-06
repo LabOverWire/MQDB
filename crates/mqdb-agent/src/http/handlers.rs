@@ -63,7 +63,7 @@ pub struct ServerState {
     pub register_rate_limiter: RateLimiter,
     pub jti_revocation: JtiRevocationStore,
     pub trust_proxy: bool,
-    pub identity_crypto: Option<IdentityCrypto>,
+    pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Arc<VaultKeyStore>,
     pub vault_min_passphrase_length: usize,
@@ -2028,7 +2028,7 @@ pub async fn handle_register(state: &ServerState, body: &[u8], client_ip: &str) 
         );
     }
 
-    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_deref(), email);
     let filter = format!("email_hash={email_hash}");
     if let Some(existing) = list_entities(&state.mqtt_client, "_credentials", &filter).await
         && !existing.is_empty()
@@ -2154,7 +2154,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         );
     }
 
-    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_deref(), email);
     let filter = format!("email_hash={email_hash}");
     let cred_record = match list_entities(&state.mqtt_client, "_credentials", &filter).await {
         Some(records) if !records.is_empty() => records.into_iter().next().unwrap_or_default(),
@@ -2312,7 +2312,7 @@ pub async fn handle_verify_start(
         );
     };
 
-    let target_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), &email);
+    let target_hash = credentials::compute_email_hash(state.identity_crypto.as_deref(), &email);
 
     expire_pending_challenges(state, &target_hash).await;
 
@@ -2798,7 +2798,7 @@ pub async fn handle_password_reset_start(
         );
     }
 
-    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_ref(), email);
+    let email_hash = credentials::compute_email_hash(state.identity_crypto.as_deref(), email);
 
     let creds = list_entities(
         &state.mqtt_client,
@@ -2807,19 +2807,25 @@ pub async fn handle_password_reset_start(
     )
     .await;
 
-    let canonical_id = creds
+    let canonical_id_from_creds = creds
         .as_ref()
         .and_then(|list| list.first())
-        .and_then(|c| c.get("id").and_then(|v| v.as_str()));
+        .and_then(|c| c.get("id").and_then(|v| v.as_str()))
+        .map(String::from);
 
-    let Some(canonical_id) = canonical_id else {
-        return json_response_with_credentials(
-            200,
-            &json!({"status": "reset_started", "expires_in": 600}),
-            cors,
-        );
+    let canonical_id = match canonical_id_from_creds {
+        Some(id) => id,
+        None => match find_identity_by_email(state, email).await {
+            Some(id) => id,
+            None => {
+                return json_response_with_credentials(
+                    200,
+                    &json!({"status": "reset_started", "expires_in": 600}),
+                    cors,
+                );
+            }
+        },
     };
-    let canonical_id = canonical_id.to_string();
 
     expire_pending_challenges(state, &email_hash).await;
 
@@ -3068,13 +3074,32 @@ pub async fn handle_password_reset_submit(
         }
     };
 
-    update_entity(
-        &state.mqtt_client,
-        "_credentials",
-        canonical_id,
-        &json!({"password_hash": new_hash}),
-    )
-    .await;
+    let target_hash = challenge
+        .get("target_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let existing_creds = read_entity(&state.mqtt_client, "_credentials", canonical_id).await;
+    if existing_creds.is_some() {
+        update_entity(
+            &state.mqtt_client,
+            "_credentials",
+            canonical_id,
+            &json!({"password_hash": new_hash}),
+        )
+        .await;
+    } else {
+        create_entity_with_response(
+            &state.mqtt_client,
+            "_credentials",
+            &json!({
+                "id": canonical_id,
+                "password_hash": new_hash,
+                "email_hash": target_hash,
+            }),
+        )
+        .await;
+    }
 
     update_entity(
         &state.mqtt_client,

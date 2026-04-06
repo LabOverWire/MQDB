@@ -59,6 +59,8 @@ impl MqdbAgent {
         let vault_min_passphrase_length = self.vault_min_passphrase_length;
         #[cfg(feature = "http-api")]
         let vault_unlock_limiter = Arc::clone(&self.vault_unlock_limiter);
+        #[cfg(feature = "http-api")]
+        let identity_crypto = self.identity_crypto.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -125,6 +127,8 @@ impl MqdbAgent {
                                 vault_min_passphrase_length,
                                 #[cfg(feature = "http-api")]
                                 vault_unlock_limiter: &vault_unlock_limiter,
+                                #[cfg(feature = "http-api")]
+                                identity_crypto: identity_crypto.as_ref(),
                             };
                             handle_message(&ctx, message).await;
                         } else {
