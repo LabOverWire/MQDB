@@ -524,10 +524,10 @@ async fn fetch_picture_from_links(state: &ServerState, canonical_id: &str) -> Op
         if let Some(ref crypto) = state.identity_crypto {
             crypto.decrypt_json_fields("_identity_links", &mut link, &["picture"]);
         }
-        if let Some(pic) = link.get("picture").and_then(|v| v.as_str()) {
-            if !pic.is_empty() {
-                return Some(pic.to_string());
-            }
+        if let Some(pic) = link.get("picture").and_then(|v| v.as_str())
+            && !pic.is_empty()
+        {
+            return Some(pic.to_string());
         }
     }
     None
