@@ -504,6 +504,8 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 | GET | `/auth/session` | Check current session status |
 | POST | `/auth/logout` | Destroy the session |
 | POST | `/auth/password/change` | Change password (requires `--email-auth`, verified email) |
+| POST | `/auth/password/reset/start` | Start password reset (requires `--email-auth`, unauthenticated) |
+| POST | `/auth/password/reset/submit` | Submit reset code + new password (requires `--email-auth`, unauthenticated) |
 | POST | `/auth/verify/start` | Start email verification challenge (requires `--email-auth`) |
 | POST | `/auth/verify/submit` | Submit verification code (requires `--email-auth`) |
 | GET | `/auth/verify/status` | Check email verification state (requires `--email-auth`) |
@@ -513,13 +515,15 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 
 All auth endpoints use cookie-based sessions. The `/auth/ticket` endpoint exchanges a valid session for a JWT that can be used to authenticate MQTT connections.
 
-### Password Change MQTT API
+### Password Change & Reset MQTT API
 
-Password change is also available over MQTT 5.0 request-response for JWT-authenticated users:
+Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users:
 
 | Topic | Payload | Description |
 |-------|---------|-------------|
 | `$DB/_auth/password/change` | `{"current_password": "...", "new_password": "..."}` | Change password (requires verified email) |
+| `$DB/_auth/password/reset/start` | `{"email": "user@example.com"}` | Start password reset (sends verification code) |
+| `$DB/_auth/password/reset/submit` | `{"challenge_id": "...", "code": "...", "new_password": "..."}` | Submit reset code + new password |
 
 ## Vault Encryption
 
