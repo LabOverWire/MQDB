@@ -516,6 +516,22 @@ async fn update_identity_link(state: &ServerState, link_key: &str, identity: &Pr
     }
 }
 
+async fn fetch_picture_from_links(state: &ServerState, canonical_id: &str) -> Option<String> {
+    let filter = format!("canonical_id={canonical_id}");
+    let links = list_entities(&state.mqtt_client, "_identity_links", &filter).await?;
+    for mut link in links {
+        if let Some(ref crypto) = state.identity_crypto {
+            crypto.decrypt_json_fields("_identity_links", &mut link, &["picture"]);
+        }
+        if let Some(pic) = link.get("picture").and_then(|v| v.as_str()) {
+            if !pic.is_empty() {
+                return Some(pic.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn is_safe_filter_value(value: &str) -> bool {
     !value.is_empty() && !value.contains([',', '<', '>', '=', '!', '~', '?'])
 }
@@ -2206,12 +2222,14 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         (None, Some(email.to_string()), false)
     };
 
+    let picture = fetch_picture_from_links(state, canonical_id).await;
+
     let identity = ProviderIdentity {
         provider: "email",
         provider_sub: canonical_id.to_string(),
         email: display_email.clone(),
         name: display_name.clone(),
-        picture: None,
+        picture: picture.clone(),
         email_verified: verified,
     };
     let jwt = mint_callback_jwt(state, canonical_id, &identity);
@@ -2223,7 +2241,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         provider_sub: canonical_id.to_string(),
         email: display_email.clone(),
         name: display_name.clone(),
-        picture: None,
+        picture: picture.clone(),
     }) else {
         return json_response_with_credentials(
             500,
@@ -2239,6 +2257,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
             "canonical_id": canonical_id,
             "email": display_email,
             "name": display_name,
+            "picture": picture,
             "provider": "email",
         }),
         &cookie,
