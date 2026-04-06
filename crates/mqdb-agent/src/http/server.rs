@@ -99,7 +99,16 @@ impl HttpServer {
             } else {
                 5
             }),
-            password_reset_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 3 }),
+            password_reset_start_rate_limiter: RateLimiter::new(if no_rate_limit {
+                u32::MAX
+            } else {
+                3
+            }),
+            password_reset_submit_rate_limiter: RateLimiter::new(if no_rate_limit {
+                u32::MAX
+            } else {
+                5
+            }),
         });
 
         initialize_identity_constraints(&state).await;

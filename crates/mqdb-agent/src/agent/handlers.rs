@@ -1765,47 +1765,12 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         }
     }
 
-    let rng = ring::rand::SystemRandom::new();
-    let mut id_bytes = [0u8; 16];
-    if ring::rand::SecureRandom::fill(&rng, &mut id_bytes).is_err() {
+    let challenge_id = crate::http::challenge_utils::uuid_v4();
+    let Some(code) = crate::http::challenge_utils::generate_verification_code() else {
         return Response::error(mqdb_core::ErrorCode::Internal, "RNG failure");
-    }
-    id_bytes[6] = (id_bytes[6] & 0x0F) | 0x40;
-    id_bytes[8] = (id_bytes[8] & 0x3F) | 0x80;
-    let challenge_id = format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        id_bytes[0],
-        id_bytes[1],
-        id_bytes[2],
-        id_bytes[3],
-        id_bytes[4],
-        id_bytes[5],
-        id_bytes[6],
-        id_bytes[7],
-        id_bytes[8],
-        id_bytes[9],
-        id_bytes[10],
-        id_bytes[11],
-        id_bytes[12],
-        id_bytes[13],
-        id_bytes[14],
-        id_bytes[15]
-    );
-
-    let mut code_bytes = [0u8; 4];
-    if ring::rand::SecureRandom::fill(&rng, &mut code_bytes).is_err() {
-        return Response::error(mqdb_core::ErrorCode::Internal, "RNG failure");
-    }
-    let code_num = u32::from_be_bytes(code_bytes) % 1_000_000;
-    let code = format!("{code_num:06}");
-    let code_hash = {
-        let d = ring::digest::digest(&ring::digest::SHA256, code.as_bytes());
-        crate::http::credentials::hex_encode(d.as_ref())
     };
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let code_hash = crate::http::challenge_utils::hash_code(&code);
+    let now = crate::http::challenge_utils::now_unix();
     let expires_at = now + 600;
 
     let challenge_data = json!({
@@ -1936,9 +1901,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let now = crate::http::challenge_utils::now_unix();
     if expires_at > 0 && now >= expires_at {
         crate::vault_ops::update_entity_db(
             ctx.db,
@@ -1970,10 +1933,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     }
 
     let new_attempts = attempts + 1;
-    let submitted_hash = {
-        let d = ring::digest::digest(&ring::digest::SHA256, submitted_code.as_bytes());
-        crate::http::credentials::hex_encode(d.as_ref())
-    };
+    let submitted_hash = crate::http::challenge_utils::hash_code(submitted_code);
     let stored_hash = challenge
         .get("code_hash")
         .and_then(|v| v.as_str())

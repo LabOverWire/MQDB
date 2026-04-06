@@ -70,7 +70,8 @@ pub struct ServerState {
     pub email_auth: bool,
     pub verify_rate_limiter: RateLimiter,
     pub password_change_rate_limiter: RateLimiter,
-    pub password_reset_rate_limiter: RateLimiter,
+    pub password_reset_start_rate_limiter: RateLimiter,
+    pub password_reset_submit_rate_limiter: RateLimiter,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -1237,31 +1238,7 @@ fn chrono_now_iso() -> String {
 }
 
 fn uuid_v4() -> String {
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 16];
-    rng.fill(&mut bytes)
-        .expect("system RNG unavailable — OS CSPRNG failure");
-    bytes[6] = (bytes[6] & 0x0F) | 0x40;
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
+    super::challenge_utils::uuid_v4()
 }
 
 async fn list_entities(
@@ -2807,7 +2784,7 @@ pub async fn handle_password_reset_start(
     };
 
     if !state
-        .password_reset_rate_limiter
+        .password_reset_start_rate_limiter
         .check_and_record(client_ip)
     {
         return json_response_with_credentials(
@@ -2965,7 +2942,7 @@ pub async fn handle_password_reset_submit(
     }
 
     if !state
-        .password_reset_rate_limiter
+        .password_reset_submit_rate_limiter
         .check_and_record(client_ip)
     {
         return json_response_with_credentials(
@@ -3311,16 +3288,11 @@ pub async fn cleanup_expired_challenges(state: &ServerState) {
 }
 
 fn generate_verification_code() -> Option<String> {
-    let rng = SystemRandom::new();
-    let mut bytes = [0u8; 4];
-    rng.fill(&mut bytes).ok()?;
-    let num = u32::from_be_bytes(bytes) % 1_000_000;
-    Some(format!("{num:06}"))
+    super::challenge_utils::generate_verification_code()
 }
 
 fn hash_code(code: &str) -> String {
-    let d = digest::digest(&digest::SHA256, code.as_bytes());
-    credentials::hex_encode(d.as_ref())
+    super::challenge_utils::hash_code(code)
 }
 
 async fn expire_pending_challenges(state: &ServerState, target_hash: &str) {
@@ -3352,63 +3324,5 @@ async fn expire_pending_challenges(state: &ServerState, target_hash: &str) {
 }
 
 fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verification_code_is_six_digits() {
-        for _ in 0..100 {
-            let code = generate_verification_code().unwrap();
-            assert_eq!(code.len(), 6);
-            assert!(code.chars().all(|c| c.is_ascii_digit()));
-        }
-    }
-
-    #[test]
-    fn verification_codes_are_not_constant() {
-        let codes: std::collections::HashSet<String> = (0..20)
-            .filter_map(|_| generate_verification_code())
-            .collect();
-        assert!(codes.len() > 1);
-    }
-
-    #[test]
-    fn hash_code_produces_64_char_hex() {
-        let h = hash_code("123456");
-        assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn hash_code_is_deterministic() {
-        assert_eq!(hash_code("539666"), hash_code("539666"));
-    }
-
-    #[test]
-    fn hash_code_differs_for_different_inputs() {
-        assert_ne!(hash_code("000000"), hash_code("000001"));
-    }
-
-    #[test]
-    fn hash_code_known_sha256() {
-        let h = hash_code("000000");
-        let expected = "91b4d142823f7d20c5f08df69122de43f35f057a988d9619f6d3138485c9a203";
-        assert_eq!(h, expected);
-    }
-
-    #[test]
-    fn now_unix_returns_reasonable_timestamp() {
-        let ts = now_unix();
-        let expected = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        assert!(ts >= expected - 1 && ts <= expected + 1);
-    }
+    super::challenge_utils::now_unix()
 }
