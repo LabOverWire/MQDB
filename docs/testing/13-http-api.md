@@ -391,7 +391,7 @@ Reset password for email-auth users who forgot their password. HTTP endpoints ar
 
 ### Prerequisites
 
-Use the same agent setup as section 27 (Email Verification). Register a user and complete email verification first. Subscribe to `$DB/_verify/challenges/email` in a background terminal to capture verification codes.
+Use the same agent setup as section 27 (Email Verification). Register a user and complete email verification first. Subscribe to `$DB/_verify/challenges/email` in a background terminal to capture verification codes; the subscription must use admin credentials (e.g. `mosquitto_sub -u admin -P admin123 -t '$DB/_verify/challenges/email'`) because the verification namespace is admin-protected.
 
 ### Start Password Reset (HTTP)
 

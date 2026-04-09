@@ -223,7 +223,7 @@ impl MqdbAgent {
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
-        self.identity_crypto = config.identity_crypto.clone();
+        self.identity_crypto.clone_from(&config.identity_crypto);
         *self.http_config.lock().expect("http_config lock") = Some(config);
         self
     }

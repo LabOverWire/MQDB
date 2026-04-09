@@ -418,9 +418,9 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
-| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
+| AdminRequired | `$DB/_admin/#`, `$DB/_verify/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
 
-Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, `$DB/_verify/*`, and `$DB/_auth/*` are accessible to any authenticated user.
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_auth/*` are accessible to any authenticated user. Verifier services that subscribe to `$DB/_verify/challenges/#` or publish to `$DB/_verify/receipts/#` must connect with admin credentials so they bypass topic protection on the verification namespace.
 
 #### Admin User Configuration
 

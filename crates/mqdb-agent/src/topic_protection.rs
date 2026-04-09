@@ -216,6 +216,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_service_bypasses_verify_topics() {
+        let provider = create_test_provider_with_internal("mqdb-internal-abc123");
+
+        let result = provider
+            .authorize_publish(
+                "mqdb-http-oauth",
+                Some("mqdb-internal-abc123"),
+                "$DB/_verify/challenges/email",
+            )
+            .await;
+        assert!(result);
+
+        let result = provider
+            .authorize_subscribe(
+                "mqdb-http-oauth",
+                Some("mqdb-internal-abc123"),
+                "$DB/_verify/receipts/#",
+            )
+            .await;
+        assert!(result);
+
+        let external = create_test_provider(HashSet::new());
+
+        let result = external
+            .authorize_publish("client-1", Some("alice"), "$DB/_verify/receipts/abc-123")
+            .await;
+        assert!(!result);
+
+        let result = external
+            .authorize_subscribe("client-1", Some("alice"), "$DB/_verify/challenges/email")
+            .await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
     async fn spoofed_client_id_blocked() {
         let provider = create_test_provider_with_internal("mqdb-internal-abc123");
 
