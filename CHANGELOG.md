@@ -15,6 +15,7 @@ Affected crates: mqdb-core (0.5.0), mqdb-agent (0.6.0), mqdb-cli (0.7.0).
 - Challenge `purpose` field to distinguish password reset from email verification challenges
 - Purpose guard in `handle_verify_submit` to reject password reset challenges
 - `--no-rate-limit` now disables all HTTP rate limiters (login, register, verify, password change, password reset)
+- `AdminRequired` topic protection now falls through to ACL for non-admin users, enabling operator-provisioned service accounts
 
 ### Security
 

@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::topic_rules::check_topic_access;
+use crate::topic_rules::{BlockReason, check_topic_access};
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
@@ -100,6 +100,20 @@ impl AuthProvider for TopicProtectionAuthProvider {
             }
 
             if let Err(reason) = check_topic_access(topic, true, is_admin) {
+                if reason == BlockReason::AdminRequired {
+                    let allowed = self
+                        .inner
+                        .authorize_publish(&client_id_owned, user_id, topic)
+                        .await;
+                    if !allowed {
+                        debug!(
+                            client_id = %client_id_owned,
+                            topic = %topic,
+                            "publish on AdminRequired topic denied by ACL"
+                        );
+                    }
+                    return allowed;
+                }
                 debug!(
                     client_id = %client_id_owned,
                     topic = %topic,
@@ -134,6 +148,20 @@ impl AuthProvider for TopicProtectionAuthProvider {
             }
 
             if let Err(reason) = check_topic_access(topic_filter, false, is_admin) {
+                if reason == BlockReason::AdminRequired {
+                    let allowed = self
+                        .inner
+                        .authorize_subscribe(&client_id_owned, user_id, topic_filter)
+                        .await;
+                    if !allowed {
+                        debug!(
+                            client_id = %client_id_owned,
+                            topic_filter = %topic_filter,
+                            "subscribe on AdminRequired topic denied by ACL"
+                        );
+                    }
+                    return allowed;
+                }
                 debug!(
                     client_id = %client_id_owned,
                     topic_filter = %topic_filter,
@@ -187,8 +215,42 @@ mod tests {
     use super::*;
     use mqtt5::broker::auth::AllowAllAuthProvider;
 
+    struct DenyAllAuthProvider;
+
+    impl AuthProvider for DenyAllAuthProvider {
+        fn authenticate<'a>(
+            &'a self,
+            _connect: &'a ConnectPacket,
+            _client_addr: SocketAddr,
+        ) -> Pin<Box<dyn Future<Output = Result<AuthResult>> + Send + 'a>> {
+            Box::pin(async { Ok(AuthResult::success()) })
+        }
+
+        fn authorize_publish<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
+        }
+
+        fn authorize_subscribe<'a>(
+            &'a self,
+            _client_id: &str,
+            _user_id: Option<&'a str>,
+            _topic_filter: &'a str,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            Box::pin(async { false })
+        }
+    }
+
     fn create_test_provider(admin_users: HashSet<String>) -> TopicProtectionAuthProvider {
         TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), admin_users)
+    }
+
+    fn create_deny_provider() -> TopicProtectionAuthProvider {
+        TopicProtectionAuthProvider::new(Arc::new(DenyAllAuthProvider), HashSet::new())
     }
 
     fn create_test_provider_with_internal(internal_username: &str) -> TopicProtectionAuthProvider {
@@ -236,16 +298,58 @@ mod tests {
             )
             .await;
         assert!(result);
+    }
 
-        let external = create_test_provider(HashSet::new());
+    #[tokio::test]
+    async fn acl_grant_allows_admin_required_topics() {
+        let provider = create_test_provider(HashSet::new());
 
-        let result = external
+        let result = provider
+            .authorize_publish(
+                "client-1",
+                Some("email-verifier"),
+                "$DB/_verify/challenges/email",
+            )
+            .await;
+        assert!(result);
+
+        let result = provider
+            .authorize_subscribe("client-1", Some("email-verifier"), "$DB/_verify/receipts/#")
+            .await;
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn no_acl_grant_blocks_admin_required_topics() {
+        let provider = create_deny_provider();
+
+        let result = provider
             .authorize_publish("client-1", Some("alice"), "$DB/_verify/receipts/abc-123")
             .await;
         assert!(!result);
 
-        let result = external
+        let result = provider
             .authorize_subscribe("client-1", Some("alice"), "$DB/_verify/challenges/email")
+            .await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn acl_grant_does_not_bypass_hard_blocks() {
+        let provider = create_test_provider(HashSet::new());
+
+        let result = provider
+            .authorize_publish("client-1", Some("alice"), "_mqdb/cluster/heartbeat")
+            .await;
+        assert!(!result);
+
+        let result = provider
+            .authorize_subscribe("client-1", Some("alice"), "$DB/_idx/users")
+            .await;
+        assert!(!result);
+
+        let result = provider
+            .authorize_subscribe("client-1", Some("alice"), "$DB/_sessions/list")
             .await;
         assert!(!result);
     }
@@ -322,10 +426,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_admin_user_blocked_on_admin_topics() {
-        let mut admin_users = HashSet::new();
-        admin_users.insert("admin".to_string());
-        let provider = create_test_provider(admin_users);
+    async fn non_admin_user_blocked_on_admin_topics_without_acl() {
+        let provider = create_deny_provider();
 
         let result = provider
             .authorize_publish("client-1", Some("regular"), "$DB/_admin/backup")
