@@ -1,6 +1,8 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use std::sync::Arc;
+
 use crate::database::Database;
 use crate::http::VaultCrypto;
 use crate::vault_transform::{
@@ -63,6 +65,8 @@ pub(super) struct MessageContext<'a> {
     pub vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     pub vault_unlock_limiter: &'a RateLimiter,
+    #[cfg(feature = "http-api")]
+    pub identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -91,6 +95,8 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             vault_min_passphrase_length: ctx.vault_min_passphrase_length,
             #[cfg(feature = "http-api")]
             vault_unlock_limiter: ctx.vault_unlock_limiter,
+            #[cfg(feature = "http-api")]
+            identity_crypto: ctx.identity_crypto,
         };
         handle_admin_operation(&admin_ctx, admin_op).await;
         return;
@@ -408,6 +414,8 @@ struct AdminContext<'a> {
     vault_min_passphrase_length: usize,
     #[cfg(feature = "http-api")]
     vault_unlock_limiter: &'a RateLimiter,
+    #[cfg(feature = "http-api")]
+    identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -490,6 +498,12 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         AdminOperation::VaultStatus => handle_vault_status_mqtt(ctx).await,
         #[cfg(feature = "http-api")]
         AdminOperation::PasswordChange => handle_password_change_mqtt(ctx, &payload).await,
+        #[cfg(feature = "http-api")]
+        AdminOperation::PasswordResetStart => handle_password_reset_start_mqtt(ctx, &payload).await,
+        #[cfg(feature = "http-api")]
+        AdminOperation::PasswordResetSubmit => {
+            handle_password_reset_submit_mqtt(ctx, &payload).await
+        }
         #[cfg(not(feature = "http-api"))]
         AdminOperation::VaultEnable
         | AdminOperation::VaultUnlock
@@ -500,7 +514,9 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
             Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
         }
         #[cfg(not(feature = "http-api"))]
-        AdminOperation::PasswordChange => {
+        AdminOperation::PasswordChange
+        | AdminOperation::PasswordResetStart
+        | AdminOperation::PasswordResetSubmit => {
             Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
         }
     };
@@ -1669,4 +1685,327 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
     .await;
 
     Response::ok(json!({"status": "password changed"}))
+}
+
+#[cfg(feature = "http-api")]
+#[allow(clippy::too_many_lines)]
+async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let Some(canonical_id) = extract_sender(ctx.message) else {
+        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
+    };
+
+    let Some(email) = payload.get("email").and_then(|v| v.as_str()) else {
+        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing email field");
+    };
+
+    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many attempts, try again later",
+        );
+    }
+
+    let Some(identity) =
+        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
+    else {
+        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
+    };
+
+    let email_lower = email.to_lowercase();
+    let email_matches = if let Some(crypto) = ctx.identity_crypto {
+        let computed = crypto.blind_index("_identities", &email_lower);
+        identity
+            .get("email_hash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored == computed)
+    } else {
+        identity
+            .get("primary_email")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored.to_lowercase() == email_lower)
+    };
+    if !email_matches {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "email does not match identity",
+        );
+    }
+
+    let target_hash = crate::http::credentials::compute_email_hash(
+        ctx.identity_crypto.map(std::convert::AsRef::as_ref),
+        email,
+    );
+
+    if let Some(challenges) = crate::vault_ops::list_entities_db(
+        ctx.db,
+        "_verification_challenges",
+        &format!("target_hash={target_hash}"),
+    )
+    .await
+    {
+        for challenge in challenges {
+            let status = challenge
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if status != "pending" && status != "delivered" {
+                continue;
+            }
+            if let Some(id) = challenge.get("id").and_then(|v| v.as_str()) {
+                crate::vault_ops::update_entity_db(
+                    ctx.db,
+                    "_verification_challenges",
+                    id,
+                    &json!({"status": "expired"}),
+                )
+                .await;
+            }
+        }
+    }
+
+    let challenge_id = crate::http::challenge_utils::uuid_v4();
+    let Some(code) = crate::http::challenge_utils::generate_verification_code() else {
+        return Response::error(mqdb_core::ErrorCode::Internal, "RNG failure");
+    };
+    let code_hash = crate::http::challenge_utils::hash_code(&code);
+    let now = crate::http::challenge_utils::now_unix();
+    let expires_at = now + 600;
+
+    let challenge_data = json!({
+        "id": challenge_id,
+        "canonical_id": canonical_id,
+        "method": "email",
+        "target_hash": target_hash,
+        "code_hash": code_hash,
+        "status": "pending",
+        "mode": "code",
+        "purpose": "password_reset",
+        "attempts": 0,
+        "max_attempts": 5,
+        "created_at": now.to_string(),
+        "expires_at": expires_at.to_string(),
+    });
+
+    if !crate::vault_ops::create_entity_db(ctx.db, "_verification_challenges", &challenge_data)
+        .await
+    {
+        return Response::error(
+            mqdb_core::ErrorCode::Internal,
+            "failed to create reset challenge",
+        );
+    }
+
+    let notification = json!({
+        "challenge_id": challenge_id,
+        "method": "email",
+        "mode": "code",
+        "purpose": "password_reset",
+        "target": email,
+        "code": code,
+        "expires_at": expires_at.to_string(),
+    });
+    let notify_payload = serde_json::to_vec(&notification).unwrap_or_default();
+    if let Err(e) = ctx
+        .client
+        .publish("$DB/_verify/challenges/email", notify_payload)
+        .await
+    {
+        warn!("failed to publish password reset notification: {e}");
+    }
+
+    Response::ok(json!({
+        "status": "reset_started",
+        "challenge_id": challenge_id,
+        "expires_in": 600,
+    }))
+}
+
+#[cfg(feature = "http-api")]
+#[allow(clippy::too_many_lines)]
+async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let Some(canonical_id) = extract_sender(ctx.message) else {
+        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
+    };
+
+    let Some(challenge_id) = payload.get("challenge_id").and_then(|v| v.as_str()) else {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "missing challenge_id field",
+        );
+    };
+
+    let Some(submitted_code) = payload.get("code").and_then(|v| v.as_str()) else {
+        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing code field");
+    };
+
+    let Some(new_password) = payload.get("new_password").and_then(|v| v.as_str()) else {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "missing new_password field",
+        );
+    };
+
+    if let Err(e) = crate::http::credentials::validate_password(new_password) {
+        return Response::error(mqdb_core::ErrorCode::BadRequest, e);
+    }
+
+    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many attempts, try again later",
+        );
+    }
+
+    let Some(challenge) =
+        crate::vault_ops::read_entity_db(ctx.db, "_verification_challenges", challenge_id).await
+    else {
+        return Response::error(mqdb_core::ErrorCode::NotFound, "challenge not found");
+    };
+
+    let purpose = challenge
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if purpose != "password_reset" {
+        return Response::error(mqdb_core::ErrorCode::BadRequest, "invalid challenge type");
+    }
+
+    let challenge_canonical = challenge
+        .get("canonical_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if challenge_canonical != canonical_id {
+        return Response::error(
+            mqdb_core::ErrorCode::Forbidden,
+            "challenge belongs to another user",
+        );
+    }
+
+    let status = challenge
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status != "pending" && status != "delivered" {
+        return Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            format!("challenge is {status}"),
+        );
+    }
+
+    let expires_at = challenge
+        .get("expires_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let now = crate::http::challenge_utils::now_unix();
+    if expires_at > 0 && now >= expires_at {
+        crate::vault_ops::update_entity_db(
+            ctx.db,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "expired"}),
+        )
+        .await;
+        return Response::error(mqdb_core::ErrorCode::BadRequest, "challenge has expired");
+    }
+
+    let attempts = challenge
+        .get("attempts")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let max_attempts = challenge
+        .get("max_attempts")
+        .and_then(Value::as_u64)
+        .unwrap_or(5);
+    if attempts >= max_attempts {
+        crate::vault_ops::update_entity_db(
+            ctx.db,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"status": "failed"}),
+        )
+        .await;
+        return Response::error(mqdb_core::ErrorCode::BadRequest, "too many attempts");
+    }
+
+    let new_attempts = attempts + 1;
+    let submitted_hash = crate::http::challenge_utils::hash_code(submitted_code);
+    let stored_hash = challenge
+        .get("code_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if submitted_hash != stored_hash {
+        let new_status = if new_attempts >= max_attempts {
+            "failed"
+        } else {
+            status
+        };
+        crate::vault_ops::update_entity_db(
+            ctx.db,
+            "_verification_challenges",
+            challenge_id,
+            &json!({"attempts": new_attempts, "status": new_status}),
+        )
+        .await;
+        return Response::error(mqdb_core::ErrorCode::Unauthorized, "invalid code");
+    }
+
+    crate::vault_ops::update_entity_db(
+        ctx.db,
+        "_verification_challenges",
+        challenge_id,
+        &json!({"status": "verified", "attempts": new_attempts}),
+    )
+    .await;
+
+    let new_hash = match crate::http::credentials::hash_password(new_password) {
+        Ok(h) => h,
+        Err(e) => {
+            error!("password hashing failed: {e}");
+            return Response::error(mqdb_core::ErrorCode::Internal, "internal error");
+        }
+    };
+
+    let target_hash = challenge
+        .get("target_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let existing_creds =
+        crate::vault_ops::read_entity_db(ctx.db, "_credentials", canonical_id).await;
+    if existing_creds.is_some() {
+        crate::vault_ops::update_entity_db(
+            ctx.db,
+            "_credentials",
+            canonical_id,
+            &json!({"password_hash": new_hash}),
+        )
+        .await;
+    } else {
+        crate::vault_ops::create_entity_db(
+            ctx.db,
+            "_credentials",
+            &json!({
+                "id": canonical_id,
+                "password_hash": new_hash,
+                "email_hash": target_hash,
+            }),
+        )
+        .await;
+    }
+
+    crate::vault_ops::update_entity_db(
+        ctx.db,
+        "_identities",
+        canonical_id,
+        &json!({"email_verified": true}),
+    )
+    .await;
+
+    Response::ok(json!({"status": "password_reset"}))
 }

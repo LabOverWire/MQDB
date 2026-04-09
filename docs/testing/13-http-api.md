@@ -385,6 +385,147 @@ Expected: successful login with session cookie.
 
 ---
 
+## 28.5. Password Reset
+
+Reset password for email-auth users who forgot their password. HTTP endpoints are unauthenticated (classic "forgot password" flow). MQTT endpoints are authenticated (for OAuth users adding/resetting a password).
+
+### Prerequisites
+
+Use the same agent setup as section 27 (Email Verification). Register a user and complete email verification first. Subscribe to `$DB/_verify/challenges/email` in a background terminal to capture verification codes; the subscription must use admin credentials (e.g. `mosquitto_sub -u admin -P admin123 -t '$DB/_verify/challenges/email'`) because the verification namespace is admin-protected.
+
+### Start Password Reset (HTTP)
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/password/reset/start \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"user@example.com"}'
+```
+
+Expected: `{"status":"reset_started","challenge_id":"<uuid>","expires_in":600}`
+
+### Enumeration Prevention
+
+When using a non-existent email, the response shape is the same but without a challenge_id:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/password/reset/start \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"nonexistent@example.com"}'
+```
+
+Expected: `{"status":"reset_started","expires_in":600}`
+
+### Submit Reset Code (HTTP)
+
+Extract the verification code from the challenge notification on `$DB/_verify/challenges/email`, then submit:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/password/reset/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<uuid>","code":"<6-digit-code>","new_password":"newpass456"}'
+```
+
+Expected: `{"status":"password_reset"}`
+
+### Wrong Code
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/password/reset/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<uuid>","code":"000000","new_password":"newpass456"}'
+```
+
+Expected: HTTP 401 `{"error":"invalid code"}`
+
+### New Password Too Short
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/password/reset/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<uuid>","code":"<code>","new_password":"short"}'
+```
+
+Expected: HTTP 400 `{"error":"password must be at least 8 characters"}`
+
+### Expired Challenge
+
+After 10 minutes (or with a manipulated challenge), the code is rejected:
+
+Expected: HTTP 400 `{"error":"challenge expired"}`
+
+### Purpose Guard: Reset Challenge on Verify Endpoint
+
+A password reset challenge cannot be used on the email verification endpoint:
+
+```bash
+curl -s -b "session=$SESSION" -X POST http://127.0.0.1:3000/auth/verify/submit \
+    -H 'Content-Type: application/json' \
+    -d '{"challenge_id":"<reset-challenge-id>","code":"<code>"}'
+```
+
+Expected: HTTP 400 `{"error":"cannot verify a password reset challenge via this endpoint"}`
+
+### Start Password Reset (MQTT)
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_auth/password/reset/start' -e 'resp/test' -W 5 \
+    -m '{"email":"user@example.com"}'
+```
+
+Expected: `{"status":"ok","data":{"status":"reset_started","challenge_id":"<uuid>","expires_in":600}}`
+
+### Submit Password Reset (MQTT)
+
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u admin -P admin123 \
+    -t '$DB/_auth/password/reset/submit' -e 'resp/test' -W 5 \
+    -m '{"challenge_id":"<uuid>","code":"<code>","new_password":"newpass456"}'
+```
+
+Expected: `{"status":"ok","data":{"status":"password_reset"}}`
+
+### Login With New Password
+
+After resetting, verify the old password no longer works and the new one does:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/auth/login \
+    -H 'Content-Type: application/json' \
+    -d '{"email":"user@example.com","password":"newpass456"}'
+```
+
+Expected: successful login with session cookie.
+
+### Rate Limiting
+
+HTTP: 3 requests per minute per client IP.
+MQTT: shares the vault unlock rate limiter.
+
+### Verification Checklist
+
+- [ ] `POST /auth/password/reset/start` returns reset_started with challenge_id for existing email
+- [ ] Returns reset_started without challenge_id for non-existent email (enumeration prevention)
+- [ ] Returns 400 when email field is missing
+- [ ] Returns 404 when email-auth is disabled
+- [ ] Challenge notification published to `$DB/_verify/challenges/email` with `purpose: password_reset`
+- [ ] `POST /auth/password/reset/submit` returns password_reset with correct code
+- [ ] Returns 401 with wrong code, attempts increment
+- [ ] Returns 400 with new password shorter than 8 characters
+- [ ] Returns 400 for expired challenge
+- [ ] Returns 400 when using an email verification challenge on reset submit
+- [ ] Purpose guard: reset challenge rejected on `POST /auth/verify/submit`
+- [ ] `email_verified` set to `true` after successful reset
+- [ ] Login works with new password after reset
+- [ ] Login fails with old password after reset
+- [ ] Rate limited after 3 attempts per minute (HTTP)
+- [ ] MQTT `$DB/_auth/password/reset/start` works with same logic
+- [ ] MQTT `$DB/_auth/password/reset/submit` works with same logic
+- [ ] MQTT handler verifies email matches authenticated user's identity
+- [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
+
+---
+
 ## 29. Additional Admin MQTT Endpoints
 
 ### Entity Catalog

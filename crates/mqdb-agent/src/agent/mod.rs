@@ -41,6 +41,8 @@ pub struct MqdbAgent {
     #[cfg(feature = "http-api")]
     pub(super) vault_unlock_limiter: Arc<RateLimiter>,
     pub(super) vault_min_passphrase_length: usize,
+    #[cfg(feature = "http-api")]
+    pub(super) identity_crypto: Option<Arc<crate::http::IdentityCrypto>>,
     pub(super) license_expires_at: Option<u64>,
     #[cfg(feature = "opentelemetry")]
     pub(super) telemetry_config: Option<mqtt5::telemetry::TelemetryConfig>,
@@ -71,6 +73,8 @@ impl MqdbAgent {
             #[cfg(feature = "http-api")]
             vault_unlock_limiter: Arc::new(RateLimiter::new(10)),
             vault_min_passphrase_length: 0,
+            #[cfg(feature = "http-api")]
+            identity_crypto: None,
             license_expires_at: None,
             #[cfg(feature = "opentelemetry")]
             telemetry_config: None,
@@ -218,7 +222,8 @@ impl MqdbAgent {
 
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
-    pub fn with_http_config(self, config: crate::http::HttpServerConfig) -> Self {
+    pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
+        self.identity_crypto.clone_from(&config.identity_crypto);
         *self.http_config.lock().expect("http_config lock") = Some(config);
         self
     }

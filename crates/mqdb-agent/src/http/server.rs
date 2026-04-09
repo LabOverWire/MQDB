@@ -33,7 +33,7 @@ pub struct HttpServerConfig {
     pub cors_origin: Option<String>,
     pub ticket_rate_limit: u32,
     pub trust_proxy: bool,
-    pub identity_crypto: Option<IdentityCrypto>,
+    pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
     pub vault_key_store: Option<Arc<VaultKeyStore>>,
     pub vault_unlock_rate_limit: u32,
@@ -71,6 +71,7 @@ impl HttpServer {
             .config
             .vault_key_store
             .unwrap_or_else(|| Arc::new(VaultKeyStore::new()));
+        let no_rate_limit = self.config.vault_unlock_rate_limit == u32::MAX;
         let state = Arc::new(ServerState {
             provider_registry: self.config.provider_registry,
             jwt_config: self.config.jwt_config,
@@ -83,8 +84,8 @@ impl HttpServer {
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
             vault_unlock_limiter: RateLimiter::new(self.config.vault_unlock_rate_limit),
-            login_rate_limiter: RateLimiter::new(10),
-            register_rate_limiter: RateLimiter::new(5),
+            login_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 10 }),
+            register_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 5 }),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
@@ -92,8 +93,22 @@ impl HttpServer {
             vault_key_store,
             vault_min_passphrase_length: self.config.vault_min_passphrase_length,
             email_auth: self.config.email_auth,
-            verify_rate_limiter: RateLimiter::new(3),
-            password_change_rate_limiter: RateLimiter::new(5),
+            verify_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 3 }),
+            password_change_rate_limiter: RateLimiter::new(if no_rate_limit {
+                u32::MAX
+            } else {
+                5
+            }),
+            password_reset_start_rate_limiter: RateLimiter::new(if no_rate_limit {
+                u32::MAX
+            } else {
+                3
+            }),
+            password_reset_submit_rate_limiter: RateLimiter::new(if no_rate_limit {
+                u32::MAX
+            } else {
+                5
+            }),
         });
 
         initialize_identity_constraints(&state).await;
@@ -196,6 +211,8 @@ async fn handle_request(
             | "/auth/verify/submit"
             | "/auth/verify/status"
             | "/auth/password/change"
+            | "/auth/password/reset/start"
+            | "/auth/password/reset/submit"
             | "/vault/enable"
             | "/vault/unlock"
             | "/vault/lock"
@@ -265,6 +282,24 @@ async fn handle_request(
                 .map(http_body_util::Collected::to_bytes)
                 .unwrap_or_default();
             handlers::handle_password_change(&state, &headers, &body).await
+        }
+        (&Method::POST, "/auth/password/reset/start") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_password_reset_start(&state, &body, &ip).await
+        }
+        (&Method::POST, "/auth/password/reset/submit") => {
+            let body = req
+                .collect()
+                .await
+                .map(http_body_util::Collected::to_bytes)
+                .unwrap_or_default();
+            let ip = client_ip(&headers, peer_addr, state.trust_proxy);
+            handlers::handle_password_reset_submit(&state, &body, &ip).await
         }
         (&Method::POST, "/auth/unlink") => {
             let body = req

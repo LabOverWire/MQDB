@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+pub(crate) mod challenge_utils;
 mod cookies;
 pub(crate) mod credentials;
 mod handlers;

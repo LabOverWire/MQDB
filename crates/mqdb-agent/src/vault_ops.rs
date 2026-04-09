@@ -372,6 +372,13 @@ pub async fn resume_pending_migration(
     })
 }
 
+pub async fn create_entity_db(db: &Database, entity: &str, data: &Value) -> bool {
+    let scope = ScopeConfig::default();
+    db.create(entity.to_string(), data.clone(), None, None, None, &scope)
+        .await
+        .is_ok()
+}
+
 pub async fn read_entity_db(db: &Database, entity: &str, id: &str) -> Option<Value> {
     db.read(entity.to_string(), id.to_string(), vec![], None)
         .await

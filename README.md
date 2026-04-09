@@ -418,9 +418,9 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
 | ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
-| AdminRequired | `$DB/_admin/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user |
+| AdminRequired | `$DB/_admin/#`, `$DB/_verify/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user or explicit ACL grant |
 
-Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, `$DB/_verify/*`, and `$DB/_auth/*` are accessible to any authenticated user.
+Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_auth/*` are accessible to any authenticated user. For `AdminRequired` topics, non-admin users with an explicit ACL grant for the specific topic are also allowed access. This enables operator-provisioned service accounts (e.g., an email verifier with ACL grants for `$DB/_verify/#`) without requiring full admin privileges.
 
 #### Admin User Configuration
 
@@ -504,6 +504,8 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 | GET | `/auth/session` | Check current session status |
 | POST | `/auth/logout` | Destroy the session |
 | POST | `/auth/password/change` | Change password (requires `--email-auth`, verified email) |
+| POST | `/auth/password/reset/start` | Start password reset (requires `--email-auth`, unauthenticated) |
+| POST | `/auth/password/reset/submit` | Submit reset code + new password (requires `--email-auth`, unauthenticated) |
 | POST | `/auth/verify/start` | Start email verification challenge (requires `--email-auth`) |
 | POST | `/auth/verify/submit` | Submit verification code (requires `--email-auth`) |
 | GET | `/auth/verify/status` | Check email verification state (requires `--email-auth`) |
@@ -513,13 +515,15 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 
 All auth endpoints use cookie-based sessions. The `/auth/ticket` endpoint exchanges a valid session for a JWT that can be used to authenticate MQTT connections.
 
-### Password Change MQTT API
+### Password Change & Reset MQTT API
 
-Password change is also available over MQTT 5.0 request-response for JWT-authenticated users:
+Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users:
 
 | Topic | Payload | Description |
 |-------|---------|-------------|
 | `$DB/_auth/password/change` | `{"current_password": "...", "new_password": "..."}` | Change password (requires verified email) |
+| `$DB/_auth/password/reset/start` | `{"email": "user@example.com"}` | Start password reset (sends verification code) |
+| `$DB/_auth/password/reset/submit` | `{"challenge_id": "...", "code": "...", "new_password": "..."}` | Submit reset code + new password |
 
 ## Vault Encryption
 

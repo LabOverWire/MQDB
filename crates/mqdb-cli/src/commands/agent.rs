@@ -357,7 +357,7 @@ pub(crate) fn build_http_config(
         .unwrap_or_else(|| "mqdb".to_string());
     let audience = auth.jwt_audience.clone().or(client_id);
 
-    let identity_crypto = build_identity_crypto(oauth, db_path)?;
+    let identity_crypto = build_identity_crypto(oauth, db_path)?.map(std::sync::Arc::new);
 
     Ok(mqdb_agent::http::HttpServerConfig {
         bind_address: http_bind,

@@ -58,6 +58,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::AdminRequired,
     },
     TopicRule {
+        pattern: "$DB/_verify/#",
+        tier: ProtectionTier::AdminRequired,
+    },
+    TopicRule {
         pattern: "$DB/_oauth_tokens/#",
         tier: ProtectionTier::AdminRequired,
     },
@@ -156,17 +160,11 @@ fn is_internal_entity_topic(topic: &str) -> bool {
         return false;
     }
     let rest = &topic[4..];
-    if rest.starts_with('_')
-        && !rest.starts_with("_health")
-        && !rest.starts_with("_vault")
-        && !rest.starts_with("_verify")
-        && !rest.starts_with("_auth")
-    {
-        let entity = rest.split('/').next().unwrap_or("");
-        !entity.is_empty() && entity.starts_with('_')
-    } else {
-        false
+    let entity = rest.split('/').next().unwrap_or("");
+    if !entity.starts_with('_') || entity.is_empty() {
+        return false;
     }
+    !matches!(entity, "_health" | "_vault" | "_auth" | "_verify")
 }
 
 /// # Errors
@@ -516,17 +514,65 @@ mod tests {
     }
 
     #[test]
-    fn check_access_verify_endpoints_allowed() {
+    fn prefix_lookalikes_blocked_for_non_admin() {
+        assert_eq!(
+            check_topic_access("$DB/_healthcheck/list", false, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_healthy/data", true, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_vaulted/secrets", true, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_authentication/tokens", false, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_authority/keys", true, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verifier/status", false, false),
+            Err(BlockReason::InternalEntityAccess)
+        );
+    }
+
+    #[test]
+    fn check_access_verify_endpoints_admin_required() {
         assert_eq!(
             check_topic_access("$DB/_verify/challenges/email", true, false),
-            Ok(())
+            Err(BlockReason::AdminRequired)
         );
         assert_eq!(
             check_topic_access("$DB/_verify/challenges/email", false, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/receipts/abc-123", true, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/receipts/abc-123", false, false),
+            Err(BlockReason::AdminRequired)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/challenges/email", true, true),
             Ok(())
         );
         assert_eq!(
-            check_topic_access("$DB/_verify/confirm", true, false),
+            check_topic_access("$DB/_verify/challenges/email", false, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/receipts/abc-123", true, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_verify/receipts/abc-123", false, true),
             Ok(())
         );
     }

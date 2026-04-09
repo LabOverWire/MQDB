@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-04-05
+
+Affected crates: mqdb-core (0.5.0), mqdb-agent (0.6.0), mqdb-cli (0.7.0).
+
+### Added
+
+- Password reset endpoints: `POST /auth/password/reset/start` and `POST /auth/password/reset/submit` (HTTP, unauthenticated) for "forgot password" flow
+- Password reset MQTT topics: `$DB/_auth/password/reset/start` and `$DB/_auth/password/reset/submit` for authenticated users
+- Challenge `purpose` field to distinguish password reset from email verification challenges
+- Purpose guard in `handle_verify_submit` to reject password reset challenges
+- `--no-rate-limit` now disables all HTTP rate limiters (login, register, verify, password change, password reset)
+- `AdminRequired` topic protection now falls through to ACL for non-admin users, enabling operator-provisioned service accounts
+
+### Security
+
+- Promote `$DB/_verify/#` to `AdminRequired` topic protection tier to prevent leakage of verification codes and receipt spoofing
+
 ## [0.6.0] - 2026-04-04
 
 Affected crates: mqdb-core (0.4.0), mqdb-agent (0.5.0), mqdb-cluster (0.3.0), mqdb-cli (0.6.0).
