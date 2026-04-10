@@ -7,7 +7,6 @@ use common::next_test_port;
 use mqdb_agent::{Database, MqdbAgent};
 use serde_json::Value;
 use std::net::SocketAddr;
-use std::time::Duration;
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -19,11 +18,8 @@ async fn start_agent_background(port: u16) -> (TempDir, tokio::task::JoinHandle<
         .with_bind_address(addr)
         .with_anonymous(true);
 
-    let handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let _ = ready_rx.changed().await;
 
     (tmp, handle)
 }

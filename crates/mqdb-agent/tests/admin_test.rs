@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{next_test_port, wait_for_port};
+use common::next_test_port;
 use mqdb_agent::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
@@ -60,17 +60,22 @@ fn get_response_data(response: &Value) -> Option<&Value> {
     response.get("data")
 }
 
-async fn start_agent(port: u16) -> (TempDir, MqdbAgent) {
+async fn start_agent(port: u16) -> (TempDir, tokio::task::JoinHandle<()>) {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let agent = MqdbAgent::new(db)
         .with_bind_address(addr)
         .with_anonymous(true);
-    (tmp, agent)
+    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let _ = ready_rx.changed().await;
+    (tmp, handle)
 }
 
-async fn start_agent_with_admin(port: u16, admin_user: &str) -> (TempDir, MqdbAgent) {
+async fn start_agent_with_admin(
+    port: u16,
+    admin_user: &str,
+) -> (TempDir, tokio::task::JoinHandle<()>) {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -80,46 +85,21 @@ async fn start_agent_with_admin(port: u16, admin_user: &str) -> (TempDir, MqdbAg
         .with_bind_address(addr)
         .with_anonymous(true)
         .with_admin_users(admin_users);
-    (tmp, agent)
-}
-
-async fn wait_for_ready(client: &MqttClient, max_attempts: u32) -> bool {
-    for _ in 0..max_attempts {
-        if let Some(resp) = mqtt_request_response(client, "$DB/_health", b"{}", 1000).await
-            && resp
-                .get("data")
-                .and_then(|d| d.get("ready"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
+    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let _ = ready_rx.changed().await;
+    (tmp, handle)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_health_endpoint_agent_mode() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent(port).await;
-
-    let agent_handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    wait_for_port(port).await;
+    let (_tmp, agent_handle) = start_agent(port).await;
 
     let client = MqttClient::new("test-health-agent");
     client
         .connect(&format!("mqtt://127.0.0.1:{port}"))
         .await
         .unwrap();
-
-    assert!(
-        wait_for_ready(&client, 10).await,
-        "agent should become ready"
-    );
 
     let response = mqtt_request_response(&client, "$DB/_health", b"{}", 2000)
         .await
@@ -142,24 +122,13 @@ async fn test_health_endpoint_agent_mode() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_admin_schema_set_and_get() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
-
-    let agent_handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    wait_for_port(port).await;
+    let (_tmp, agent_handle) = start_agent_with_admin(port, "admin").await;
 
     let client = MqttClient::new("test-schema-ops");
     let options = ConnectOptions::new("test-schema-ops").with_credentials("admin", "");
     Box::pin(client.connect_with_options(&format!("mqtt://127.0.0.1:{port}"), options))
         .await
         .unwrap();
-
-    assert!(
-        wait_for_ready(&client, 10).await,
-        "agent should become ready"
-    );
 
     let schema = json!({
         "name": {"type": "string", "required": true},
@@ -193,24 +162,13 @@ async fn test_admin_schema_set_and_get() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_admin_constraint_add_and_list() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent_with_admin(port, "admin").await;
-
-    let agent_handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    wait_for_port(port).await;
+    let (_tmp, agent_handle) = start_agent_with_admin(port, "admin").await;
 
     let client = MqttClient::new("test-constraint-ops");
     let options = ConnectOptions::new("test-constraint-ops").with_credentials("admin", "");
     Box::pin(client.connect_with_options(&format!("mqtt://127.0.0.1:{port}"), options))
         .await
         .unwrap();
-
-    assert!(
-        wait_for_ready(&client, 10).await,
-        "agent should become ready"
-    );
 
     let constraint = json!({
         "type": "unique",
@@ -242,24 +200,13 @@ async fn test_admin_constraint_add_and_list() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_crud_via_mqtt() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent(port).await;
-
-    let agent_handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    wait_for_port(port).await;
+    let (_tmp, agent_handle) = start_agent(port).await;
 
     let client = MqttClient::new("test-crud-mqtt");
     client
         .connect(&format!("mqtt://127.0.0.1:{port}"))
         .await
         .unwrap();
-
-    assert!(
-        wait_for_ready(&client, 10).await,
-        "agent should become ready"
-    );
 
     let user = json!({
         "name": "Alice",
@@ -319,24 +266,13 @@ async fn test_crud_via_mqtt() {
 #[tokio::test]
 async fn test_list_query_complexity_limits_via_mqtt() {
     let port = next_test_port();
-    let (_tmp, agent) = start_agent(port).await;
-
-    let agent_handle = tokio::spawn(async move {
-        let _ = agent.run().await;
-    });
-
-    wait_for_port(port).await;
+    let (_tmp, agent_handle) = start_agent(port).await;
 
     let client = MqttClient::new("test-query-limits");
     client
         .connect(&format!("mqtt://127.0.0.1:{port}"))
         .await
         .unwrap();
-
-    assert!(
-        wait_for_ready(&client, 10).await,
-        "agent should become ready"
-    );
 
     let too_many_filters: Vec<Value> = (0..17)
         .map(|i| json!({"field": format!("f{i}"), "op": "eq", "value": "x"}))
