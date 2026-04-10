@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.2] - 2026-04-10
+
+Affected crates: mqdb-agent (0.7.0), mqdb-cli (0.7.2).
+
+### Added
+
+- `MqdbAgent::start()` method that returns a `JoinHandle` and a `watch::Receiver<bool>` readiness signal, firing only after both the TCP accept loop and the internal `$DB/#` handler are ready
+- Handler readiness oneshot in `spawn_handler_task` — signals after the `$DB/#` subscribe succeeds
+
+### Fixed
+
+- Replace hardcoded 500ms sleep in CLI tests with deterministic `start()` + `ready_rx` readiness signal
+- Replace `wait_for_port` + `wait_for_ready` polling in admin tests with `start()` + `ready_rx`
+- Replace static port counters with OS-assigned ephemeral ports in all test suites (agent, cli, cluster) to eliminate cross-binary port collisions
+
 ## [0.7.1] - 2026-04-10
 
 Affected crates: mqdb-core (0.5.1), mqdb-agent (0.6.1).
