@@ -109,6 +109,7 @@ impl HttpServer {
             } else {
                 5
             }),
+            refresh_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 10 }),
         });
 
         initialize_identity_constraints(&state).await;

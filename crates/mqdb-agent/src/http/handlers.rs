@@ -72,6 +72,7 @@ pub struct ServerState {
     pub password_change_rate_limiter: RateLimiter,
     pub password_reset_start_rate_limiter: RateLimiter,
     pub password_reset_submit_rate_limiter: RateLimiter,
+    pub refresh_rate_limiter: RateLimiter,
 }
 
 type HttpResponse = Response<Full<Bytes>>;
@@ -652,6 +653,14 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
             Ok(result) => result,
             Err(resp) => return resp,
         };
+
+    if !state.refresh_rate_limiter.check_and_record(&canonical_id) {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many requests, try again later"}),
+            cors,
+        );
+    }
 
     let Some(stored_refresh_token) = stored_data
         .get("refresh_token")
@@ -1399,6 +1408,17 @@ pub async fn handle_vault_enable(
         Err(resp) => return *resp,
     };
 
+    if !state
+        .vault_unlock_limiter
+        .check_and_record(&session.canonical_id)
+    {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many requests, try again later"}),
+            cors,
+        );
+    }
+
     let body_value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(_) => {
@@ -1607,6 +1627,17 @@ pub fn handle_vault_lock(state: &ServerState, headers: &HeaderMap) -> HttpRespon
         Ok((sid, s)) => (sid, s),
         Err(resp) => return *resp,
     };
+
+    if !state
+        .vault_unlock_limiter
+        .check_and_record(&session.canonical_id)
+    {
+        return json_response_with_credentials(
+            429,
+            &json!({"error": "too many requests, try again later"}),
+            cors,
+        );
+    }
 
     state.vault_key_store.remove(&session.canonical_id);
     state
@@ -2471,7 +2502,7 @@ pub async fn handle_verify_submit(
     if status != "pending" && status != "delivered" {
         return json_response_with_credentials(
             400,
-            &json!({"error": format!("challenge is {status}")}),
+            &json!({"error": "invalid or expired challenge"}),
             cors,
         );
     }
@@ -2977,7 +3008,7 @@ pub async fn handle_password_reset_submit(
     if status != "pending" && status != "delivered" {
         return json_response_with_credentials(
             400,
-            &json!({"error": format!("challenge is {status}")}),
+            &json!({"error": "invalid or expired challenge"}),
             cors,
         );
     }

@@ -1205,6 +1205,13 @@ async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         );
     }
 
+    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many unlock attempts, try again later",
+        );
+    }
+
     let Some(identity) =
         crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
@@ -1476,6 +1483,13 @@ async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Re
         return Response::error(
             mqdb_core::ErrorCode::BadRequest,
             format!("passphrase must be at least {min_len} characters"),
+        );
+    }
+
+    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many unlock attempts, try again later",
         );
     }
 
@@ -1892,7 +1906,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     if status != "pending" && status != "delivered" {
         return Response::error(
             mqdb_core::ErrorCode::BadRequest,
-            format!("challenge is {status}"),
+            "invalid or expired challenge",
         );
     }
 
