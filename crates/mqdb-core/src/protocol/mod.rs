@@ -13,6 +13,8 @@ pub enum ProtocolError {
     MissingId(DbOp),
     #[error("invalid JSON payload: {0}")]
     InvalidPayload(#[from] serde_json::Error),
+    #[error("payload too large ({0} bytes, max {MAX_PAYLOAD_SIZE})")]
+    PayloadTooLarge(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,26 @@ pub enum AdminOperation {
     PasswordResetSubmit,
 }
 
+const MAX_ENTITY_NAME_LEN: usize = 128;
+const MAX_RECORD_ID_LEN: usize = 512;
+const MAX_PAYLOAD_SIZE: usize = 4 * 1024 * 1024;
+
+fn is_valid_entity_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ENTITY_NAME_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn is_valid_record_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_RECORD_ID_LEN
+        && !id.contains('+')
+        && !id.contains('#')
+        && !id.contains('/')
+}
+
 type ListOptions = (
     Vec<Filter>,
     Vec<SortOrder>,
@@ -135,21 +157,31 @@ pub fn parse_admin_topic(topic: &str) -> Option<AdminOperation> {
     let parts: Vec<&str> = topic.strip_prefix("$DB/_admin/")?.split('/').collect();
 
     match parts.as_slice() {
-        ["schema", entity, "set"] => Some(AdminOperation::SchemaSet {
-            entity: (*entity).to_string(),
-        }),
-        ["schema", entity, "get"] => Some(AdminOperation::SchemaGet {
-            entity: (*entity).to_string(),
-        }),
-        ["constraint", entity, "add"] => Some(AdminOperation::ConstraintAdd {
-            entity: (*entity).to_string(),
-        }),
-        ["constraint", entity, "list"] => Some(AdminOperation::ConstraintList {
-            entity: (*entity).to_string(),
-        }),
-        ["index", entity, "add"] => Some(AdminOperation::IndexAdd {
-            entity: (*entity).to_string(),
-        }),
+        ["schema", entity, "set"] if is_valid_entity_name(entity) => {
+            Some(AdminOperation::SchemaSet {
+                entity: (*entity).to_string(),
+            })
+        }
+        ["schema", entity, "get"] if is_valid_entity_name(entity) => {
+            Some(AdminOperation::SchemaGet {
+                entity: (*entity).to_string(),
+            })
+        }
+        ["constraint", entity, "add"] if is_valid_entity_name(entity) => {
+            Some(AdminOperation::ConstraintAdd {
+                entity: (*entity).to_string(),
+            })
+        }
+        ["constraint", entity, "list"] if is_valid_entity_name(entity) => {
+            Some(AdminOperation::ConstraintList {
+                entity: (*entity).to_string(),
+            })
+        }
+        ["index", entity, "add"] if is_valid_entity_name(entity) => {
+            Some(AdminOperation::IndexAdd {
+                entity: (*entity).to_string(),
+            })
+        }
         ["backup"] => Some(AdminOperation::Backup),
         ["backup", "list"] => Some(AdminOperation::BackupList),
         ["restore"] => Some(AdminOperation::Restore),
@@ -179,31 +211,37 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     let parts: Vec<&str> = topic.strip_prefix("$DB/")?.split('/').collect();
 
     match parts.as_slice() {
-        [entity, "create"] => Some(DbOperation {
+        [entity, "create"] if is_valid_entity_name(entity) => Some(DbOperation {
             entity: (*entity).to_string(),
             operation: DbOp::Create,
             id: None,
         }),
-        [entity, "list"] => Some(DbOperation {
+        [entity, "list"] if is_valid_entity_name(entity) => Some(DbOperation {
             entity: (*entity).to_string(),
             operation: DbOp::List,
             id: None,
         }),
-        [entity, id] => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: DbOp::Read,
-            id: Some((*id).to_string()),
-        }),
-        [entity, id, "update"] => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: DbOp::Update,
-            id: Some((*id).to_string()),
-        }),
-        [entity, id, "delete"] => Some(DbOperation {
-            entity: (*entity).to_string(),
-            operation: DbOp::Delete,
-            id: Some((*id).to_string()),
-        }),
+        [entity, id] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Read,
+                id: Some((*id).to_string()),
+            })
+        }
+        [entity, id, "update"] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Update,
+                id: Some((*id).to_string()),
+            })
+        }
+        [entity, id, "delete"] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Delete,
+                id: Some((*id).to_string()),
+            })
+        }
         _ => None,
     }
 }
@@ -213,6 +251,9 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
 /// # Errors
 /// Returns an error if JSON deserialization fails or a required ID is missing.
 pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, ProtocolError> {
+    if payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(ProtocolError::PayloadTooLarge(payload.len()));
+    }
     let data: Value = if payload.is_empty() {
         Value::Null
     } else {
@@ -528,6 +569,51 @@ mod tests {
         ));
         assert!(parse_admin_topic("$DB/_auth/unknown").is_none());
         assert!(parse_admin_topic("$DB/_auth/password/reset/other").is_none());
+    }
+
+    #[test]
+    fn entity_name_validation() {
+        assert!(parse_db_topic("$DB/users/create").is_some());
+        assert!(parse_db_topic("$DB/my-entity/create").is_some());
+        assert!(parse_db_topic("$DB/my_entity/create").is_some());
+        assert!(parse_db_topic("$DB/Entity123/create").is_some());
+        assert!(parse_db_topic("$DB//create").is_none());
+        assert!(parse_db_topic("$DB/has space/create").is_none());
+        assert!(parse_db_topic("$DB/has.dot/create").is_none());
+        assert!(parse_db_topic(&format!("$DB/{}/create", "a".repeat(129))).is_none());
+        assert!(parse_db_topic(&format!("$DB/{}/create", "a".repeat(128))).is_some());
+    }
+
+    #[test]
+    fn record_id_validation() {
+        assert!(parse_db_topic("$DB/users/valid-id").is_some());
+        assert!(parse_db_topic("$DB/users/abc123").is_some());
+        assert!(parse_db_topic("$DB/users/+").is_none());
+        assert!(parse_db_topic("$DB/users/#").is_none());
+        let long_id = "x".repeat(513);
+        assert!(parse_db_topic(&format!("$DB/users/{long_id}")).is_none());
+        let ok_id = "x".repeat(512);
+        assert!(parse_db_topic(&format!("$DB/users/{ok_id}")).is_some());
+    }
+
+    #[test]
+    fn admin_entity_name_validation() {
+        assert!(parse_admin_topic("$DB/_admin/schema/users/set").is_some());
+        assert!(parse_admin_topic("$DB/_admin/schema/has space/set").is_none());
+        assert!(parse_admin_topic("$DB/_admin/constraint/has.dot/add").is_none());
+        assert!(parse_admin_topic(&format!("$DB/_admin/index/{}/add", "a".repeat(129))).is_none());
+    }
+
+    #[test]
+    fn payload_too_large_rejected() {
+        let op = DbOperation {
+            entity: "users".to_string(),
+            operation: DbOp::Create,
+            id: None,
+        };
+        let big_payload = vec![b'{'; MAX_PAYLOAD_SIZE + 1];
+        let result = build_request(op, &big_payload);
+        assert!(matches!(result, Err(ProtocolError::PayloadTooLarge(_))));
     }
 
     #[test]

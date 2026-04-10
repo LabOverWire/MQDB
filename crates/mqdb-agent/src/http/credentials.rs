@@ -3,7 +3,7 @@
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use ring::digest;
+use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
 
 use super::identity_crypto::IdentityCrypto;
@@ -24,6 +24,7 @@ impl std::fmt::Display for CredentialError {
 impl std::error::Error for CredentialError {}
 
 const MIN_PASSWORD_LENGTH: usize = 8;
+const MAX_PASSWORD_LENGTH: usize = 256;
 const ARGON2_M_COST: u32 = 19456;
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
@@ -61,8 +62,9 @@ pub fn compute_email_hash(crypto: Option<&IdentityCrypto>, email: &str) -> Strin
     if let Some(c) = crypto {
         c.blind_index("_credentials", &lower)
     } else {
-        let d = digest::digest(&digest::SHA256, lower.as_bytes());
-        hex_encode(d.as_ref())
+        let key = hmac::Key::new(hmac::HMAC_SHA256, b"mqdb-credential-email-index-v1");
+        let tag = hmac::sign(&key, lower.as_bytes());
+        hex_encode(tag.as_ref())
     }
 }
 
@@ -79,6 +81,9 @@ pub fn validate_email(email: &str) -> bool {
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
     if password.len() < MIN_PASSWORD_LENGTH {
         return Err("password must be at least 8 characters");
+    }
+    if password.len() > MAX_PASSWORD_LENGTH {
+        return Err("password must be at most 256 characters");
     }
     Ok(())
 }
@@ -120,6 +125,8 @@ mod tests {
         assert!(validate_password("12345678").is_ok());
         assert!(validate_password("1234567").is_err());
         assert!(validate_password("").is_err());
+        assert!(validate_password(&"a".repeat(256)).is_ok());
+        assert!(validate_password(&"a".repeat(257)).is_err());
     }
 
     #[test]
