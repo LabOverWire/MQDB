@@ -1028,17 +1028,6 @@ cargo run --example constraints_07_combined
 cargo run --example parking_lot
 ```
 
-## Future Enhancements
-
-| Area | Goal |
-|------|------|
-| Consumer group tracking | Cluster-wide group membership (currently node-local) |
-| Coordinated backup/restore | Consistent cluster-wide snapshots |
-| Reactive query language | Subscribe to expressions, not just topics |
-| Metrics export | Prometheus/OTLP metrics alongside traces |
-| TTL optimization | Expiration index to avoid full scans |
-| Horizontal scaling | Partition counts beyond the current 256 |
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. All contributions require signing our [Contributor License Agreement](CLA.md).
