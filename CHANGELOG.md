@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] - 2026-04-10
+
+Affected crates: mqdb-core (0.5.1), mqdb-agent (0.6.1).
+
+### Security
+
+- Cap password length at 256 bytes to prevent Argon2id CPU exhaustion
+- Add rate limiters to vault enable/change MQTT handlers and OAuth token refresh endpoint
+- Validate entity names (alphanumeric, `_`, `-`, max 128 chars) and record IDs (reject `+`, `#`, `/`, max 512 bytes) in topic parsers
+- Reject JSON payloads over 4 MiB before parsing
+- Normalize challenge error messages to prevent internal status leakage
+- Replace bare SHA256 with HMAC-SHA256 for email hash fallback
+
 ## [0.7.0] - 2026-04-05
 
 Affected crates: mqdb-core (0.5.0), mqdb-agent (0.6.0), mqdb-cli (0.7.0).
