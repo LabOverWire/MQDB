@@ -18,7 +18,7 @@ async fn start_agent_background(port: u16) -> (TempDir, tokio::task::JoinHandle<
         .with_bind_address(addr)
         .with_anonymous(true);
 
-    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
     let _ = ready_rx.changed().await;
 
     (tmp, handle)

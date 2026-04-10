@@ -67,7 +67,7 @@ async fn start_agent(port: u16) -> (TempDir, tokio::task::JoinHandle<()>) {
     let agent = MqdbAgent::new(db)
         .with_bind_address(addr)
         .with_anonymous(true);
-    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
     let _ = ready_rx.changed().await;
     (tmp, handle)
 }
@@ -85,7 +85,7 @@ async fn start_agent_with_admin(
         .with_bind_address(addr)
         .with_anonymous(true)
         .with_admin_users(admin_users);
-    let (handle, mut ready_rx) = agent.start().await.unwrap();
+    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
     let _ = ready_rx.changed().await;
     (tmp, handle)
 }

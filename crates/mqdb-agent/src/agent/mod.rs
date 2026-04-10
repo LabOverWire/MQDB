@@ -254,13 +254,12 @@ impl MqdbAgent {
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let bind_addr = self.bind_address;
-        let (handler_ready_tx, _handler_ready_rx) = oneshot::channel();
         let handler_task = self.spawn_handler_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
             auth_providers,
-            handler_ready_tx,
+            None,
         );
         let event_task = self.spawn_event_task(
             bind_addr,
@@ -294,7 +293,11 @@ impl MqdbAgent {
     pub async fn start(
         self,
     ) -> Result<
-        (tokio::task::JoinHandle<()>, watch::Receiver<bool>),
+        (
+            tokio::task::JoinHandle<()>,
+            watch::Receiver<bool>,
+            broadcast::Sender<()>,
+        ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
         let (ready_tx, ready_rx) = watch::channel(false);
@@ -331,7 +334,7 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
-            handler_ready_tx,
+            Some(handler_ready_tx),
         );
         let event_task = self.spawn_event_task(
             bind_addr,
@@ -366,7 +369,8 @@ impl MqdbAgent {
             }
         });
 
-        Ok((handle, ready_rx))
+        let caller_shutdown_tx = self.shutdown_tx.clone();
+        Ok((handle, ready_rx, caller_shutdown_tx))
     }
 
     pub fn shutdown(&self) {
