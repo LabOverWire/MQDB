@@ -347,7 +347,7 @@ let agent = MqdbAgent::new(db)
 agent.run().await?;
 
 // Non-blocking: returns a handle and a readiness signal
-let (handle, mut ready_rx) = agent.start().await?;
+let (handle, mut ready_rx, shutdown_tx) = agent.start().await?;
 ready_rx.changed().await?; // wait until broker + handler are ready
 ```
 
