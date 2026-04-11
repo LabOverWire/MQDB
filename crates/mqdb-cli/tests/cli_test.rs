@@ -41,6 +41,16 @@ async fn run_mqdb(args: &[&str]) -> (bool, String, String) {
     (output.status.success(), stdout, stderr)
 }
 
+fn parse_json(stdout: &str, stderr: &str) -> Value {
+    serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "JSON parse failed: {e}\nstdout ({} bytes): {stdout:?}\nstderr ({} bytes): {stderr:?}",
+            stdout.len(),
+            stderr.len(),
+        )
+    })
+}
+
 #[tokio::test]
 async fn test_cli_create_and_read() {
     let port = next_test_port();
@@ -63,14 +73,14 @@ async fn test_cli_create_and_read() {
         "create should succeed: stderr={stderr}, stdout={stdout}"
     );
 
-    let created: Value = serde_json::from_str(&stdout).expect("should parse JSON output");
+    let created = parse_json(&stdout, &stderr);
     let id = created
         .get("data")
         .and_then(|d| d.get("id"))
         .and_then(|v| v.as_str())
         .expect("should have data.id");
 
-    let (success, stdout, _stderr) = run_mqdb(&[
+    let (success, stdout, stderr) = run_mqdb(&[
         "read",
         "users",
         id,
@@ -83,7 +93,7 @@ async fn test_cli_create_and_read() {
 
     assert!(success, "read should succeed");
 
-    let read: Value = serde_json::from_str(&stdout).expect("should parse JSON output");
+    let read = parse_json(&stdout, &stderr);
     let data = read.get("data").expect("should have data");
     assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("Alice"));
 
@@ -109,7 +119,7 @@ async fn test_cli_list() {
         assert!(success, "create should succeed: {stderr}");
     }
 
-    let (success, stdout, _stderr) = run_mqdb(&[
+    let (success, stdout, stderr) = run_mqdb(&[
         "list",
         "users",
         "--broker",
@@ -121,7 +131,7 @@ async fn test_cli_list() {
 
     assert!(success, "list should succeed");
 
-    let list: Value = serde_json::from_str(&stdout).expect("should parse JSON output");
+    let list = parse_json(&stdout, &stderr);
     let data = list.get("data").expect("should have data");
     let items = data.as_array().expect("data should be array");
     assert_eq!(items.len(), 3);
@@ -134,7 +144,7 @@ async fn test_cli_update_and_delete() {
     let port = next_test_port();
     let (_tmp, handle) = start_agent_background(port).await;
 
-    let (success, stdout, _stderr) = run_mqdb(&[
+    let (success, stdout, stderr) = run_mqdb(&[
         "create",
         "users",
         "-d",
@@ -147,14 +157,14 @@ async fn test_cli_update_and_delete() {
     .await;
     assert!(success, "create should succeed");
 
-    let created: Value = serde_json::from_str(&stdout).expect("should parse JSON");
+    let created = parse_json(&stdout, &stderr);
     let id = created
         .get("data")
         .and_then(|d| d.get("id"))
         .and_then(|v| v.as_str())
         .unwrap();
 
-    let (success, stdout, _stderr) = run_mqdb(&[
+    let (success, stdout, stderr) = run_mqdb(&[
         "update",
         "users",
         id,
@@ -168,7 +178,7 @@ async fn test_cli_update_and_delete() {
     .await;
     assert!(success, "update should succeed");
 
-    let updated: Value = serde_json::from_str(&stdout).expect("should parse JSON");
+    let updated = parse_json(&stdout, &stderr);
     let data = updated.get("data").expect("should have data");
     assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("Bob Smith"));
 
@@ -182,7 +192,7 @@ async fn test_cli_update_and_delete() {
     .await;
     assert!(success, "delete should succeed");
 
-    let (_success, stdout, _stderr) = run_mqdb(&[
+    let (_success, stdout, stderr) = run_mqdb(&[
         "read",
         "users",
         id,
@@ -192,7 +202,7 @@ async fn test_cli_update_and_delete() {
         "json",
     ])
     .await;
-    let response: Value = serde_json::from_str(&stdout).expect("should parse JSON");
+    let response = parse_json(&stdout, &stderr);
     assert_eq!(
         response.get("status").and_then(|v| v.as_str()),
         Some("error"),
