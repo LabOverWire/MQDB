@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot, watch};
 use tracing::info;
 
 #[cfg(feature = "http-api")]
@@ -259,6 +259,7 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
+            None,
         );
         let event_task = self.spawn_event_task(
             bind_addr,
@@ -285,6 +286,91 @@ impl MqdbAgent {
         }
 
         Ok(())
+    }
+
+    /// # Errors
+    /// Returns an error if the broker fails to start.
+    pub async fn start(
+        self,
+    ) -> Result<
+        (
+            tokio::task::JoinHandle<()>,
+            watch::Receiver<bool>,
+            broadcast::Sender<()>,
+        ),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let (ready_tx, ready_rx) = watch::channel(false);
+        let shutdown_tx = self.shutdown_tx.clone();
+
+        let (mut config, service_username, service_password, needs_composite, admin_users) =
+            self.build_broker_config().await?;
+
+        self.apply_transport_config(&mut config);
+
+        let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
+        let (mut broker, auth_providers) = Self::apply_auth_providers(
+            broker,
+            broker::AuthProviderConfig {
+                needs_composite,
+                service_username: service_username.as_ref(),
+                service_password: service_password.as_ref(),
+                password_file: self.auth_setup.password_file.as_deref(),
+                acl_file: self.auth_setup.acl_file.as_deref(),
+                admin_users: &admin_users,
+                allow_anonymous: self.auth_setup.allow_anonymous,
+            },
+        )
+        .await?;
+
+        info!("MQDB Agent listening on {}", self.bind_address);
+
+        let mut broker_ready_rx = broker.ready_receiver();
+
+        let bind_addr = self.bind_address;
+        let (handler_ready_tx, handler_ready_rx) = oneshot::channel();
+        let handler_task = self.spawn_handler_task(
+            bind_addr,
+            service_username.clone(),
+            service_password.clone(),
+            auth_providers,
+            Some(handler_ready_tx),
+        );
+        let event_task = self.spawn_event_task(
+            bind_addr,
+            service_username.clone(),
+            service_password.clone(),
+        );
+        let http_task = self.spawn_http_task(
+            bind_addr,
+            service_username.as_ref(),
+            service_password.as_ref(),
+        );
+        let license_task = self.spawn_license_check_task();
+
+        tokio::spawn(async move {
+            let _ = broker_ready_rx.changed().await;
+            let _ = handler_ready_rx.await;
+            let _ = ready_tx.send(true);
+        });
+
+        let handle = tokio::spawn(async move {
+            if let Err(e) = broker.run().await {
+                tracing::error!("broker error: {e}");
+            }
+            let _ = shutdown_tx.send(());
+            let _ = handler_task.await;
+            let _ = event_task.await;
+            if let Some(http) = http_task {
+                let _ = http.await;
+            }
+            if let Some(lic) = license_task {
+                let _ = lic.await;
+            }
+        });
+
+        let caller_shutdown_tx = self.shutdown_tx.clone();
+        Ok((handle, ready_rx, caller_shutdown_tx))
     }
 
     pub fn shutdown(&self) {

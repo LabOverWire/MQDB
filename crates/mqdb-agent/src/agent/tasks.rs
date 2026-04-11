@@ -9,7 +9,7 @@ use mqtt5::time::Duration;
 use mqtt5::types::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 impl MqdbAgent {
@@ -43,6 +43,7 @@ impl MqdbAgent {
         handler_username: Option<String>,
         handler_password: Option<String>,
         auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
+        handler_ready_tx: Option<oneshot::Sender<()>>,
     ) -> tokio::task::JoinHandle<()> {
         let db = Arc::clone(&self.db);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -97,6 +98,9 @@ impl MqdbAgent {
             }
 
             info!("Internal handler subscribed to $DB/#");
+            if let Some(tx) = handler_ready_tx {
+                let _ = tx.send(());
+            }
 
             let response_client = MqttClient::new("mqdb-response-publisher");
             if let Err(e) = connect_mqtt_client(

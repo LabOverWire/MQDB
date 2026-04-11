@@ -1047,7 +1047,12 @@ let agent = MqdbAgent::new(db)
     .with_acl_file("acl.txt".into())
     .with_backup_dir("./backups".into());
 
+// Blocking: runs the agent until shutdown
 agent.run().await?;
+
+// Non-blocking alternative: returns a handle and a readiness signal
+let (handle, mut ready_rx, shutdown_tx) = agent.start().await?;
+ready_rx.changed().await?; // wait until broker + handler are ready
 ```
 
 **Architecture:**

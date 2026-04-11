@@ -343,7 +343,12 @@ let agent = MqdbAgent::new(db)
     .with_password_file("passwd.txt".into())
     .with_acl_file("acl.txt".into());
 
+// Blocking: runs the agent until shutdown
 agent.run().await?;
+
+// Non-blocking: returns a handle and a readiness signal
+let (handle, mut ready_rx, shutdown_tx) = agent.start().await?;
+ready_rx.changed().await?; // wait until broker + handler are ready
 ```
 
 ### MQTT Topic Structure
