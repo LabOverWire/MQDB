@@ -17,6 +17,7 @@ impl FjallBackend {
     /// # Errors
     /// Returns an error if the storage fails to open.
     pub fn open<P: AsRef<Path>>(path: P, durability: DurabilityMode) -> Result<Self> {
+        std::fs::create_dir_all(path.as_ref()).map_err(fjall::Error::Io)?;
         let db = Database::builder(path.as_ref()).open()?;
         let keyspace = db.keyspace("main", KeyspaceCreateOptions::default)?;
 
