@@ -34,6 +34,7 @@ impl Database {
 
     /// # Errors
     /// Returns an error if any index field doesn't exist in the entity's schema.
+    #[tracing::instrument(skip(self), fields(entity = %entity))]
     pub async fn add_index(&self, entity: String, fields: Vec<String>) -> Result<()> {
         let schema_registry = self.schema_registry.read().await;
         let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
@@ -41,11 +42,13 @@ impl Database {
         drop(schema_registry);
 
         {
+            let definition = mqdb_core::index::IndexDefinition::new(entity.clone(), fields);
+            let mut batch = self.storage.batch();
             let mut manager = self.index_manager.write().await;
-            manager.add_index(mqdb_core::index::IndexDefinition::new(
-                entity.clone(),
-                fields,
-            ));
+            manager.persist_index(&mut batch, &definition)?;
+            batch.commit()?;
+            manager.add_index(definition);
+            drop(manager);
         }
 
         let prefix = format!("data/{entity}/");

@@ -150,6 +150,11 @@ pub fn encode_value_for_index(value: &serde_json::Value) -> Result<Vec<u8>> {
 }
 
 #[must_use]
+pub fn encode_index_definition_key(entity: &str) -> Vec<u8> {
+    format!("meta/index/{entity}").into_bytes()
+}
+
+#[must_use]
 pub fn encode_schema_key(entity: &str) -> Vec<u8> {
     format!("meta/schema/{entity}").into_bytes()
 }
@@ -222,6 +227,12 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn test_encode_index_definition_key() {
+        let key = encode_index_definition_key("users");
+        assert_eq!(key, b"meta/index/users");
     }
 
     #[test]

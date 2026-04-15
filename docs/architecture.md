@@ -173,6 +173,7 @@ sub/{subscription_id}                       → Persistent subscriptions
 dedup/{correlation_id}                      → Idempotency cache
 meta/{key}                                  → Sequences, metadata
 meta/schema/{entity}                        → Schema definitions
+meta/index/{entity}                         → Index definitions
 meta/constraint/{type}/{entity}/{name}      → Constraint definitions
 _outbox/{operation_id}                      → Pending events for delivery
 _dead_letter/{operation_id}                 → Failed events after max retries
@@ -195,6 +196,7 @@ fkref/{target_entity}/{target_id}/...       → FK reverse lookups (reserved)
 data/users/123                              → User entity with ID 123
 idx/users/email/alice@example.com/123       → Email index entry
 meta/schema/users                           → Users schema definition
+meta/index/users                            → Users index definition
 meta/constraint/fk/posts/posts_author_id_fk → Foreign key constraint
 ```
 
@@ -247,6 +249,7 @@ idx/users/email/alice@example.com/123
 ```
 
 **Index Lifecycle:**
+- **Define**: Persist definition to `meta/index/{entity}`, reload on startup
 - **Create**: Insert index entries for indexed fields
 - **Update**: Remove old index entries, insert new ones
 - **Delete**: Remove all index entries for entity
