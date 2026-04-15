@@ -58,6 +58,7 @@ idx/{entity}/{field}/{value}/{id} → secondary index entries
 sub/{subscription_id}           → subscription metadata
 dedup/{correlation_id}          → cached responses for idempotency
 meta/{key}                      → system metadata (sequences, etc.)
+meta/index/{entity}             → index definitions (survive restarts)
 _outbox/{operation_id}          → pending events for delivery
 _dead_letter/{operation_id}     → failed events after max retries
 ```

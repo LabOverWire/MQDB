@@ -2,11 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Each entry lists the date and the crate versions that were released.
 
-## [0.7.2] - 2026-04-10
+## 2026-04-15 — mqdb-core 0.5.2, mqdb-agent 0.7.1
 
-Affected crates: mqdb-core (0.5.1), mqdb-agent (0.7.0), mqdb-cli (0.7.2).
+### Added
+
+- Index definitions persist to `meta/index/{entity}` and reload on agent startup — indexes survive restarts without re-issuing `index add`
+
+## 2026-04-10 — mqdb-core 0.5.1, mqdb-agent 0.7.0, mqdb-cli 0.7.2
 
 ### Added
 
@@ -21,9 +25,7 @@ Affected crates: mqdb-core (0.5.1), mqdb-agent (0.7.0), mqdb-cli (0.7.2).
 - Ensure database directory tree exists before fjall open to prevent EBADF on `FROM scratch` Docker images
 - Direct tracing subscriber output to stderr in CLI to prevent log lines from corrupting JSON stdout
 
-## [0.7.1] - 2026-04-10
-
-Affected crates: mqdb-core (0.5.1), mqdb-agent (0.6.1).
+## 2026-04-10 — mqdb-core 0.5.1, mqdb-agent 0.6.1
 
 ### Security
 
@@ -34,9 +36,7 @@ Affected crates: mqdb-core (0.5.1), mqdb-agent (0.6.1).
 - Normalize challenge error messages to prevent internal status leakage
 - Replace bare SHA256 with HMAC-SHA256 for email hash fallback
 
-## [0.7.0] - 2026-04-05
-
-Affected crates: mqdb-core (0.5.0), mqdb-agent (0.6.0), mqdb-cli (0.7.0).
+## 2026-04-05 — mqdb-core 0.5.0, mqdb-agent 0.6.0, mqdb-cli 0.7.0
 
 ### Added
 
@@ -51,9 +51,7 @@ Affected crates: mqdb-core (0.5.0), mqdb-agent (0.6.0), mqdb-cli (0.7.0).
 
 - Promote `$DB/_verify/#` to `AdminRequired` topic protection tier to prevent leakage of verification codes and receipt spoofing
 
-## [0.6.0] - 2026-04-04
-
-Affected crates: mqdb-core (0.4.0), mqdb-agent (0.5.0), mqdb-cluster (0.3.0), mqdb-cli (0.6.0).
+## 2026-04-04 — mqdb-core 0.4.0, mqdb-agent 0.5.0, mqdb-cluster 0.3.0, mqdb-cli 0.6.0
 
 ### Added
 
@@ -66,9 +64,7 @@ Affected crates: mqdb-core (0.4.0), mqdb-agent (0.5.0), mqdb-cluster (0.3.0), mq
 
 - Cluster mode returns explicit error for `$DB/_auth/` topics (agent-only)
 
-## [0.5.0] - 2026-04-03
-
-Affected crates: mqdb-core (0.3.0), mqdb-agent (0.4.0), mqdb-cluster (0.2.0), mqdb-cli (0.5.0).
+## 2026-04-03 — mqdb-core 0.3.0, mqdb-agent 0.4.0, mqdb-cluster 0.2.0, mqdb-cli 0.5.0
 
 ### Added
 
@@ -84,9 +80,7 @@ Affected crates: mqdb-core (0.3.0), mqdb-agent (0.4.0), mqdb-cluster (0.2.0), mq
 - Vault HTTP handlers refactored to thin wrappers over shared `vault_ops` functions
 - Cluster mode returns explicit error for vault admin topics (vault requires agent mode)
 
-## [0.4.0] - 2026-04-02
-
-Affected crates: mqdb-agent, mqdb-cli.
+## 2026-04-02 — mqdb-agent, mqdb-cli
 
 ### Added
 
@@ -103,9 +97,7 @@ Affected crates: mqdb-agent, mqdb-cli.
 
 - OAuth client secret no longer required when `--email-auth` is used without OAuth providers
 
-## [0.3.0] - 2026-03-30
-
-Affected crates: mqdb-cli.
+## 2026-03-30 — mqdb-cli
 
 ### Added
 
@@ -113,9 +105,7 @@ Affected crates: mqdb-cli.
 - Inline content environment variables for file-path flags: `MQDB_PASSWD`, `MQDB_ACL`, `MQDB_SCRAM`, `MQDB_JWT_KEY`, `MQDB_PASSPHRASE`, `MQDB_LICENSE`, `MQDB_QUIC_CERT`, `MQDB_QUIC_KEY`, `MQDB_QUIC_CA`, `MQDB_OAUTH_CLIENT_SECRET`, `MQDB_IDENTITY_KEY`, `MQDB_FEDERATED_JWT_CONFIG`, `MQDB_CERT_AUTH`
 - Precedence: CLI flags > inline env vars (`MQDB_*`) > file-path env vars (`MQDB_*_FILE`)
 
-## [0.2.0] - 2026-03-28
-
-Affected crates: mqdb-core, mqdb-agent, mqdb-cli.
+## 2026-03-28 — mqdb-core, mqdb-agent, mqdb-cli
 
 ### Added
 
@@ -130,9 +120,7 @@ Affected crates: mqdb-core, mqdb-agent, mqdb-cli.
 - Deferred tracing subscriber initialization for `agent start` to avoid conflict with mqtt-lib's OTLP subscriber
 - Extracted `AgentStartFields` struct from `AgentAction::Start` enum variant (clippy large_enum_variant fix)
 
-## [0.1.0] - 2026-03-23
-
-Initial open-source release.
+## 2026-03-23 — initial release
 
 ### Added
 
