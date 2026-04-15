@@ -41,11 +41,13 @@ impl Database {
         drop(schema_registry);
 
         {
+            let definition = mqdb_core::index::IndexDefinition::new(entity.clone(), fields);
+            let mut batch = self.storage.batch();
             let mut manager = self.index_manager.write().await;
-            manager.add_index(mqdb_core::index::IndexDefinition::new(
-                entity.clone(),
-                fields,
-            ));
+            manager.persist_index(&mut batch, &definition)?;
+            manager.add_index(definition);
+            drop(manager);
+            batch.commit()?;
         }
 
         let prefix = format!("data/{entity}/");

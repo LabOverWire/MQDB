@@ -531,3 +531,101 @@ mqdb list products --filter 'price>100' --user admin --pass admin123
 - [ ] Adding same index twice causes no error (idempotent)
 - [ ] First equality filter uses index, subsequent filters post-filter
 - [ ] Range filter uses index correctly
+
+---
+
+## 43. Index Definition Persistence Across Restarts
+
+Index definitions are persisted to storage under `meta/index/{entity}` and reloaded on agent
+startup. This means indexes survive restarts without requiring users to re-issue `index add`.
+
+> **Note:** Agent-mode only. Cluster mode rejects `index add`.
+
+### Setup
+
+```bash
+mqdb passwd admin -b admin123 -f /tmp/mqdb-persist-idx-passwd
+mqdb agent start --db /tmp/mqdb-persist-idx --bind 127.0.0.1:1883 \
+    --passwd /tmp/mqdb-persist-idx-passwd --admin-users admin
+```
+
+Create schema, add index, and seed data:
+
+```bash
+echo '{"name": {"type": "string"}, "price": {"type": "number"}}' > /tmp/products_schema.json
+mqdb schema set products -f /tmp/products_schema.json --user admin --pass admin123
+
+mqdb index add products --fields price --user admin --pass admin123
+
+mqdb create products --data '{"name":"Phone","price":999}' --user admin --pass admin123
+mqdb create products --data '{"name":"Laptop","price":1500}' --user admin --pass admin123
+mqdb create products --data '{"name":"Mouse","price":25}' --user admin --pass admin123
+```
+
+#### Test 1: Range Query Works Before Restart
+
+```bash
+mqdb list products --filter 'price>100' --user admin --pass admin123
+```
+
+**Expected:** Returns Phone (999) and Laptop (1500). Mouse (25) excluded.
+
+#### Test 2: Stop and Restart Agent
+
+```bash
+# Stop the agent (Ctrl-C or pkill)
+# Restart with the SAME --db path
+mqdb agent start --db /tmp/mqdb-persist-idx --bind 127.0.0.1:1883 \
+    --passwd /tmp/mqdb-persist-idx-passwd --admin-users admin
+```
+
+#### Test 3: Range Query Works After Restart (No Re-Index)
+
+```bash
+mqdb list products --filter 'price>100' --user admin --pass admin123
+```
+
+**Expected:** Returns Phone (999) and Laptop (1500). The index definition was loaded from
+storage on startup — no need to re-issue `index add`.
+
+#### Test 4: New Records Are Indexed After Restart
+
+```bash
+mqdb create products --data '{"name":"Tablet","price":500}' --user admin --pass admin123
+mqdb list products --filter 'price>100' --user admin --pass admin123
+```
+
+**Expected:** Returns Tablet (500), Phone (999), and Laptop (1500). The loaded index
+definition is active, so new writes are indexed automatically.
+
+#### Test 5: Combined Range After Restart
+
+```bash
+mqdb list products --filter 'price>=500' --filter 'price<=999' --user admin --pass admin123
+```
+
+**Expected:** Returns Tablet (500) and Phone (999).
+
+#### Test 6: Re-Adding Same Index Is Idempotent
+
+```bash
+mqdb index add products --fields price --user admin --pass admin123
+mqdb list products --filter 'price>100' --user admin --pass admin123
+```
+
+**Expected:** `index add` succeeds. Range query still returns correct results.
+
+### Cleanup
+
+```bash
+# Stop agent
+rm -rf /tmp/mqdb-persist-idx /tmp/mqdb-persist-idx-passwd /tmp/products_schema.json
+```
+
+### Verification Checklist
+
+- [ ] Range query works before restart
+- [ ] After restart, range query returns same results without re-issuing `index add`
+- [ ] New records created after restart are indexed
+- [ ] Combined range filters work after restart
+- [ ] Re-adding the same index after restart is idempotent

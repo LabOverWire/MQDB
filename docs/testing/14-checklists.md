@@ -82,6 +82,11 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Consumer groups (list, show)
 - [ ] Backup/Restore
 
+### Agent Mode — Index Persistence
+- [ ] Index definitions survive agent restart (no re-issue needed)
+- [ ] New records indexed after restart
+- [ ] Re-adding same index after restart is idempotent
+
 ### Agent Mode — Index Range Queries
 - [ ] Range filters (>, >=, <, <=) on indexed field return correct results
 - [ ] Combined range (>= AND <=) on indexed field returns correct range
@@ -221,6 +226,13 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Index on existing data backfills correctly
 - [ ] Index add is idempotent
 - [ ] First Eq filter uses index, rest post-filter
+
+### Index Persistence (Section 43, Agent Only)
+- [ ] Range query works before restart
+- [ ] After restart, range query returns same results without re-issuing `index add`
+- [ ] New records created after restart are indexed
+- [ ] Combined range filters work after restart
+- [ ] Re-adding same index after restart is idempotent
 
 ### Cluster Scatter-Gather (Section 37)
 - [ ] Sort consistency across all nodes

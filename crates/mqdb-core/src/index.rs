@@ -4,9 +4,11 @@
 use crate::entity::Entity;
 use crate::error::Result;
 use crate::keys;
-use crate::storage::BatchWriter;
+use crate::storage::{BatchWriter, Storage};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Serialize, Deserialize)]
 pub struct IndexDefinition {
     pub entity: String,
     pub fields: Vec<String>,
@@ -98,6 +100,33 @@ impl IndexManager {
         self.indexes
             .get(entity)
             .is_some_and(|idx| idx.fields.iter().any(|f| f == field))
+    }
+
+    /// # Errors
+    /// Returns an error if serialization fails.
+    pub fn persist_index(
+        &self,
+        batch: &mut BatchWriter,
+        definition: &IndexDefinition,
+    ) -> Result<()> {
+        let key = keys::encode_index_definition_key(&definition.entity);
+        let value = serde_json::to_vec(definition)?;
+        batch.insert(key, value);
+        Ok(())
+    }
+
+    /// # Errors
+    /// Returns an error if reading or deserializing index definitions fails.
+    pub fn load_indexes(&mut self, storage: &Storage) -> Result<()> {
+        let prefix = b"meta/index/";
+        let items = storage.prefix_scan(prefix)?;
+
+        for (_key, value) in items {
+            let definition: IndexDefinition = serde_json::from_slice(&value)?;
+            self.indexes.insert(definition.entity.clone(), definition);
+        }
+
+        Ok(())
     }
 
     /// # Errors
@@ -346,5 +375,35 @@ mod tests {
         assert!(ids.contains(&"u1".to_string()));
         assert!(ids.contains(&"u2".to_string()));
         assert!(ids.contains(&"u3".to_string()));
+    }
+
+    #[test]
+    fn persist_and_load_indexes_round_trip() {
+        let storage = Storage::memory();
+        let mut mgr = IndexManager::new();
+        mgr.add_index(IndexDefinition::new(
+            "users".into(),
+            vec!["email".into(), "status".into()],
+        ));
+        mgr.add_index(IndexDefinition::new("posts".into(), vec!["title".into()]));
+
+        for def in mgr.indexes.values() {
+            let mut batch = storage.batch();
+            mgr.persist_index(&mut batch, def).unwrap();
+            batch.commit().unwrap();
+        }
+
+        let mut loaded = IndexManager::new();
+        loaded.load_indexes(&storage).unwrap();
+
+        assert_eq!(
+            loaded.get_indexed_fields("users").unwrap(),
+            &vec!["email".to_string(), "status".to_string()]
+        );
+        assert_eq!(
+            loaded.get_indexed_fields("posts").unwrap(),
+            &vec!["title".to_string()]
+        );
+        assert!(loaded.get_indexed_fields("nonexistent").is_none());
     }
 }

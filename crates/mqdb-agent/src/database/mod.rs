@@ -105,7 +105,9 @@ impl Database {
             config.shared_subscription.num_partitions,
         ));
         let outbox = Arc::new(Outbox::new(Arc::clone(&storage)));
-        let index_manager = Arc::new(RwLock::new(IndexManager::new()));
+        let mut index_manager = IndexManager::new();
+        index_manager.load_indexes(&storage)?;
+        let index_manager = Arc::new(RwLock::new(index_manager));
         let relationship_registry = Arc::new(RwLock::new(RelationshipRegistry::new()));
 
         let mut schema_registry = SchemaRegistry::new();
