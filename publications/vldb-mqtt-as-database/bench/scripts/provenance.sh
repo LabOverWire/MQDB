@@ -122,7 +122,7 @@ obj = {
     "cpu_model":              """$CPU""",
     "mqdb_version":           "$VERSION",
     "mqdb_git_commit":        "$GIT_COMMIT",
-    "mqdb_git_dirty":         ($GIT_DIRTY == "true") if "$GIT_DIRTY" in ("true","false") else None,
+    "mqdb_git_dirty":         "$GIT_DIRTY" == "true",
     "host_fingerprint_sha256":"$FP"
 }
 text = json.dumps(obj, indent=2)
