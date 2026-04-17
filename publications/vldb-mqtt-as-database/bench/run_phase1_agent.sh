@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MQDB_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+MQDB_ROOT="${MQDB_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 MQDB_BIN="${MQDB_ROOT}/target/release/mqdb"
 BRIDGE_BIN="${SCRIPT_DIR}/target/release/mqdb-baseline-bench"
 REST_BIN="${SCRIPT_DIR}/rest-pg/target/release/rest-pg-bench"
