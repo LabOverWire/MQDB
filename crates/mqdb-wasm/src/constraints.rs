@@ -3,6 +3,7 @@
 
 use super::{ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen};
 use crate::encoding::encode_value_for_index;
+use mqdb_core::keys::{encode_constraint_key, encode_index_definition_key};
 
 #[wasm_bindgen]
 impl WasmDatabase {
@@ -75,6 +76,114 @@ impl WasmDatabase {
         Ok(())
     }
 
+    /// Adds a unique constraint and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    pub async fn add_unique_constraint_async(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+            inner
+                .unique_constraints
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        if !self.storage.is_memory() {
+            let name = fields.join("_");
+            let key = encode_constraint_key("unique", &entity, &name);
+            let bytes = serde_json::to_vec(&serde_json::json!({"fields": fields}))
+                .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+            self.persist_index_definitions(&entity).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds a NOT NULL constraint and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    pub async fn add_not_null_async(
+        &self,
+        entity: String,
+        field: String,
+    ) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .not_null_constraints
+                .entry(entity.clone())
+                .or_default()
+                .push(field.clone());
+        }
+
+        if !self.storage.is_memory() {
+            let key = encode_constraint_key("not_null", &entity, &field);
+            let bytes = serde_json::to_vec(&serde_json::json!({"field": field}))
+                .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds a foreign key constraint and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    pub async fn add_foreign_key_async(
+        &self,
+        source_entity: String,
+        source_field: String,
+        target_entity: String,
+        target_field: String,
+        on_delete: &str,
+    ) -> Result<(), JsValue> {
+        let on_delete_action = match on_delete {
+            "cascade" => OnDeleteAction::Cascade,
+            "set_null" => OnDeleteAction::SetNull,
+            _ => OnDeleteAction::Restrict,
+        };
+
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner.foreign_keys.push(ForeignKeyEntry {
+                source_entity: source_entity.clone(),
+                source_field: source_field.clone(),
+                target_entity: target_entity.clone(),
+                target_field: target_field.clone(),
+                on_delete: on_delete_action,
+            });
+        }
+
+        if !self.storage.is_memory() {
+            let key = encode_constraint_key("foreign_key", &source_entity, &source_field);
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "source_entity": source_entity,
+                "source_field": source_field,
+                "target_entity": target_entity,
+                "target_field": target_field,
+                "on_delete": on_delete
+            }))
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+        }
+
+        Ok(())
+    }
+
     /// Adds an index on the specified fields and backfills from existing records (async).
     ///
     /// # Errors
@@ -93,6 +202,10 @@ impl WasmDatabase {
                 .push(fields.clone());
         }
 
+        if !self.storage.is_memory() {
+            self.persist_index_definitions(&entity).await?;
+        }
+
         let prefix = format!("data/{entity}/");
         let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
         for (key, value) in items {
@@ -104,6 +217,44 @@ impl WasmDatabase {
                 self.storage.insert(&index_key, &[]).await?;
             }
         }
+        Ok(())
+    }
+
+    /// Adds a relationship definition and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    pub async fn add_relationship_async(
+        &self,
+        source_entity: String,
+        field: String,
+        target_entity: String,
+    ) -> Result<(), JsValue> {
+        let field_suffix = format!("{field}_id");
+
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .relationships
+                .entry(source_entity.clone())
+                .or_default()
+                .push(Relationship {
+                    field: field.clone(),
+                    target_entity: target_entity.clone(),
+                    field_suffix: field_suffix.clone(),
+                });
+        }
+
+        if !self.storage.is_memory() {
+            let key = format!("meta/relationship/{source_entity}/{field}");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "target_entity": target_entity,
+                "field_suffix": field_suffix
+            }))
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(key.as_bytes(), &bytes).await?;
+        }
+
         Ok(())
     }
 
@@ -625,6 +776,17 @@ impl WasmDatabase {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn persist_index_definitions(&self, entity: &str) -> Result<(), JsValue> {
+        let all_indexes: Vec<Vec<String>> = {
+            let inner = self.borrow_inner()?;
+            inner.indexes.get(entity).cloned().unwrap_or_default()
+        };
+        let key = encode_index_definition_key(entity);
+        let bytes = serde_json::to_vec(&all_indexes)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+        self.storage.insert(&key, &bytes).await
     }
 
     fn extract_id_from_data_key(key: &[u8]) -> Option<String> {

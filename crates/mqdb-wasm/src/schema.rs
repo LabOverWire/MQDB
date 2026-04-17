@@ -5,43 +5,41 @@ use super::{
     FieldDefJs, FieldDefinition, FieldType, JsValue, Schema, SchemaDefinition, WasmDatabase,
     wasm_bindgen,
 };
+use mqdb_core::keys::encode_schema_key;
 
 #[wasm_bindgen]
 impl WasmDatabase {
-    /// Adds a schema definition for an entity.
+    /// Adds a schema definition for an entity (sync, memory backend only).
     ///
     /// # Errors
     /// Returns an error if the schema definition is invalid.
     pub fn add_schema(&self, entity: String, schema_js: JsValue) -> Result<(), JsValue> {
-        let schema_def: SchemaDefinition = serde_wasm_bindgen::from_value(schema_js)
-            .map_err(|e| JsValue::from_str(&format!("invalid schema: {e}")))?;
+        let schema = Self::parse_schema(&entity, schema_js)?;
+        let mut inner = self.borrow_inner_mut()?;
+        inner.schemas.insert(entity, schema);
+        Ok(())
+    }
 
-        let mut schema = Schema::new(entity.clone());
+    /// Adds a schema definition for an entity and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if the schema definition is invalid or storage fails.
+    pub async fn add_schema_async(
+        &self,
+        entity: String,
+        schema_js: JsValue,
+    ) -> Result<(), JsValue> {
+        let schema = Self::parse_schema(&entity, schema_js)?;
 
-        for field in schema_def.fields {
-            let field_type = match field.field_type.as_str() {
-                "string" => FieldType::String,
-                "number" => FieldType::Number,
-                "boolean" => FieldType::Boolean,
-                "array" => FieldType::Array,
-                "object" => FieldType::Object,
-                other => return Err(JsValue::from_str(&format!("unknown field type: {other}"))),
-            };
-
-            let mut field_def = FieldDefinition::new(field.name, field_type);
-            if field.required.unwrap_or(false) {
-                field_def = field_def.required();
-            }
-            if let Some(default) = field.default {
-                field_def = field_def.with_default(default);
-            }
-
-            schema = schema.add_field(field_def);
+        if !self.storage.is_memory() {
+            let key = encode_schema_key(&entity);
+            let bytes = serde_json::to_vec(&schema)
+                .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
         }
 
         let mut inner = self.borrow_inner_mut()?;
         inner.schemas.insert(entity, schema);
-
         Ok(())
     }
 
@@ -70,5 +68,37 @@ impl WasmDatabase {
             }
             None => Ok(JsValue::NULL),
         }
+    }
+}
+
+impl WasmDatabase {
+    fn parse_schema(entity: &str, schema_js: JsValue) -> Result<Schema, JsValue> {
+        let schema_def: SchemaDefinition = serde_wasm_bindgen::from_value(schema_js)
+            .map_err(|e| JsValue::from_str(&format!("invalid schema: {e}")))?;
+
+        let mut schema = Schema::new(entity);
+
+        for field in schema_def.fields {
+            let field_type = match field.field_type.as_str() {
+                "string" => FieldType::String,
+                "number" => FieldType::Number,
+                "boolean" => FieldType::Boolean,
+                "array" => FieldType::Array,
+                "object" => FieldType::Object,
+                other => return Err(JsValue::from_str(&format!("unknown field type: {other}"))),
+            };
+
+            let mut field_def = FieldDefinition::new(field.name, field_type);
+            if field.required.unwrap_or(false) {
+                field_def = field_def.required();
+            }
+            if let Some(default) = field.default {
+                field_def = field_def.with_default(default);
+            }
+
+            schema = schema.add_field(field_def);
+        }
+
+        Ok(schema)
     }
 }

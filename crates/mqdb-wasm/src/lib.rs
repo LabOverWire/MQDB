@@ -63,7 +63,9 @@ impl WasmDatabase {
         let backend = IdbBackend::open(db_name)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(Self::with_storage(StorageKind::indexed_db(backend)))
+        let db = Self::with_storage(StorageKind::indexed_db(backend));
+        db.load_metadata_async().await?;
+        Ok(db)
     }
 
     #[allow(clippy::missing_errors_doc)]
@@ -116,9 +118,216 @@ impl WasmDatabase {
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
-        Ok(Self::with_storage(StorageKind::encrypted_indexed_db(
-            backend, handle,
-        )))
+        let db = Self::with_storage(StorageKind::encrypted_indexed_db(backend, handle));
+        db.load_metadata_async().await?;
+        Ok(db)
+    }
+}
+
+impl WasmDatabase {
+    async fn load_metadata_async(&self) -> Result<(), JsValue> {
+        self.load_schemas().await?;
+        self.load_constraints().await?;
+        self.load_indexes().await?;
+        self.load_relationships().await?;
+        self.recover_id_counters().await?;
+        Ok(())
+    }
+
+    async fn load_schemas(&self) -> Result<(), JsValue> {
+        let prefix = b"meta/schema/";
+        let items = self.storage.prefix_scan(prefix).await?;
+        let mut inner = self.borrow_inner_mut()?;
+        for (key, value) in items {
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| JsValue::from_str(&format!("invalid key: {e}")))?;
+            let entity = key_str
+                .strip_prefix("meta/schema/")
+                .ok_or_else(|| JsValue::from_str("invalid schema key"))?;
+            let schema: Schema = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("invalid schema data: {e}")))?;
+            inner.schemas.insert(entity.to_string(), schema);
+        }
+        Ok(())
+    }
+
+    async fn load_constraints(&self) -> Result<(), JsValue> {
+        let prefix = b"meta/constraint/";
+        let items = self.storage.prefix_scan(prefix).await?;
+        let mut inner = self.borrow_inner_mut()?;
+
+        for (key, value) in items {
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| JsValue::from_str(&format!("invalid key: {e}")))?;
+            let rest = key_str
+                .strip_prefix("meta/constraint/")
+                .ok_or_else(|| JsValue::from_str("invalid constraint key"))?;
+
+            let parts: Vec<&str> = rest.splitn(3, '/').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+
+            let constraint_type = parts[0];
+            let entity = parts[1];
+
+            match constraint_type {
+                "unique" => {
+                    let data: serde_json::Value = serde_json::from_slice(&value)
+                        .map_err(|e| JsValue::from_str(&format!("invalid constraint: {e}")))?;
+                    if let Some(fields) = data.get("fields").and_then(|v| v.as_array()) {
+                        let field_names: Vec<String> = fields
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                        inner
+                            .unique_constraints
+                            .entry(entity.to_string())
+                            .or_default()
+                            .push(field_names);
+                    }
+                }
+                "not_null" => {
+                    let data: serde_json::Value = serde_json::from_slice(&value)
+                        .map_err(|e| JsValue::from_str(&format!("invalid constraint: {e}")))?;
+                    if let Some(field) = data.get("field").and_then(|v| v.as_str()) {
+                        inner
+                            .not_null_constraints
+                            .entry(entity.to_string())
+                            .or_default()
+                            .push(field.to_string());
+                    }
+                }
+                "foreign_key" => {
+                    let data: serde_json::Value = serde_json::from_slice(&value)
+                        .map_err(|e| JsValue::from_str(&format!("invalid constraint: {e}")))?;
+                    let source_entity = data
+                        .get("source_entity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(entity);
+                    let source_field =
+                        data.get("source_field").and_then(|v| v.as_str()).unwrap_or(parts[2]);
+                    let target_entity = data
+                        .get("target_entity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let target_field = data
+                        .get("target_field")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("id");
+                    let on_delete = match data.get("on_delete").and_then(|v| v.as_str()) {
+                        Some("cascade") => OnDeleteAction::Cascade,
+                        Some("set_null") => OnDeleteAction::SetNull,
+                        _ => OnDeleteAction::Restrict,
+                    };
+                    inner.foreign_keys.push(ForeignKeyEntry {
+                        source_entity: source_entity.to_string(),
+                        source_field: source_field.to_string(),
+                        target_entity: target_entity.to_string(),
+                        target_field: target_field.to_string(),
+                        on_delete,
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn load_indexes(&self) -> Result<(), JsValue> {
+        let prefix = b"meta/index/";
+        let items = self.storage.prefix_scan(prefix).await?;
+        let mut inner = self.borrow_inner_mut()?;
+        for (key, value) in items {
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| JsValue::from_str(&format!("invalid key: {e}")))?;
+            let entity = key_str
+                .strip_prefix("meta/index/")
+                .ok_or_else(|| JsValue::from_str("invalid index key"))?;
+            let index_defs: Vec<Vec<String>> = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("invalid index data: {e}")))?;
+            inner.indexes.insert(entity.to_string(), index_defs);
+        }
+        Ok(())
+    }
+
+    async fn load_relationships(&self) -> Result<(), JsValue> {
+        let prefix = b"meta/relationship/";
+        let items = self.storage.prefix_scan(prefix).await?;
+        let mut inner = self.borrow_inner_mut()?;
+        for (key, value) in items {
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|e| JsValue::from_str(&format!("invalid key: {e}")))?;
+            let rest = key_str
+                .strip_prefix("meta/relationship/")
+                .ok_or_else(|| JsValue::from_str("invalid relationship key"))?;
+
+            let parts: Vec<&str> = rest.splitn(2, '/').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+
+            let source_entity = parts[0];
+            let field = parts[1];
+            let data: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("invalid relationship: {e}")))?;
+
+            let target_entity = data
+                .get("target_entity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let default_suffix = format!("{field}_id");
+            let field_suffix = data
+                .get("field_suffix")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&default_suffix);
+
+            inner
+                .relationships
+                .entry(source_entity.to_string())
+                .or_default()
+                .push(Relationship {
+                    field: field.to_string(),
+                    target_entity: target_entity.to_string(),
+                    field_suffix: field_suffix.to_string(),
+                });
+        }
+        Ok(())
+    }
+
+    async fn recover_id_counters(&self) -> Result<(), JsValue> {
+        let prefix = b"data/";
+        let items = self.storage.prefix_scan(prefix).await?;
+        let mut max_ids: HashMap<String, u64> = HashMap::new();
+
+        for (key, _) in items {
+            let key_str = match std::str::from_utf8(&key) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rest = match key_str.strip_prefix("data/") {
+                Some(r) => r,
+                None => continue,
+            };
+            let slash_pos = match rest.find('/') {
+                Some(p) => p,
+                None => continue,
+            };
+            let entity = &rest[..slash_pos];
+            let id_str = &rest[slash_pos + 1..];
+            if let Ok(id_num) = id_str.parse::<u64>() {
+                let current_max = max_ids.entry(entity.to_string()).or_insert(0);
+                if id_num > *current_max {
+                    *current_max = id_num;
+                }
+            }
+        }
+
+        let mut inner = self.borrow_inner_mut()?;
+        for (entity, max_id) in max_ids {
+            inner.id_counters.insert(entity, max_id);
+        }
+        Ok(())
     }
 }
 

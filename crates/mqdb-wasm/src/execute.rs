@@ -90,7 +90,7 @@ impl WasmDatabase {
             }))?),
             AdminOperation::SchemaSet { entity } => {
                 let schema_js = serialize_js(&data)?;
-                self.add_schema(entity, schema_js)?;
+                self.add_schema_async(entity, schema_js).await?;
                 Ok(serialize_js(&serde_json::json!({"message": "schema set"}))?)
             }
             AdminOperation::SchemaGet { entity } => self.get_schema(&entity),
@@ -108,14 +108,14 @@ impl WasmDatabase {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        self.add_unique_constraint(entity, fields)?;
+                        self.add_unique_constraint_async(entity, fields).await?;
                     }
                     Some("not_null") => {
                         let field = data
                             .get("field")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| JsValue::from_str("field required"))?;
-                        self.add_not_null(entity, field.to_string())?;
+                        self.add_not_null_async(entity, field.to_string()).await?;
                     }
                     Some("foreign_key") => {
                         let source_field = data
@@ -134,13 +134,14 @@ impl WasmDatabase {
                             .get("on_delete")
                             .and_then(|v| v.as_str())
                             .unwrap_or("restrict");
-                        self.add_foreign_key(
+                        self.add_foreign_key_async(
                             entity,
                             source_field.to_string(),
                             target_entity.to_string(),
                             target_field.to_string(),
                             on_delete,
-                        )?;
+                        )
+                        .await?;
                     }
                     _ => return Err(JsValue::from_str("unknown constraint type")),
                 }
@@ -161,7 +162,7 @@ impl WasmDatabase {
                 if fields.is_empty() {
                     return Err(JsValue::from_str("fields required for index"));
                 }
-                self.add_index(entity, fields)?;
+                self.add_index_async(entity, fields).await?;
                 Ok(serialize_js(
                     &serde_json::json!({"message": "index added"}),
                 )?)
@@ -170,12 +171,11 @@ impl WasmDatabase {
                 let items = self.storage.prefix_scan(b"data/").await?;
                 let mut entities = std::collections::BTreeSet::new();
                 for (key, _) in &items {
-                    if let Ok(key_str) = std::str::from_utf8(key) {
-                        if let Some(rest) = key_str.strip_prefix("data/") {
-                            if let Some(slash_pos) = rest.find('/') {
-                                entities.insert(rest[..slash_pos].to_string());
-                            }
-                        }
+                    if let Ok(key_str) = std::str::from_utf8(key)
+                        && let Some(rest) = key_str.strip_prefix("data/")
+                        && let Some(slash_pos) = rest.find('/')
+                    {
+                        entities.insert(rest[..slash_pos].to_string());
                     }
                 }
                 let entity_list: Vec<&str> = entities.iter().map(String::as_str).collect();
