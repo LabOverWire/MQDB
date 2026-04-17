@@ -23,7 +23,7 @@ impl WasmDatabase {
         };
 
         if let Some(admin_op) = parse_admin_topic(&topic) {
-            return self.handle_admin_operation(admin_op, &payload_bytes);
+            return self.handle_admin_operation(admin_op, &payload_bytes).await;
         }
 
         let Some(db_op) = parse_db_topic(&topic) else {
@@ -70,7 +70,7 @@ impl WasmDatabase {
 }
 
 impl WasmDatabase {
-    pub(crate) fn handle_admin_operation(
+    pub(crate) async fn handle_admin_operation(
         &self,
         op: AdminOperation,
         payload: &[u8],
@@ -147,6 +147,39 @@ impl WasmDatabase {
                 Ok(serialize_js(
                     &serde_json::json!({"message": "constraint added"}),
                 )?)
+            }
+            AdminOperation::IndexAdd { entity } => {
+                let fields: Vec<String> = data
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if fields.is_empty() {
+                    return Err(JsValue::from_str("fields required for index"));
+                }
+                self.add_index(entity, fields)?;
+                Ok(serialize_js(
+                    &serde_json::json!({"message": "index added"}),
+                )?)
+            }
+            AdminOperation::Catalog => {
+                let items = self.storage.prefix_scan(b"data/").await?;
+                let mut entities = std::collections::BTreeSet::new();
+                for (key, _) in &items {
+                    if let Ok(key_str) = std::str::from_utf8(key) {
+                        if let Some(rest) = key_str.strip_prefix("data/") {
+                            if let Some(slash_pos) = rest.find('/') {
+                                entities.insert(rest[..slash_pos].to_string());
+                            }
+                        }
+                    }
+                }
+                let entity_list: Vec<&str> = entities.iter().map(String::as_str).collect();
+                Ok(serialize_js(&serde_json::json!({"entities": entity_list}))?)
             }
             _ => Err(JsValue::from_str(&format!(
                 "admin operation not supported in WASM: {op:?}"

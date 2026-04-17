@@ -16,6 +16,13 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &opts.sort)?;
+        self.validate_query_fields(
+            &entity,
+            &opts.filters,
+            &opts.sort,
+            opts.projection.as_deref(),
+        )?;
 
         let mut all_items = if let Some((records, remaining)) =
             self.try_index_scans_async(&entity, &opts.filters).await?

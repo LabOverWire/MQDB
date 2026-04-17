@@ -75,13 +75,63 @@ impl WasmDatabase {
         Ok(())
     }
 
-    /// Adds an index on the specified fields.
+    /// Adds an index on the specified fields and backfills from existing records (async).
     ///
     /// # Errors
-    /// This function does not currently return errors but the signature allows for future validation.
+    /// Returns an error if the storage operation fails during backfill.
+    pub async fn add_index_async(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+        for (key, value) in items {
+            let id = Self::extract_id_from_data_key(&key);
+            let Some(id) = id else { continue };
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if let Some(index_key) = Self::build_index_key(&entity, &id, &fields, &parsed)? {
+                self.storage.insert(&index_key, &[]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds an index on the specified fields and backfills from existing records (sync, memory only).
+    ///
+    /// # Errors
+    /// Returns an error if the backend is not memory-based or backfill fails.
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
-        let mut inner = self.borrow_inner_mut()?;
-        inner.indexes.entry(entity).or_default().push(fields);
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+        for (key, value) in items {
+            let id = Self::extract_id_from_data_key(&key);
+            let Some(id) = id else { continue };
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if let Some(index_key) = Self::build_index_key(&entity, &id, &fields, &parsed)? {
+                self.storage.insert_sync(&index_key, &[])?;
+            }
+        }
         Ok(())
     }
 
@@ -575,6 +625,13 @@ impl WasmDatabase {
         }
 
         Ok(())
+    }
+
+    fn extract_id_from_data_key(key: &[u8]) -> Option<String> {
+        let key_str = std::str::from_utf8(key).ok()?;
+        let rest = key_str.strip_prefix("data/")?;
+        let slash_pos = rest.find('/')?;
+        Some(rest[slash_pos + 1..].to_string())
     }
 
     fn build_index_key(

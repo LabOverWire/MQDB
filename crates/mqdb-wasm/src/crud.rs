@@ -190,6 +190,12 @@ impl WasmDatabase {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
 
+        let existing_raw = self
+            .storage
+            .get_raw(key.as_bytes())
+            .await?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
         let existing_data = self
             .storage
             .get(key.as_bytes())
@@ -237,7 +243,9 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert(key.as_bytes(), &serialized).await?;
+        self.storage
+            .compare_and_swap(key.as_bytes(), &existing_raw, &serialized)
+            .await?;
         self.update_indexes_async(&entity, &id, &value, Some(&existing))
             .await?;
 
@@ -370,6 +378,11 @@ impl WasmDatabase {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
 
+        let existing_raw = self
+            .storage
+            .get_raw_sync(key.as_bytes())?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
         let existing_data = self
             .storage
             .get_sync(key.as_bytes())?
@@ -415,7 +428,8 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert_sync(key.as_bytes(), &serialized)?;
+        self.storage
+            .compare_and_swap_sync(key.as_bytes(), &existing_raw, &serialized)?;
         self.update_indexes_sync(&entity, &id, &value, Some(&existing))?;
 
         let event = ChangeEvent::update(entity, id, value.clone());

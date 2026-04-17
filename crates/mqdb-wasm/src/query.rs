@@ -6,6 +6,10 @@ use super::{
 };
 use crate::encoding::encode_value_for_index;
 
+const MAX_FILTERS: usize = mqdb_core::types::MAX_FILTERS;
+const MAX_SORT_FIELDS: usize = mqdb_core::types::MAX_SORT_FIELDS;
+const MAX_LIST_RESULTS: usize = mqdb_core::types::MAX_LIST_RESULTS;
+
 type ScanResult = Option<(Vec<serde_json::Value>, Vec<FilterJs>)>;
 type RangeBound = Option<(Vec<u8>, bool)>;
 type RangeBounds = (RangeBound, RangeBound, Vec<usize>);
@@ -23,6 +27,13 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &opts.sort)?;
+        self.validate_query_fields(
+            &entity,
+            &opts.filters,
+            &opts.sort,
+            opts.projection.as_deref(),
+        )?;
 
         let mut results = if let Some((records, remaining)) =
             self.try_index_scans_async(&entity, &opts.filters).await?
@@ -41,6 +52,7 @@ impl WasmDatabase {
             let limit = pagination.limit;
             results = results.into_iter().skip(offset).take(limit).collect();
         }
+        results.truncate(MAX_LIST_RESULTS);
 
         if let Some(ref includes) = opts.includes {
             for result in &mut results {
@@ -72,6 +84,13 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &opts.sort)?;
+        self.validate_query_fields(
+            &entity,
+            &opts.filters,
+            &opts.sort,
+            opts.projection.as_deref(),
+        )?;
 
         let mut results = if let Some((records, remaining)) =
             self.try_index_scans_sync(&entity, &opts.filters)?
@@ -90,6 +109,7 @@ impl WasmDatabase {
             let limit = pagination.limit;
             results = results.into_iter().skip(offset).take(limit).collect();
         }
+        results.truncate(MAX_LIST_RESULTS);
 
         if let Some(ref projection) = opts.projection {
             results = results
@@ -115,6 +135,8 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &[])?;
+        self.validate_query_fields(&entity, &opts.filters, &[], None)?;
 
         if opts.filters.is_empty() {
             let prefix = format!("data/{entity}/");
@@ -159,6 +181,8 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &[])?;
+        self.validate_query_fields(&entity, &opts.filters, &[], None)?;
 
         if opts.filters.is_empty() {
             let prefix = format!("data/{entity}/");
@@ -589,6 +613,13 @@ impl WasmDatabase {
                     false
                 }
             }
+            "in" => {
+                if let (Some(fv), serde_json::Value::Array(arr)) = (field_value, &filter.value) {
+                    arr.contains(fv)
+                } else {
+                    false
+                }
+            }
             "null" | "?" => field_value.is_none() || field_value == Some(&serde_json::Value::Null),
             "not_null" | "!?" => {
                 field_value.is_some() && field_value != Some(&serde_json::Value::Null)
@@ -685,6 +716,65 @@ impl WasmDatabase {
             }
             _ => std::cmp::Ordering::Equal,
         }
+    }
+
+    pub(crate) fn validate_query_fields(
+        &self,
+        entity: &str,
+        filters: &[FilterJs],
+        sort: &[SortOrderJs],
+        projection: Option<&[String]>,
+    ) -> Result<(), JsValue> {
+        let inner = self.borrow_inner()?;
+        let Some(schema) = inner.schemas.get(entity) else {
+            return Ok(());
+        };
+
+        for filter in filters {
+            if filter.field != "id" && !schema.fields.contains_key(&filter.field) {
+                return Err(JsValue::from_str(&format!(
+                    "unknown field in filter: '{}'",
+                    filter.field
+                )));
+            }
+        }
+        for s in sort {
+            if s.field != "id" && !schema.fields.contains_key(&s.field) {
+                return Err(JsValue::from_str(&format!(
+                    "unknown field in sort: '{}'",
+                    s.field
+                )));
+            }
+        }
+        if let Some(fields) = projection {
+            for f in fields {
+                if f != "id" && !schema.fields.contains_key(f) {
+                    return Err(JsValue::from_str(&format!(
+                        "unknown field in projection: '{f}'"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_query_limits(
+        filters: &[FilterJs],
+        sort: &[SortOrderJs],
+    ) -> Result<(), JsValue> {
+        if filters.len() > MAX_FILTERS {
+            return Err(JsValue::from_str(&format!(
+                "too many filters: {} (max {MAX_FILTERS})",
+                filters.len()
+            )));
+        }
+        if sort.len() > MAX_SORT_FIELDS {
+            return Err(JsValue::from_str(&format!(
+                "too many sort fields: {} (max {MAX_SORT_FIELDS})",
+                sort.len()
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn project_fields(value: serde_json::Value, fields: &[String]) -> serde_json::Value {
