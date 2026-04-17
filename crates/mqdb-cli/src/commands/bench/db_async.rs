@@ -9,6 +9,8 @@ use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
+use crate::cli_types::OutputFormat;
+
 use super::common::{BenchDbArgs, DbOp, generate_record};
 
 const RAMP_INITIAL_RATE: u64 = 500;
@@ -451,27 +453,52 @@ pub(super) async fn cmd_bench_db_async(
         (0.0, 0.0, 0.0, 0.0, 0.0)
     };
 
-    println!("\n┌───────────────────────────────────────────┐");
-    println!("│           DB Benchmark Results            │");
-    println!("├───────────────────────────────────────────┤");
-    println!("│ Mode:                              ASYNC  │");
-    println!("│ Duration:              {duration:>10.2} s      │");
-    println!("│ Published:             {published:>10}         │");
-    println!("│ Successful:            {received:>10}         │");
-    println!("│ Errors:                {errors:>10}         │");
-    println!("│ Saturation Point:      {saturation_display:>10.0} ops/s  │");
-    if peak_rate > 0 {
-        println!("│ Peak Rate Tested:      {peak_rate:>10} ops/s  │");
+    if let OutputFormat::Json = args.format {
+        let result = json!({
+            "mode": "async",
+            "duration_secs": duration,
+            "published": published,
+            "successful": received,
+            "errors": errors,
+            "saturation_ops_sec": saturation_display,
+            "throughput_ops_sec": throughput,
+            "latency_min_ms": lat_min,
+            "latency_p50_ms": lat_p50,
+            "latency_p95_ms": lat_p95,
+            "latency_p99_ms": lat_p99,
+            "latency_max_ms": lat_max,
+            "config": {
+                "op": args.op,
+                "qos": args.qos,
+                "fields": args.fields,
+                "field_size": args.field_size,
+                "record_size_approx": record_size_approx
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("\n┌───────────────────────────────────────────┐");
+        println!("│           DB Benchmark Results            │");
+        println!("├───────────────────────────────────────────┤");
+        println!("│ Mode:                              ASYNC  │");
+        println!("│ Duration:              {duration:>10.2} s      │");
+        println!("│ Published:             {published:>10}         │");
+        println!("│ Successful:            {received:>10}         │");
+        println!("│ Errors:                {errors:>10}         │");
+        println!("│ Saturation Point:      {saturation_display:>10.0} ops/s  │");
+        if peak_rate > 0 {
+            println!("│ Peak Rate Tested:      {peak_rate:>10} ops/s  │");
+        }
+        println!("│ Throughput:            {throughput:>10.0} ops/s  │");
+        println!("├───────────────────────────────────────────┤");
+        println!("│ Latency (ms):                             │");
+        println!("│   Min:                 {lat_min:>10.2} ms      │");
+        println!("│   p50:                 {lat_p50:>10.2} ms      │");
+        println!("│   p95:                 {lat_p95:>10.2} ms      │");
+        println!("│   p99:                 {lat_p99:>10.2} ms      │");
+        println!("│   Max:                 {lat_max:>10.2} ms      │");
+        println!("└───────────────────────────────────────────┘");
     }
-    println!("│ Throughput:            {throughput:>10.0} ops/s  │");
-    println!("├───────────────────────────────────────────┤");
-    println!("│ Latency (ms):                             │");
-    println!("│   Min:                 {lat_min:>10.2} ms      │");
-    println!("│   p50:                 {lat_p50:>10.2} ms      │");
-    println!("│   p95:                 {lat_p95:>10.2} ms      │");
-    println!("│   p99:                 {lat_p99:>10.2} ms      │");
-    println!("│   Max:                 {lat_max:>10.2} ms      │");
-    println!("└───────────────────────────────────────────┘");
 
     Ok(())
 }

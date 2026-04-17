@@ -56,7 +56,7 @@ pub(crate) enum BenchAction {
         #[arg(
             long,
             default_value = "mixed",
-            help = "Operation type: insert, get, update, delete, list, mixed"
+            help = "Operation type: insert, get, update, delete, list, mixed, changefeed, unique, cascade"
         )]
         op: String,
         #[arg(long, default_value = "1", help = "Number of concurrent clients")]
@@ -97,9 +97,33 @@ pub(crate) enum BenchAction {
         qos: u8,
         #[arg(
             long,
-            help = "Duration in seconds (async mode only, overrides --operations)"
+            help = "Duration in seconds (async mode / changefeed, overrides --operations)"
         )]
         duration: Option<u64>,
+        #[arg(
+            long,
+            default_value = "500",
+            help = "Write rate in ops/sec (changefeed op only)"
+        )]
+        write_rate: u64,
+        #[arg(
+            long,
+            default_value = "100",
+            help = "Attempts per client on contested field (unique op only)"
+        )]
+        attempts_per_client: u64,
+        #[arg(
+            long,
+            default_value = "100",
+            help = "Children per parent (cascade op only)"
+        )]
+        children: u64,
+        #[arg(
+            long,
+            default_value = "5",
+            help = "Cascade iterations (cascade op only)"
+        )]
+        runs: u64,
         #[command(flatten)]
         conn: ConnectionArgs,
         #[arg(long, default_value = "table", help = "Output format")]
