@@ -124,13 +124,24 @@ remote() {
     ssh $SSH_OPTS "$SSH_USER@$PUBLIC_DNS" "$@"
 }
 
+wait_for_cloud_init() {
+    log "waiting for cloud-init (user_data.sh) to finish..."
+    local retries=120
+    for i in $(seq 1 $retries); do
+        if remote "test -f /home/$SSH_USER/ready" 2>/dev/null; then
+            log "cloud-init done after $((i * 5))s"
+            return 0
+        fi
+        sleep 5
+    done
+    die "cloud-init never finished (no /home/$SSH_USER/ready after 10min)"
+}
+
 install_on_instance() {
-    log "installing docker + rust on instance..."
+    wait_for_cloud_init
+    log "installing extra packages (jq, rsync, python3)..."
     remote "sudo apt-get update -y && \
-            sudo apt-get install -y docker.io docker-compose-v2 build-essential curl jq rsync python3 && \
-            sudo systemctl enable --now docker && \
-            sudo usermod -aG docker $SSH_USER"
-    remote "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable"
+            sudo apt-get install -y jq rsync python3"
     log "building mqdb release binary..."
     remote "cd /home/$SSH_USER/mqdb && \$HOME/.cargo/bin/cargo build --release -p mqdb-cli"
     log "building baseline bridge binary..."
