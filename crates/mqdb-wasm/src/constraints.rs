@@ -3,6 +3,7 @@
 
 use super::{ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen};
 use crate::encoding::encode_value_for_index;
+use crate::types::WasmBatch;
 use mqdb_core::keys::{encode_constraint_key, encode_index_definition_key};
 
 #[wasm_bindgen]
@@ -539,55 +540,6 @@ impl WasmDatabase {
         Ok(cascade_deletes)
     }
 
-    pub(crate) async fn update_indexes_async(
-        &self,
-        entity: &str,
-        id: &str,
-        value: &serde_json::Value,
-        old_value: Option<&serde_json::Value>,
-    ) -> Result<(), JsValue> {
-        if let Some(old) = old_value {
-            self.remove_indexes_async(entity, id, old).await?;
-        }
-
-        let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.borrow_inner()?;
-            inner.indexes.get(entity).cloned()
-        };
-
-        if let Some(index_defs) = index_defs {
-            for fields in index_defs {
-                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    self.storage.insert(&key, &[]).await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn remove_indexes_async(
-        &self,
-        entity: &str,
-        id: &str,
-        value: &serde_json::Value,
-    ) -> Result<(), JsValue> {
-        let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.borrow_inner()?;
-            inner.indexes.get(entity).cloned()
-        };
-
-        if let Some(index_defs) = index_defs {
-            for fields in index_defs {
-                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    let _ = self.storage.remove(&key).await;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn validate_unique_sync(
         &self,
         entity: &str,
@@ -729,15 +681,16 @@ impl WasmDatabase {
         Ok(cascade_deletes)
     }
 
-    pub(crate) fn update_indexes_sync(
+    pub(crate) fn update_indexes_batch(
         &self,
+        batch: &mut WasmBatch,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
         old_value: Option<&serde_json::Value>,
     ) -> Result<(), JsValue> {
         if let Some(old) = old_value {
-            self.remove_indexes_sync(entity, id, old)?;
+            self.remove_indexes_batch(batch, entity, id, old)?;
         }
 
         let index_defs: Option<Vec<Vec<String>>> = {
@@ -748,7 +701,7 @@ impl WasmDatabase {
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    self.storage.insert_sync(&key, &[])?;
+                    batch.insert(key, vec![]);
                 }
             }
         }
@@ -756,8 +709,9 @@ impl WasmDatabase {
         Ok(())
     }
 
-    pub(crate) fn remove_indexes_sync(
+    pub(crate) fn remove_indexes_batch(
         &self,
+        batch: &mut WasmBatch,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
@@ -770,7 +724,7 @@ impl WasmDatabase {
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    let _ = self.storage.remove_sync(&key);
+                    batch.remove(key);
                 }
             }
         }

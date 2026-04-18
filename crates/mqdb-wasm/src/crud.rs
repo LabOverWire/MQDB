@@ -55,9 +55,11 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert(key.as_bytes(), &serialized).await?;
-        self.update_indexes_async(&entity, &id, &value, None)
-            .await?;
+        let stored = self.storage.encrypt_if_needed(key.as_bytes(), &serialized).await?;
+        let mut batch = self.storage.batch();
+        batch.insert(key.as_bytes().to_vec(), stored);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, None)?;
+        batch.commit().await?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -243,11 +245,12 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage
-            .compare_and_swap(key.as_bytes(), &existing_raw, &serialized)
-            .await?;
-        self.update_indexes_async(&entity, &id, &value, Some(&existing))
-            .await?;
+        let stored = self.storage.encrypt_if_needed(key.as_bytes(), &serialized).await?;
+        let mut batch = self.storage.batch();
+        batch.expect_value(key.as_bytes().to_vec(), existing_raw);
+        batch.insert(key.as_bytes().to_vec(), stored);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, Some(&existing))?;
+        batch.commit().await?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -275,8 +278,10 @@ impl WasmDatabase {
             .check_foreign_key_constraints_async(&entity, &id)
             .await?;
 
-        self.storage.remove(key.as_bytes()).await?;
-        self.remove_indexes_async(&entity, &id, &existing).await?;
+        let mut batch = self.storage.batch();
+        batch.remove(key.as_bytes().to_vec());
+        self.remove_indexes_batch(&mut batch, &entity, &id, &existing)?;
+        batch.commit().await?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = Box::pin(self.delete(cascade_entity, cascade_id)).await;
@@ -357,8 +362,10 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert_sync(key.as_bytes(), &serialized)?;
-        self.update_indexes_sync(&entity, &id, &value, None)?;
+        let mut batch = self.storage.batch();
+        batch.insert(key.as_bytes().to_vec(), serialized);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, None)?;
+        batch.commit_sync()?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -428,9 +435,11 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage
-            .compare_and_swap_sync(key.as_bytes(), &existing_raw, &serialized)?;
-        self.update_indexes_sync(&entity, &id, &value, Some(&existing))?;
+        let mut batch = self.storage.batch();
+        batch.expect_value(key.as_bytes().to_vec(), existing_raw);
+        batch.insert(key.as_bytes().to_vec(), serialized);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, Some(&existing))?;
+        batch.commit_sync()?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -453,8 +462,10 @@ impl WasmDatabase {
 
         let cascade_deletes = self.check_foreign_key_constraints_sync(&entity, &id)?;
 
-        self.storage.remove_sync(key.as_bytes())?;
-        self.remove_indexes_sync(&entity, &id, &existing)?;
+        let mut batch = self.storage.batch();
+        batch.remove(key.as_bytes().to_vec());
+        self.remove_indexes_batch(&mut batch, &entity, &id, &existing)?;
+        batch.commit_sync()?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = self.delete_sync(cascade_entity, cascade_id);

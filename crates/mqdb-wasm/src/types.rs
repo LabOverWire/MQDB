@@ -5,8 +5,9 @@ use super::{
     Arc, AsyncStorageBackend, ChangeEvent, Deserialize, Filter, HashMap, IdbBackend, JsValue,
     OnDeleteAction, Operation, Pagination, Schema, Serialize, SortDirection, SortOrder, Storage,
 };
-use mqdb_core::storage::AsyncBatchOperations;
 use crate::crypto::CryptoHandle;
+use crate::IndexedDbBatch;
+use mqdb_core::storage::{AsyncBatchOperations, BatchWriter};
 use std::rc::Rc;
 
 pub(crate) type KvPairs = Vec<(Vec<u8>, Vec<u8>)>;
@@ -23,6 +24,48 @@ enum BackendKind {
 
 fn err_to_js(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+pub(crate) enum WasmBatch {
+    Memory(BatchWriter),
+    IndexedDb(IndexedDbBatch),
+}
+
+impl WasmBatch {
+    pub(crate) fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        match self {
+            Self::Memory(b) => b.insert(key, value),
+            Self::IndexedDb(b) => b.insert(key, value),
+        }
+    }
+
+    pub(crate) fn remove(&mut self, key: Vec<u8>) {
+        match self {
+            Self::Memory(b) => b.remove(key),
+            Self::IndexedDb(b) => b.remove(key),
+        }
+    }
+
+    pub(crate) fn expect_value(&mut self, key: Vec<u8>, expected: Vec<u8>) {
+        match self {
+            Self::Memory(b) => b.expect_value(key, expected),
+            Self::IndexedDb(b) => b.expect_value(key, expected),
+        }
+    }
+
+    pub(crate) async fn commit(self) -> Result<(), JsValue> {
+        match self {
+            Self::Memory(b) => b.commit().map_err(err_to_js),
+            Self::IndexedDb(b) => b.commit().await.map_err(err_to_js),
+        }
+    }
+
+    pub(crate) fn commit_sync(self) -> Result<(), JsValue> {
+        match self {
+            Self::Memory(b) => b.commit().map_err(err_to_js),
+            Self::IndexedDb(_) => Err(JsValue::from_str("sync commit requires memory backend")),
+        }
+    }
 }
 
 impl StorageKind {
@@ -73,13 +116,6 @@ impl StorageKind {
         }
     }
 
-    pub(crate) async fn remove(&self, key: &[u8]) -> Result<(), JsValue> {
-        match &self.backend {
-            BackendKind::Memory(s) => s.remove(key).map_err(err_to_js),
-            BackendKind::IndexedDb(s) => s.remove(key).await.map_err(err_to_js),
-        }
-    }
-
     pub(crate) async fn prefix_scan(&self, prefix: &[u8]) -> Result<KvPairs, JsValue> {
         let raw = match &self.backend {
             BackendKind::Memory(s) => s.prefix_scan(prefix).map_err(err_to_js)?,
@@ -119,20 +155,6 @@ impl StorageKind {
         }
         match &self.backend {
             BackendKind::Memory(s) => s.insert(key, value).map_err(err_to_js),
-            BackendKind::IndexedDb(_) => {
-                Err(JsValue::from_str("sync operations require memory backend"))
-            }
-        }
-    }
-
-    pub(crate) fn remove_sync(&self, key: &[u8]) -> Result<(), JsValue> {
-        if self.crypto.is_some() {
-            return Err(JsValue::from_str(
-                "sync operations not available with encryption",
-            ));
-        }
-        match &self.backend {
-            BackendKind::Memory(s) => s.remove(key).map_err(err_to_js),
             BackendKind::IndexedDb(_) => {
                 Err(JsValue::from_str("sync operations require memory backend"))
             }
@@ -200,59 +222,23 @@ impl StorageKind {
         }
     }
 
-    pub(crate) async fn compare_and_swap(
-        &self,
-        key: &[u8],
-        expected_raw: &[u8],
-        new_value: &[u8],
-    ) -> Result<(), JsValue> {
-        let stored = if let Some(c) = &self.crypto {
-            c.encrypt(key, new_value).await.map_err(err_to_js)?
-        } else {
-            new_value.to_vec()
-        };
-        match &self.backend {
-            BackendKind::Memory(s) => {
-                let mut batch = s.batch();
-                batch.expect_value(key.to_vec(), expected_raw.to_vec());
-                batch.insert(key.to_vec(), stored);
-                batch.commit().map_err(err_to_js)
-            }
-            BackendKind::IndexedDb(s) => {
-                let mut batch = s.batch();
-                batch.expect_value(key.to_vec(), expected_raw.to_vec());
-                batch.insert(key.to_vec(), stored);
-                batch.commit().await.map_err(err_to_js)
-            }
-        }
-    }
-
-    pub(crate) fn compare_and_swap_sync(
-        &self,
-        key: &[u8],
-        expected_raw: &[u8],
-        new_value: &[u8],
-    ) -> Result<(), JsValue> {
-        if self.crypto.is_some() {
-            return Err(JsValue::from_str(
-                "sync operations not available with encryption",
-            ));
-        }
-        match &self.backend {
-            BackendKind::Memory(s) => {
-                let mut batch = s.batch();
-                batch.expect_value(key.to_vec(), expected_raw.to_vec());
-                batch.insert(key.to_vec(), new_value.to_vec());
-                batch.commit().map_err(err_to_js)
-            }
-            BackendKind::IndexedDb(_) => {
-                Err(JsValue::from_str("sync operations require memory backend"))
-            }
-        }
-    }
-
     pub(crate) fn is_memory(&self) -> bool {
         matches!(self.backend, BackendKind::Memory(_))
+    }
+
+    pub(crate) fn batch(&self) -> WasmBatch {
+        match &self.backend {
+            BackendKind::Memory(s) => WasmBatch::Memory(s.batch()),
+            BackendKind::IndexedDb(s) => WasmBatch::IndexedDb(s.batch()),
+        }
+    }
+
+    pub(crate) async fn encrypt_if_needed(&self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if let Some(c) = &self.crypto {
+            c.encrypt(key, value).await.map_err(err_to_js)
+        } else {
+            Ok(value.to_vec())
+        }
     }
 }
 
