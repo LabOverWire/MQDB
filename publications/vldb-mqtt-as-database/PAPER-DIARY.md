@@ -508,6 +508,130 @@ Decided: add all three thesis workloads + widen sweep parameters.
 
 - [x] Decide §6.4 scope.
 - [x] Widen SOP.
-- [ ] Run `aws_run.sh` end-to-end in `ca-west-1` (Step 4, separate session).
-- [ ] Repopulate tables via `extract_tables.py`.
+- [x] Run `aws_run.sh` end-to-end in `ca-west-1` (Step 4).
+- [x] Repopulate tables via `extract_tables.py`.
 - [ ] Phase 2 cluster benchmarks.
+
+---
+
+## Session 8 — AWS Execution + Table Population (2026-04-17/18)
+
+Step 4 of the benchmark plan: executed `aws_run.sh` on two instance types in
+ca-west-1 and populated all §6 tables.
+
+### AWS run details
+
+- **Commit**: d35e22a
+- **Instances**: c7g.xlarge (i-01baf82986d018e28) + c7g.4xlarge (i-0d4e925db49ce5c9e)
+- **Region**: ca-west-1a
+- **AMI**: ami-009b601d5ffeb769c (Ubuntu 24.04 ARM)
+- **Kernel**: Linux 6.17.0-1010-aws
+- **Duration**: c7g.xlarge ~5h (15:25–20:12 UTC), c7g.4xlarge ~6.5h (20:12–02:42 UTC)
+- **Result files**: 437 per instance type, 874 total
+- **Top-level manifest**: `bench/results-aws/phase1/run-manifest.json`
+
+### Prior fixes (commits during Step 4 iterations)
+
+Seven AWS run attempts before success. Fixes across attempts:
+- `19e16bc` wait for cloud-init before installing packages
+- `5e3f433` fix python NameError in provenance.sh
+- `8eb073a` fix MQDB_ROOT path and cargo PATH for remote execution
+- `c073f7c` add seq column to PG schema for REST server changefeed
+- `d35e22a` add SSH keepalive to prevent connection timeout
+
+### Data anomalies discovered
+
+1. **Bridge changefeed events_received=0**: Mosquitto + PG and Mosquitto + Redis
+   bridge emit_event() publishes at QoS 0; under sustained 500 writes/s the
+   event stream is silently dropped. Same bridge code delivers cascade events
+   (K=10–1000) successfully, confirming the failure is load-dependent.
+2. **MQDB cascade events_received=0**: cascade delete commits parent + K
+   children in one WriteBatch but only emits a parent-level change event, not
+   per-child events. Known v0.7.2 limitation.
+3. **PG insert anomaly on c7g.4xlarge**: 76 ops/s (vs 499 on c7g.xlarge). PG
+   WAL sync fires at ~41ms intervals; on faster hardware a larger fraction of
+   operations hit the sync barrier (p95 at 41ms vs p99 on c7g.xlarge).
+4. **REST+PG unique successes > 1**: HTTP driver's concurrent requests bypass
+   application-layer serialization; PG unique index violations not surfaced
+   through HTTP error path.
+
+### extract_tables.py fixes
+
+- `cell_unique()` now checks `wall_secs` fallback (REST+PG uses `wall_secs`
+  not `duration_secs`)
+- `cell_changefeed_ms()` shows "—" when `events_received=0`
+- `cell_cascade_ms()` shows "—" for propagation latency when `events_received=0`
+
+### §6 updates
+
+All PENDING markers replaced with AWS data. Analysis paragraphs written for
+§6.2 (CRUD), §6.3 (pub/sub), §6.4.1 (changefeed), §6.4.2 (unique), §6.4.3
+(cascade). Zero PENDING markers remain.
+
+---
+
+## Session 6 — 2026-04-18: List performance fix and re-run preparation
+
+### Bug found: list_with_early_pagination used prefix_scan instead of prefix_scan_batch
+
+Investigation in `docs/internal/list-performance-investigation/FINDINGS.md` revealed
+that `list_with_early_pagination()` in `query.rs` called `prefix_scan()`, which
+materializes ALL records into a `Vec`, even when the client requests `limit: 10`.
+The `prefix_scan_batch()` method — which stops after a specified count — existed
+but was not used for the paginated list path.
+
+**Root cause**: O(N) full-table scan in storage layer, not response serialization
+or MQTT backpressure (initial hypothesis was wrong for the bench scenario).
+
+**Fix**: Replace `prefix_scan()` with `prefix_scan_batch()`. Local result:
+throughput constant at ~2,000 ops/s regardless of dataset size (7.7x improvement
+at 10K records on fjall).
+
+### List operation semantics documented
+
+Added "List operation semantics" paragraph to §6.1 describing what each system
+actually does for a list operation:
+
+| System | Records read from storage | Records returned | Response size |
+|--------|--------------------------|------------------|---------------|
+| MQDB (fjall/memory) | 10 (bounded scan) | 10 | ~7 KB |
+| Mosquitto + PG | 10 (SQL LIMIT 10) | 10 | ~7 KB |
+| Mosquitto + Redis | 10,000 (SMEMBERS) + 10 (MGET) | 10 | ~7 KB |
+| REST + PG | 100 (SQL LIMIT 100, hardcoded) | 100 | ~70 KB |
+
+Key asymmetries:
+- Redis `SMEMBERS` is O(N) regardless of limit — explains its 68 ops/s
+- REST+PG hardcodes LIMIT 100 (no client-side limit param) — 10x more work per request
+- The old MQDB bug read all N records but returned only 10 — now fixed
+
+### §6 list analysis rewritten
+
+Removed incorrect claim: "The list workload is the one case where a relational
+engine's native scan outperforms the LSM-based approach." That was a bug, not an
+architectural limitation.
+
+New analysis describes each system's access pattern. MQDB list numbers marked
+PENDING until AWS re-run completes.
+
+### Re-run infrastructure created
+
+- `bench/run_phase1_list_rerun.sh` — targeted script running only list + mixed +
+  mixed_concurrency_sweep for all 5 configurations
+- `bench/scripts/aws_run.sh` — added `PHASE1_SCRIPT` env var support
+
+Usage: `PHASE1_SCRIPT=run_phase1_list_rerun.sh bash bench/scripts/aws_run.sh`
+
+### Files affected by re-run (per instance type)
+
+MQDB-only changes (fix in query.rs), but all 5 configs re-run for provenance:
+- 25 list files (5 configs × 5 runs)
+- 25 mixed standalone files (5 configs × 5 runs)
+- 80 mixed concurrency files (4 configs × 4 concurrency × 5 runs)
+
+### Remaining work
+
+1. Commit the fix (clean tree required by SOP)
+2. Run `PHASE1_SCRIPT=run_phase1_list_rerun.sh bash bench/scripts/aws_run.sh`
+3. Update Tables 4a, 4b, 4c with new MQDB list/mixed numbers
+4. Rewrite list analysis paragraph with actual numbers
+5. Rewrite Table 4c analysis (contention pattern will change with bounded scan)

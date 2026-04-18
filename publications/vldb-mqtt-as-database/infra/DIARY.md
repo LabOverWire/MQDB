@@ -114,6 +114,40 @@ execution is Step 4, pending cost sign-off in a separate session.
 
 ### Open items
 
-- [ ] First `terraform apply` (even as a smoke test).
-- [ ] Full SOP run: 5 triplicates × 10000 ops × 2 instance types.
-- [ ] Verify on-instance build (MQDB + baseline bridge + rest-pg).
+- [x] First `terraform apply` (even as a smoke test).
+- [x] Full SOP run: 5 triplicates × 10000 ops × 2 instance types.
+- [x] Verify on-instance build (MQDB + baseline bridge + rest-pg).
+
+---
+
+## Session 4 — 2026-04-18: Full SOP run completed
+
+### What happened
+
+`aws_run.sh` executed end-to-end for both instance types in `ca-west-1`.
+Terraform applied successfully for each iteration. On-instance build (MQDB +
+baseline bridge + rest-pg) completed without issues on both ARM Graviton 3
+instances.
+
+### Instance runs
+
+| Instance type | Instance ID | Result files |
+|---|---|---|
+| c7g.xlarge | i-01baf82986d018e28 | 437 |
+| c7g.4xlarge | i-0d4e925db49ce5c9e | 437 |
+
+Both instances were destroyed via `terraform destroy` after results were
+fetched. Total: 874 JSON files in `results-aws/phase1/`.
+
+### Pre-requisites resolved
+
+- [x] Verify MQDB builds on aarch64 (built on-instance, no cross-compile)
+- [x] `run_phase1_agent.sh` works on Linux (Ubuntu 24.04 on EC2)
+- [x] Mixed workload in benchmark harness (concurrency sweep {1,8,32,128})
+- [x] Redis bridge built and tested
+- [x] Terraform configs working (parameterized `instance_type`)
+- [x] Full experiment completed within budget
+
+### Open items
+
+- [ ] Phase 2 (cluster) — requires multi-instance Terraform (3 nodes)

@@ -126,6 +126,8 @@ def cell_pubsub(files):
 def cell_changefeed_ms(files, key):
     if not files:
         return PENDING
+    if all(d.get("events_received", 0) == 0 for d in files):
+        return "—"
     m, s = mean_sd([v / 1000.0 for v in field(files, key)])
     if m is None:
         return PENDING
@@ -137,7 +139,11 @@ def cell_unique(files):
         return PENDING
     s_mean, _ = mean_sd(field(files, "successes_total"))
     c_p95_mean, _ = mean_sd(field(files, "latency_conflict_p95_us"))
-    wall_ms_values = [d["duration_secs"] * 1000.0 for d in files if "duration_secs" in d]
+    wall_ms_values = [
+        d.get("duration_secs", d.get("wall_secs", 0)) * 1000.0
+        for d in files
+        if "duration_secs" in d or "wall_secs" in d
+    ]
     wall_ms_mean, _ = mean_sd(wall_ms_values)
     if s_mean is None or c_p95_mean is None or wall_ms_mean is None:
         return PENDING
@@ -147,6 +153,8 @@ def cell_unique(files):
 def cell_cascade_ms(files, key):
     if not files:
         return PENDING
+    if "propagation" in key and all(d.get("events_received", 0) == 0 for d in files):
+        return "—"
     m, _ = mean_sd([v / 1000.0 for v in field(files, key)])
     if m is None:
         return PENDING
