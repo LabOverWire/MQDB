@@ -178,7 +178,7 @@ execute_runs() {
             export MQDB_AWS_RUN_TOKEN=$RUN_TOKEN && \
             export MQDB_ROOT=/home/$SSH_USER/mqdb && \
             cd /home/$SSH_USER/bench && \
-            bash run_phase1_agent.sh"
+            bash ${PHASE1_SCRIPT:-run_phase1_agent.sh}"
 }
 
 fetch_results() {
