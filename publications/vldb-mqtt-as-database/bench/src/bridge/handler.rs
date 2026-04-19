@@ -1,7 +1,28 @@
 use mqtt5::client::MqttClient;
+use mqtt5::{PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use super::store::Store;
+
+async fn publish_response(
+    client: &MqttClient,
+    topic: &str,
+    payload: Vec<u8>,
+    correlation_data: &Option<Vec<u8>>,
+) {
+    if let Some(cd) = correlation_data {
+        let opts = PublishOptions {
+            properties: PublishProperties {
+                correlation_data: Some(cd.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _ = client.publish_with_options(topic, payload, opts).await;
+    } else {
+        let _ = client.publish(topic, payload).await;
+    }
+}
 
 pub async fn handle_create(
     client: &MqttClient,
@@ -9,11 +30,16 @@ pub async fn handle_create(
     entity: &str,
     payload: &[u8],
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let (response, emitted_id) = create_impl(store, entity, payload).await;
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
     if let Some(id) = emitted_id {
         emit_event(client, entity, &id, "create", response.get("data")).await;
     }
@@ -61,6 +87,7 @@ pub async fn handle_get(
     entity: &str,
     id: &str,
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let response = match store.get_record(entity, id).await {
         Ok(Some(data)) => json!({"status": "ok", "data": data}),
@@ -68,9 +95,13 @@ pub async fn handle_get(
         Err(e) => json!({"status": "error", "code": 500, "message": e.to_string()}),
     };
 
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
 }
 
 pub async fn handle_update(
@@ -80,11 +111,16 @@ pub async fn handle_update(
     id: &str,
     payload: &[u8],
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let (response, emitted) = update_impl(store, entity, id, payload).await;
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
     if emitted {
         emit_event(client, entity, id, "update", response.get("data")).await;
     }
@@ -127,29 +163,32 @@ pub async fn handle_delete(
     entity: &str,
     id: &str,
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let cascaded = match store.delete_with_cascade(entity, id).await {
         Ok(v) => v,
         Err(e) => {
             let response = json!({"status": "error", "code": 500, "message": e.to_string()});
-            let _ = client
-                .publish(
-                    response_topic,
-                    serde_json::to_vec(&response).unwrap_or_default(),
-                )
-                .await;
+            publish_response(
+                client,
+                response_topic,
+                serde_json::to_vec(&response).unwrap_or_default(),
+                correlation_data,
+            )
+            .await;
             return;
         }
     };
 
     if cascaded.is_empty() {
         let response = json!({"status": "error", "code": 404, "message": "not found"});
-        let _ = client
-            .publish(
-                response_topic,
-                serde_json::to_vec(&response).unwrap_or_default(),
-            )
-            .await;
+        publish_response(
+            client,
+            response_topic,
+            serde_json::to_vec(&response).unwrap_or_default(),
+            correlation_data,
+        )
+        .await;
         return;
     }
 
@@ -157,9 +196,13 @@ pub async fn handle_delete(
         "status": "ok",
         "data": {"id": id, "deleted": true, "cascaded": cascaded.len().saturating_sub(1)}
     });
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
 
     for (child_entity, child_id) in cascaded {
         emit_event(client, &child_entity, &child_id, "delete", None).await;
@@ -173,6 +216,7 @@ pub async fn handle_list(
     entity: &str,
     payload: &[u8],
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let limit = serde_json::from_slice::<Value>(payload)
         .ok()
@@ -184,12 +228,20 @@ pub async fn handle_list(
         Err(e) => json!({"status": "error", "code": 500, "message": e.to_string()}),
     };
 
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
 }
 
-pub async fn handle_health(client: &MqttClient, response_topic: &str) {
+pub async fn handle_health(
+    client: &MqttClient,
+    response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
+) {
     let response = json!({
         "status": "ok",
         "data": {
@@ -199,9 +251,13 @@ pub async fn handle_health(client: &MqttClient, response_topic: &str) {
         }
     });
 
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
 }
 
 pub async fn handle_constraint(
@@ -210,11 +266,16 @@ pub async fn handle_constraint(
     entity: &str,
     payload: &[u8],
     response_topic: &str,
+    correlation_data: &Option<Vec<u8>>,
 ) {
     let response = constraint_impl(store, entity, payload).await;
-    let _ = client
-        .publish(response_topic, serde_json::to_vec(&response).unwrap_or_default())
-        .await;
+    publish_response(
+        client,
+        response_topic,
+        serde_json::to_vec(&response).unwrap_or_default(),
+        correlation_data,
+    )
+    .await;
 }
 
 async fn constraint_impl(store: &Store, entity: &str, payload: &[u8]) -> Value {

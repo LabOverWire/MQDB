@@ -36,9 +36,10 @@ async fn subscribe_health(client: &MqttClient) -> Result<(), BoxError> {
             let Some(response_topic) = msg.properties.response_topic.clone() else {
                 return;
             };
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             tokio::spawn(async move {
-                handler::handle_health(&c, &response_topic).await;
+                handler::handle_health(&c, &response_topic, &cd).await;
             });
         })
         .await?;
@@ -59,10 +60,11 @@ async fn subscribe_constraint(client: &MqttClient, store: &Store) -> Result<(), 
             }
             let entity = parts[3].to_string();
             let payload = msg.payload.clone();
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_constraint(&c, &s, &entity, &payload, &response_topic).await;
+                handler::handle_constraint(&c, &s, &entity, &payload, &response_topic, &cd).await;
             });
         })
         .await?;
@@ -81,10 +83,11 @@ async fn subscribe_create(client: &MqttClient, store: &Store) -> Result<(), BoxE
                 return;
             };
             let payload = msg.payload.clone();
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_create(&c, &s, &entity, &payload, &response_topic).await;
+                handler::handle_create(&c, &s, &entity, &payload, &response_topic, &cd).await;
             });
         })
         .await?;
@@ -103,10 +106,11 @@ async fn subscribe_list(client: &MqttClient, store: &Store) -> Result<(), BoxErr
                 return;
             };
             let payload = msg.payload.clone();
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_list(&c, &s, &entity, &payload, &response_topic).await;
+                handler::handle_list(&c, &s, &entity, &payload, &response_topic, &cd).await;
             });
         })
         .await?;
@@ -125,10 +129,12 @@ async fn subscribe_update(client: &MqttClient, store: &Store) -> Result<(), BoxE
                 return;
             };
             let payload = msg.payload.clone();
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_update(&c, &s, &entity, &id, &payload, &response_topic).await;
+                handler::handle_update(&c, &s, &entity, &id, &payload, &response_topic, &cd)
+                    .await;
             });
         })
         .await?;
@@ -146,10 +152,11 @@ async fn subscribe_delete(client: &MqttClient, store: &Store) -> Result<(), BoxE
             let Some((entity, id)) = parse_entity_id(&msg.topic, 4, 3, "delete") else {
                 return;
             };
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_delete(&c, &s, &entity, &id, &response_topic).await;
+                handler::handle_delete(&c, &s, &entity, &id, &response_topic, &cd).await;
             });
         })
         .await?;
@@ -173,10 +180,11 @@ async fn subscribe_get(client: &MqttClient, store: &Store) -> Result<(), BoxErro
             }
             let entity = parts[1].to_string();
             let id = parts[2].to_string();
+            let cd = msg.properties.correlation_data.clone();
             let c = client_pub.clone();
             let s = store.clone();
             tokio::spawn(async move {
-                handler::handle_get(&c, &s, &entity, &id, &response_topic).await;
+                handler::handle_get(&c, &s, &entity, &id, &response_topic, &cd).await;
             });
         })
         .await?;
