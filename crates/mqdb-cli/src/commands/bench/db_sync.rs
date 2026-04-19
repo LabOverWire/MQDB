@@ -1,16 +1,113 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::types::{ConnectOptions, Message, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use super::common::{BenchDbArgs, DbBenchMetrics, DbOp, generate_record, wait_for_broker_ready};
 use super::db_async::cmd_bench_db_async;
 use crate::cli_types::OutputFormat;
+
+type PendingMap = Arc<std::sync::Mutex<HashMap<u64, flume::Sender<Option<String>>>>>;
+
+struct ResponseRouter {
+    pending: PendingMap,
+    counter: AtomicU64,
+    response_topic: String,
+}
+
+impl ResponseRouter {
+    fn new(client_id: &str) -> Self {
+        Self {
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            counter: AtomicU64::new(0),
+            response_topic: format!("{client_id}/resp"),
+        }
+    }
+
+    fn register(&self) -> (u64, flume::Receiver<Option<String>>) {
+        let corr_id = self.counter.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = flume::bounded(1);
+        if let Ok(mut map) = self.pending.lock() {
+            map.insert(corr_id, tx);
+        }
+        (corr_id, rx)
+    }
+
+    fn remove(&self, corr_id: u64) {
+        if let Ok(mut map) = self.pending.lock() {
+            map.remove(&corr_id);
+        }
+    }
+
+    fn make_callback(&self) -> impl Fn(Message) + Send + Sync + 'static {
+        let pending = Arc::clone(&self.pending);
+        move |msg: Message| {
+            if let Some(corr_bytes) = &msg.properties.correlation_data
+                && corr_bytes.len() == 8
+                && let Ok(bytes) = <[u8; 8]>::try_from(&corr_bytes[..8])
+            {
+                let corr_id = u64::from_be_bytes(bytes);
+                if let Ok(mut map) = pending.lock()
+                    && let Some(tx) = map.remove(&corr_id)
+                {
+                    let id = serde_json::from_slice::<Value>(&msg.payload)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("id")
+                                .and_then(|id| id.as_str().map(String::from))
+                                .or_else(|| {
+                                    v.get("data")?.get("id")?.as_str().map(String::from)
+                                })
+                        })
+                        .unwrap_or_default();
+                    let _ = tx.send(Some(id));
+                }
+            }
+        }
+    }
+
+    fn publish_opts(&self, corr_id: u64) -> PublishOptions {
+        PublishOptions {
+            properties: PublishProperties {
+                response_topic: Some(self.response_topic.clone()),
+                correlation_data: Some(corr_id.to_be_bytes().to_vec()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+async fn request_response(
+    router: &ResponseRouter,
+    client: &MqttClient,
+    topic: &str,
+    payload: Vec<u8>,
+) -> Option<String> {
+    let (corr_id, rx) = router.register();
+    let opts = router.publish_opts(corr_id);
+    if client
+        .publish_with_options(topic, payload, opts)
+        .await
+        .is_err()
+    {
+        router.remove(corr_id);
+        return None;
+    }
+    if let Ok(Ok(result)) = tokio::time::timeout(Duration::from_secs(5), rx.recv_async()).await {
+        result
+    } else {
+        router.remove(corr_id);
+        None
+    }
+}
 
 #[allow(
     clippy::too_many_lines,
@@ -18,7 +115,6 @@ use crate::cli_types::OutputFormat;
     clippy::cast_precision_loss
 )]
 pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::atomic::Ordering;
     use std::time::Instant;
 
     wait_for_broker_ready(&args.conn, 30).await?;
@@ -48,70 +144,45 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
     let metrics = Arc::new(DbBenchMetrics::default());
     let inserted_ids: Arc<std::sync::Mutex<Vec<String>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let id_counter = Arc::new(AtomicU64::new(0));
 
     if args.seed > 0 {
         println!("Seeding {} records...", args.seed);
         let seeder_id = "bench-db-seeder".to_string();
         let client = MqttClient::new(seeder_id.clone());
         if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-            let opts = ConnectOptions::new(seeder_id).with_credentials(user.clone(), pass.clone());
+            let opts = ConnectOptions::new(seeder_id.clone())
+                .with_credentials(user.clone(), pass.clone());
             Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
         } else {
             client.connect(&args.conn.broker).await?;
         }
 
+        let router = ResponseRouter::new(&seeder_id);
+        client
+            .subscribe(&router.response_topic, router.make_callback())
+            .await?;
+
         for i in 0..args.seed {
             let id = id_counter.fetch_add(1, Ordering::Relaxed);
             let record = generate_record(args.fields, args.field_size, id);
             let topic = format!("$DB/{}/create", args.entity);
-            let response_topic = format!("bench-db-seeder/resp/{}", uuid::Uuid::new_v4());
 
-            let (tx, rx) = flume::bounded::<Option<String>>(1);
-            let tx_clone = tx.clone();
-            client
-                .subscribe(&response_topic, move |msg| {
-                    let actual_id =
-                        serde_json::from_slice::<Value>(&msg.payload)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("id")
-                                    .and_then(|id| id.as_str().map(String::from))
-                                    .or_else(|| {
-                                        v.get("data")?.get("id")?.as_str().map(String::from)
-                                    })
-                            });
-                    let _ = tx_clone.try_send(actual_id);
-                })
-                .await?;
-
-            let opts = PublishOptions {
-                properties: PublishProperties {
-                    response_topic: Some(response_topic.clone()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            client
-                .publish_with_options(&topic, serde_json::to_vec(&record).unwrap(), opts)
-                .await?;
-
-            if let Some(actual_id) = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .flatten()
+            if let Some(actual_id) =
+                request_response(&router, &client, &topic, serde_json::to_vec(&record).unwrap())
+                    .await
+                && !actual_id.is_empty()
                 && let Ok(mut ids) = inserted_ids.lock()
             {
                 ids.push(actual_id);
             }
-            let _ = client.unsubscribe(&response_topic).await;
 
             if (i + 1) % 1000 == 0 {
                 println!("  Seeded {} records...", i + 1);
             }
         }
 
+        let _ = client.unsubscribe(&router.response_topic).await;
         let _ = client.disconnect().await;
         println!("Seeding complete. {} records ready.", args.seed);
     }
@@ -138,13 +209,24 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
 
             if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
                 let opts =
-                    ConnectOptions::new(client_name).with_credentials(user.clone(), pass.clone());
+                    ConnectOptions::new(client_name.clone())
+                        .with_credentials(user.clone(), pass.clone());
                 if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                     eprintln!("Client {client_id} connect failed: {e}");
                     return;
                 }
             } else if let Err(e) = client.connect(&conn.broker).await {
                 eprintln!("Client {client_id} connect failed: {e}");
+                return;
+            }
+
+            let router = ResponseRouter::new(&client_name);
+            if client
+                .subscribe(&router.response_topic, router.make_callback())
+                .await
+                .is_err()
+            {
+                eprintln!("Client {client_id} subscribe failed");
                 return;
             }
 
@@ -172,63 +254,20 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
                         let id = id_counter.fetch_add(1, Ordering::Relaxed);
                         let record = generate_record(fields, field_size, id);
                         let topic = format!("$DB/{entity}/create");
-                        let response_topic =
-                            format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
-
-                        let (tx, rx) = flume::bounded::<Option<String>>(1);
-                        let tx_clone = tx.clone();
-                        if client
-                            .subscribe(&response_topic, move |msg| {
-                                let actual_id = serde_json::from_slice::<Value>(&msg.payload)
-                                    .ok()
-                                    .and_then(|v| {
-                                        v.get("id")
-                                            .and_then(|id| id.as_str().map(String::from))
-                                            .or_else(|| {
-                                                v.get("data")?.get("id")?.as_str().map(String::from)
-                                            })
-                                    });
-                                let _ = tx_clone.try_send(actual_id);
-                            })
-                            .await
-                            .is_err()
+                        let result = request_response(
+                            &router,
+                            &client,
+                            &topic,
+                            serde_json::to_vec(&record).unwrap(),
+                        )
+                        .await;
+                        if let Some(actual_id) = &result
+                            && !actual_id.is_empty()
+                            && let Ok(mut ids) = inserted_ids.lock()
                         {
-                            false
-                        } else {
-                            let opts = PublishOptions {
-                                properties: PublishProperties {
-                                    response_topic: Some(response_topic.clone()),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            };
-                            if client
-                                .publish_with_options(
-                                    &topic,
-                                    serde_json::to_vec(&record).unwrap(),
-                                    opts,
-                                )
-                                .await
-                                .is_err()
-                            {
-                                false
-                            } else {
-                                let actual_id =
-                                    tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                        .await
-                                        .ok()
-                                        .and_then(Result::ok)
-                                        .flatten();
-                                let success = actual_id.is_some();
-                                if let Some(actual_id) = actual_id
-                                    && let Ok(mut ids) = inserted_ids.lock()
-                                {
-                                    ids.push(actual_id);
-                                }
-                                let _ = client.unsubscribe(&response_topic).await;
-                                success
-                            }
+                            ids.push(actual_id.clone());
                         }
+                        result.is_some()
                     }
                     DbOp::Get => {
                         let id = {
@@ -243,46 +282,9 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
                         };
                         if let Some(id) = id {
                             let topic = format!("$DB/{entity}/{id}");
-                            let response_topic =
-                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
-
-                            let (tx, rx) = flume::bounded::<bool>(1);
-                            let tx_clone = tx.clone();
-                            if client
-                                .subscribe(&response_topic, move |_msg| {
-                                    let _ = tx_clone.try_send(true);
-                                })
+                            request_response(&router, &client, &topic, b"{}".to_vec())
                                 .await
-                                .is_err()
-                            {
-                                false
-                            } else {
-                                let opts = PublishOptions {
-                                    properties: PublishProperties {
-                                        response_topic: Some(response_topic.clone()),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                };
-                                if client
-                                    .publish_with_options(&topic, b"{}".to_vec(), opts)
-                                    .await
-                                    .is_err()
-                                {
-                                    false
-                                } else {
-                                    let result = tokio::time::timeout(
-                                        Duration::from_secs(5),
-                                        rx.recv_async(),
-                                    )
-                                    .await
-                                    .ok()
-                                    .and_then(Result::ok)
-                                    .unwrap_or(false);
-                                    let _ = client.unsubscribe(&response_topic).await;
-                                    result
-                                }
-                            }
+                                .is_some()
                         } else {
                             true
                         }
@@ -301,50 +303,14 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
                         if let Some(id) = id {
                             let record = generate_record(fields, field_size, i);
                             let topic = format!("$DB/{entity}/{id}/update");
-                            let response_topic =
-                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
-
-                            let (tx, rx) = flume::bounded::<bool>(1);
-                            let tx_clone = tx.clone();
-                            if client
-                                .subscribe(&response_topic, move |_msg| {
-                                    let _ = tx_clone.try_send(true);
-                                })
-                                .await
-                                .is_err()
-                            {
-                                false
-                            } else {
-                                let opts = PublishOptions {
-                                    properties: PublishProperties {
-                                        response_topic: Some(response_topic.clone()),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                };
-                                if client
-                                    .publish_with_options(
-                                        &topic,
-                                        serde_json::to_vec(&record).unwrap(),
-                                        opts,
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    false
-                                } else {
-                                    let result = tokio::time::timeout(
-                                        Duration::from_secs(5),
-                                        rx.recv_async(),
-                                    )
-                                    .await
-                                    .ok()
-                                    .and_then(Result::ok)
-                                    .unwrap_or(false);
-                                    let _ = client.unsubscribe(&response_topic).await;
-                                    result
-                                }
-                            }
+                            request_response(
+                                &router,
+                                &client,
+                                &topic,
+                                serde_json::to_vec(&record).unwrap(),
+                            )
+                            .await
+                            .is_some()
                         } else {
                             true
                         }
@@ -356,95 +322,24 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
                         };
                         if let Some(id) = id {
                             let topic = format!("$DB/{entity}/{id}/delete");
-                            let response_topic =
-                                format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
-
-                            let (tx, rx) = flume::bounded::<bool>(1);
-                            let tx_clone = tx.clone();
-                            if client
-                                .subscribe(&response_topic, move |_msg| {
-                                    let _ = tx_clone.try_send(true);
-                                })
+                            request_response(&router, &client, &topic, b"{}".to_vec())
                                 .await
-                                .is_err()
-                            {
-                                false
-                            } else {
-                                let opts = PublishOptions {
-                                    properties: PublishProperties {
-                                        response_topic: Some(response_topic.clone()),
-                                        ..Default::default()
-                                    },
-                                    ..Default::default()
-                                };
-                                if client
-                                    .publish_with_options(&topic, b"{}".to_vec(), opts)
-                                    .await
-                                    .is_err()
-                                {
-                                    false
-                                } else {
-                                    let result = tokio::time::timeout(
-                                        Duration::from_secs(5),
-                                        rx.recv_async(),
-                                    )
-                                    .await
-                                    .ok()
-                                    .and_then(Result::ok)
-                                    .unwrap_or(false);
-                                    let _ = client.unsubscribe(&response_topic).await;
-                                    result
-                                }
-                            }
+                                .is_some()
                         } else {
                             true
                         }
                     }
                     DbOp::List => {
                         let topic = format!("$DB/{entity}/list");
-                        let response_topic =
-                            format!("bench-db-{client_id}/resp/{}", uuid::Uuid::new_v4());
-
-                        let (tx, rx) = flume::bounded::<bool>(1);
-                        let tx_clone = tx.clone();
-                        if client
-                            .subscribe(&response_topic, move |_msg| {
-                                let _ = tx_clone.try_send(true);
-                            })
-                            .await
-                            .is_err()
-                        {
-                            false
-                        } else {
-                            let opts = PublishOptions {
-                                properties: PublishProperties {
-                                    response_topic: Some(response_topic.clone()),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            };
-                            let payload = json!({"limit": 10});
-                            if client
-                                .publish_with_options(
-                                    &topic,
-                                    serde_json::to_vec(&payload).unwrap(),
-                                    opts,
-                                )
-                                .await
-                                .is_err()
-                            {
-                                false
-                            } else {
-                                let result =
-                                    tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
-                                        .await
-                                        .ok()
-                                        .and_then(Result::ok)
-                                        .unwrap_or(false);
-                                let _ = client.unsubscribe(&response_topic).await;
-                                result
-                            }
-                        }
+                        let payload = json!({"limit": 10});
+                        request_response(
+                            &router,
+                            &client,
+                            &topic,
+                            serde_json::to_vec(&payload).unwrap(),
+                        )
+                        .await
+                        .is_some()
                     }
                     DbOp::Mixed => unreachable!(),
                 };
@@ -469,6 +364,7 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
                 }
             }
 
+            let _ = client.unsubscribe(&router.response_topic).await;
             let _ = client.disconnect().await;
         });
         handles.push(handle);
