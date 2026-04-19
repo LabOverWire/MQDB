@@ -628,10 +628,39 @@ MQDB-only changes (fix in query.rs), but all 5 configs re-run for provenance:
 - 25 mixed standalone files (5 configs × 5 runs)
 - 80 mixed concurrency files (4 configs × 4 concurrency × 5 runs)
 
-### Remaining work
+### AWS re-run completed (2026-04-18)
 
-1. Commit the fix (clean tree required by SOP)
-2. Run `PHASE1_SCRIPT=run_phase1_list_rerun.sh bash bench/scripts/aws_run.sh`
-3. Update Tables 4a, 4b, 4c with new MQDB list/mixed numbers
-4. Rewrite list analysis paragraph with actual numbers
-5. Rewrite Table 4c analysis (contention pattern will change with bounded scan)
+Re-run executed on both c7g.xlarge and c7g.4xlarge. Key results:
+
+**List standalone (16x improvement on c7g.xlarge):**
+| Instance | MQDB (fjall) old | MQDB (fjall) new | MQDB (mem) old | MQDB (mem) new |
+|---|---|---|---|---|
+| c7g.xlarge | 141 | 2,281 | 280 | 2,430 |
+| c7g.4xlarge | 115 | 2,521 | 206 | 2,693 |
+
+MQDB list now fastest across all configurations on both instances.
+
+**Mixed concurrency sweep (c7g.4xlarge) — dramatically different profile:**
+| c | MQDB (fjall) old | MQDB (fjall) new |
+|---|---|---|
+| 1 | 421 | 2,545 |
+| 8 | 249 | 502 |
+| 32 | 473 | 6,777 |
+| 128 | 479 | 6,369 |
+
+c=8 dip persists (single event loop contention) but c=32 and c=128 now show
+strong throughput scaling. The old numbers were dominated by the O(N) list
+scan; with that fixed, MQDB exceeds PG at c=32 and competes at c=128.
+
+Baseline consistency: PG c7g.4xlarge list (1,738 ± 14) within 3% of original
+(1,784 ± 10). PG c7g.xlarge list (967 ± 238) shows cold-start effect in first
+run; noted in analysis.
+
+### Paper updated
+
+- Tables 4a, 4b list rows: new numbers for all 5 configurations
+- Table 4c: all new numbers from c7g.4xlarge sweep
+- List analysis: PENDING markers replaced with actual numbers
+- Table 4c analysis: rewritten to describe the new concurrency profile
+  (c=8 single-loop contention, c=32 amortization breakthrough, c=128 PG pool advantage)
+- Data provenance note: updated to reference both SOP runs
