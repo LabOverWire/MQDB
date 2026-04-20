@@ -664,3 +664,80 @@ run; noted in analysis.
 - Table 4c analysis: rewritten to describe the new concurrency profile
   (c=8 single-loop contention, c=32 amortization breakthrough, c=128 PG pool advantage)
 - Data provenance note: updated to reference both SOP runs
+
+---
+
+## Session 6 — 2026-04-20: CRUD re-run with persistent subscriptions
+
+### Problem
+
+The `db_sync.rs` benchmark harness subscribed/unsubscribed per operation (3 MQTT
+control frames per DB operation). This added ~1ms of client-side overhead per op,
+masking the true system-under-test performance.
+
+### Changes
+
+1. **`db_sync.rs`**: Replaced per-operation subscribe/unsubscribe with persistent
+   subscriptions using MQTT 5.0 correlation data for response matching. New
+   `ResponseRouter` struct with `PendingMap` (HashMap<u64, flume::Sender>).
+   Committed 9fefa59.
+
+2. **`bridge/handler.rs` + `bridge/mod.rs`**: Baseline bridge was not forwarding
+   `correlation_data` from requests to responses, causing benchmark clients to
+   hang indefinitely. Added `publish_response()` helper and updated all 7 handler
+   functions. Committed 08f651d.
+
+3. **`run_phase1_crud_rerun.sh`**: Targeted re-run script for 6 CRUD ops + mixed
+   concurrency sweep (skips pub/sub and architectural workloads). Committed 4c5c9d7.
+
+### AWS run 3 (2026-04-20, commit 08f651d)
+
+Completed on both c7g.xlarge and c7g.4xlarge. 437 files per instance (230 CRUD
+files overwrote runs 1+2 data; architectural workload files unchanged).
+
+**Key MQDB improvements (reduced harness overhead):**
+
+| Op | c7g.xlarge old → new | c7g.4xlarge old → new |
+|---|---|---|
+| insert | 1,928 → 2,060 (+7%) | 2,220 → 3,025 (+36%) |
+| get | 2,792 → 4,402 (+58%) | 3,229 → 4,751 (+47%) |
+| update | 2,088 → 2,452 (+17%) | 2,442 → 3,474 (+42%) |
+| delete | 2,260 → 3,271 (+45%) | 2,664 → 3,953 (+48%) |
+| list | 2,281 → 3,090 (+35%) | 2,521 → 3,340 (+32%) |
+
+All improvements consistent: eliminating 2 MQTT round-trips per op reduces
+client-side latency, boosting measured throughput.
+
+**Mosquitto baseline insert anomaly:**
+
+PG and Redis inserts collapsed to 48–49 ops/s on BOTH instances (previously
+499/1,175 on c7g.xlarge, 76/2,197 on c7g.4xlarge). Bimodal latency: p50 ~2ms,
+p95 ~41ms. Zero errors. All 5 triplicates identical (σ≈0).
+
+The stall is INSERT-specific — PG get (2,291), update (1,866), delete (2,250) all
+operate normally through the same bridge. REST+PG insert (2,658) uses the same PG
+without the stall. The 41ms periodicity and its presence on both PG and Redis
+suggest a Docker bridge network TCP delayed-ACK interaction triggered by the
+bridge's insert-specific message pattern (response + change event in rapid
+succession).
+
+**Mixed concurrency sweep (c7g.4xlarge, Table 4c):**
+
+| c | MQDB (fjall) old → new | Mosquitto + PG old → new |
+|---|---|---|
+| 1 | 2,545 → 3,607 (+42%) | 1,825 → 116 (insert stall) |
+| 8 | 502 → 447 (persistent) | 2,018 → 929 |
+| 32 | 6,777 → 7,113 (+5%) | 4,340 → 3,620 |
+| 128 | 6,369 → 6,470 (+2%) | 9,325 → 10,472 |
+
+c=8 MQDB dip persists (447 vs 502 — within noise). PG c=1 drop from 1,825 to
+116 is caused by insert fraction (20%) injecting 41ms stalls into every 5th op.
+
+### Paper updated
+
+- Data provenance: three SOP runs documented (d35e22a, a77ce5c, 08f651d)
+- Tables 4a, 4b: all rows replaced with run 3 data
+- Table 4c: all rows replaced with run 3 data
+- Insert analysis: rewritten around REST+PG and MQDB-memory comparisons; Mosquitto baseline insert anomaly explained (41ms TCP delayed-ACK hypothesis)
+- List analysis: updated numbers (3,090 from 2,281, etc.)
+- Table 4c analysis: rewritten to account for PG c=1 insert stall depressing mixed throughput
