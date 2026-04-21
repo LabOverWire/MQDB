@@ -156,7 +156,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         let isPersistent = true;
@@ -178,13 +178,13 @@
 
             if (persistent) {
                 log(`Opening persistent database: ${dbName}`);
-                db = await WasmDatabase.open_persistent(dbName);
+                db = await Database.openPersistent(dbName);
                 document.getElementById('modeDisplay').textContent = 'IndexedDB - Data persists across page reloads';
                 document.getElementById('persistentBtn').classList.add('active');
                 document.getElementById('memoryBtn').classList.remove('active');
             } else {
                 log('Creating in-memory database');
-                db = new WasmDatabase();
+                db = new Database();
                 document.getElementById('modeDisplay').textContent = 'In-Memory - Data lost on page reload';
                 document.getElementById('memoryBtn').classList.add('active');
                 document.getElementById('persistentBtn').classList.remove('active');

@@ -11,21 +11,21 @@ wasm-pack build --target web
 ## Usage
 
 ```javascript
-import init, { WasmDatabase } from './pkg/mqdb_wasm.js';
+import init, { Database } from './pkg/mqdb_wasm.js';
 
 await init();
 
 // In-memory (data lost on page refresh)
-const db = new WasmDatabase();
+const db = new Database();
 
 // Persistent (IndexedDB-backed, survives page reloads)
-const db = await WasmDatabase.open_persistent("my-app");
+const db = await Database.openPersistent("my-app");
 
 // Encrypted persistent (AES-GCM + PBKDF2, passphrase-derived key)
-const db = await WasmDatabase.open_encrypted("my-app", "user-passphrase");
+const db = await Database.openEncrypted("my-app", "user-passphrase");
 
 // Define schema
-db.add_schema("users", {
+db.addSchema("users", {
   fields: [
     { name: "name", type: "string", required: true },
     { name: "email", type: "string" }
@@ -41,12 +41,12 @@ const count = await db.count("users", { filters: [{ field: "name", op: "eq", val
 await db.delete("users", user.id);
 
 // Sync CRUD operations (memory backend only)
-const user2 = db.create_sync("users", { name: "Carol", email: "carol@example.com" });
-const found2 = db.read_sync("users", user2.id);
-db.update_sync("users", user2.id, { name: "Dave" });
-const all2 = db.list_sync("users");
-const count2 = db.count_sync("users");
-db.delete_sync("users", user2.id);
+const user2 = db.createSync("users", { name: "Carol", email: "carol@example.com" });
+const found2 = db.readSync("users", user2.id);
+db.updateSync("users", user2.id, { name: "Dave" });
+const all2 = db.listSync("users");
+const count2 = db.countSync("users");
+db.deleteSync("users", user2.id);
 
 // Subscribe to changes
 const subId = db.subscribe("*", null, (event) => {
@@ -64,9 +64,9 @@ const listed = await db.execute("$DB/users/list", {});
 
 | Constructor | Backend | Persistence | Encryption | Sync methods |
 |-------------|---------|-------------|------------|--------------|
-| `new WasmDatabase()` | Memory | No | No | Yes |
-| `WasmDatabase.open_persistent(name)` | IndexedDB | Yes | No | No |
-| `WasmDatabase.open_encrypted(name, passphrase)` | IndexedDB | Yes | AES-GCM | No |
+| `new Database()` | Memory | No | No | Yes |
+| `Database.openPersistent(name)` | IndexedDB | Yes | No | No |
+| `Database.openEncrypted(name, passphrase)` | IndexedDB | Yes | AES-GCM | No |
 
 Persistent backends automatically reload schemas, constraints, indexes, relationships, and ID counters on open. Encrypted backends derive a 256-bit key from the passphrase via PBKDF2 (100k iterations) and encrypt each record independently with AES-GCM.
 
@@ -78,7 +78,7 @@ Persistent backends automatically reload schemas, constraints, indexes, relation
 |--------|-------------|
 | `create(entity, data)` | Create record, returns with generated id and `_version: 1` |
 | `read(entity, id)` | Get record by id |
-| `read_with_includes(entity, id, includes)` | Get record with related data eagerly loaded |
+| `readWithIncludes(entity, id, includes)` | Get record with related data eagerly loaded |
 | `update(entity, id, fields)` | Partial update, bumps `_version`, returns merged record |
 | `delete(entity, id)` | Delete record (triggers cascade/set_null/restrict) |
 | `list(entity, options?)` | Query with filters, sort, pagination, projection, includes |
@@ -90,50 +90,50 @@ Persistent backends automatically reload schemas, constraints, indexes, relation
 
 | Method | Description |
 |--------|-------------|
-| `create_sync(entity, data)` | Create record synchronously |
-| `read_sync(entity, id)` | Get record by id synchronously |
-| `update_sync(entity, id, fields)` | Partial update synchronously |
-| `delete_sync(entity, id)` | Delete record synchronously |
-| `list_sync(entity, options?)` | Query records synchronously (no `includes` support) |
-| `count_sync(entity, options?)` | Count records synchronously |
-| `is_memory_backend()` | Returns `true` if using memory storage |
+| `createSync(entity, data)` | Create record synchronously |
+| `readSync(entity, id)` | Get record by id synchronously |
+| `updateSync(entity, id, fields)` | Partial update synchronously |
+| `deleteSync(entity, id)` | Delete record synchronously |
+| `listSync(entity, options?)` | Query records synchronously (no `includes` support) |
+| `countSync(entity, options?)` | Count records synchronously |
+| `isMemoryBackend()` | Returns `true` if using memory storage |
 
 ### Schema & Constraints
 
 | Method | Description |
 |--------|-------------|
-| `add_schema(entity, schema)` | Define entity schema (sync, memory only) |
-| `add_schema_async(entity, schema)` | Define entity schema (persisted) |
-| `get_schema(entity)` | Get entity schema |
-| `add_unique_constraint(entity, fields)` | Add unique constraint (sync) |
-| `add_unique_constraint_async(entity, fields)` | Add unique constraint (persisted) |
-| `add_not_null(entity, field)` | Add not-null constraint (sync) |
-| `add_not_null_async(entity, field)` | Add not-null constraint (persisted) |
-| `add_foreign_key(source, field, target, targetField, onDelete)` | Add foreign key (sync) |
-| `add_foreign_key_async(source, field, target, targetField, onDelete)` | Add foreign key (persisted) |
-| `add_index(entity, fields)` | Add index (sync, backfills existing records) |
-| `add_index_async(entity, fields)` | Add index (persisted, backfills existing records) |
-| `list_constraints(entity)` | List entity constraints |
+| `addSchema(entity, schema)` | Define entity schema (sync, memory only) |
+| `addSchemaAsync(entity, schema)` | Define entity schema (persisted) |
+| `getSchema(entity)` | Get entity schema |
+| `addUniqueConstraint(entity, fields)` | Add unique constraint (sync) |
+| `addUniqueConstraintAsync(entity, fields)` | Add unique constraint (persisted) |
+| `addNotNull(entity, field)` | Add not-null constraint (sync) |
+| `addNotNullAsync(entity, field)` | Add not-null constraint (persisted) |
+| `addForeignKey(source, field, target, targetField, onDelete)` | Add foreign key (sync) |
+| `addForeignKeyAsync(source, field, target, targetField, onDelete)` | Add foreign key (persisted) |
+| `addIndex(entity, fields)` | Add index (sync, backfills existing records) |
+| `addIndexAsync(entity, fields)` | Add index (persisted, backfills existing records) |
+| `listConstraints(entity)` | List entity constraints |
 
 ### Relationships
 
 | Method | Description |
 |--------|-------------|
-| `add_relationship(source, field, target)` | Define relationship (sync) |
-| `add_relationship_async(source, field, target)` | Define relationship (persisted) |
-| `list_relationships(entity)` | List entity relationships |
+| `addRelationship(source, field, target)` | Define relationship (sync) |
+| `addRelationshipAsync(source, field, target)` | Define relationship (persisted) |
+| `listRelationships(entity)` | List entity relationships |
 
 ### Subscriptions
 
 | Method | Description |
 |--------|-------------|
 | `subscribe(pattern, entity, callback)` | Subscribe to changes |
-| `subscribe_shared(pattern, entity, group, mode, callback)` | Shared subscription |
+| `subscribeShared(pattern, entity, group, mode, callback)` | Shared subscription |
 | `unsubscribe(subId)` | Remove subscription |
 | `heartbeat(subId)` | Update subscription timestamp |
-| `get_subscription_info(subId)` | Get subscription details |
-| `list_consumer_groups()` | List all consumer groups |
-| `get_consumer_group(name)` | Get consumer group details |
+| `getSubscriptionInfo(subId)` | Get subscription details |
+| `listConsumerGroups()` | List all consumer groups |
+| `getConsumerGroup(name)` | Get consumer group details |
 
 ### Filter Operators
 
@@ -160,7 +160,7 @@ Single-field indexes accelerate both equality and range filters:
 Remaining filters are applied as post-filters on the reduced candidate set.
 
 ```javascript
-db.add_index('products', ['price']);
+db.addIndex('products', ['price']);
 
 // Index range scan for price > 100, then post-filter on category
 const results = await db.list('products', {
@@ -193,10 +193,10 @@ await db.execute("$DB/_catalog", {});
 
 ## Notes
 
-- `new WasmDatabase()` creates an in-memory instance (data lost on page refresh)
-- `WasmDatabase.open_persistent(name)` creates an IndexedDB-backed instance that persists schemas, constraints, indexes, relationships, and data across page reloads
-- `WasmDatabase.open_encrypted(name, passphrase)` adds AES-GCM encryption on top of IndexedDB persistence; wrong passphrase is detected on open
-- Sync methods (`*_sync`) only work with the memory backend; they throw on IndexedDB
+- `new Database()` creates an in-memory instance (data lost on page refresh)
+- `Database.openPersistent(name)` creates an IndexedDB-backed instance that persists schemas, constraints, indexes, relationships, and data across page reloads
+- `Database.openEncrypted(name, passphrase)` adds AES-GCM encryption on top of IndexedDB persistence; wrong passphrase is detected on open
+- Sync methods (`*Sync`) only work with the memory backend; they throw on IndexedDB
 - All records carry a `_version` field that increments on every update (used for CAS via `expect_value`)
 - Field types: `string`, `number`, `boolean`, `array`, `object`
 - Subscription patterns: `*` (all), `entity` (exact), `prefix/*` (prefix match)

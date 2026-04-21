@@ -7,7 +7,7 @@ use super::{
     wasm_bindgen,
 };
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Executes a database operation based on an MQTT-style topic.
     ///

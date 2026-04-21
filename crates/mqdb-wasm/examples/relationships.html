@@ -93,7 +93,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         let testAuthors = [];
@@ -101,7 +101,7 @@
 
         async function main() {
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             log('Database initialized', 'success');
 
             setupEventListeners();
@@ -144,10 +144,10 @@
             const target = document.getElementById('targetEntity').value;
 
             try {
-                db.add_relationship(source, field, target);
+                db.addRelationship(source, field, target);
                 log(`Added relationship: ${source}.${field} -> ${target}`, 'success');
 
-                const rels = db.list_relationships(source);
+                const rels = db.listRelationships(source);
                 log(`Relationships for ${source}: ${JSON.stringify(rels, null, 2)}`);
             } catch (e) {
                 log(`Error: ${e}`, 'error');
@@ -161,7 +161,7 @@
 
             try {
                 const includes = JSON.parse(includesStr);
-                const result = await db.read_with_includes(entity, id, includes);
+                const result = await db.readWithIncludes(entity, id, includes);
                 log(`Read ${entity}/${id} with includes:`, 'success');
                 log(JSON.stringify(result, null, 2));
             } catch (e) {
@@ -191,8 +191,8 @@
             await sleep(100);
 
             log('\nTest 2: Add relationship');
-            db.add_relationship('posts', 'author', 'authors');
-            const rels = db.list_relationships('posts');
+            db.addRelationship('posts', 'author', 'authors');
+            const rels = db.listRelationships('posts');
             if (rels.length === 1 && rels[0].field === 'author') {
                 log('✓ Relationship added successfully', 'success');
             } else {
@@ -200,7 +200,7 @@
             }
 
             log('\nTest 3: Read with includes');
-            const post = await db.read_with_includes('posts', testPosts[0].id, ['author']);
+            const post = await db.readWithIncludes('posts', testPosts[0].id, ['author']);
             if (post.author && post.author.name) {
                 log(`✓ Read with includes worked: post.author.name = "${post.author.name}"`, 'success');
             } else {

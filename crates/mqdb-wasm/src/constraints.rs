@@ -8,12 +8,13 @@ use crate::encoding::encode_value_for_index;
 use crate::types::WasmBatch;
 use mqdb_core::keys::{encode_constraint_key, encode_index_definition_key};
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Adds a unique constraint on the specified fields.
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addUniqueConstraint")]
     pub fn add_unique_constraint(
         &self,
         entity: String,
@@ -40,6 +41,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addNotNull")]
     pub fn add_not_null(&self, entity: String, field: String) -> Result<(), JsValue> {
         let mut inner = self.borrow_inner_mut()?;
         inner
@@ -54,6 +56,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addForeignKey")]
     pub fn add_foreign_key(
         &self,
         source_entity: String,
@@ -83,6 +86,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addUniqueConstraintAsync")]
     pub async fn add_unique_constraint_async(
         &self,
         entity: String,
@@ -118,6 +122,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addNotNullAsync")]
     pub async fn add_not_null_async(&self, entity: String, field: String) -> Result<(), JsValue> {
         {
             let mut inner = self.borrow_inner_mut()?;
@@ -142,6 +147,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addForeignKeyAsync")]
     pub async fn add_foreign_key_async(
         &self,
         source_entity: String,
@@ -187,6 +193,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if the storage operation fails during backfill.
+    #[wasm_bindgen(js_name = "addIndexAsync")]
     pub async fn add_index_async(
         &self,
         entity: String,
@@ -223,6 +230,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addRelationshipAsync")]
     pub async fn add_relationship_async(
         &self,
         source_entity: String,
@@ -262,6 +270,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if the backend is not memory-based or backfill fails.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "addIndex")]
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
         {
             let mut inner = self.borrow_inner_mut()?;
@@ -290,6 +299,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addRelationship")]
     pub fn add_relationship(
         &self,
         source_entity: String,
@@ -311,6 +321,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "listRelationships")]
     pub fn list_relationships(&self, entity: &str) -> JsValue {
         let inner = match self.borrow_inner() {
             Ok(inner) => inner,
@@ -337,6 +348,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "listConstraints")]
     pub fn list_constraints(&self, entity: &str) -> JsValue {
         let inner = match self.borrow_inner() {
             Ok(inner) => inner,

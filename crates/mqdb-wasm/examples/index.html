@@ -159,7 +159,7 @@
             <ul>
                 <li>Create cursors with filters</li>
                 <li>Iterate with next()</li>
-                <li>Batch fetch with next_batch()</li>
+                <li>Batch fetch with nextBatch()</li>
                 <li>Sorted and filtered cursors</li>
             </ul>
         </a>
@@ -192,13 +192,13 @@ python3 -m http.server 8080
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         async function checkStatus() {
             const statusEl = document.getElementById('status');
             try {
                 await init();
-                const db = new WasmDatabase();
+                const db = new Database();
                 statusEl.textContent = 'Ready';
                 statusEl.style.background = '#4caf50';
             } catch (e) {

@@ -184,7 +184,7 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         const subscriptions = new Map();
@@ -193,7 +193,7 @@
 
         async function main() {
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             log('Database initialized', 'success');
 
             setupEventListeners();
@@ -240,7 +240,7 @@
             const group = document.getElementById('sharedGroup').value;
             const mode = document.getElementById('sharedMode').value;
 
-            const subId = db.subscribe_shared(pattern, entity, group, mode, (event) => {
+            const subId = db.subscribeShared(pattern, entity, group, mode, (event) => {
                 addEvent(subId, event);
             });
 
@@ -451,9 +451,9 @@
             log('=== Testing Shared Subscription (Broadcast) ===', 'info');
             clearEvents();
 
-            const sub1 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub1, e));
-            const sub2 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub2, e));
-            const sub3 = db.subscribe_shared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub3, e));
+            const sub1 = db.subscribeShared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub1, e));
+            const sub2 = db.subscribeShared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub2, e));
+            const sub3 = db.subscribeShared('*', 'broadcast_test', 'group1', 'broadcast', (e) => addEvent(sub3, e));
 
             subscriptions.set(sub1, {pattern: '*', entity: 'broadcast_test', type: 'shared', group: 'group1', mode: 'broadcast', active: true});
             subscriptions.set(sub2, {pattern: '*', entity: 'broadcast_test', type: 'shared', group: 'group1', mode: 'broadcast', active: true});
@@ -473,9 +473,9 @@
             log('=== Testing Shared Subscription (Load Balanced) ===', 'info');
             clearEvents();
 
-            const sub1 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub1, e));
-            const sub2 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub2, e));
-            const sub3 = db.subscribe_shared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub3, e));
+            const sub1 = db.subscribeShared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub1, e));
+            const sub2 = db.subscribeShared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub2, e));
+            const sub3 = db.subscribeShared('*', 'lb_test', 'workers', 'load-balanced', (e) => addEvent(sub3, e));
 
             subscriptions.set(sub1, {pattern: '*', entity: 'lb_test', type: 'shared', group: 'workers', mode: 'load-balanced', active: true});
             subscriptions.set(sub2, {pattern: '*', entity: 'lb_test', type: 'shared', group: 'workers', mode: 'load-balanced', active: true});
@@ -518,7 +518,7 @@
                 return;
             }
 
-            const info = db.get_subscription_info(subId);
+            const info = db.getSubscriptionInfo(subId);
             if (info) {
                 log(`Subscription info for ${subId.slice(0, 8)}...:`);
                 log(JSON.stringify(info, null, 2));
@@ -528,7 +528,7 @@
         }
 
         function listConsumerGroups() {
-            const groups = db.list_consumer_groups();
+            const groups = db.listConsumerGroups();
             log('Consumer Groups:', 'info');
             if (groups.length === 0) {
                 log('No consumer groups found');
@@ -544,7 +544,7 @@
                 return;
             }
 
-            const info = db.get_consumer_group(groupName);
+            const info = db.getConsumerGroup(groupName);
             if (info) {
                 log(`Consumer group "${groupName}":`);
                 log(JSON.stringify(info, null, 2));

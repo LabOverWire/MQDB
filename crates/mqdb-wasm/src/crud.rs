@@ -5,7 +5,7 @@ use super::{
     ChangeEvent, JsValue, Relationship, WasmDatabase, deserialize_js, serialize_js, wasm_bindgen,
 };
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Creates a new record in the specified entity.
     ///
@@ -93,6 +93,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if the record is not found or includes cannot be loaded.
+    #[wasm_bindgen(js_name = "readWithIncludes")]
     pub async fn read_with_includes(
         &self,
         entity: String,
@@ -300,6 +301,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "isMemoryBackend")]
     pub fn is_memory_backend(&self) -> bool {
         self.storage.is_memory()
     }
@@ -307,6 +309,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if the record is not found or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "readSync")]
     pub fn read_sync(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
         let key = format!("data/{entity}/{id}");
 
@@ -324,6 +327,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if validation fails or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "createSync")]
     pub fn create_sync(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
         let mut value: serde_json::Value = deserialize_js(&data)?;
 
@@ -382,6 +386,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if the record is not found, validation fails, or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "updateSync")]
     pub fn update_sync(
         &self,
         entity: String,
@@ -455,6 +460,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns an error if the record is not found, foreign key constraints prevent deletion, or the backend is not memory-based.
+    #[wasm_bindgen(js_name = "deleteSync")]
     pub fn delete_sync(&self, entity: String, id: String) -> Result<(), JsValue> {
         let key = format!("data/{entity}/{id}");
 

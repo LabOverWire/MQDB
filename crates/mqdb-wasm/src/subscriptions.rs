@@ -6,7 +6,7 @@ use super::{
     match_pattern, serialize_event, wasm_bindgen,
 };
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// # Errors
     /// Returns `JsValue` if the database is currently borrowed.
@@ -37,6 +37,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns `JsValue` if the database is currently borrowed.
+    #[wasm_bindgen(js_name = "subscribeShared")]
     pub fn subscribe_shared(
         &self,
         pattern: String,
@@ -84,6 +85,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns `JsValue` if the database is currently borrowed.
+    #[wasm_bindgen(js_name = "getSubscriptionInfo")]
     pub fn get_subscription_info(&self, sub_id: &str) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         match inner.subscriptions.get(sub_id) {
@@ -109,6 +111,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns `JsValue` if the database is currently borrowed.
+    #[wasm_bindgen(js_name = "listConsumerGroups")]
     pub fn list_consumer_groups(&self) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         let mut groups: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
@@ -147,6 +150,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns `JsValue` if the database is currently borrowed.
+    #[wasm_bindgen(js_name = "getConsumerGroup")]
     pub fn get_consumer_group(&self, group_name: &str) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         let mut members: Vec<serde_json::Value> = Vec::new();

@@ -152,13 +152,13 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
 
         async function main() {
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             log('Database initialized', 'success');
 
             setupEventListeners();

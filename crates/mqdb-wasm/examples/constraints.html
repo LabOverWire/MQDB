@@ -144,14 +144,14 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         const trackedEntities = new Set(['users', 'posts', 'comments']);
 
         async function main() {
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             window.db = db;
             log('Database initialized', 'success');
 
@@ -192,12 +192,12 @@
                 if (type === 'unique') {
                     const fields = document.getElementById('uniqueFieldList').value.split(',').map(f => f.trim());
                     log(`Adding unique constraint on ${entity}(${fields.join(', ')})...`);
-                    db.add_unique_constraint(entity, fields);
+                    db.addUniqueConstraint(entity, fields);
                     log(`Unique constraint added`, 'success');
                 } else if (type === 'not_null') {
                     const field = document.getElementById('notNullField').value;
                     log(`Adding NOT NULL constraint on ${entity}.${field}...`);
-                    db.add_not_null(entity, field);
+                    db.addNotNull(entity, field);
                     log(`NOT NULL constraint added`, 'success');
                 } else if (type === 'foreign_key') {
                     const sourceField = document.getElementById('fkSourceField').value;
@@ -205,7 +205,7 @@
                     const targetField = document.getElementById('fkTargetField').value;
                     const onDelete = document.getElementById('fkOnDelete').value;
                     log(`Adding FK: ${entity}.${sourceField} -> ${targetEntity}.${targetField} (${onDelete.toUpperCase()})...`);
-                    db.add_foreign_key(entity, sourceField, targetEntity, targetField, onDelete);
+                    db.addForeignKey(entity, sourceField, targetEntity, targetField, onDelete);
                     log(`Foreign key constraint added`, 'success');
                 }
 
@@ -219,7 +219,7 @@
         async function listConstraints() {
             const entity = document.getElementById('constraintEntity').value;
             log(`Listing constraints for ${entity}...`);
-            const constraints = db.list_constraints(entity);
+            const constraints = db.listConstraints(entity);
             log(`Constraints: ${JSON.stringify(constraints, null, 2)}`, 'info');
         }
 
@@ -228,7 +228,7 @@
             let html = '';
 
             for (const entity of trackedEntities) {
-                const constraints = db.list_constraints(entity);
+                const constraints = db.listConstraints(entity);
                 if (constraints && constraints.length > 0) {
                     html += `<div class="card">
                         <h3>${entity}</h3>
@@ -285,7 +285,7 @@
 
         async function testUniquePass() {
             log('Testing unique constraint (should pass)...');
-            db.add_unique_constraint('users', ['email']);
+            db.addUniqueConstraint('users', ['email']);
             try {
                 const result = await db.create('users', {name: 'Alice', email: 'unique_' + Date.now() + '@test.com'});
                 log(`✓ Created user: ${JSON.stringify(result)}`, 'success');
@@ -298,7 +298,7 @@
 
         async function testUniqueFail() {
             log('Testing unique constraint (should fail)...');
-            db.add_unique_constraint('users', ['email']);
+            db.addUniqueConstraint('users', ['email']);
             const email = 'duplicate@test.com';
             try {
                 await db.create('users', {name: 'First', email: email});
@@ -313,7 +313,7 @@
 
         async function setupFK() {
             log('Setting up FK demo: posts.user_id -> users.id (RESTRICT)...');
-            db.add_foreign_key('posts', 'user_id', 'users', 'id', 'restrict');
+            db.addForeignKey('posts', 'user_id', 'users', 'id', 'restrict');
             const user = await db.create('users', {name: 'FK Demo User', email: 'fk_' + Date.now() + '@test.com'});
             log(`Created user: ${JSON.stringify(user)}`, 'success');
             updateConstraintsDisplay();
@@ -349,7 +349,7 @@
 
         async function setupCascade() {
             log('Setting up CASCADE demo: comments.post_id -> posts.id (CASCADE)...');
-            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'cascade');
+            db.addForeignKey('comments', 'post_id', 'posts', 'id', 'cascade');
             const post = await db.create('posts', {title: 'Parent Post', content: 'Will be deleted'});
             const comment1 = await db.create('comments', {text: 'Comment 1', post_id: post.id});
             const comment2 = await db.create('comments', {text: 'Comment 2', post_id: post.id});
@@ -389,7 +389,7 @@
 
         async function setupRestrict() {
             log('Setting up RESTRICT demo...');
-            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'restrict');
+            db.addForeignKey('comments', 'post_id', 'posts', 'id', 'restrict');
             const post = await db.create('posts', {title: 'Protected Post', content: 'Cannot delete while has comments'});
             const comment = await db.create('comments', {text: 'Blocking comment', post_id: post.id});
             log(`Created post ${post.id} with 1 comment`, 'success');
@@ -418,7 +418,7 @@
             log('=== Running All Constraint Tests ===', 'info');
 
             log('\n--- Test 1: Unique Constraint ---');
-            db.add_unique_constraint('test_users', ['email']);
+            db.addUniqueConstraint('test_users', ['email']);
             await db.create('test_users', {name: 'User1', email: 'unique@test.com'});
             log('Created first user with unique@test.com', 'success');
             try {
@@ -429,7 +429,7 @@
             }
 
             log('\n--- Test 2: NOT NULL Constraint ---');
-            db.add_not_null('test_users', 'name');
+            db.addNotNull('test_users', 'name');
             try {
                 await db.create('test_users', {email: 'noname@test.com'});
                 log('✗ Missing required field should have been rejected', 'error');
@@ -438,7 +438,7 @@
             }
 
             log('\n--- Test 3: Foreign Key (Valid) ---');
-            db.add_foreign_key('test_posts', 'author_id', 'test_users', 'id', 'restrict');
+            db.addForeignKey('test_posts', 'author_id', 'test_users', 'id', 'restrict');
             const user = await db.create('test_users', {name: 'Author', email: 'author_' + Date.now() + '@test.com'});
             try {
                 const post = await db.create('test_posts', {title: 'Post', author_id: user.id});
@@ -456,7 +456,7 @@
             }
 
             log('\n--- Test 5: CASCADE Delete ---');
-            db.add_foreign_key('test_comments', 'post_id', 'test_posts', 'id', 'cascade');
+            db.addForeignKey('test_comments', 'post_id', 'test_posts', 'id', 'cascade');
             const testPosts = await db.list('test_posts', null);
             if (testPosts.length > 0) {
                 const pid = testPosts[0].id;
@@ -472,7 +472,7 @@
 
             log('\n--- Test 6: RESTRICT Delete ---');
             const newUser = await db.create('test_users', {name: 'Protected', email: 'protected_' + Date.now() + '@test.com'});
-            db.add_foreign_key('test_profiles', 'user_id', 'test_users', 'id', 'restrict');
+            db.addForeignKey('test_profiles', 'user_id', 'test_users', 'id', 'restrict');
             await db.create('test_profiles', {bio: 'My bio', user_id: newUser.id});
             try {
                 await db.delete('test_users', newUser.id);

@@ -7,12 +7,13 @@ use super::{
 };
 use mqdb_core::keys::encode_schema_key;
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Adds a schema definition for an entity (sync, memory backend only).
     ///
     /// # Errors
     /// Returns an error if the schema definition is invalid.
+    #[wasm_bindgen(js_name = "addSchema")]
     pub fn add_schema(&self, entity: String, schema_js: JsValue) -> Result<(), JsValue> {
         let schema = Self::parse_schema(&entity, schema_js)?;
         let mut inner = self.borrow_inner_mut()?;
@@ -24,6 +25,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if the schema definition is invalid or storage fails.
+    #[wasm_bindgen(js_name = "addSchemaAsync")]
     pub async fn add_schema_async(
         &self,
         entity: String,
@@ -47,6 +49,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if serialization fails.
+    #[wasm_bindgen(js_name = "getSchema")]
     pub fn get_schema(&self, entity: &str) -> Result<JsValue, JsValue> {
         let inner = self.borrow_inner()?;
         match inner.schemas.get(entity) {

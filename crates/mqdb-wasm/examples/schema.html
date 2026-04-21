@@ -85,14 +85,14 @@
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         const registeredSchemas = new Set();
 
         async function main() {
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             log('Database initialized', 'success');
 
             setupEventListeners();
@@ -114,7 +114,7 @@
                 const entity = document.getElementById('schemaEntity').value;
                 const schema = JSON.parse(document.getElementById('schemaDefinition').value);
                 log(`Adding schema for ${entity}...`);
-                db.add_schema(entity, schema);
+                db.addSchema(entity, schema);
                 registeredSchemas.add(entity);
                 log(`Schema added for ${entity}`, 'success');
                 updateSchemasDisplay();
@@ -127,7 +127,7 @@
             try {
                 const entity = document.getElementById('schemaEntity').value;
                 log(`Getting schema for ${entity}...`);
-                const schema = db.get_schema(entity);
+                const schema = db.getSchema(entity);
                 if (schema) {
                     log(`Schema: ${JSON.stringify(schema, null, 2)}`, 'success');
                     document.getElementById('schemaDefinition').value = JSON.stringify(schema, null, 2);
@@ -160,7 +160,7 @@
 
             let html = '';
             for (const entity of registeredSchemas) {
-                const schema = db.get_schema(entity);
+                const schema = db.getSchema(entity);
                 if (schema) {
                     html += `<div class="card">
                         <h3>${entity}</h3>
@@ -184,7 +184,7 @@
         async function runAllSchemaTests() {
             log('=== Running Schema Tests ===', 'info');
 
-            db.add_schema('test_users', {
+            db.addSchema('test_users', {
                 fields: [
                     {name: 'name', type: 'string', required: true},
                     {name: 'email', type: 'string', required: true},
@@ -232,7 +232,7 @@
             }
 
             log('Test 5: Retrieve and verify schema');
-            const schema = db.get_schema('test_users');
+            const schema = db.getSchema('test_users');
             if (schema && schema.fields.length === 4) {
                 log(`  ✓ Schema retrieved with ${schema.fields.length} fields`, 'success');
             } else {
@@ -245,7 +245,7 @@
 
         async function testValidData() {
             log('Testing valid data...');
-            db.add_schema('demo', {
+            db.addSchema('demo', {
                 fields: [
                     {name: 'title', type: 'string', required: true},
                     {name: 'count', type: 'number'}
@@ -263,7 +263,7 @@
 
         async function testWrongType() {
             log('Testing wrong type...');
-            db.add_schema('demo', {
+            db.addSchema('demo', {
                 fields: [
                     {name: 'title', type: 'string', required: true},
                     {name: 'count', type: 'number'}
@@ -281,7 +281,7 @@
 
         async function testMissingRequired() {
             log('Testing missing required field...');
-            db.add_schema('demo', {
+            db.addSchema('demo', {
                 fields: [
                     {name: 'title', type: 'string', required: true},
                     {name: 'count', type: 'number'}
@@ -299,7 +299,7 @@
 
         async function testDefaultValue() {
             log('Testing default value...');
-            db.add_schema('demo', {
+            db.addSchema('demo', {
                 fields: [
                     {name: 'title', type: 'string', required: true},
                     {name: 'status', type: 'string', default: 'pending'}

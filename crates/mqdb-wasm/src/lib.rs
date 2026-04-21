@@ -43,13 +43,13 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "Database")]
 pub struct WasmDatabase {
     storage: Rc<StorageKind>,
     inner: Rc<RefCell<DatabaseInner>>,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     #[wasm_bindgen(constructor)]
     #[must_use]
@@ -59,6 +59,7 @@ impl WasmDatabase {
     }
 
     #[allow(clippy::missing_errors_doc)]
+    #[wasm_bindgen(js_name = "openPersistent")]
     pub async fn open_persistent(db_name: &str) -> Result<WasmDatabase, JsValue> {
         let backend = IdbBackend::open(db_name)
             .await
@@ -69,6 +70,7 @@ impl WasmDatabase {
     }
 
     #[allow(clippy::missing_errors_doc)]
+    #[wasm_bindgen(js_name = "openEncrypted")]
     pub async fn open_encrypted(db_name: &str, passphrase: &str) -> Result<WasmDatabase, JsValue> {
         use crypto::{CHECK_KEY, CHECK_PLAINTEXT, CryptoHandle, SALT_KEY, generate_salt};
         use mqdb_core::storage::AsyncStorageBackend;

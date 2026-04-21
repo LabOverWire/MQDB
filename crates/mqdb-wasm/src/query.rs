@@ -14,7 +14,7 @@ type ScanResult = Option<(Vec<serde_json::Value>, Vec<FilterJs>)>;
 type RangeBound = Option<(Vec<u8>, bool)>;
 type RangeBounds = (RangeBound, RangeBound, Vec<usize>);
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Lists records from an entity with optional filtering, sorting, and pagination.
     ///
@@ -77,6 +77,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if options are invalid or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "listSync")]
     pub fn list_sync(&self, entity: String, options: JsValue) -> Result<JsValue, JsValue> {
         let opts: ListOptions = if options.is_null() || options.is_undefined() {
             ListOptions::default()
@@ -174,6 +175,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if options are invalid or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "countSync")]
     pub fn count_sync(&self, entity: String, options: JsValue) -> Result<usize, JsValue> {
         let opts: CountOptions = if options.is_null() || options.is_undefined() {
             CountOptions::default()

@@ -8,9 +8,10 @@ Each entry lists the date and the crate versions that were released.
 
 ### Added
 
-- Persistent metadata reload: `open_persistent` and `open_encrypted` now restore schemas, constraints, indexes, relationships, and ID counters from IndexedDB on reopen
-- Async admin variants: `add_schema_async`, `add_unique_constraint_async`, `add_not_null_async`, `add_foreign_key_async`, `add_index_async`, `add_relationship_async` — persist definitions to IndexedDB
-- Index backfill on `add_index` / `add_index_async` — existing records are indexed immediately
+- Persistent metadata reload: `openPersistent` and `openEncrypted` now restore schemas, constraints, indexes, relationships, and ID counters from IndexedDB on reopen
+- Async admin variants: `addSchemaAsync`, `addUniqueConstraintAsync`, `addNotNullAsync`, `addForeignKeyAsync`, `addIndexAsync`, `addRelationshipAsync` — persist definitions to IndexedDB
+- Index backfill on `addIndex` / `addIndexAsync` — existing records are indexed immediately
+- camelCase JavaScript API: all multi-word methods use camelCase (`addSchema`, `readSync`, etc.) and structs drop the `Wasm` prefix (`Database`, `Cursor`)
 - `in` filter operator for set-membership queries
 - `$DB/_admin/index/*/add` and `$DB/_catalog` admin operations via `execute()`
 - Atomic batch writes for CRUD operations (data + index entries written in a single transaction)
