@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mqtt5::client::MqttClient;
@@ -62,9 +62,7 @@ impl ResponseRouter {
                         .and_then(|v| {
                             v.get("id")
                                 .and_then(|id| id.as_str().map(String::from))
-                                .or_else(|| {
-                                    v.get("data")?.get("id")?.as_str().map(String::from)
-                                })
+                                .or_else(|| v.get("data")?.get("id")?.as_str().map(String::from))
                         })
                         .unwrap_or_default();
                     let _ = tx.send(Some(id));
@@ -151,8 +149,8 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
         let seeder_id = "bench-db-seeder".to_string();
         let client = MqttClient::new(seeder_id.clone());
         if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-            let opts = ConnectOptions::new(seeder_id.clone())
-                .with_credentials(user.clone(), pass.clone());
+            let opts =
+                ConnectOptions::new(seeder_id.clone()).with_credentials(user.clone(), pass.clone());
             Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
         } else {
             client.connect(&args.conn.broker).await?;
@@ -168,9 +166,13 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
             let record = generate_record(args.fields, args.field_size, id);
             let topic = format!("$DB/{}/create", args.entity);
 
-            if let Some(actual_id) =
-                request_response(&router, &client, &topic, serde_json::to_vec(&record).unwrap())
-                    .await
+            if let Some(actual_id) = request_response(
+                &router,
+                &client,
+                &topic,
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .await
                 && !actual_id.is_empty()
                 && let Ok(mut ids) = inserted_ids.lock()
             {
@@ -208,9 +210,8 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
             let client = MqttClient::new(client_name.clone());
 
             if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts =
-                    ConnectOptions::new(client_name.clone())
-                        .with_credentials(user.clone(), pass.clone());
+                let opts = ConnectOptions::new(client_name.clone())
+                    .with_credentials(user.clone(), pass.clone());
                 if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
                     eprintln!("Client {client_id} connect failed: {e}");
                     return;
