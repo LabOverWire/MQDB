@@ -741,3 +741,76 @@ c=8 MQDB dip persists (447 vs 502 — within noise). PG c=1 drop from 1,825 to
 - Insert analysis: rewritten around REST+PG and MQDB-memory comparisons; Mosquitto baseline insert anomaly explained (41ms TCP delayed-ACK hypothesis)
 - List analysis: updated numbers (3,090 from 2,281, etc.)
 - Table 4c analysis: rewritten to account for PG c=1 insert stall depressing mixed throughput
+
+---
+
+## Session 7 — 2026-04-20: TCP_NODELAY fix and final CRUD re-run
+
+### Problem
+
+AWS run 3 (commit `08f651d`, persistent subscriptions) revealed a pathological
+48–49 ops/s insert throughput in both Mosquitto + PG and Mosquitto + Redis
+baselines, with bimodal latency: p50 ~2ms, p95 ~41ms. The stall affected
+insert only — get/update/delete operated normally through the same bridge.
+
+### Root cause
+
+TCP Nagle/delayed-ACK interaction. The persistent subscription pattern changed
+the bridge's TCP conversation from bidirectional (per-op SUBSCRIBE/SUBACK kept
+the TCP stream warm) to unidirectional (only QoS 0 PUBLISHes from bridge to
+Mosquitto for change events). With Nagle enabled (Mosquitto default:
+`set_tcp_nodelay false`), small outgoing packets were buffered when there was
+outstanding unACK'd data, and the TCP delayed-ACK timer (~40ms) kicked in
+whenever the receiver had no outgoing data to piggyback the ACK on. The insert
+path triggers this specifically because it generates two back-to-back publishes
+(response + change event) in rapid succession.
+
+### Fix
+
+Added `set_tcp_nodelay true` to `mosquitto.conf` and `mosquitto-redis.conf`.
+Committed as `7e5afb5`.
+
+### Local verification
+
+| Benchmark | Before | After |
+|---|---|---|
+| PG insert | 42 ops/s | 882 ops/s |
+| Redis insert | 48 ops/s | 854 ops/s |
+| Insert c=8 | pathological | 2,947 ops/s |
+| Get | 1,083 ops/s | 1,115 ops/s (unchanged) |
+
+### AWS run 4 (2026-04-20, commit `7e5afb5`)
+
+Completed on both c7g.xlarge and c7g.4xlarge. All CRUD operations + mixed
+concurrency sweep re-run. Key results:
+
+**Insert (fixed):**
+
+| Instance | Mosquitto + PG old → new | Mosquitto + Redis old → new |
+|---|---|---|
+| c7g.xlarge | 48 → 1,560 | 48 → 1,975 |
+| c7g.4xlarge | 49 → 2,298 | 49 → 3,470 |
+
+**Mixed concurrency (c7g.4xlarge, PG column no longer stalled):**
+
+| c | Mosquitto + PG old → new |
+|---|---|
+| 1 | 116 → 2,448 |
+| 8 | 929 → 10,809 |
+| 32 | 3,620 → 11,224 |
+| 128 | 10,472 → 11,176 |
+
+PG now scales cleanly from c=1 to c=8 via connection pool parallelism and
+plateaus near 11,200 ops/s at c=32+.
+
+MQDB c=8 dip persists (636 ops/s, p99=42ms) — confirmed as single event loop
+contention, not TCP-related (both fjall and memory show identical dip).
+
+### Paper updated
+
+- Data provenance: references commit `7e5afb5` (TCP_NODELAY + persistent subs)
+- Tables 4a, 4b: all rows replaced with run 4 data
+- Table 4c: all rows replaced with run 4 data
+- Insert analysis: completely rewritten — no anomaly, clean architectural comparison
+- Table 4c analysis: completely rewritten — PG scales properly, MQDB c=8 dip explained as event loop contention
+- List analysis: numbers updated (minor changes within noise)
