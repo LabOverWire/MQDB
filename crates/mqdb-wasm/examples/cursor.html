@@ -176,7 +176,7 @@
             }
         }
 
-        function createCursor() {
+        async function createCursor() {
             const entity = document.getElementById('cursorEntity').value;
             const filterValue = parseInt(document.getElementById('filterValue').value);
             const sortField = document.getElementById('sortField').value;
@@ -191,7 +191,7 @@
                     options.sort = [{ field, direction: dir }];
                 }
 
-                cursor = db.cursor(entity, options);
+                cursor = await db.cursor(entity, options);
                 updateCursorStatus();
                 log(`Cursor created with filter (value > ${filterValue})`, 'success');
                 log(`Items matching filter: ${cursor.count()}`);
@@ -278,7 +278,7 @@
             log('✓ Created 50 test records', 'success');
 
             log('\nTest 2: Create cursor without filter');
-            cursor = db.cursor('test_cursor', {});
+            cursor = await db.cursor('test_cursor', {});
             if (cursor.count() === 50) {
                 log(`✓ Cursor has 50 items (no filter)`, 'success');
             } else {
@@ -286,7 +286,7 @@
             }
 
             log('\nTest 3: Create cursor with filter (value > 25)');
-            cursor = db.cursor('test_cursor', {
+            cursor = await db.cursor('test_cursor', {
                 filters: [{ field: 'value', op: 'gt', value: 25 }]
             });
             if (cursor.count() === 25) {
@@ -330,7 +330,7 @@
             }
 
             log('\nTest 8: Create sorted cursor');
-            cursor = db.cursor('test_cursor', {
+            cursor = await db.cursor('test_cursor', {
                 filters: [{ field: 'value', op: 'lte', value: 10 }],
                 sort: [{ field: 'value', direction: 'desc' }]
             });
