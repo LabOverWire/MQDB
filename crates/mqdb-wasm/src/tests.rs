@@ -9,6 +9,10 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+fn json_to_js(value: &serde_json::Value) -> JsValue {
+    js_sys::JSON::parse(&value.to_string()).unwrap()
+}
+
 #[wasm_bindgen_test]
 async fn test_create_and_read() {
     let db = WasmDatabase::new();
@@ -62,10 +66,9 @@ async fn test_list_with_filter() {
         db.create("users".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "name", "op": "eq", "value": "Bob"}]
-    }))
-    .unwrap();
+    }));
 
     let result = db.list("users".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
@@ -100,10 +103,9 @@ async fn test_index_accelerated_list() {
         db.create("users".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "name", "op": "eq", "value": "Bob"}]
-    }))
-    .unwrap();
+    }));
 
     let result = db.list("users".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
@@ -120,10 +122,9 @@ async fn test_index_scan_fallback_no_index() {
         db.create("users".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "name", "op": "eq", "value": "Alice"}]
-    }))
-    .unwrap();
+    }));
 
     let result = db.list("users".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
@@ -142,10 +143,9 @@ async fn test_count_with_indexed_filter() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "status", "op": "eq", "value": "active"}]
-    }))
-    .unwrap();
+    }));
 
     let count = db.count("items".to_string(), opts).await.unwrap();
     assert_eq!(count, 3);
@@ -160,10 +160,9 @@ async fn test_count_without_index() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "status", "op": "eq", "value": "active"}]
-    }))
-    .unwrap();
+    }));
 
     let count = db.count("items".to_string(), opts).await.unwrap();
     assert_eq!(count, 2);
@@ -192,10 +191,9 @@ async fn test_cursor_with_projection() {
         db.create("users".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "projection": ["name"]
-    }))
-    .unwrap();
+    }));
 
     let mut cursor = db.cursor("users".to_string(), opts).await.unwrap();
     assert_eq!(cursor.count(), 2);
@@ -218,45 +216,40 @@ async fn test_range_filter_indexed_numeric() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "gt", "value": 20}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 3);
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "gte", "value": 20}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 4);
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "lt", "value": 30}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 2);
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "lte", "value": 30}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 3);
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [
             {"field": "score", "op": "gte", "value": 20},
             {"field": "score", "op": "lte", "value": 40}
         ]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 3);
@@ -273,18 +266,16 @@ async fn test_range_filter_negative_numbers() {
         db.create("temps".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "temp", "op": "gte", "value": -10}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("temps".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 4);
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "temp", "op": "lt", "value": 0}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("temps".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 2);
@@ -301,10 +292,9 @@ async fn test_range_filter_string_field() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "name", "op": "gte", "value": "charlie"}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 3);
@@ -323,13 +313,12 @@ async fn test_range_with_equality_post_filter() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [
             {"field": "score", "op": "gt", "value": 10},
             {"field": "label", "op": "eq", "value": "a"}
         ]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 2);
@@ -345,10 +334,9 @@ async fn test_range_filter_no_index_fallback() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "gt", "value": 10}]
-    }))
-    .unwrap();
+    }));
     let result = db.list("items".to_string(), opts).await.unwrap();
     let values: Vec<serde_json::Value> = serde_wasm_bindgen::from_value(result).unwrap();
     assert_eq!(values.len(), 2);
@@ -365,10 +353,9 @@ async fn test_range_count_indexed() {
         db.create("items".to_string(), data).await.unwrap();
     }
 
-    let opts = serde_wasm_bindgen::to_value(&serde_json::json!({
+    let opts = json_to_js(&serde_json::json!({
         "filters": [{"field": "score", "op": "gte", "value": 30}]
-    }))
-    .unwrap();
+    }));
     let count = db.count("items".to_string(), opts).await.unwrap();
     assert_eq!(count, 3);
 }

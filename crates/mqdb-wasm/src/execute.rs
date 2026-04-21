@@ -58,8 +58,10 @@ impl WasmDatabase {
                     projection,
                     includes: None,
                 };
-                let opts_js = serde_wasm_bindgen::to_value(&opts)
+                let opts_json = serde_json::to_string(&opts)
                     .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+                let opts_js = js_sys::JSON::parse(&opts_json)
+                    .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))?;
                 self.list(entity, opts_js).await
             }
             Request::Subscribe { .. } | Request::Unsubscribe { .. } => Err(JsValue::from_str(
@@ -96,58 +98,7 @@ impl WasmDatabase {
             AdminOperation::SchemaGet { entity } => self.get_schema(&entity),
             AdminOperation::ConstraintList { entity } => Ok(self.list_constraints(&entity)),
             AdminOperation::ConstraintAdd { entity } => {
-                let constraint_type = data.get("type").and_then(|v| v.as_str());
-                match constraint_type {
-                    Some("unique") => {
-                        let fields: Vec<String> = data
-                            .get("fields")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        self.add_unique_constraint_async(entity, fields).await?;
-                    }
-                    Some("not_null") => {
-                        let field = data
-                            .get("field")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| JsValue::from_str("field required"))?;
-                        self.add_not_null_async(entity, field.to_string()).await?;
-                    }
-                    Some("foreign_key") => {
-                        let source_field = data
-                            .get("field")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| JsValue::from_str("field required"))?;
-                        let target_entity = data
-                            .get("target_entity")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| JsValue::from_str("target_entity required"))?;
-                        let target_field = data
-                            .get("target_field")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| JsValue::from_str("target_field required"))?;
-                        let on_delete = data
-                            .get("on_delete")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("restrict");
-                        self.add_foreign_key_async(
-                            entity,
-                            source_field.to_string(),
-                            target_entity.to_string(),
-                            target_field.to_string(),
-                            on_delete,
-                        )
-                        .await?;
-                    }
-                    _ => return Err(JsValue::from_str("unknown constraint type")),
-                }
-                Ok(serialize_js(
-                    &serde_json::json!({"message": "constraint added"}),
-                )?)
+                self.handle_constraint_add(entity, &data).await
             }
             AdminOperation::IndexAdd { entity } => {
                 let fields: Vec<String> = data
@@ -185,5 +136,62 @@ impl WasmDatabase {
                 "admin operation not supported in WASM: {op:?}"
             ))),
         }
+    }
+
+    async fn handle_constraint_add(
+        &self,
+        entity: String,
+        data: &serde_json::Value,
+    ) -> Result<JsValue, JsValue> {
+        let constraint_type = data.get("type").and_then(|v| v.as_str());
+        match constraint_type {
+            Some("unique") => {
+                let fields: Vec<String> = data
+                    .get("fields")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.add_unique_constraint_async(entity, fields).await?;
+            }
+            Some("not_null") => {
+                let field = data
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| JsValue::from_str("field required"))?;
+                self.add_not_null_async(entity, field.to_string()).await?;
+            }
+            Some("foreign_key") => {
+                let source_field = data
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| JsValue::from_str("field required"))?;
+                let target_entity = data
+                    .get("target_entity")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| JsValue::from_str("target_entity required"))?;
+                let target_field = data
+                    .get("target_field")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| JsValue::from_str("target_field required"))?;
+                let on_delete = data
+                    .get("on_delete")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("restrict");
+                self.add_foreign_key_async(
+                    entity,
+                    source_field.to_string(),
+                    target_entity.to_string(),
+                    target_field.to_string(),
+                    on_delete,
+                )
+                .await?;
+            }
+            _ => return Err(JsValue::from_str("unknown constraint type")),
+        }
+        serialize_js(&serde_json::json!({"message": "constraint added"}))
     }
 }
