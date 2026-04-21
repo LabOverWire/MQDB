@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Execute (Topic Routing)</title>
+    <link rel="stylesheet" href="shared/common.css">
+    <style>
+        .topic-ref {
+            font-size: 13px;
+        }
+        .topic-ref td:first-child {
+            font-family: 'Monaco', 'Consolas', monospace;
+            white-space: nowrap;
+        }
+        .preset-row {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        .preset-row button {
+            font-size: 12px;
+            padding: 5px 10px;
+        }
+        .result-display {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 4px;
+            min-height: 80px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html" class="active">Execute</a>
+        <a href="count.html">Count</a>
+    </nav>
+
+    <h1>Execute (MQTT Topic Routing)</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Execute Command</h2>
+            <div class="row">
+                <label>Topic:</label>
+                <input type="text" id="topic" value="$DB/_health" style="flex:1">
+            </div>
+            <div class="row">
+                <label>Payload (JSON):</label>
+            </div>
+            <textarea id="payload">null</textarea>
+            <div class="row mt-10">
+                <button id="executeBtn" class="success">Execute</button>
+            </div>
+
+            <h3 class="mt-10">Presets</h3>
+            <div class="preset-row">
+                <button onclick="setPreset('$DB/_health', 'null')">Health</button>
+                <button onclick="setPreset('$DB/_admin/catalog', 'null')">Catalog</button>
+                <button onclick="setPreset('$DB/products/create', '{&quot;name&quot;:&quot;Widget&quot;,&quot;price&quot;:9.99}')">Create</button>
+                <button onclick="setPreset('$DB/products/list', '{}')">List</button>
+            </div>
+            <div class="preset-row">
+                <button onclick="setPreset('$DB/_admin/schema/orders/set', '{&quot;fields&quot;:[{&quot;name&quot;:&quot;code&quot;,&quot;type&quot;:&quot;string&quot;,&quot;required&quot;:true},{&quot;name&quot;:&quot;total&quot;,&quot;type&quot;:&quot;number&quot;}]}')">Set Schema</button>
+                <button onclick="setPreset('$DB/_admin/schema/orders/get', 'null')">Get Schema</button>
+                <button onclick="setPreset('$DB/_admin/constraint/orders/add', '{&quot;type&quot;:&quot;unique&quot;,&quot;fields&quot;:[&quot;code&quot;]}')">Add Constraint</button>
+                <button onclick="setPreset('$DB/_admin/constraint/orders/list', 'null')">List Constraints</button>
+                <button onclick="setPreset('$DB/_admin/index/orders/add', '{&quot;fields&quot;:[&quot;total&quot;]}')">Add Index</button>
+            </div>
+
+            <h3 class="mt-10">Result</h3>
+            <div class="result-display" id="resultDisplay">Execute a command to see results</div>
+        </div>
+
+        <div class="section">
+            <h2>Topic Reference</h2>
+            <table class="topic-ref">
+                <thead>
+                    <tr><th>Topic Pattern</th><th>Operation</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>$DB/{entity}/create</td><td>Create record</td></tr>
+                    <tr><td>$DB/{entity}/{id}</td><td>Read record</td></tr>
+                    <tr><td>$DB/{entity}/{id}/update</td><td>Update record</td></tr>
+                    <tr><td>$DB/{entity}/{id}/delete</td><td>Delete record</td></tr>
+                    <tr><td>$DB/{entity}/list</td><td>List records</td></tr>
+                    <tr><td>$DB/_health</td><td>Health check</td></tr>
+                    <tr><td>$DB/_admin/schema/{entity}/set</td><td>Set schema</td></tr>
+                    <tr><td>$DB/_admin/schema/{entity}/get</td><td>Get schema</td></tr>
+                    <tr><td>$DB/_admin/constraint/{entity}/add</td><td>Add constraint</td></tr>
+                    <tr><td>$DB/_admin/constraint/{entity}/list</td><td>List constraints</td></tr>
+                    <tr><td>$DB/_admin/index/{entity}/add</td><td>Add index</td></tr>
+                    <tr><td>$DB/_admin/catalog</td><td>List entities</td></tr>
+                </tbody>
+            </table>
+
+            <div class="card mt-10">
+                <h3>Quick Tests</h3>
+                <button id="runAllTests" class="success">Run All Tests</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { Database } from '../pkg/mqdb_wasm.js';
+
+        let db;
+
+        async function main() {
+            await init();
+            db = new Database();
+            window.db = db;
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('executeBtn').onclick = handleExecute;
+            document.getElementById('runAllTests').onclick = runAllTests;
+        }
+
+        window.setPreset = function(topic, payload) {
+            document.getElementById('topic').value = topic;
+            document.getElementById('payload').value = payload;
+        };
+
+        async function handleExecute() {
+            const topic = document.getElementById('topic').value;
+            const payloadStr = document.getElementById('payload').value.trim();
+
+            let payload;
+            try {
+                payload = JSON.parse(payloadStr);
+            } catch (e) {
+                log(`Invalid JSON payload: ${e}`, 'error');
+                return;
+            }
+
+            try {
+                log(`execute("${topic}", ${payloadStr})...`);
+                const result = await db.execute(topic, payload);
+                const formatted = JSON.stringify(result, null, 2);
+                document.getElementById('resultDisplay').textContent = formatted;
+                log(`Result: ${formatted}`, 'success');
+            } catch (e) {
+                document.getElementById('resultDisplay').textContent = `Error: ${e}`;
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function runAllTests() {
+            log('=== Running Execute Tests ===', 'info');
+
+            log('Test 1: Health check');
+            try {
+                const health = await db.execute('$DB/_health', null);
+                if (health.status === 'healthy' || health.status === 'ok') {
+                    log(`  ✓ Health: ${JSON.stringify(health)}`, 'success');
+                } else {
+                    log(`  ✗ Unexpected health response: ${JSON.stringify(health)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 2: Create via execute');
+            let createdId;
+            try {
+                const created = await db.execute('$DB/products/create', {name: 'Widget', price: 9.99});
+                createdId = created.id;
+                if (createdId && created.name === 'Widget') {
+                    log(`  ✓ Created: id=${createdId}, name="${created.name}"`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(created)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 3: Read via execute');
+            try {
+                const read = await db.execute(`$DB/products/${createdId}`, null);
+                if (read.name === 'Widget' && read.price === 9.99) {
+                    log(`  ✓ Read: name="${read.name}", price=${read.price}`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(read)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 4: Update via execute');
+            try {
+                const updated = await db.execute(`$DB/products/${createdId}/update`, {price: 12.99});
+                if (updated.price === 12.99) {
+                    log(`  ✓ Updated: price=${updated.price}`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(updated)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 5: List via execute');
+            try {
+                const list = await db.execute('$DB/products/list', {});
+                if (Array.isArray(list) && list.length >= 1) {
+                    log(`  ✓ List: ${list.length} records`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(list)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 6: Delete via execute');
+            try {
+                const deleted = await db.execute(`$DB/products/${createdId}/delete`, null);
+                log('  ✓ Deleted', 'success');
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 7: Schema set via execute');
+            try {
+                const result = await db.execute('$DB/_admin/schema/orders/set', {
+                    fields: [
+                        {name: 'code', type: 'string', required: true},
+                        {name: 'total', type: 'number'}
+                    ]
+                });
+                log(`  ✓ Schema set: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 8: Schema get via execute');
+            try {
+                const schema = await db.execute('$DB/_admin/schema/orders/get', null);
+                if (schema && schema.fields) {
+                    log(`  ✓ Schema get: ${schema.fields.length} fields`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(schema)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 9: Constraint add via execute');
+            try {
+                const result = await db.execute('$DB/_admin/constraint/orders/add', {
+                    type: 'unique',
+                    fields: ['code']
+                });
+                log(`  ✓ Constraint added: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 10: Constraint list via execute');
+            try {
+                const constraints = await db.execute('$DB/_admin/constraint/orders/list', null);
+                if (Array.isArray(constraints) && constraints.length >= 1) {
+                    log(`  ✓ Constraints: ${constraints.length} found`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(constraints)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 11: Index add via execute');
+            try {
+                const result = await db.execute('$DB/_admin/index/orders/add', {
+                    fields: ['total']
+                });
+                log(`  ✓ Index added: ${JSON.stringify(result)}`, 'success');
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 12: Catalog via execute');
+            try {
+                const catalog = await db.execute('$DB/_admin/catalog', null);
+                if (Array.isArray(catalog) || (catalog && typeof catalog === 'object')) {
+                    log(`  ✓ Catalog: ${JSON.stringify(catalog)}`, 'success');
+                } else {
+                    log(`  ✗ Unexpected: ${JSON.stringify(catalog)}`, 'error');
+                }
+            } catch (e) {
+                log(`  ✗ Error: ${e}`, 'error');
+            }
+
+            log('Test 13: Invalid topic throws error');
+            try {
+                await db.execute('invalid/topic', null);
+                log('  ✗ Should have thrown error', 'error');
+            } catch (e) {
+                log(`  ✓ Invalid topic correctly rejected: ${e}`, 'success');
+            }
+
+            log('=== All Execute Tests Complete ===', 'success');
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

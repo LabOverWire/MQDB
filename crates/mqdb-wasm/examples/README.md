@@ -187,7 +187,28 @@ const posts = await db.list('posts', {
 });
 ```
 
-### Count
+### Persistent Storage (`persistent.html`)
+
+IndexedDB-backed storage for data that survives page reloads.
+
+```javascript
+// Open a persistent database (IndexedDB)
+const db = await Database.openPersistent('my-database');
+console.log(db.isMemoryBackend()); // false
+
+// CRUD works the same — data persists across page reloads
+const user = await db.create('users', { name: 'Alice' });
+
+// Switch between databases
+const otherDb = await Database.openPersistent('other-database');
+```
+
+- **Toggle storage modes** — switch between in-memory and IndexedDB at runtime
+- **Named databases** — multiple independent databases via different names
+- **IndexedDB inspector** — view raw stored key-value pairs
+- **Counter demo** — persistent counter that survives page reloads
+
+### Count (`count.html`)
 
 Count records without fetching full data.
 
@@ -199,6 +220,70 @@ const total = await db.count('products');
 const expensive = await db.count('products', {
     filters: [{ field: 'category', op: 'eq', value: 'electronics' }]
 });
+
+// Sync variant (memory backend only)
+const syncCount = db.countSync('products', null);
+```
+
+### Encrypted Storage (`encrypted.html`)
+
+AES-256-GCM encryption at rest using a passphrase-derived key.
+
+```javascript
+const db = await Database.openEncrypted('my-db', 'my-passphrase');
+
+// All async admin methods persist to encrypted storage
+await db.addSchemaAsync('users', { fields: [...] });
+await db.addUniqueConstraintAsync('users', ['email']);
+await db.addNotNullAsync('users', 'name');
+await db.addForeignKeyAsync('posts', 'author_id', 'users', 'id', 'cascade');
+await db.addIndexAsync('users', ['age']);
+await db.addRelationshipAsync('posts', 'author', 'users');
+
+// CRUD works transparently — data encrypted/decrypted automatically
+const user = await db.create('users', { name: 'Alice', email: 'alice@example.com' });
+const read = await db.read('users', user.id);
+```
+
+### Sync API (`sync-api.html`)
+
+Synchronous operations for memory-only databases. No `await` needed.
+
+```javascript
+const db = new Database();
+console.log(db.isMemoryBackend()); // true
+
+const user = db.createSync('users', { name: 'Alice' });
+const read = db.readSync('users', user.id);
+db.updateSync('users', user.id, { name: 'Bob' });
+db.deleteSync('users', user.id);
+
+const all = db.listSync('users', null);
+const count = db.countSync('users', { filters: [{ field: 'name', op: 'eq', value: 'Bob' }] });
+```
+
+### Execute (`execute.html`)
+
+MQTT-style topic routing interface. Same topic patterns as the networked MQDB broker.
+
+```javascript
+// Health check
+const health = await db.execute('$DB/_health', null);
+
+// CRUD via topics
+const created = await db.execute('$DB/products/create', { name: 'Widget', price: 9.99 });
+const read = await db.execute(`$DB/products/${created.id}`, null);
+await db.execute(`$DB/products/${created.id}/update`, { price: 12.99 });
+await db.execute(`$DB/products/${created.id}/delete`, null);
+const list = await db.execute('$DB/products/list', {});
+
+// Admin operations
+await db.execute('$DB/_admin/schema/orders/set', { fields: [...] });
+const schema = await db.execute('$DB/_admin/schema/orders/get', null);
+await db.execute('$DB/_admin/constraint/orders/add', { type: 'unique', fields: ['code'] });
+const constraints = await db.execute('$DB/_admin/constraint/orders/list', null);
+await db.execute('$DB/_admin/index/orders/add', { fields: ['total'] });
+const catalog = await db.execute('$DB/_admin/catalog', null);
 ```
 
 ### Cursor (`cursor.html`)
@@ -332,20 +417,32 @@ db.deleteSync("users", user.id);
 
 | Method | Description |
 |--------|-------------|
-| `addSchema(entity, schema)` | Define entity schema |
+| `addSchema(entity, schema)` | Define entity schema (memory) |
+| `addSchemaAsync(entity, schema)` | Define entity schema (persisted) |
 | `getSchema(entity)` | Get entity schema |
-| `addUniqueConstraint(entity, fields)` | Add unique constraint |
-| `addNotNull(entity, field)` | Add not-null constraint |
-| `addForeignKey(source, field, target, targetField, onDelete)` | Add foreign key |
-| `addIndex(entity, fields)` | Add index |
+| `addUniqueConstraint(entity, fields)` | Add unique constraint (memory) |
+| `addUniqueConstraintAsync(entity, fields)` | Add unique constraint (persisted) |
+| `addNotNull(entity, field)` | Add not-null constraint (memory) |
+| `addNotNullAsync(entity, field)` | Add not-null constraint (persisted) |
+| `addForeignKey(source, field, target, targetField, onDelete)` | Add foreign key (memory) |
+| `addForeignKeyAsync(source, field, target, targetField, onDelete)` | Add foreign key (persisted) |
+| `addIndex(entity, fields)` | Add index (memory) |
+| `addIndexAsync(entity, fields)` | Add index (persisted) |
 | `listConstraints(entity)` | List entity constraints |
 
 ### Relationships
 
 | Method | Description |
 |--------|-------------|
-| `addRelationship(source, field, target)` | Define relationship |
+| `addRelationship(source, field, target)` | Define relationship (memory) |
+| `addRelationshipAsync(source, field, target)` | Define relationship (persisted) |
 | `listRelationships(entity)` | List entity relationships |
+
+### Execute
+
+| Method | Description |
+|--------|-------------|
+| `execute(topic, payload)` | Execute operation via MQTT topic pattern |
 
 ### Subscriptions
 

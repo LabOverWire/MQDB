@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Count & Aggregation</title>
+    <link rel="stylesheet" href="shared/common.css">
+    <style>
+        .big-count {
+            font-size: 72px;
+            font-weight: bold;
+            color: #1565c0;
+            text-align: center;
+            padding: 20px;
+            line-height: 1;
+        }
+        .count-label {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+        .verify-panel {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .verify-box {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .verify-box .method {
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        .verify-box .result {
+            font-size: 32px;
+            font-weight: bold;
+        }
+        .verify-box .result.match {
+            color: #4caf50;
+        }
+        .verify-box .result.mismatch {
+            color: #f44336;
+        }
+        .filter-builder {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html" class="active">Count</a>
+    </nav>
+
+    <h1>Count & Aggregation</h1>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Setup</h2>
+            <div class="card">
+                <h3>Seed Data</h3>
+                <p>Create 50 products with random prices and categories</p>
+                <button id="seedBtn" class="success">Seed 50 Products</button>
+                <button id="clearBtn" class="danger">Clear Products</button>
+            </div>
+            <div class="card mt-10">
+                <h3>Entity</h3>
+                <div class="row">
+                    <label>Entity:</label>
+                    <input type="text" id="entity" value="products">
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Count Result</h2>
+            <div class="big-count" id="countDisplay">0</div>
+            <div class="count-label" id="countLabel">records</div>
+            <div class="row mt-10" style="justify-content:center">
+                <button id="countAllBtn" class="success">Count All</button>
+                <button id="countFilteredBtn">Count (price > 50)</button>
+                <button id="countCategoryBtn">Count (electronics)</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Custom Filter</h2>
+        <div class="filter-builder">
+            <label>Field:</label>
+            <input type="text" id="filterField" value="price" style="width:100px">
+            <label>Op:</label>
+            <select id="filterOp">
+                <option value="eq">eq (=)</option>
+                <option value="gt" selected>gt (>)</option>
+                <option value="lt">lt (<)</option>
+                <option value="gte">gte (>=)</option>
+                <option value="lte">lte (<=)</option>
+                <option value="ne">ne (<>)</option>
+                <option value="glob">glob (~)</option>
+            </select>
+            <label>Value:</label>
+            <input type="text" id="filterValue" value="50" style="width:100px">
+            <button id="countCustomBtn">Count</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Count vs List Verification</h2>
+        <p>Verifies that <code>count(opts)</code> === <code>list(opts).length</code></p>
+        <button id="verifyBtn">Verify count vs list</button>
+        <button id="verifySyncBtn">Verify countSync vs listSync</button>
+        <div class="verify-panel" id="verifyPanel" style="display:none">
+            <div class="verify-box">
+                <div class="method">count(entity, opts)</div>
+                <div class="result" id="verifyCount">-</div>
+            </div>
+            <div class="verify-box">
+                <div class="method">list(entity, opts).length</div>
+                <div class="result" id="verifyList">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Quick Tests</h2>
+        <button id="runAllTests" class="success">Run All Tests</button>
+    </div>
+
+    <div id="output">
+        <h3>Output</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { Database } from '../pkg/mqdb_wasm.js';
+
+        let db;
+        const categories = ['electronics', 'books', 'clothing', 'food', 'toys'];
+
+        async function main() {
+            await init();
+            db = new Database();
+            window.db = db;
+            log('Database initialized', 'success');
+
+            setupEventListeners();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('seedBtn').onclick = seedProducts;
+            document.getElementById('clearBtn').onclick = clearProducts;
+            document.getElementById('countAllBtn').onclick = countAll;
+            document.getElementById('countFilteredBtn').onclick = countPriceAbove50;
+            document.getElementById('countCategoryBtn').onclick = countElectronics;
+            document.getElementById('countCustomBtn').onclick = countCustom;
+            document.getElementById('verifyBtn').onclick = verifyCountVsList;
+            document.getElementById('verifySyncBtn').onclick = verifySyncCountVsList;
+            document.getElementById('runAllTests').onclick = runAllTests;
+        }
+
+        function getEntity() {
+            return document.getElementById('entity').value;
+        }
+
+        async function seedProducts() {
+            log('Seeding 50 products...');
+            for (let i = 0; i < 50; i++) {
+                await db.create('products', {
+                    name: `Product ${i}`,
+                    price: Math.round(Math.random() * 100 * 100) / 100,
+                    category: categories[i % categories.length]
+                });
+            }
+            log('Seeded 50 products', 'success');
+            await updateCount();
+        }
+
+        async function clearProducts() {
+            const records = await db.list('products', null);
+            for (const r of records) {
+                await db.delete('products', r.id);
+            }
+            log(`Cleared ${records.length} products`, 'success');
+            document.getElementById('countDisplay').textContent = '0';
+        }
+
+        async function updateCount() {
+            const c = await db.count(getEntity(), null);
+            document.getElementById('countDisplay').textContent = c;
+            document.getElementById('countLabel').textContent = 'records';
+        }
+
+        async function countAll() {
+            try {
+                const c = await db.count(getEntity(), null);
+                document.getElementById('countDisplay').textContent = c;
+                document.getElementById('countLabel').textContent = 'total records';
+                log(`count("${getEntity()}") = ${c}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function countPriceAbove50() {
+            try {
+                const c = await db.count(getEntity(), {
+                    filters: [{field: 'price', op: 'gt', value: 50}]
+                });
+                document.getElementById('countDisplay').textContent = c;
+                document.getElementById('countLabel').textContent = 'where price > 50';
+                log(`count(price > 50) = ${c}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function countElectronics() {
+            try {
+                const c = await db.count(getEntity(), {
+                    filters: [{field: 'category', op: 'eq', value: 'electronics'}]
+                });
+                document.getElementById('countDisplay').textContent = c;
+                document.getElementById('countLabel').textContent = 'electronics';
+                log(`count(category = "electronics") = ${c}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function countCustom() {
+            try {
+                const field = document.getElementById('filterField').value;
+                const op = document.getElementById('filterOp').value;
+                let value = document.getElementById('filterValue').value;
+                const numVal = Number(value);
+                if (!isNaN(numVal) && value !== '') value = numVal;
+
+                const c = await db.count(getEntity(), {
+                    filters: [{field, op, value}]
+                });
+                document.getElementById('countDisplay').textContent = c;
+                document.getElementById('countLabel').textContent = `where ${field} ${op} ${value}`;
+                log(`count(${field} ${op} ${value}) = ${c}`, 'success');
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function verifyCountVsList() {
+            const panel = document.getElementById('verifyPanel');
+            panel.style.display = '';
+
+            const opts = {
+                filters: [{field: 'price', op: 'gt', value: 50}]
+            };
+
+            try {
+                const countResult = await db.count(getEntity(), opts);
+                const listResult = await db.list(getEntity(), opts);
+
+                document.getElementById('verifyCount').textContent = countResult;
+                document.getElementById('verifyList').textContent = listResult.length;
+
+                const match = countResult === listResult.length;
+                document.getElementById('verifyCount').className = 'result ' + (match ? 'match' : 'mismatch');
+                document.getElementById('verifyList').className = 'result ' + (match ? 'match' : 'mismatch');
+
+                if (match) {
+                    log(`Verification passed: count=${countResult} === list.length=${listResult.length}`, 'success');
+                } else {
+                    log(`Verification FAILED: count=${countResult} !== list.length=${listResult.length}`, 'error');
+                }
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        function verifySyncCountVsList() {
+            const panel = document.getElementById('verifyPanel');
+            panel.style.display = '';
+
+            const opts = {
+                filters: [{field: 'price', op: 'gt', value: 50}]
+            };
+
+            try {
+                const countResult = db.countSync(getEntity(), opts);
+                const listResult = db.listSync(getEntity(), opts);
+
+                document.getElementById('verifyCount').textContent = countResult;
+                document.getElementById('verifyList').textContent = listResult.length;
+
+                const match = countResult === listResult.length;
+                document.getElementById('verifyCount').className = 'result ' + (match ? 'match' : 'mismatch');
+                document.getElementById('verifyList').className = 'result ' + (match ? 'match' : 'mismatch');
+
+                if (match) {
+                    log(`Sync verification passed: countSync=${countResult} === listSync.length=${listResult.length}`, 'success');
+                } else {
+                    log(`Sync verification FAILED: countSync=${countResult} !== listSync.length=${listResult.length}`, 'error');
+                }
+            } catch (e) {
+                log(`Error: ${e}`, 'error');
+            }
+        }
+
+        async function runAllTests() {
+            log('=== Running Count Tests ===', 'info');
+
+            log('Test 1: Seed 50 products');
+            for (let i = 0; i < 50; i++) {
+                await db.create('count_test', {
+                    name: `Product ${i}`,
+                    price: Math.round(Math.random() * 100 * 100) / 100,
+                    category: categories[i % categories.length]
+                });
+            }
+            log('  ✓ Seeded 50 products', 'success');
+
+            log('Test 2: count with no filter returns 50');
+            const total = await db.count('count_test', null);
+            if (total === 50) {
+                log(`  ✓ count() = ${total}`, 'success');
+            } else {
+                log(`  ✗ Expected 50, got ${total}`, 'error');
+            }
+
+            log('Test 3: count with price > 50 filter');
+            const priceFiltered = await db.count('count_test', {
+                filters: [{field: 'price', op: 'gt', value: 50}]
+            });
+            const priceList = await db.list('count_test', {
+                filters: [{field: 'price', op: 'gt', value: 50}]
+            });
+            if (priceFiltered === priceList.length) {
+                log(`  ✓ count(price > 50) = ${priceFiltered} matches list length`, 'success');
+            } else {
+                log(`  ✗ count=${priceFiltered} != list.length=${priceList.length}`, 'error');
+            }
+
+            log('Test 4: count with category = "electronics"');
+            const catFiltered = await db.count('count_test', {
+                filters: [{field: 'category', op: 'eq', value: 'electronics'}]
+            });
+            if (catFiltered === 10) {
+                log(`  ✓ count(category = "electronics") = ${catFiltered}`, 'success');
+            } else {
+                log(`  ✗ Expected 10, got ${catFiltered}`, 'error');
+            }
+
+            log('Test 5: Multiple filters (price > 20 AND category = "books")');
+            const multiFiltered = await db.count('count_test', {
+                filters: [
+                    {field: 'price', op: 'gt', value: 20},
+                    {field: 'category', op: 'eq', value: 'books'}
+                ]
+            });
+            const multiList = await db.list('count_test', {
+                filters: [
+                    {field: 'price', op: 'gt', value: 20},
+                    {field: 'category', op: 'eq', value: 'books'}
+                ]
+            });
+            if (multiFiltered === multiList.length) {
+                log(`  ✓ count(price>20 AND category="books") = ${multiFiltered} matches list`, 'success');
+            } else {
+                log(`  ✗ count=${multiFiltered} != list.length=${multiList.length}`, 'error');
+            }
+
+            log('Test 6: countSync matches count for same query');
+            const syncCount = db.countSync('count_test', {
+                filters: [{field: 'price', op: 'gt', value: 50}]
+            });
+            if (syncCount === priceFiltered) {
+                log(`  ✓ countSync(price > 50) = ${syncCount} matches async count`, 'success');
+            } else {
+                log(`  ✗ countSync=${syncCount} != count=${priceFiltered}`, 'error');
+            }
+
+            log('Test 7: count vs list length (no filter)');
+            const allList = await db.list('count_test', null);
+            if (total === allList.length) {
+                log(`  ✓ count(null) = ${total} === list(null).length = ${allList.length}`, 'success');
+            } else {
+                log(`  ✗ count=${total} != list.length=${allList.length}`, 'error');
+            }
+
+            log('=== All Count Tests Complete ===', 'success');
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

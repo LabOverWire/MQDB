@@ -78,6 +78,10 @@
         <a href="relationships.html">Relationships</a>
         <a href="cursor.html">Cursor</a>
         <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html">Count</a>
     </nav>
 
     <div class="hero">
@@ -172,6 +176,50 @@
                 <li>Toggle memory vs IndexedDB</li>
                 <li>Inspect raw IndexedDB contents</li>
                 <li>Multiple named databases</li>
+            </ul>
+        </a>
+
+        <a href="encrypted.html" class="feature-card">
+            <h3>Encrypted Storage</h3>
+            <p>AES-GCM encryption at rest</p>
+            <ul>
+                <li>Passphrase-derived encryption key</li>
+                <li>Persistent schema and constraints</li>
+                <li>IndexedDB stores only ciphertext</li>
+                <li>Async admin methods</li>
+            </ul>
+        </a>
+
+        <a href="sync-api.html" class="feature-card">
+            <h3>Sync API</h3>
+            <p>Synchronous operations (memory-only)</p>
+            <ul>
+                <li>No await needed</li>
+                <li>createSync, readSync, updateSync</li>
+                <li>listSync with filters and sorting</li>
+                <li>Performance comparison vs async</li>
+            </ul>
+        </a>
+
+        <a href="execute.html" class="feature-card">
+            <h3>Execute</h3>
+            <p>MQTT topic routing interface</p>
+            <ul>
+                <li>CRUD via topic patterns</li>
+                <li>Admin operations (schema, constraints)</li>
+                <li>Health check and catalog</li>
+                <li>Same API as networked MQDB</li>
+            </ul>
+        </a>
+
+        <a href="count.html" class="feature-card">
+            <h3>Count</h3>
+            <p>Record counting and aggregation</p>
+            <ul>
+                <li>Count with filters</li>
+                <li>Async and sync variants</li>
+                <li>Count vs list verification</li>
+                <li>Custom filter builder</li>
             </ul>
         </a>
     </div>
