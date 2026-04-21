@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-04-20 — mqdb-wasm 0.3.0
+
+### Added
+
+- Persistent metadata reload: `open_persistent` and `open_encrypted` now restore schemas, constraints, indexes, relationships, and ID counters from IndexedDB on reopen
+- Async admin variants: `add_schema_async`, `add_unique_constraint_async`, `add_not_null_async`, `add_foreign_key_async`, `add_index_async`, `add_relationship_async` — persist definitions to IndexedDB
+- Index backfill on `add_index` / `add_index_async` — existing records are indexed immediately
+- `in` filter operator for set-membership queries
+- `$DB/_admin/index/*/add` and `$DB/_catalog` admin operations via `execute()`
+- Atomic batch writes for CRUD operations (data + index entries written in a single transaction)
+- CAS precondition on update and delete via `expect_value` in batch writes
+
+### Fixed
+
+- SetNull cascade now bumps `_version`, updates index entries, and dispatches update events
+- Unique constraint validation uses index lookup (O(1)) instead of full entity scan (O(N))
+- `serde_wasm_bindgen` Map/Object mismatch: `to_value` produces JS `Map` for struct options, causing `#[serde(default)]` to silently drop filter/sort/pagination fields — fixed by routing through `JSON.parse` for struct deserialization targets
+
 ## 2026-04-15 — mqdb-core 0.5.2, mqdb-agent 0.7.1
 
 ### Added

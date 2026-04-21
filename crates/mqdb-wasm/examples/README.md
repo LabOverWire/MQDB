@@ -78,6 +78,7 @@ Advanced query capabilities.
 | `gte`, `>=` | Greater or equal |
 | `lte`, `<=` | Less or equal |
 | `glob`, `~` | Wildcard pattern (`*`) |
+| `in` | Value in array |
 | `null`, `?` | Is null |
 | `not_null`, `!?` | Is not null |
 
@@ -95,7 +96,7 @@ const results = await db.list('products', {
 
 **Index-Accelerated Queries:**
 
-When a single-field index exists and an `eq` filter matches that field, `list`, `count`, and `cursor` scan the index instead of doing a full table scan. Remaining filters are applied on the reduced candidate set.
+When a single-field index exists and a filter matches that field, `list`, `count`, and `cursor` scan the index instead of doing a full table scan. This works for both equality (`eq`) and range (`gt`, `gte`, `lt`, `lte`) filters, including combined upper+lower bounds. Remaining filters are applied on the reduced candidate set.
 
 ```javascript
 db.add_index('products', ['category']);
@@ -225,7 +226,7 @@ const cursor = await db.cursor('products', {
 ```javascript
 // One at a time
 while (cursor.has_more()) {
-    const item = cursor.next();
+    const item = cursor.next_item();
     console.log(item);
 }
 
@@ -236,7 +237,7 @@ const batch = cursor.next_batch(10);  // Up to 10 items
 **Cursor Methods:**
 | Method | Description |
 |--------|-------------|
-| `next()` | Get next item (undefined when exhausted) |
+| `next_item()` | Get next item (undefined when exhausted) |
 | `next_batch(n)` | Get up to n items as array |
 | `reset()` | Reset to beginning |
 | `has_more()` | Check if more items available |
@@ -248,29 +249,33 @@ const batch = cursor.next_batch(10);  // Up to 10 items
 The WASM database runs entirely in the browser with no server required:
 
 ```
-┌───────────────────────────────────────────────┐
-│                  Browser                       │
-│  ┌─────────────────────────────────────────┐  │
-│  │            JavaScript API               │  │
-│  │  db.create() / db.read() / ...          │  │
-│  └───────────────────┬─────────────────────┘  │
-│                      │                         │
-│  ┌───────────────────▼─────────────────────┐  │
-│  │            WASM Module                  │  │
-│  │  ┌──────────────────────────────────┐   │  │
-│  │  │    WasmDatabase (Rust)           │   │  │
-│  │  │  - Schema validation             │   │  │
-│  │  │  - Constraint checking           │   │  │
-│  │  │  - Subscription dispatch         │   │  │
-│  │  │  - Relationship loading          │   │  │
-│  │  └───────────────┬──────────────────┘   │  │
-│  │                  │                      │  │
-│  │  ┌───────────────▼──────────────────┐   │  │
-│  │  │    In-Memory Storage             │   │  │
-│  │  │  (mqdb_core::storage::Storage)   │   │  │
-│  │  └──────────────────────────────────┘   │  │
-│  └─────────────────────────────────────────┘  │
-└───────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                       Browser                           │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │              JavaScript API                      │  │
+│  │  db.create() / db.list() / db.execute() / ...    │  │
+│  └────────────────────┬─────────────────────────────┘  │
+│                       │                                 │
+│  ┌─���──────────────────▼─────────────────────────────┐  │
+│  │              WASM Module                         │  │
+│  │  ┌───────────────────────────────────────────┐   │  │
+│  │  │    WasmDatabase (Rust)                    │   │  │
+│  │  │  - Schema validation                      │   │  │
+│  │  │  - Constraint checking (unique, FK, NN)   │   │  │
+│  │  │  - Index acceleration (eq + range)        │   │  │
+│  │  │  - Subscription dispatch                  │   │  │
+│  │  │  - Relationship loading                   │   │  │
+│  │  └──────────────────┬────────────────────────┘   │  │
+│  │                     │                            │  │
+│  │  ┌──────────────────▼────────────────────────┐   │  │
+│  │  │    Storage Backend                        │   │  │
+│  │  │  ┌────────────┬────────────┬───────────┐  │   │  │
+│  │  │  │  Memory    │ IndexedDB  │ Encrypted │  │   │  │
+│  │  │  │ (volatile) │(persistent)│(AES-GCM)  │  │   │  │
+│  │  │  └────────────┴────────────┴───────────┘  │   │  │
+│  │  └───────────────────────────────────────────┘   │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## API Reference
@@ -281,6 +286,7 @@ The WASM database runs entirely in the browser with no server required:
 |--------|-------------|
 | `new WasmDatabase()` | Create in-memory database instance |
 | `WasmDatabase.open_persistent(name)` | Create IndexedDB-backed instance |
+| `WasmDatabase.open_encrypted(name, passphrase)` | Create encrypted IndexedDB-backed instance |
 | `create(entity, data)` | Insert record |
 | `read(entity, id)` | Get record by ID |
 | `read_with_includes(entity, id, includes)` | Get record with related data |
