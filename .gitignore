@@ -11,3 +11,7 @@ test_certs/
 .playwright-mcp/
 benchmark_results/
 book/
+publications/vldb-mqtt-as-database/bench/results-*
+publications/vldb-mqtt-as-database/bench/results
+publications/vldb-mqtt-as-database/bench/rest-pg/results
+publications/vldb-mqtt-as-database/**/target

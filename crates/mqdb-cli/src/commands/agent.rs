@@ -16,6 +16,7 @@ use crate::common::connect_client;
 pub(crate) struct AgentStartArgs {
     pub(crate) bind: SocketAddr,
     pub(crate) db_path: PathBuf,
+    pub(crate) memory_backend: bool,
     pub(crate) auth: AuthArgs,
     pub(crate) durability: DurabilityArg,
     pub(crate) durability_ms: u64,
@@ -68,7 +69,19 @@ pub(crate) async fn cmd_agent_start(
     if let Some(ref pp) = passphrase {
         config = config.with_passphrase(pp.clone());
     }
-    let db = Database::open_with_config(config).await?;
+    let db = if args.memory_backend {
+        if passphrase.is_some() {
+            return Err(
+                "--memory-backend is incompatible with a passphrase (vault requires persistent storage)"
+                    .into(),
+            );
+        }
+        let backend: Arc<dyn mqdb_core::storage::StorageBackend> =
+            Arc::new(mqdb_core::MemoryBackend::new());
+        Database::open_with_backend(backend, config).await?
+    } else {
+        Database::open_with_config(config).await?
+    };
 
     let license_info =
         verify_and_log_license(args.license.as_deref(), args.license_data.as_deref());

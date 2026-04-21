@@ -13,7 +13,10 @@ use cli_types::{
 #[cfg(feature = "cluster")]
 use cli_types::{ClusterAction, DbAction, DevAction};
 use commands::agent::{AgentStartArgs, cmd_agent_start, cmd_agent_status};
-use commands::bench::{BenchDbArgs, BenchPubsubArgs, cmd_bench_db, cmd_bench_pubsub};
+use commands::bench::{
+    BenchDbArgs, BenchPubsubArgs, cmd_bench_db, cmd_bench_db_cascade, cmd_bench_db_changefeed,
+    cmd_bench_db_unique, cmd_bench_pubsub,
+};
 #[cfg(feature = "cluster")]
 use commands::cluster::{
     ClusterStartArgs, cmd_cluster_rebalance, cmd_cluster_start, cmd_cluster_status,
@@ -183,6 +186,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
             cmd_agent_start(AgentStartArgs {
                 bind: fields.bind,
                 db_path: fields.db,
+                memory_backend: fields.memory_backend,
                 auth: *fields.auth,
                 durability: fields.durability,
                 durability_ms: fields.durability_ms,
@@ -517,13 +521,17 @@ async fn dispatch_bench(action: BenchAction) -> Result<(), Box<dyn std::error::E
             r#async,
             qos,
             duration,
+            write_rate,
+            attempts_per_client,
+            children,
+            runs,
             conn,
             format,
         } => {
-            Box::pin(cmd_bench_db(BenchDbArgs {
+            let args = BenchDbArgs {
                 operations,
                 entity,
-                op,
+                op: op.clone(),
                 concurrency,
                 fields,
                 field_size,
@@ -536,8 +544,16 @@ async fn dispatch_bench(action: BenchAction) -> Result<(), Box<dyn std::error::E
                 duration,
                 conn,
                 format,
-            }))
-            .await
+            };
+            match op.to_lowercase().as_str() {
+                "changefeed" => {
+                    let duration_secs = duration.unwrap_or(30);
+                    Box::pin(cmd_bench_db_changefeed(args, write_rate, duration_secs)).await
+                }
+                "unique" => Box::pin(cmd_bench_db_unique(args, attempts_per_client)).await,
+                "cascade" => Box::pin(cmd_bench_db_cascade(args, children, runs)).await,
+                _ => Box::pin(cmd_bench_db(args)).await,
+            }
         }
     }
 }

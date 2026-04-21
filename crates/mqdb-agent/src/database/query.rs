@@ -134,21 +134,37 @@ impl Database {
             .map_or(requested_limit, |max| requested_limit.min(max));
         let offset = pagination.map_or(0, |p| p.offset);
         let prefix = format!("data/{entity_name}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes())?;
+        let batch_size = offset.saturating_add(limit);
 
         let mut results = Vec::new();
+        let mut after_key: Option<Vec<u8>> = None;
         let mut skipped = 0;
-        for (key, value) in items {
-            if skipped < offset {
-                skipped += 1;
-                continue;
-            }
-            if results.len() >= limit {
+
+        loop {
+            let items = self.storage.prefix_scan_batch(
+                prefix.as_bytes(),
+                batch_size.min(1000),
+                after_key.as_deref(),
+            )?;
+            if items.is_empty() {
                 break;
             }
-            let (_, id) = keys::decode_data_key(&key)?;
-            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
-            results.push(entity.to_json());
+            for (key, value) in &items {
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if results.len() >= limit {
+                    return Ok(results);
+                }
+                let (_, id) = keys::decode_data_key(key)?;
+                let entity = Entity::deserialize(entity_name.to_string(), id, value)?;
+                results.push(entity.to_json());
+            }
+            if items.len() < batch_size.min(1000) {
+                break;
+            }
+            after_key = items.last().map(|(k, _)| k.clone());
         }
         Ok(results)
     }

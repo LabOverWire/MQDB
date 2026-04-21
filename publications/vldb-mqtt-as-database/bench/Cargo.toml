@@ -1,0 +1,19 @@
+[package]
+name = "mqdb-baseline-bench"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+mqtt5 = { git = "https://github.com/LabOverWire/mqtt-lib.git" }
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+deadpool-postgres = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+redis = { version = "1.2.0", features = ["tokio-comp"] }

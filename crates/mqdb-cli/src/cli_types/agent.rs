@@ -19,6 +19,12 @@ pub(crate) struct AgentStartFields {
     pub(crate) bind: SocketAddr,
     #[arg(long, env = "MQDB_DB", help = "Path to database directory")]
     pub(crate) db: PathBuf,
+    #[arg(
+        long,
+        env = "MQDB_MEMORY_BACKEND",
+        help = "Use in-memory storage backend (no persistence; for benchmarking only)"
+    )]
+    pub(crate) memory_backend: bool,
     #[command(flatten)]
     pub(crate) auth: Box<AuthArgs>,
     #[arg(
