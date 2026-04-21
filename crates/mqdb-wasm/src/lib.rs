@@ -205,8 +205,10 @@ impl WasmDatabase {
                         .get("source_entity")
                         .and_then(|v| v.as_str())
                         .unwrap_or(entity);
-                    let source_field =
-                        data.get("source_field").and_then(|v| v.as_str()).unwrap_or(parts[2]);
+                    let source_field = data
+                        .get("source_field")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(parts[2]);
                     let target_entity = data
                         .get("target_entity")
                         .and_then(|v| v.as_str())
@@ -301,17 +303,14 @@ impl WasmDatabase {
         let mut max_ids: HashMap<String, u64> = HashMap::new();
 
         for (key, _) in items {
-            let key_str = match std::str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(key_str) = std::str::from_utf8(&key) else {
+                continue;
             };
-            let rest = match key_str.strip_prefix("data/") {
-                Some(r) => r,
-                None => continue,
+            let Some(rest) = key_str.strip_prefix("data/") else {
+                continue;
             };
-            let slash_pos = match rest.find('/') {
-                Some(p) => p,
-                None => continue,
+            let Some(slash_pos) = rest.find('/') else {
+                continue;
             };
             let entity = &rest[..slash_pos];
             let id_str = &rest[slash_pos + 1..];

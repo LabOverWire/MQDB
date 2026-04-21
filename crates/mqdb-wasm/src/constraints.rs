@@ -1,7 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen};
+use super::{
+    ChangeEvent, ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen,
+};
 use crate::encoding::encode_value_for_index;
 use crate::types::WasmBatch;
 use mqdb_core::keys::{encode_constraint_key, encode_index_definition_key};
@@ -116,11 +118,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if storage fails.
-    pub async fn add_not_null_async(
-        &self,
-        entity: String,
-        field: String,
-    ) -> Result<(), JsValue> {
+    pub async fn add_not_null_async(&self, entity: String, field: String) -> Result<(), JsValue> {
         {
             let mut inner = self.borrow_inner_mut()?;
             inner
@@ -263,6 +261,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if the backend is not memory-based or backfill fails.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
         {
             let mut inner = self.borrow_inner_mut()?;
@@ -411,36 +410,26 @@ impl WasmDatabase {
         };
 
         if let Some(constraints) = constraints {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
             for constraint_fields in constraints {
-                let new_values: Vec<Option<&serde_json::Value>> =
-                    constraint_fields.iter().map(|f| value.get(f)).collect();
+                if constraint_fields.iter().any(|f| {
+                    value.get(f).is_none() || value.get(f) == Some(&serde_json::Value::Null)
+                }) {
+                    continue;
+                }
 
-                for (_key, existing_data) in &items {
-                    let existing: serde_json::Value = serde_json::from_slice(existing_data)
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let index_prefix =
+                    Self::build_unique_index_prefix(entity, &constraint_fields, value)?;
+                let matches = self.storage.prefix_scan(&index_prefix).await?;
 
-                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
-                        && current_id == Some(existing_id)
-                    {
+                for (key, _) in &matches {
+                    let hit_id = Self::extract_id_from_index_key(key);
+                    if hit_id.as_deref() == current_id {
                         continue;
                     }
-
-                    let existing_values: Vec<Option<&serde_json::Value>> =
-                        constraint_fields.iter().map(|f| existing.get(f)).collect();
-
-                    if new_values == existing_values
-                        && new_values
-                            .iter()
-                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
-                    {
-                        return Err(JsValue::from_str(&format!(
-                            "unique constraint violation: {entity}.{}",
-                            constraint_fields.join(", ")
-                        )));
-                    }
+                    return Err(JsValue::from_str(&format!(
+                        "unique constraint violation: {entity}.{}",
+                        constraint_fields.join(", ")
+                    )));
                 }
             }
         }
@@ -522,14 +511,53 @@ impl WasmDatabase {
                         }
                         OnDeleteAction::SetNull => {
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                let data_key = format!("data/{}/{}", fk.source_entity, source_id);
+                                let existing_raw = self
+                                    .storage
+                                    .get_raw(data_key.as_bytes())
+                                    .await?
+                                    .ok_or_else(|| {
+                                        JsValue::from_str("set_null: record disappeared")
+                                    })?;
+
                                 let mut updated = value.clone();
+                                let old_version = updated
+                                    .get("_version")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
                                 if let Some(obj) = updated.as_object_mut() {
                                     obj.insert(fk.source_field.clone(), serde_json::Value::Null);
+                                    obj.insert(
+                                        "_version".to_string(),
+                                        serde_json::Value::Number((old_version + 1).into()),
+                                    );
                                 }
-                                let key = format!("data/{}/{}", fk.source_entity, source_id);
+
                                 let serialized = serde_json::to_vec(&updated)
                                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                                self.storage.insert(key.as_bytes(), &serialized).await?;
+                                let stored = self
+                                    .storage
+                                    .encrypt_if_needed(data_key.as_bytes(), &serialized)
+                                    .await?;
+
+                                let mut batch = self.storage.batch();
+                                batch.expect_value(data_key.as_bytes().to_vec(), existing_raw);
+                                batch.insert(data_key.as_bytes().to_vec(), stored);
+                                self.update_indexes_batch(
+                                    &mut batch,
+                                    &fk.source_entity,
+                                    source_id,
+                                    &updated,
+                                    Some(&value),
+                                )?;
+                                batch.commit().await?;
+
+                                let event = ChangeEvent::update(
+                                    fk.source_entity.clone(),
+                                    source_id.to_string(),
+                                    updated,
+                                );
+                                self.dispatch_event(&event);
                             }
                         }
                     }
@@ -552,36 +580,26 @@ impl WasmDatabase {
         };
 
         if let Some(constraints) = constraints {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
-
             for constraint_fields in constraints {
-                let new_values: Vec<Option<&serde_json::Value>> =
-                    constraint_fields.iter().map(|f| value.get(f)).collect();
+                if constraint_fields.iter().any(|f| {
+                    value.get(f).is_none() || value.get(f) == Some(&serde_json::Value::Null)
+                }) {
+                    continue;
+                }
 
-                for (_key, existing_data) in &items {
-                    let existing: serde_json::Value = serde_json::from_slice(existing_data)
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let index_prefix =
+                    Self::build_unique_index_prefix(entity, &constraint_fields, value)?;
+                let matches = self.storage.prefix_scan_sync(&index_prefix)?;
 
-                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
-                        && current_id == Some(existing_id)
-                    {
+                for (key, _) in &matches {
+                    let hit_id = Self::extract_id_from_index_key(key);
+                    if hit_id.as_deref() == current_id {
                         continue;
                     }
-
-                    let existing_values: Vec<Option<&serde_json::Value>> =
-                        constraint_fields.iter().map(|f| existing.get(f)).collect();
-
-                    if new_values == existing_values
-                        && new_values
-                            .iter()
-                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
-                    {
-                        return Err(JsValue::from_str(&format!(
-                            "unique constraint violation: {entity}.{}",
-                            constraint_fields.join(", ")
-                        )));
-                    }
+                    return Err(JsValue::from_str(&format!(
+                        "unique constraint violation: {entity}.{}",
+                        constraint_fields.join(", ")
+                    )));
                 }
             }
         }
@@ -663,14 +681,46 @@ impl WasmDatabase {
                         }
                         OnDeleteAction::SetNull => {
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                let data_key = format!("data/{}/{}", fk.source_entity, source_id);
+                                let existing_raw =
+                                    self.storage.get_raw_sync(data_key.as_bytes())?.ok_or_else(
+                                        || JsValue::from_str("set_null: record disappeared"),
+                                    )?;
+
                                 let mut updated = value.clone();
+                                let old_version = updated
+                                    .get("_version")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
                                 if let Some(obj) = updated.as_object_mut() {
                                     obj.insert(fk.source_field.clone(), serde_json::Value::Null);
+                                    obj.insert(
+                                        "_version".to_string(),
+                                        serde_json::Value::Number((old_version + 1).into()),
+                                    );
                                 }
-                                let key = format!("data/{}/{}", fk.source_entity, source_id);
+
                                 let serialized = serde_json::to_vec(&updated)
                                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                                self.storage.insert_sync(key.as_bytes(), &serialized)?;
+
+                                let mut batch = self.storage.batch();
+                                batch.expect_value(data_key.as_bytes().to_vec(), existing_raw);
+                                batch.insert(data_key.as_bytes().to_vec(), serialized);
+                                self.update_indexes_batch(
+                                    &mut batch,
+                                    &fk.source_entity,
+                                    source_id,
+                                    &updated,
+                                    Some(&value),
+                                )?;
+                                batch.commit_sync()?;
+
+                                let event = ChangeEvent::update(
+                                    fk.source_entity.clone(),
+                                    source_id.to_string(),
+                                    updated,
+                                );
+                                self.dispatch_event(&event);
                             }
                         }
                     }
@@ -741,6 +791,37 @@ impl WasmDatabase {
         let bytes = serde_json::to_vec(&all_indexes)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
         self.storage.insert(&key, &bytes).await
+    }
+
+    fn build_unique_index_prefix(
+        entity: &str,
+        fields: &[String],
+        value: &serde_json::Value,
+    ) -> Result<Vec<u8>, JsValue> {
+        let mut encoded_values = Vec::new();
+        for field in fields {
+            let v = value
+                .get(field)
+                .ok_or_else(|| JsValue::from_str("missing field for unique check"))?;
+            let encoded = encode_value_for_index(v)?;
+            if !encoded_values.is_empty() {
+                encoded_values.push(0x00);
+            }
+            encoded_values.extend_from_slice(&encoded);
+        }
+
+        let prefix_str = format!("index/{entity}/{}/", fields.join("_"));
+        let mut prefix = Vec::with_capacity(prefix_str.len() + encoded_values.len() + 1);
+        prefix.extend_from_slice(prefix_str.as_bytes());
+        prefix.extend_from_slice(&encoded_values);
+        prefix.push(b'/');
+        Ok(prefix)
+    }
+
+    fn extract_id_from_index_key(key: &[u8]) -> Option<String> {
+        let key_str = std::str::from_utf8(key).ok()?;
+        let last_slash = key_str.rfind('/')?;
+        Some(key_str[last_slash + 1..].to_string())
     }
 
     fn extract_id_from_data_key(key: &[u8]) -> Option<String> {

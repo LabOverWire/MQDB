@@ -5,8 +5,8 @@ use super::{
     Arc, AsyncStorageBackend, ChangeEvent, Deserialize, Filter, HashMap, IdbBackend, JsValue,
     OnDeleteAction, Operation, Pagination, Schema, Serialize, SortDirection, SortOrder, Storage,
 };
-use crate::crypto::CryptoHandle;
 use crate::IndexedDbBatch;
+use crate::crypto::CryptoHandle;
 use mqdb_core::storage::{AsyncBatchOperations, BatchWriter};
 use std::rc::Rc;
 
@@ -233,7 +233,11 @@ impl StorageKind {
         }
     }
 
-    pub(crate) async fn encrypt_if_needed(&self, key: &[u8], value: &[u8]) -> Result<Vec<u8>, JsValue> {
+    pub(crate) async fn encrypt_if_needed(
+        &self,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Vec<u8>, JsValue> {
         if let Some(c) = &self.crypto {
             c.encrypt(key, value).await.map_err(err_to_js)
         } else {

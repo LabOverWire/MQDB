@@ -55,7 +55,10 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        let stored = self.storage.encrypt_if_needed(key.as_bytes(), &serialized).await?;
+        let stored = self
+            .storage
+            .encrypt_if_needed(key.as_bytes(), &serialized)
+            .await?;
         let mut batch = self.storage.batch();
         batch.insert(key.as_bytes().to_vec(), stored);
         self.update_indexes_batch(&mut batch, &entity, &id, &value, None)?;
@@ -245,7 +248,10 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        let stored = self.storage.encrypt_if_needed(key.as_bytes(), &serialized).await?;
+        let stored = self
+            .storage
+            .encrypt_if_needed(key.as_bytes(), &serialized)
+            .await?;
         let mut batch = self.storage.batch();
         batch.expect_value(key.as_bytes().to_vec(), existing_raw);
         batch.insert(key.as_bytes().to_vec(), stored);
