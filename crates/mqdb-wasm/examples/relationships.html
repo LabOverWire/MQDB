@@ -5,6 +5,106 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Relationships</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .page-hero {
+            background: linear-gradient(135deg, #5e35b1, #311b92);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .compare-panel {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .compare-panel.before { border-top: 4px solid #9e9e9e; }
+        .compare-panel.after { border-top: 4px solid #5e35b1; }
+        .compare-panel h3 { margin: 0 0 6px 0; }
+        .compare-panel pre {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin: 0;
+            max-height: 320px;
+            overflow-y: auto;
+        }
+
+        .rel-card {
+            background: #ede7f6;
+            border-left: 4px solid #5e35b1;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+        }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
+    </style>
 </head>
 <body>
     <nav>
@@ -17,94 +117,182 @@
         <a href="relationships.html" class="active">Relationships</a>
         <a href="cursor.html">Cursor</a>
         <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html">Count</a>
     </nav>
 
-    <h1>Relationships & Includes</h1>
+    <div class="page-hero">
+        <h2>Relationships — embed related records on read</h2>
+        <p>Declare once that a post has an author (<code style="background:rgba(255,255,255,0.2);color:white">addRelationship('posts', 'author', 'authors')</code>), and MQDB will embed the author record into your post whenever you ask for it. Your app gets a single nested object back instead of having to issue a second lookup per post.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>addRelationship(source, field, target)</code> tells MQDB that <code>source.&lt;field&gt;_id</code> points at <code>target.id</code>. So <code>addRelationship('posts', 'author', 'authors')</code> links <code>posts.author_id → authors.id</code>.</li>
+                <li>The relationship is a <em>read-time</em> hint only — it doesn't add a constraint. If you want the FK enforced, add a FOREIGN KEY constraint too.</li>
+                <li><code>db.readWithIncludes(entity, id, [fields])</code> returns the record with each listed relationship embedded as a nested object.</li>
+                <li><code>db.list(entity, { includes: [fields] })</code> does the same for a whole list.</li>
+                <li>Includes are resolved per row with one lookup per id — no join, no N+1 concern for normal-sized datasets.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    P["posts/1<br/>{ title, author_id: 'a1' }"] --> R{includes: author?}
+    R -- no --> OUT1[post only]
+    R -- yes --> L["lookup authors/a1"]
+    L --> M["merge → post.author = {...}"]
+    M --> OUT2["{ ...post, author: {...} }"]
+    style OUT2 fill:#ede7f6,stroke:#5e35b1
+    style R fill:#e3f2fd,stroke:#1565c0
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a three-step tour</h3>
+        <ol>
+            <li>Click <code>Seed test data</code> to create two authors and three posts linked via <code>author_id</code>.</li>
+            <li>Click <code>Define posts→authors relationship</code>. The rule appears below.</li>
+            <li>Click <code>Show side-by-side</code>. The <strong>Without includes</strong> panel shows posts with a bare <code>author_id</code>; the <strong>With includes</strong> panel shows the same posts with the full author record nested under <code>.author</code>.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
             <h2>Setup</h2>
+
             <div class="card">
-                <h3>Create Test Data</h3>
-                <p>Creates authors and posts with relationships</p>
-                <button id="setupData" class="success">Setup Test Data</button>
+                <h3>1 · Seed data</h3>
+                <p class="hint">Creates authors (Alice, Bob) and three posts with <code>author_id</code> set.</p>
+                <button id="setupData" class="success">Seed test data</button>
             </div>
 
             <div class="card mt-10">
-                <h3>Define Relationship</h3>
-                <div class="row">
-                    <label>Source Entity:</label>
-                    <input type="text" id="sourceEntity" value="posts" readonly>
+                <h3>2 · Define relationship</h3>
+                <div class="kv-grid">
+                    <label for="sourceEntity">Source</label>
+                    <select id="sourceEntity">
+                        <option value="posts" selected>posts</option>
+                    </select>
+                    <label for="fieldName">Field name</label>
+                    <input type="text" id="fieldName" value="author">
+                    <label for="targetEntity">Target</label>
+                    <select id="targetEntity">
+                        <option value="authors" selected>authors</option>
+                    </select>
                 </div>
-                <div class="row">
-                    <label>Field Name:</label>
-                    <input type="text" id="fieldName" value="author" readonly>
-                </div>
-                <div class="row">
-                    <label>Target Entity:</label>
-                    <input type="text" id="targetEntity" value="authors" readonly>
-                </div>
-                <button id="addRelationship" class="success">Add Relationship</button>
+                <p class="hint mt-10">Joins <code id="joinPreview">posts.author_id → authors.id</code></p>
+                <button id="addRelationship" class="success">Define posts→authors relationship</button>
+            </div>
+
+            <div class="card mt-10">
+                <h3>Active relationships</h3>
+                <div id="relList"><p class="hint">None yet.</p></div>
             </div>
         </div>
 
         <div class="section">
-            <h2>Test Operations</h2>
+            <h2>Manual query</h2>
+
             <div class="card">
-                <h3>Read with Includes</h3>
-                <div class="row">
-                    <label>Entity:</label>
-                    <input type="text" id="readEntity" value="posts">
-                </div>
-                <div class="row">
-                    <label>ID:</label>
+                <h3>Read one with includes</h3>
+                <div class="kv-grid">
+                    <label for="readEntity">Entity</label>
+                    <select id="readEntity"><option value="posts" selected>posts</option></select>
+                    <label for="readId">ID</label>
                     <input type="text" id="readId" value="1">
+                    <label for="readIncludes">Include</label>
+                    <select id="readIncludes">
+                        <option value="">(none)</option>
+                        <option value="author" selected>author</option>
+                    </select>
                 </div>
-                <div class="row">
-                    <label>Includes:</label>
-                    <input type="text" id="readIncludes" value='["author"]' placeholder='["author"]'>
-                </div>
-                <button id="readWithIncludes">Read with Includes</button>
+                <button id="readWithIncludes" class="mt-10">Read</button>
             </div>
 
             <div class="card mt-10">
-                <h3>List with Includes</h3>
-                <div class="row">
-                    <label>Entity:</label>
-                    <input type="text" id="listEntity" value="posts">
+                <h3>List with includes</h3>
+                <div class="kv-grid">
+                    <label for="listEntity">Entity</label>
+                    <select id="listEntity"><option value="posts" selected>posts</option></select>
+                    <label for="listIncludes">Include</label>
+                    <select id="listIncludes">
+                        <option value="">(none)</option>
+                        <option value="author" selected>author</option>
+                    </select>
                 </div>
-                <div class="row">
-                    <label>Includes:</label>
-                    <input type="text" id="listIncludes" value='["author"]'>
-                </div>
-                <button id="listWithIncludes">List with Includes</button>
+                <button id="listWithIncludes" class="mt-10">List</button>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Quick Tests</h2>
-        <button id="runAllTests" class="success">Run All Tests</button>
+        <h2>Side-by-side comparison</h2>
+        <p class="hint">The same list, queried with and without <code>includes: ['author']</code>.</p>
+        <div class="row">
+            <button id="showCompare" class="success">Show side-by-side</button>
+        </div>
+        <div class="grid-2 mt-10">
+            <div class="compare-panel before">
+                <h3>Without includes</h3>
+                <p class="hint">Bare rows — only <code>author_id</code>.</p>
+                <pre id="beforePanel">Click "Show side-by-side".</pre>
+            </div>
+            <div class="compare-panel after">
+                <h3>With includes: ['author']</h3>
+                <p class="hint">Same rows, author object nested under <code>.author</code>.</p>
+                <pre id="afterPanel">Click "Show side-by-side".</pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> runs these 5 steps and reports pass/fail:</p>
+        <ol>
+            <li>Seed 2 authors + 3 posts</li>
+            <li>Declare the <code>posts→authors</code> relationship</li>
+            <li><code>readWithIncludes('posts', id, ['author'])</code> returns a nested author object</li>
+            <li><code>list('posts', { includes: ['author'] })</code> nests author on every row</li>
+            <li>Alice's post count matches what was seeded (2 posts)</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         let testAuthors = [];
         let testPosts = [];
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
-            db = new WasmDatabase();
+            db = new Database();
+            window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
+            updateRelList();
+            updateJoinPreview();
         }
 
         function setupEventListeners() {
@@ -112,125 +300,151 @@
             document.getElementById('addRelationship').onclick = addRelationship;
             document.getElementById('readWithIncludes').onclick = readWithIncludes;
             document.getElementById('listWithIncludes').onclick = listWithIncludes;
+            document.getElementById('showCompare').onclick = showCompare;
             document.getElementById('runAllTests').onclick = runAllTests;
+            document.getElementById('fieldName').oninput = updateJoinPreview;
+        }
+
+        function updateJoinPreview() {
+            const src = document.getElementById('sourceEntity').value;
+            const field = document.getElementById('fieldName').value.trim() || 'FIELD';
+            const tgt = document.getElementById('targetEntity').value;
+            document.getElementById('joinPreview').textContent = `${src}.${field}_id → ${tgt}.id`;
         }
 
         async function setupTestData() {
-            log('Setting up test data...', 'info');
-
+            log('Seeding authors and posts…', 'info');
             try {
-                const author1 = await db.create('authors', { name: 'Alice Smith', email: 'alice@example.com' });
-                const author2 = await db.create('authors', { name: 'Bob Jones', email: 'bob@example.com' });
-
-                testAuthors = [author1, author2];
-                log(`Created authors: ${author1.id}, ${author2.id}`, 'success');
-
-                const post1 = await db.create('posts', { title: 'First Post', author_id: author1.id, content: 'Hello world' });
-                const post2 = await db.create('posts', { title: 'Second Post', author_id: author1.id, content: 'Another post' });
-                const post3 = await db.create('posts', { title: 'Bob Post', author_id: author2.id, content: 'Bob writes' });
-
-                testPosts = [post1, post2, post3];
-                log(`Created posts: ${post1.id}, ${post2.id}, ${post3.id}`, 'success');
-
-                log('Test data setup complete', 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                const a1 = await db.create('authors', { name: 'Alice Smith', email: 'alice@example.com' });
+                const a2 = await db.create('authors', { name: 'Bob Jones', email: 'bob@example.com' });
+                testAuthors = [a1, a2];
+                const p1 = await db.create('posts', { title: 'First Post',  author_id: a1.id, content: 'Hello world' });
+                const p2 = await db.create('posts', { title: 'Second Post', author_id: a1.id, content: 'Another post' });
+                const p3 = await db.create('posts', { title: 'Bob Post',    author_id: a2.id, content: 'Bob writes' });
+                testPosts = [p1, p2, p3];
+                log(`Seeded 2 authors (${a1.id}, ${a2.id}) and 3 posts (${p1.id}, ${p2.id}, ${p3.id})`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function addRelationship() {
             const source = document.getElementById('sourceEntity').value;
-            const field = document.getElementById('fieldName').value;
+            const field = document.getElementById('fieldName').value.trim();
             const target = document.getElementById('targetEntity').value;
-
+            if (!field) return log('Field name required', 'warning');
             try {
-                db.add_relationship(source, field, target);
-                log(`Added relationship: ${source}.${field} -> ${target}`, 'success');
+                db.addRelationship(source, field, target);
+                log(`${source}.${field}_id → ${target}.id`, 'success');
+                updateRelList();
+            } catch (e) { log(`${e}`, 'error'); }
+        }
 
-                const rels = db.list_relationships(source);
-                log(`Relationships for ${source}: ${JSON.stringify(rels, null, 2)}`);
+        function updateRelList() {
+            const target = document.getElementById('relList');
+            try {
+                const rels = db.listRelationships('posts') || [];
+                if (rels.length === 0) {
+                    target.innerHTML = '<p class="hint">None yet.</p>';
+                    return;
+                }
+                target.innerHTML = rels.map(r =>
+                    `<div class="rel-card">posts.${escapeHtml(r.field_suffix || (r.field + '_id'))} → ${escapeHtml(r.target_entity)}.id  <small style="color:#888">(field <code>${escapeHtml(r.field)}</code>)</small></div>`
+                ).join('');
             } catch (e) {
-                log(`Error: ${e}`, 'error');
+                target.innerHTML = `<p class="error">${escapeHtml(String(e))}</p>`;
             }
         }
 
         async function readWithIncludes() {
             const entity = document.getElementById('readEntity').value;
-            const id = document.getElementById('readId').value;
-            const includesStr = document.getElementById('readIncludes').value;
-
+            const id = document.getElementById('readId').value.trim();
+            const inc = document.getElementById('readIncludes').value;
             try {
-                const includes = JSON.parse(includesStr);
-                const result = await db.read_with_includes(entity, id, includes);
-                log(`Read ${entity}/${id} with includes:`, 'success');
+                const includes = inc ? [inc] : [];
+                const result = includes.length
+                    ? await db.readWithIncludes(entity, id, includes)
+                    : await db.read(entity, id);
+                log(`Read ${entity}/${id}:`, 'success');
                 log(JSON.stringify(result, null, 2));
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function listWithIncludes() {
             const entity = document.getElementById('listEntity').value;
-            const includesStr = document.getElementById('listIncludes').value;
-
+            const inc = document.getElementById('listIncludes').value;
             try {
-                const includes = JSON.parse(includesStr);
-                const result = await db.list(entity, { includes });
-                log(`List ${entity} with includes (${result.length} items):`, 'success');
+                const opts = inc ? { includes: [inc] } : null;
+                const result = await db.list(entity, opts);
+                log(`List ${entity} (${result.length} rows):`, 'success');
                 log(JSON.stringify(result, null, 2));
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
+
+        async function showCompare() {
+            try {
+                const withOut = await db.list('posts', null);
+                const withInc = await db.list('posts', { includes: ['author'] });
+                document.getElementById('beforePanel').textContent = JSON.stringify(withOut, null, 2);
+                document.getElementById('afterPanel').textContent  = JSON.stringify(withInc, null, 2);
+                log('Side-by-side rendered', 'success');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
 
         async function runAllTests() {
-            log('=== Running All Relationship Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Relationship tests ===');
 
-            log('\nTest 1: Setup test data');
+            summaryLine('Test 1 — seed 2 authors + 3 posts');
             await setupTestData();
-            await sleep(100);
+            await sleep(80);
+            summaryLine(`  ✓ ${testAuthors.length} authors, ${testPosts.length} posts`, 'pass');
 
-            log('\nTest 2: Add relationship');
-            db.add_relationship('posts', 'author', 'authors');
-            const rels = db.list_relationships('posts');
-            if (rels.length === 1 && rels[0].field === 'author') {
-                log('✓ Relationship added successfully', 'success');
-            } else {
-                log('✗ Failed to add relationship', 'error');
-            }
+            summaryLine('Test 2 — addRelationship(posts, author, authors)');
+            try {
+                db.addRelationship('posts', 'author', 'authors');
+                const rels = db.listRelationships('posts');
+                const ok = rels && rels.some(r => r.field === 'author' && r.target_entity === 'authors');
+                summaryLine(ok ? '  ✓ relationship stored' : '  ✗ relationship missing', ok ? 'pass' : 'fail');
+                updateRelList();
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\nTest 3: Read with includes');
-            const post = await db.read_with_includes('posts', testPosts[0].id, ['author']);
-            if (post.author && post.author.name) {
-                log(`✓ Read with includes worked: post.author.name = "${post.author.name}"`, 'success');
-            } else {
-                log('✗ Read with includes failed - no author embedded', 'error');
-            }
+            summaryLine('Test 3 — readWithIncludes embeds author');
+            try {
+                const p = await db.readWithIncludes('posts', testPosts[0].id, ['author']);
+                const ok = p.author && p.author.name === 'Alice Smith';
+                summaryLine(ok ? `  ✓ author.name = ${p.author.name}` : '  ✗ author not embedded', ok ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\nTest 4: List with includes');
-            const posts = await db.list('posts', { includes: ['author'] });
-            const allHaveAuthor = posts.every(p => p.author && p.author.name);
-            if (allHaveAuthor) {
-                log(`✓ List with includes worked: all ${posts.length} posts have author embedded`, 'success');
-            } else {
-                log('✗ List with includes failed - some posts missing author', 'error');
-            }
+            summaryLine('Test 4 — list with includes embeds author on every row');
+            let posts;
+            try {
+                posts = await db.list('posts', { includes: ['author'] });
+                const ok = posts.length >= 3 && posts.every(p => p.author && p.author.name);
+                summaryLine(ok ? `  ✓ ${posts.length}/${posts.length} rows embedded` : '  ✗ some rows missing author', ok ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\nTest 5: Verify author data integrity');
-            const alicePosts = posts.filter(p => p.author.name === 'Alice Smith');
-            if (alicePosts.length === 2) {
-                log('✓ Author data correct: Alice has 2 posts', 'success');
-            } else {
-                log(`✗ Author data incorrect: expected 2 Alice posts, got ${alicePosts.length}`, 'error');
-            }
+            summaryLine('Test 5 — Alice has 2 posts');
+            try {
+                const alice = (posts || []).filter(p => p.author && p.author.name === 'Alice Smith');
+                summaryLine(alice.length === 2 ? `  ✓ alice has 2 posts` : `  ✗ expected 2, got ${alice.length}`, alice.length === 2 ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\n=== All Relationship Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
         }
 
-        function sleep(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
-
+        function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
         function log(msg, type = '') {
             const pre = document.getElementById('log');
             const time = new Date().toISOString().slice(11, 19);

@@ -38,7 +38,7 @@ Define and enforce data structure rules.
 - **Type Checking** - Validates on create and update
 
 ```javascript
-db.add_schema('users', {
+db.addSchema('users', {
     fields: [
         { name: 'email', type: 'string', required: true },
         { name: 'age', type: 'number' },
@@ -59,9 +59,9 @@ Data integrity enforcement.
   - `set_null` - Set reference to null on delete
 
 ```javascript
-db.add_unique_constraint('users', ['email']);
-db.add_not_null('users', 'name');
-db.add_foreign_key('posts', 'author_id', 'users', 'id', 'cascade');
+db.addUniqueConstraint('users', ['email']);
+db.addNotNull('users', 'name');
+db.addForeignKey('posts', 'author_id', 'users', 'id', 'cascade');
 ```
 
 ### Filtering & Sorting (`filtering.html`)
@@ -78,6 +78,7 @@ Advanced query capabilities.
 | `gte`, `>=` | Greater or equal |
 | `lte`, `<=` | Less or equal |
 | `glob`, `~` | Wildcard pattern (`*`) |
+| `in` | Value in array |
 | `null`, `?` | Is null |
 | `not_null`, `!?` | Is not null |
 
@@ -95,10 +96,10 @@ const results = await db.list('products', {
 
 **Index-Accelerated Queries:**
 
-When a single-field index exists and an `eq` filter matches that field, `list`, `count`, and `cursor` scan the index instead of doing a full table scan. Remaining filters are applied on the reduced candidate set.
+When a single-field index exists and a filter matches that field, `list`, `count`, and `cursor` scan the index instead of doing a full table scan. This works for both equality (`eq`) and range (`gt`, `gte`, `lt`, `lte`) filters, including combined upper+lower bounds. Remaining filters are applied on the reduced candidate set.
 
 ```javascript
-db.add_index('products', ['category']);
+db.addIndex('products', ['category']);
 
 // This query scans the index on category, then applies the price filter
 const results = await db.list('products', {
@@ -125,10 +126,10 @@ db.unsubscribe(subId);
 **Shared Subscriptions:**
 ```javascript
 // Broadcast - all subscribers receive every event
-db.subscribe_shared('*', 'orders', 'processors', 'broadcast', callback);
+db.subscribeShared('*', 'orders', 'processors', 'broadcast', callback);
 
 // Load Balanced - round-robin distribution
-db.subscribe_shared('*', 'orders', 'workers', 'load-balanced', callback);
+db.subscribeShared('*', 'orders', 'workers', 'load-balanced', callback);
 ```
 
 **Heartbeat:**
@@ -137,17 +138,17 @@ db.subscribe_shared('*', 'orders', 'workers', 'load-balanced', callback);
 db.heartbeat(subId);
 
 // Get subscription details including last_heartbeat
-const info = db.get_subscription_info(subId);
+const info = db.getSubscriptionInfo(subId);
 ```
 
 **Consumer Groups:**
 ```javascript
 // List all shared subscription groups
-const groups = db.list_consumer_groups();
+const groups = db.listConsumerGroups();
 // Returns: [{ name, member_count, members: [...] }]
 
 // Get specific group details
-const group = db.get_consumer_group('workers');
+const group = db.getConsumerGroup('workers');
 ```
 
 ### Relationships (`relationships.html`)
@@ -157,16 +158,16 @@ Entity relationships and eager loading.
 **Define Relationships:**
 ```javascript
 // posts.author_id references authors.id
-db.add_relationship('posts', 'author', 'authors');
+db.addRelationship('posts', 'author', 'authors');
 
 // List defined relationships
-const rels = db.list_relationships('posts');
+const rels = db.listRelationships('posts');
 ```
 
 **Read with Includes (Eager Loading):**
 ```javascript
 // Fetches post and embeds the related author object
-const post = await db.read_with_includes('posts', '1', ['author']);
+const post = await db.readWithIncludes('posts', '1', ['author']);
 // Result: { id: '1', title: '...', author_id: '1', author: { id: '1', name: 'Alice' } }
 ```
 
@@ -186,7 +187,28 @@ const posts = await db.list('posts', {
 });
 ```
 
-### Count
+### Persistent Storage (`persistent.html`)
+
+IndexedDB-backed storage for data that survives page reloads.
+
+```javascript
+// Open a persistent database (IndexedDB)
+const db = await Database.openPersistent('my-database');
+console.log(db.isMemoryBackend()); // false
+
+// CRUD works the same — data persists across page reloads
+const user = await db.create('users', { name: 'Alice' });
+
+// Switch between databases
+const otherDb = await Database.openPersistent('other-database');
+```
+
+- **Toggle storage modes** — switch between in-memory and IndexedDB at runtime
+- **Named databases** — multiple independent databases via different names
+- **IndexedDB inspector** — view raw stored key-value pairs
+- **Counter demo** — persistent counter that survives page reloads
+
+### Count (`count.html`)
 
 Count records without fetching full data.
 
@@ -198,6 +220,70 @@ const total = await db.count('products');
 const expensive = await db.count('products', {
     filters: [{ field: 'category', op: 'eq', value: 'electronics' }]
 });
+
+// Sync variant (memory backend only)
+const syncCount = db.countSync('products', null);
+```
+
+### Encrypted Storage (`encrypted.html`)
+
+AES-256-GCM encryption at rest using a passphrase-derived key.
+
+```javascript
+const db = await Database.openEncrypted('my-db', 'my-passphrase');
+
+// All async admin methods persist to encrypted storage
+await db.addSchemaAsync('users', { fields: [...] });
+await db.addUniqueConstraintAsync('users', ['email']);
+await db.addNotNullAsync('users', 'name');
+await db.addForeignKeyAsync('posts', 'author_id', 'users', 'id', 'cascade');
+await db.addIndexAsync('users', ['age']);
+await db.addRelationshipAsync('posts', 'author', 'users');
+
+// CRUD works transparently — data encrypted/decrypted automatically
+const user = await db.create('users', { name: 'Alice', email: 'alice@example.com' });
+const read = await db.read('users', user.id);
+```
+
+### Sync API (`sync-api.html`)
+
+Synchronous operations for memory-only databases. No `await` needed.
+
+```javascript
+const db = new Database();
+console.log(db.isMemoryBackend()); // true
+
+const user = db.createSync('users', { name: 'Alice' });
+const read = db.readSync('users', user.id);
+db.updateSync('users', user.id, { name: 'Bob' });
+db.deleteSync('users', user.id);
+
+const all = db.listSync('users', null);
+const count = db.countSync('users', { filters: [{ field: 'name', op: 'eq', value: 'Bob' }] });
+```
+
+### Execute (`execute.html`)
+
+MQTT-style topic routing interface. Same topic patterns as the networked MQDB broker.
+
+```javascript
+// Health check
+const health = await db.execute('$DB/_health', null);
+
+// CRUD via topics
+const created = await db.execute('$DB/products/create', { name: 'Widget', price: 9.99 });
+const read = await db.execute(`$DB/products/${created.id}`, null);
+await db.execute(`$DB/products/${created.id}/update`, { price: 12.99 });
+await db.execute(`$DB/products/${created.id}/delete`, null);
+const list = await db.execute('$DB/products/list', {});
+
+// Admin operations
+await db.execute('$DB/_admin/schema/orders/set', { fields: [...] });
+const schema = await db.execute('$DB/_admin/schema/orders/get', null);
+await db.execute('$DB/_admin/constraint/orders/add', { type: 'unique', fields: ['code'] });
+const constraints = await db.execute('$DB/_admin/constraint/orders/list', null);
+await db.execute('$DB/_admin/index/orders/add', { fields: ['total'] });
+const catalog = await db.execute('$DB/_admin/catalog', null);
 ```
 
 ### Cursor (`cursor.html`)
@@ -224,22 +310,22 @@ const cursor = await db.cursor('products', {
 **Iterate:**
 ```javascript
 // One at a time
-while (cursor.has_more()) {
-    const item = cursor.next();
+while (cursor.hasMore()) {
+    const item = cursor.nextItem();
     console.log(item);
 }
 
 // In batches
-const batch = cursor.next_batch(10);  // Up to 10 items
+const batch = cursor.nextBatch(10);  // Up to 10 items
 ```
 
 **Cursor Methods:**
 | Method | Description |
 |--------|-------------|
-| `next()` | Get next item (undefined when exhausted) |
-| `next_batch(n)` | Get up to n items as array |
+| `nextItem()` | Get next item (undefined when exhausted) |
+| `nextBatch(n)` | Get up to n items as array |
 | `reset()` | Reset to beginning |
-| `has_more()` | Check if more items available |
+| `hasMore()` | Check if more items available |
 | `count()` | Remaining items in buffer |
 | `position()` | Current iteration position |
 
@@ -248,29 +334,33 @@ const batch = cursor.next_batch(10);  // Up to 10 items
 The WASM database runs entirely in the browser with no server required:
 
 ```
-┌───────────────────────────────────────────────┐
-│                  Browser                       │
-│  ┌─────────────────────────────────────────┐  │
-│  │            JavaScript API               │  │
-│  │  db.create() / db.read() / ...          │  │
-│  └───────────────────┬─────────────────────┘  │
-│                      │                         │
-│  ┌───────────────────▼─────────────────────┐  │
-│  │            WASM Module                  │  │
-│  │  ┌──────────────────────────────────┐   │  │
-│  │  │    WasmDatabase (Rust)           │   │  │
-│  │  │  - Schema validation             │   │  │
-│  │  │  - Constraint checking           │   │  │
-│  │  │  - Subscription dispatch         │   │  │
-│  │  │  - Relationship loading          │   │  │
-│  │  └───────────────┬──────────────────┘   │  │
-│  │                  │                      │  │
-│  │  ┌───────────────▼──────────────────┐   │  │
-│  │  │    In-Memory Storage             │   │  │
-│  │  │  (mqdb_core::storage::Storage)   │   │  │
-│  │  └──────────────────────────────────┘   │  │
-│  └─────────────────────────────────────────┘  │
-└───────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                       Browser                           │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │              JavaScript API                      │  │
+│  │  db.create() / db.list() / db.execute() / ...    │  │
+│  └────────────────────┬─────────────────────────────┘  │
+│                       │                                 │
+│  ┌────────────────────▼─────────────────────────────┐  │
+│  │              WASM Module                         │  │
+│  │  ┌───────────────────────────────────────────┐   │  │
+│  │  │    Database (Rust)                        │   │  │
+│  │  │  - Schema validation                      │   │  │
+│  │  │  - Constraint checking (unique, FK, NN)   │   │  │
+│  │  │  - Index acceleration (eq + range)        │   │  │
+│  │  │  - Subscription dispatch                  │   │  │
+│  │  │  - Relationship loading                   │   │  │
+│  │  └──────────────────┬────────────────────────┘   │  │
+│  │                     │                            │  │
+│  │  ┌──────────────────▼────────────────────────┐   │  │
+│  │  │    Storage Backend                        │   │  │
+│  │  │  ┌────────────┬────────────┬───────────┐  │   │  │
+│  │  │  │  Memory    │ IndexedDB  │ Encrypted │  │   │  │
+│  │  │  │ (volatile) │(persistent)│(AES-GCM)  │  │   │  │
+│  │  │  └────────────┴────────────┴───────────┘  │   │  │
+│  │  └───────────────────────────────────────────┘   │  │
+│  └──────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## API Reference
@@ -279,11 +369,12 @@ The WASM database runs entirely in the browser with no server required:
 
 | Method | Description |
 |--------|-------------|
-| `new WasmDatabase()` | Create in-memory database instance |
-| `WasmDatabase.open_persistent(name)` | Create IndexedDB-backed instance |
+| `new Database()` | Create in-memory database instance |
+| `Database.openPersistent(name)` | Create IndexedDB-backed instance |
+| `Database.openEncrypted(name, passphrase)` | Create encrypted IndexedDB-backed instance |
 | `create(entity, data)` | Insert record |
 | `read(entity, id)` | Get record by ID |
-| `read_with_includes(entity, id, includes)` | Get record with related data |
+| `readWithIncludes(entity, id, includes)` | Get record with related data |
 | `update(entity, id, fields)` | Update record fields |
 | `delete(entity, id)` | Remove record |
 | `list(entity, options)` | Query records |
@@ -293,62 +384,74 @@ The WASM database runs entirely in the browser with no server required:
 ### Database Operations (Sync — memory backend only)
 
 Sync methods perform the same operations as their async counterparts but return
-values directly instead of Promises. They only work on `WasmDatabase` instances
-created with `new WasmDatabase()` (memory backend). Calling them on an
+values directly instead of Promises. They only work on `Database` instances
+created with `new Database()` (memory backend). Calling them on an
 IndexedDB-backed instance throws an error.
 
-Use `is_memory_backend()` to check at runtime.
+Use `isMemoryBackend()` to check at runtime.
 
 | Method | Description |
 |--------|-------------|
-| `create_sync(entity, data)` | Insert record |
-| `read_sync(entity, id)` | Get record by ID |
-| `update_sync(entity, id, fields)` | Update record fields |
-| `delete_sync(entity, id)` | Remove record |
-| `list_sync(entity, options)` | Query records (no `includes` support) |
-| `count_sync(entity, options)` | Count records (no `includes` support) |
-| `is_memory_backend()` | Returns `true` if using memory storage |
+| `createSync(entity, data)` | Insert record |
+| `readSync(entity, id)` | Get record by ID |
+| `updateSync(entity, id, fields)` | Update record fields |
+| `deleteSync(entity, id)` | Remove record |
+| `listSync(entity, options)` | Query records (no `includes` support) |
+| `countSync(entity, options)` | Count records (no `includes` support) |
+| `isMemoryBackend()` | Returns `true` if using memory storage |
 
 ```javascript
-const db = new WasmDatabase();
-console.log(db.is_memory_backend()); // true
+const db = new Database();
+console.log(db.isMemoryBackend()); // true
 
-const user = db.create_sync("users", { name: "Alice" });
-const found = db.read_sync("users", user.id);
-const all = db.list_sync("users", {
+const user = db.createSync("users", { name: "Alice" });
+const found = db.readSync("users", user.id);
+const all = db.listSync("users", {
     filters: [{ field: "name", op: "eq", value: "Alice" }]
 });
-db.update_sync("users", user.id, { name: "Bob" });
-db.delete_sync("users", user.id);
+db.updateSync("users", user.id, { name: "Bob" });
+db.deleteSync("users", user.id);
 ```
 
 ### Schema & Constraints
 
 | Method | Description |
 |--------|-------------|
-| `add_schema(entity, schema)` | Define entity schema |
-| `get_schema(entity)` | Get entity schema |
-| `add_unique_constraint(entity, fields)` | Add unique constraint |
-| `add_not_null(entity, field)` | Add not-null constraint |
-| `add_foreign_key(source, field, target, targetField, onDelete)` | Add foreign key |
-| `add_index(entity, fields)` | Add index |
-| `list_constraints(entity)` | List entity constraints |
+| `addSchema(entity, schema)` | Define entity schema (memory) |
+| `addSchemaAsync(entity, schema)` | Define entity schema (persisted) |
+| `getSchema(entity)` | Get entity schema |
+| `addUniqueConstraint(entity, fields)` | Add unique constraint (memory) |
+| `addUniqueConstraintAsync(entity, fields)` | Add unique constraint (persisted) |
+| `addNotNull(entity, field)` | Add not-null constraint (memory) |
+| `addNotNullAsync(entity, field)` | Add not-null constraint (persisted) |
+| `addForeignKey(source, field, target, targetField, onDelete)` | Add foreign key (memory) |
+| `addForeignKeyAsync(source, field, target, targetField, onDelete)` | Add foreign key (persisted) |
+| `addIndex(entity, fields)` | Add index (memory) |
+| `addIndexAsync(entity, fields)` | Add index (persisted) |
+| `listConstraints(entity)` | List entity constraints |
 
 ### Relationships
 
 | Method | Description |
 |--------|-------------|
-| `add_relationship(source, field, target)` | Define relationship |
-| `list_relationships(entity)` | List entity relationships |
+| `addRelationship(source, field, target)` | Define relationship (memory) |
+| `addRelationshipAsync(source, field, target)` | Define relationship (persisted) |
+| `listRelationships(entity)` | List entity relationships |
+
+### Execute
+
+| Method | Description |
+|--------|-------------|
+| `execute(topic, payload)` | Execute operation via MQTT topic pattern |
 
 ### Subscriptions
 
 | Method | Description |
 |--------|-------------|
 | `subscribe(pattern, entity, callback)` | Subscribe to changes |
-| `subscribe_shared(pattern, entity, group, mode, callback)` | Shared subscription |
+| `subscribeShared(pattern, entity, group, mode, callback)` | Shared subscription |
 | `unsubscribe(subId)` | Remove subscription |
 | `heartbeat(subId)` | Update subscription timestamp |
-| `get_subscription_info(subId)` | Get subscription details |
-| `list_consumer_groups()` | List all consumer groups |
-| `get_consumer_group(name)` | Get consumer group details |
+| `getSubscriptionInfo(subId)` | Get subscription details |
+| `listConsumerGroups()` | List all consumer groups |
+| `getConsumerGroup(name)` | Get consumer group details |

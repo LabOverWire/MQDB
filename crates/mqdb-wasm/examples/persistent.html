@@ -3,64 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MQDB WASM - Persistent Storage (IndexedDB)</title>
+    <title>MQDB WASM - Persistent Storage</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
-        .storage-toggle {
-            display: flex;
-            gap: 10px;
+        .page-hero {
+            background: linear-gradient(135deg, #1976d2, #0d47a1);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
             margin-bottom: 20px;
         }
-        .storage-toggle button {
-            flex: 1;
-            padding: 15px;
-            font-size: 16px;
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
         }
-        .storage-toggle button.active {
-            background: #4a90d9;
-            color: white;
-        }
-        .idb-inspector {
-            background: #f8fafc;
-            border: 1px solid #cbd5e1;
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
             border-radius: 4px;
-            padding: 15px;
-            margin-top: 10px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
         }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .mode-toggle {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        .mode-toggle .mode-btn {
+            padding: 15px;
+            font-size: 15px;
+            border: 2px solid transparent;
+            border-radius: 8px;
+            background: #eceff1;
+            color: #455a64;
+            cursor: pointer;
+            text-align: center;
+            transition: border-color 150ms, background 150ms;
+        }
+        .mode-toggle .mode-btn:hover { background: #cfd8dc; }
+        .mode-toggle .mode-btn.active {
+            background: #1976d2;
+            color: white;
+            border-color: #0d47a1;
+        }
+        .mode-btn .sub { display: block; font-size: 12px; opacity: 0.85; margin-top: 3px; }
+
+        .counter-card {
+            background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+            border: 2px solid #1976d2;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .counter-display {
+            font-size: 56px;
+            font-weight: bold;
+            color: #0d47a1;
+            text-align: center;
+            padding: 10px;
+            font-variant-numeric: tabular-nums;
+        }
+
         .idb-inspector pre {
             margin: 0;
             white-space: pre-wrap;
             font-size: 12px;
             max-height: 300px;
             overflow-y: auto;
-            color: #1e293b;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 12px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', monospace;
         }
-        .persistence-demo {
-            background: linear-gradient(135deg, #f0f4f8 0%, #e2e8f0 100%);
-            border: 2px solid #4a90d9;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px 12px;
+            align-items: center;
         }
-        .persistence-demo h3 {
-            color: #2563eb;
-            margin-top: 0;
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
         }
-        .persistence-demo p {
-            color: #334155;
-        }
-        .reload-btn {
-            background: #e94560;
-            font-size: 18px;
-            padding: 15px 30px;
-        }
-        .counter-display {
-            font-size: 48px;
-            font-weight: bold;
-            color: #1d4ed8;
-            text-align: center;
-            padding: 20px;
-        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
     </style>
 </head>
 <body>
@@ -74,98 +141,166 @@
         <a href="relationships.html">Relationships</a>
         <a href="cursor.html">Cursor</a>
         <a href="persistent.html" class="active">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html">Count</a>
     </nav>
 
-    <h1>Persistent Storage (IndexedDB)</h1>
+    <div class="page-hero">
+        <h2>Persistent storage — survives reloads</h2>
+        <p>Open a database with <code style="background:rgba(255,255,255,0.2);color:white">Database.openPersistent(name)</code> and every write is mirrored to IndexedDB. Close the tab, reload, quit the browser — your data is still there next time. The in-memory backend, in contrast, vanishes with the page.</p>
+    </div>
 
-    <div class="persistence-demo">
-        <h3>Persistence Demo</h3>
-        <p>This counter is stored in IndexedDB. Reload the page to verify it persists!</p>
-        <div class="counter-display" id="counterValue">Loading...</div>
-        <div style="text-align: center; margin-top: 15px;">
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>new Database()</code> creates an <strong>in-memory</strong> database. Fast, no I/O, dies on reload.</li>
+                <li><code>Database.openPersistent(dbName)</code> backs the same API with IndexedDB. Creates the object store on first open.</li>
+                <li>Keys in IndexedDB look like <code>data/{entity}/{id}</code> and <code>meta/{type}/…</code>. Values are the same JSON your code sees — no envelope, no encryption (see Encrypted page for that).</li>
+                <li>Schema, constraints, indexes, and relationships are also persisted — so they reload automatically next time.</li>
+                <li>Sync methods (<code>createSync</code>, …) are <strong>not</strong> available on IndexedDB — persistent storage is inherently asynchronous. Check <code>db.isMemoryBackend()</code> before calling them.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    M["new Database()"] --> MB[In-memory map]
+    P["openPersistent('name')"] --> IDB[(IndexedDB)]
+    W1["db.create(...)"] --> MB
+    W2["db.create(...)"] --> IDB
+    R1[Page reload] --> MB2[Empty — data gone]
+    R2[Page reload] --> IDB
+    IDB --> MB3[Data restored]
+    style MB fill:#fff3e0,stroke:#ef6c00
+    style IDB fill:#e3f2fd,stroke:#1565c0
+    style MB2 fill:#ffcdd2,stroke:#c62828
+    style MB3 fill:#c8e6c9,stroke:#2e7d32
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a three-step tour</h3>
+        <ol>
+            <li>The page starts in <strong>persistent</strong> mode. Click <code>+1 Increment</code> a few times — the counter is stored in IndexedDB.</li>
+            <li>Click <code>Reload page to test persistence</code>. The counter value stays where you left it.</li>
+            <li>Switch to <strong>In-memory</strong> mode, increment the counter, reload. The counter resets — nothing was persisted.</li>
+        </ol>
+    </div>
+
+    <div class="counter-card">
+        <h3 style="margin:0 0 8px 0;color:#0d47a1">Persistence counter</h3>
+        <p class="hint" style="margin:0">Stored in the <code>counter</code> entity of the current database. Reload the page to test whether it survives.</p>
+        <div class="counter-display" id="counterValue">…</div>
+        <div class="row" style="justify-content:center">
             <button id="incrementBtn" class="success">+1 Increment</button>
             <button id="decrementBtn">-1 Decrement</button>
             <button id="resetBtn" class="danger">Reset to 0</button>
         </div>
-        <div style="text-align: center; margin-top: 20px;">
-            <button class="reload-btn" onclick="location.reload()">Reload Page to Test Persistence</button>
+        <div class="row mt-10" style="justify-content:center">
+            <button onclick="location.reload()" class="secondary">Reload page</button>
         </div>
     </div>
 
     <div class="grid-2">
         <div class="section">
-            <h2>Storage Mode</h2>
-            <div class="storage-toggle">
-                <button id="memoryBtn">In-Memory (Ephemeral)</button>
-                <button id="persistentBtn" class="active">IndexedDB (Persistent)</button>
+            <h2>Storage mode</h2>
+            <div class="mode-toggle">
+                <div class="mode-btn" id="memoryBtn">
+                    In-memory
+                    <span class="sub">fast, no I/O, ephemeral</span>
+                </div>
+                <div class="mode-btn active" id="persistentBtn">
+                    IndexedDB
+                    <span class="sub">survives reloads</span>
+                </div>
             </div>
-            <div class="card">
-                <h3>Current Mode</h3>
-                <p id="modeDisplay">IndexedDB - Data persists across page reloads</p>
+            <div class="kv-grid">
+                <label for="dbName">Database name</label>
+                <input type="text" id="dbName" value="mqdb-demo">
             </div>
-            <div class="card mt-10">
-                <h3>Database Name</h3>
-                <input type="text" id="dbName" value="mqdb-demo" style="width: 100%;">
-                <button id="switchDbBtn" class="mt-10">Switch Database</button>
+            <div class="row mt-10">
+                <button id="switchDbBtn" class="success">Open / switch database</button>
             </div>
+            <p class="hint mt-10" id="modeHint">IndexedDB — data persists across page reloads.</p>
         </div>
 
         <div class="section">
-            <h2>Quick Tests</h2>
-            <button id="runAllTests">Run All Persistence Tests</button>
-            <button id="seedData" class="success mt-10">Seed Sample Data</button>
-            <button id="clearIdb" class="danger mt-10">Clear IndexedDB</button>
+            <h2>Data</h2>
+            <div class="row">
+                <button id="seedData" class="success">Seed sample data</button>
+                <button id="clearAll" class="danger">Delete all rows</button>
+                <button id="clearIdb" class="danger">Drop entire database</button>
+            </div>
+
+            <h3 class="mt-20">Records</h3>
+            <div class="kv-grid">
+                <label for="entity">Entity</label>
+                <select id="entity">
+                    <option value="users" selected>users</option>
+                    <option value="posts">posts</option>
+                    <option value="counter">counter</option>
+                </select>
+            </div>
+            <div class="row mt-10">
+                <button id="refreshList">Refresh</button>
+            </div>
+            <table id="recordsTable" class="mt-10">
+                <thead><tr><th>ID</th><th>Data</th></tr></thead>
+                <tbody id="recordsBody"></tbody>
+            </table>
         </div>
     </div>
 
     <div class="section">
-        <h2>IndexedDB Inspector</h2>
-        <p>Raw view of what's stored in IndexedDB:</p>
-        <button id="inspectIdb">Inspect IndexedDB Contents</button>
-        <div class="idb-inspector">
-            <pre id="idbContents">Click "Inspect IndexedDB Contents" to view raw data</pre>
+        <h2>IndexedDB inspector</h2>
+        <p class="hint">Look at what MQDB has actually written to IndexedDB — keys and JSON payloads.</p>
+        <button id="inspectIdb">Inspect IndexedDB</button>
+        <div class="idb-inspector mt-10">
+            <pre id="idbContents">Click "Inspect IndexedDB" to view raw data</pre>
         </div>
     </div>
 
     <div class="section">
-        <h2>Records (from current database)</h2>
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> runs 6 steps; the last one tests round-tripping the counter so you can <em>then</em> reload the page to confirm persistence.</p>
+        <ol>
+            <li>Create a record in persistent storage</li>
+            <li>Read it back</li>
+            <li>Verify IndexedDB actually contains bytes (run the inspector)</li>
+            <li>Update — new value reads back</li>
+            <li>Delete — read throws</li>
+            <li>Counter increments by 10 end-to-end</li>
+        </ol>
         <div class="row">
-            <label>Entity:</label>
-            <select id="entity">
-                <option value="users">users</option>
-                <option value="counter">counter</option>
-                <option value="posts">posts</option>
-            </select>
-            <button id="refreshList">Refresh</button>
+            <button id="runAllTests" class="success">Run all tests</button>
         </div>
-        <table id="recordsTable">
-            <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Data</th>
-                </tr>
-            </thead>
-            <tbody id="recordsBody">
-            </tbody>
-        </table>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         let isPersistent = true;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             const savedMode = localStorage.getItem('mqdb-storage-mode');
-            const usePersistent = savedMode !== 'memory';
-            await initDatabase(usePersistent);
+            await initDatabase(savedMode !== 'memory');
             await loadCounter();
             setupEventListeners();
             refreshList();
@@ -175,23 +310,26 @@
             isPersistent = persistent;
             localStorage.setItem('mqdb-storage-mode', persistent ? 'persistent' : 'memory');
             const dbName = document.getElementById('dbName').value;
-
             if (persistent) {
-                log(`Opening persistent database: ${dbName}`);
-                db = await WasmDatabase.open_persistent(dbName);
-                document.getElementById('modeDisplay').textContent = 'IndexedDB - Data persists across page reloads';
-                document.getElementById('persistentBtn').classList.add('active');
-                document.getElementById('memoryBtn').classList.remove('active');
+                log(`Opening persistent: ${dbName}`, 'info');
+                db = await Database.openPersistent(dbName);
+                setMode('persistent');
             } else {
-                log('Creating in-memory database');
-                db = new WasmDatabase();
-                document.getElementById('modeDisplay').textContent = 'In-Memory - Data lost on page reload';
-                document.getElementById('memoryBtn').classList.add('active');
-                document.getElementById('persistentBtn').classList.remove('active');
+                log('Creating in-memory database', 'info');
+                db = new Database();
+                setMode('memory');
             }
-
             window.db = db;
-            log(`Database initialized (${persistent ? 'persistent' : 'memory'})`, 'success');
+            log(`Ready (${persistent ? 'persistent' : 'memory'})`, 'success');
+        }
+
+        function setMode(mode) {
+            document.getElementById('memoryBtn').classList.toggle('active', mode === 'memory');
+            document.getElementById('persistentBtn').classList.toggle('active', mode === 'persistent');
+            document.getElementById('modeHint').textContent =
+                mode === 'persistent'
+                    ? 'IndexedDB — data persists across page reloads.'
+                    : 'In-memory — data is lost on page reload.';
         }
 
         async function loadCounter() {
@@ -199,15 +337,11 @@
                 const counters = await db.list('counter', null);
                 if (counters.length > 0) {
                     updateCounterDisplay(counters[0].value);
-                    log(`Loaded counter value: ${counters[0].value}`, 'success');
                 } else {
                     await db.create('counter', { name: 'main', value: 0 });
                     updateCounterDisplay(0);
-                    log('Created new counter with value 0', 'info');
                 }
-            } catch (e) {
-                log(`Error loading counter: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function updateCounterDisplay(value) {
@@ -218,14 +352,12 @@
             try {
                 const counters = await db.list('counter', null);
                 if (counters.length > 0) {
-                    const newValue = counters[0].value + delta;
+                    const newValue = (counters[0].value ?? 0) + delta;
                     await db.update('counter', counters[0].id, { value: newValue });
                     updateCounterDisplay(newValue);
-                    log(`Counter updated to ${newValue}`, 'success');
+                    log(`counter = ${newValue}`, 'success');
                 }
-            } catch (e) {
-                log(`Error updating counter: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function resetCounter() {
@@ -234,11 +366,9 @@
                 if (counters.length > 0) {
                     await db.update('counter', counters[0].id, { value: 0 });
                     updateCounterDisplay(0);
-                    log('Counter reset to 0', 'success');
+                    log('counter reset to 0', 'success');
                 }
-            } catch (e) {
-                log(`Error resetting counter: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function setupEventListeners() {
@@ -250,76 +380,70 @@
             document.getElementById('switchDbBtn').onclick = () => initDatabase(true).then(loadCounter).then(refreshList);
             document.getElementById('runAllTests').onclick = runAllTests;
             document.getElementById('seedData').onclick = seedData;
+            document.getElementById('clearAll').onclick = clearAll;
             document.getElementById('clearIdb').onclick = clearIndexedDB;
             document.getElementById('inspectIdb').onclick = inspectIndexedDB;
             document.getElementById('refreshList').onclick = refreshList;
             document.getElementById('entity').onchange = refreshList;
         }
 
+        function toUint8(v) {
+            if (v instanceof Uint8Array) return v;
+            if (v instanceof ArrayBuffer) return new Uint8Array(v);
+            if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+            return null;
+        }
+        function decodeKey(key) {
+            const bytes = toUint8(key);
+            if (bytes) return new TextDecoder().decode(bytes);
+            return String(key);
+        }
+
         async function inspectIndexedDB() {
             const dbName = document.getElementById('dbName').value;
             log(`Inspecting IndexedDB: ${dbName}`);
-
             try {
-                const request = indexedDB.open(dbName, 1);
-
+                const request = indexedDB.open(dbName);
                 request.onerror = () => {
                     document.getElementById('idbContents').textContent = 'Error opening IndexedDB';
                 };
-
                 request.onsuccess = (event) => {
                     const idb = event.target.result;
                     const stores = Array.from(idb.objectStoreNames);
-
                     if (stores.length === 0) {
                         document.getElementById('idbContents').textContent = 'No object stores found';
                         idb.close();
                         return;
                     }
-
                     const tx = idb.transaction(stores, 'readonly');
                     const results = {};
                     let pending = stores.length;
-
                     stores.forEach(storeName => {
                         const store = tx.objectStore(storeName);
-                        const allRequest = store.openCursor();
+                        const req = store.openCursor();
                         results[storeName] = [];
-
-                        allRequest.onsuccess = (e) => {
+                        req.onsuccess = (e) => {
                             const cursor = e.target.result;
                             if (cursor) {
-                                const key = cursor.key;
-                                const value = cursor.value;
-                                let keyStr, valueStr;
-
-                                if (key instanceof Uint8Array) {
-                                    keyStr = new TextDecoder().decode(key);
-                                } else {
-                                    keyStr = String(key);
-                                }
-
-                                if (value instanceof Uint8Array) {
+                                const keyStr = decodeKey(cursor.key);
+                                const bytes = toUint8(cursor.value);
+                                let valueStr;
+                                if (bytes) {
                                     try {
-                                        valueStr = new TextDecoder().decode(value);
-                                        try {
-                                            valueStr = JSON.parse(valueStr);
-                                        } catch {}
-                                    } catch {
-                                        valueStr = `[Binary: ${value.length} bytes]`;
-                                    }
+                                        const text = new TextDecoder().decode(bytes);
+                                        try { valueStr = JSON.parse(text); }
+                                        catch { valueStr = text; }
+                                    } catch { valueStr = `[${bytes.length} bytes]`; }
                                 } else {
-                                    valueStr = value;
+                                    valueStr = cursor.value;
                                 }
-
                                 results[storeName].push({ key: keyStr, value: valueStr });
                                 cursor.continue();
                             } else {
                                 pending--;
                                 if (pending === 0) {
-                                    document.getElementById('idbContents').textContent =
-                                        JSON.stringify(results, null, 2);
-                                    log(`Found ${Object.values(results).flat().length} entries in IndexedDB`, 'success');
+                                    document.getElementById('idbContents').textContent = JSON.stringify(results, null, 2);
+                                    log(`Found ${Object.values(results).flat().length} entries`, 'success');
                                     idb.close();
                                 }
                             }
@@ -328,27 +452,22 @@
                 };
             } catch (e) {
                 document.getElementById('idbContents').textContent = `Error: ${e}`;
-                log(`Error inspecting IndexedDB: ${e}`, 'error');
+                log(`${e}`, 'error');
             }
         }
 
         async function clearIndexedDB() {
             const dbName = document.getElementById('dbName').value;
-            log(`Deleting IndexedDB: ${dbName}`);
-
+            log(`Dropping IndexedDB: ${dbName}`);
             try {
-                const deleteRequest = indexedDB.deleteDatabase(dbName);
-                deleteRequest.onsuccess = () => {
-                    log(`Deleted IndexedDB: ${dbName}`, 'success');
+                const r = indexedDB.deleteDatabase(dbName);
+                r.onsuccess = () => {
+                    log(`Deleted ${dbName}`, 'success');
                     document.getElementById('idbContents').textContent = 'Database deleted';
                     initDatabase(true).then(loadCounter).then(refreshList);
                 };
-                deleteRequest.onerror = () => {
-                    log('Error deleting IndexedDB', 'error');
-                };
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                r.onerror = () => log('Error deleting IndexedDB', 'error');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function refreshList() {
@@ -357,90 +476,87 @@
                 const records = await db.list(entity, null);
                 const tbody = document.getElementById('recordsBody');
                 tbody.innerHTML = '';
-
-                for (const record of records) {
+                for (const r of records) {
+                    const { id, ...rest } = r;
                     const tr = document.createElement('tr');
-                    const {id, ...rest} = record;
-                    tr.innerHTML = `
-                        <td><code>${id}</code></td>
-                        <td><code>${JSON.stringify(rest)}</code></td>
-                    `;
+                    tr.innerHTML = `<td><code>${escapeHtml(id)}</code></td><td><code>${escapeHtml(JSON.stringify(rest))}</code></td>`;
                     tbody.appendChild(tr);
                 }
-
                 if (records.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#999">No records</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="2" class="hint" style="text-align:center">No records</td></tr>';
                 }
-            } catch (e) {
-                log(`Error refreshing list: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function seedData() {
-            log('Seeding sample data...');
             try {
                 await db.create('users', { name: 'Alice', email: 'alice@example.com' });
                 await db.create('users', { name: 'Bob', email: 'bob@example.com' });
                 await db.create('posts', { title: 'Hello World', content: 'First post!' });
-                log('Seeded sample data', 'success');
+                log('Seeded 2 users + 1 post', 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error seeding data: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
-        async function runAllTests() {
-            log('=== Running Persistence Tests ===', 'info');
-
-            log('Test 1: Create record in persistent storage');
-            const testData = { name: 'PersistenceTest', timestamp: Date.now() };
-            const created = await db.create('users', testData);
-            log(`  Created: ${JSON.stringify(created)}`, 'success');
-
-            log('Test 2: Read record back');
-            const read = await db.read('users', created.id);
-            if (read.name === 'PersistenceTest') {
-                log(`  ✓ Read verified: ${JSON.stringify(read)}`, 'success');
-            } else {
-                log('  ✗ Read returned wrong data', 'error');
-            }
-
-            log('Test 3: Verify in IndexedDB directly');
-            await new Promise(resolve => setTimeout(resolve, 100));
-            await inspectIndexedDB();
-            log('  ✓ Check the IndexedDB Inspector above', 'success');
-
-            log('Test 4: Update record');
-            await db.update('users', created.id, { name: 'UpdatedPersistenceTest' });
-            const updated = await db.read('users', created.id);
-            if (updated.name === 'UpdatedPersistenceTest') {
-                log(`  ✓ Update verified`, 'success');
-            } else {
-                log('  ✗ Update failed', 'error');
-            }
-
-            log('Test 5: Delete record');
-            await db.delete('users', created.id);
+        async function clearAll() {
+            const entity = document.getElementById('entity').value;
             try {
-                await db.read('users', created.id);
-                log('  ✗ Delete failed - record still exists', 'error');
-            } catch {
-                log('  ✓ Delete verified - record not found', 'success');
-            }
+                const rows = await db.list(entity, null);
+                for (const r of rows) { try { await db.delete(entity, r.id); } catch {} }
+                log(`Deleted ${rows.length} rows from ${entity}`, 'success');
+                refreshList();
+            } catch (e) { log(`${e}`, 'error'); }
+        }
 
-            log('Test 6: Counter persistence');
-            const counterBefore = document.getElementById('counterValue').textContent;
-            await updateCounter(10);
-            const counterAfter = document.getElementById('counterValue').textContent;
-            if (parseInt(counterAfter) === parseInt(counterBefore) + 10) {
-                log(`  ✓ Counter incremented from ${counterBefore} to ${counterAfter}`, 'success');
-            } else {
-                log('  ✗ Counter update failed', 'error');
-            }
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
 
-            log('=== All Persistence Tests Complete ===', 'success');
-            log('Reload the page to verify the counter persists!', 'info');
+        async function runAllTests() {
+            clearSummary();
+            summaryLine('=== Persistence tests ===');
+
+            summaryLine('Test 1 — create in persistent storage');
+            const data = { name: 'PersistenceTest', timestamp: Date.now() };
+            const created = await db.create('users', data);
+            summaryLine(`  ✓ id=${created.id}`, 'pass');
+
+            summaryLine('Test 2 — read back');
+            const read = await db.read('users', created.id);
+            summaryLine(read.name === 'PersistenceTest' ? '  ✓ name matches' : '  ✗ wrong data', read.name === 'PersistenceTest' ? 'pass' : 'fail');
+
+            summaryLine('Test 3 — IndexedDB contains raw bytes');
+            await inspectIndexedDB();
+            summaryLine('  ✓ see inspector above', 'pass');
+
+            summaryLine('Test 4 — update');
+            await db.update('users', created.id, { name: 'UpdatedPersistenceTest' });
+            const u = await db.read('users', created.id);
+            summaryLine(u.name === 'UpdatedPersistenceTest' ? '  ✓ name updated' : '  ✗ update failed', u.name === 'UpdatedPersistenceTest' ? 'pass' : 'fail');
+
+            summaryLine('Test 5 — delete');
+            await db.delete('users', created.id);
+            try { await db.read('users', created.id); summaryLine('  ✗ record still reads', 'fail'); }
+            catch { summaryLine('  ✓ read throws after delete', 'pass'); }
+
+            summaryLine('Test 6 — counter increments by 10');
+            const before = parseInt(document.getElementById('counterValue').textContent, 10) || 0;
+            for (let i = 0; i < 10; i++) await updateCounter(1);
+            const after = parseInt(document.getElementById('counterValue').textContent, 10) || 0;
+            summaryLine(after === before + 10 ? `  ✓ ${before} → ${after}  (reload to confirm persistence)` : `  ✗ ${before} → ${after}`, after === before + 10 ? 'pass' : 'fail');
+
+            summaryLine('=== Done ===', 'pass');
             refreshList();
+        }
+
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
         function log(msg, type = '') {

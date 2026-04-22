@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQDB WASM - Encrypted Storage</title>
+    <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .encryption-hero {
+            background: linear-gradient(135deg, #7b1fa2, #512da8);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .encryption-hero h2 {
+            color: white;
+            margin: 0 0 10px 0;
+        }
+        .encryption-hero p {
+            margin: 0 0 10px 0;
+            opacity: 0.9;
+        }
+        .lock-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .lock-controls input {
+            padding: 10px;
+            font-size: 16px;
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 4px;
+            background: rgba(255,255,255,0.15);
+            color: white;
+            min-width: 200px;
+        }
+        .lock-controls input::placeholder {
+            color: rgba(255,255,255,0.5);
+        }
+        .lock-controls button {
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .status-badge.locked { background: #f44336; color: white; }
+        .status-badge.unlocked { background: #4caf50; color: white; }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+        @media (max-width: 768px) {
+            .how-it-works { grid-template-columns: 1fr; }
+        }
+
+        .view-panel {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .view-panel h3 {
+            margin: 0 0 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .view-panel .hint { color: #777; font-size: 13px; margin: 0 0 10px 0; }
+        .decrypted {
+            border-top: 4px solid #4caf50;
+        }
+        .ciphertext {
+            border-top: 4px solid #7b1fa2;
+        }
+        .ciphertext pre {
+            margin: 0;
+            white-space: pre-wrap;
+            font-size: 12px;
+            max-height: 260px;
+            overflow-y: auto;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+        .record-table {
+            max-height: 260px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="index.html">Home</a>
+        <a href="basic-crud.html">CRUD</a>
+        <a href="schema.html">Schema</a>
+        <a href="constraints.html">Constraints</a>
+        <a href="filtering.html">Filtering</a>
+        <a href="subscriptions.html">Subscriptions</a>
+        <a href="relationships.html">Relationships</a>
+        <a href="cursor.html">Cursor</a>
+        <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html" class="active">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html">Count</a>
+    </nav>
+
+    <div class="encryption-hero">
+        <h2>Encrypted Storage (AES-256-GCM) <span class="status-badge locked" id="statusBadge">Locked</span></h2>
+        <p>Records are encrypted with AES-256-GCM the moment they are written, and decrypted only when you read them back. Your passphrase derives an in-memory key; locking drops that key but touches nothing on disk.</p>
+        <div class="lock-controls">
+            <input type="password" id="passphrase" placeholder="Passphrase" value="test123">
+            <input type="text" id="encDbName" value="mqdb-encrypted-demo" placeholder="Database name">
+            <button id="unlockBtn" class="success">Unlock</button>
+            <button id="lockBtn" class="danger" disabled>Lock</button>
+        </div>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><strong>Unlock</strong> derives a key from your passphrase and keeps it in memory. No data is decrypted at this step.</li>
+                <li><strong>Write</strong> (<code>db.create</code>, <code>db.update</code>): MQDB encrypts <em>that one record</em> with the in-memory key and stores the ciphertext in IndexedDB.</li>
+                <li><strong>Read</strong> (<code>db.read</code>, <code>db.list</code>): MQDB fetches <em>that one record's</em> ciphertext from IndexedDB and decrypts it on the fly.</li>
+                <li><strong>Lock</strong> drops the in-memory key. The ciphertext on disk is left exactly as it was — locking doesn't re-encrypt anything, and unlocking doesn't bulk-decrypt anything.</li>
+                <li>Keys (<code>data/users/1</code>) are plaintext so prefix scans work. Only <em>values</em> are ciphertext.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    P[Passphrase] -- derive once --> K((In-memory key))
+    K -. drop .-> LK[Lock]
+    W["db.create(record)"] --> E[encrypt one record] --> I[(IndexedDB<br/>ciphertext)]
+    I --> D[decrypt one record] --> R["db.read(id)"]
+    E -. uses .-> K
+    D -. uses .-> K
+    style K fill:#ffe082,stroke:#f57f17
+    style I fill:#ede7f6,stroke:#512da8
+    style LK fill:#ffcdd2,stroke:#c62828
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a five-step tour</h3>
+        <ol>
+            <li>Click <code>Unlock</code> above (default passphrase <code>test123</code>). This only sets up the key — nothing gets decrypted yet.</li>
+            <li>Click <code>Seed sample records</code>. Each <code>db.create</code> encrypts its record and writes the ciphertext to IndexedDB.</li>
+            <li>The Records panel now shows those records <em>decrypted on demand</em> — it called <code>db.list('users')</code>, which decrypted each row individually.</li>
+            <li>Click <code>Lock</code>. The in-memory key is dropped. The same rows are still in IndexedDB — but the Records panel now reads them raw and shows the ciphertext (12-byte nonce + encrypted JSON). No bulk re-encryption happened; the bytes on disk are unchanged.</li>
+            <li>Click <code>Unlock</code> again to flip back to decrypted columns. Type a wrong passphrase first to see <code>invalid passphrase</code>.</li>
+        </ol>
+    </div>
+
+    <div class="section">
+        <h2>Data Operations</h2>
+        <div class="row">
+            <button id="seedBtn" class="success" disabled>Seed sample records</button>
+            <button id="addOneBtn" disabled>Add one record</button>
+            <button id="clearBtn" class="danger" disabled>Clear all users</button>
+            <button id="refreshBtn" disabled>Refresh views</button>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="view-panel decrypted" id="recordsPanel">
+            <h3><span id="recordsIcon">🔓</span> Records <span class="badge" id="recordsCount">—</span></h3>
+            <p class="hint" id="recordsHint">Unlocked view: <code>db.list('users')</code> returns the plaintext fields.</p>
+            <div id="recordsView"><p class="hint">No data yet — unlock and seed records.</p></div>
+        </div>
+
+        <div class="view-panel ciphertext">
+            <h3>🗄 All raw storage keys <span class="badge" id="rawCount">—</span></h3>
+            <p class="hint">Every key in IndexedDB — records plus metadata (schema, constraints, salt, check blob). Keys are plaintext, values are AES-GCM ciphertext.</p>
+            <pre id="rawView">Nothing to show yet — unlock and add records.</pre>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Advanced: persistent metadata</h2>
+        <p class="hint">Schemas, constraints, indexes, and relationships persist to encrypted storage just like records. These buttons exercise each async metadata API.</p>
+        <div class="flex gap-10 flex-wrap">
+            <button id="addSchemaBtn" disabled>addSchemaAsync</button>
+            <button id="getSchemaBtn" disabled>getSchema</button>
+            <button id="addUniqueBtn" disabled>addUniqueConstraintAsync (email)</button>
+            <button id="addNotNullBtn" disabled>addNotNullAsync (name)</button>
+            <button id="addFKBtn" disabled>addForeignKeyAsync (posts→users)</button>
+            <button id="addIndexBtn" disabled>addIndexAsync (age)</button>
+            <button id="addRelBtn" disabled>addRelationshipAsync (posts.author)</button>
+            <button id="crudTest" disabled>CRUD round-trip</button>
+            <button id="checkBackend" disabled>isMemoryBackend()</button>
+            <button id="runAllTests" disabled>Run all tests</button>
+        </div>
+    </div>
+
+    <div id="output">
+        <h3>Log</h3>
+        <pre id="log"></pre>
+    </div>
+
+    <script type="module">
+        import init, { Database } from '../pkg/mqdb_wasm.js';
+
+        let db = null;
+        const UNLOCK_ONLY = ['seedBtn', 'addOneBtn', 'clearBtn', 'refreshBtn',
+            'addSchemaBtn', 'getSchemaBtn', 'addUniqueBtn', 'addNotNullBtn',
+            'addFKBtn', 'addIndexBtn', 'addRelBtn', 'crudTest', 'checkBackend',
+            'runAllTests', 'lockBtn'];
+
+        async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
+            await init();
+            log('WASM initialized. Enter a passphrase and click Unlock to begin.', 'info');
+            setupEventListeners();
+            setLocked();
+            await refreshViews();
+        }
+
+        function setupEventListeners() {
+            document.getElementById('unlockBtn').onclick = unlock;
+            document.getElementById('lockBtn').onclick = lock;
+            document.getElementById('seedBtn').onclick = seedSampleRecords;
+            document.getElementById('addOneBtn').onclick = addOneRecord;
+            document.getElementById('clearBtn').onclick = clearUsers;
+            document.getElementById('refreshBtn').onclick = refreshViews;
+            document.getElementById('addSchemaBtn').onclick = addSchema;
+            document.getElementById('getSchemaBtn').onclick = getSchema;
+            document.getElementById('addUniqueBtn').onclick = addUnique;
+            document.getElementById('addNotNullBtn').onclick = addNotNull;
+            document.getElementById('addFKBtn').onclick = addFK;
+            document.getElementById('addIndexBtn').onclick = addIdx;
+            document.getElementById('addRelBtn').onclick = addRel;
+            document.getElementById('runAllTests').onclick = runAllTests;
+            document.getElementById('crudTest').onclick = crudRoundTrip;
+            document.getElementById('checkBackend').onclick = checkBackend;
+        }
+
+        function setLocked() {
+            const badge = document.getElementById('statusBadge');
+            badge.textContent = 'Locked';
+            badge.className = 'status-badge locked';
+            document.getElementById('unlockBtn').disabled = false;
+            UNLOCK_ONLY.forEach(id => { document.getElementById(id).disabled = true; });
+            const panel = document.getElementById('recordsPanel');
+            panel.classList.remove('decrypted');
+            panel.classList.add('ciphertext');
+            document.getElementById('recordsIcon').textContent = '🔒';
+            document.getElementById('recordsHint').innerHTML =
+                'Locked view: the same rows are still in IndexedDB — but the value is the raw AES-GCM ciphertext (nonce + encrypted JSON).';
+        }
+
+        function setUnlocked() {
+            const badge = document.getElementById('statusBadge');
+            badge.textContent = 'Unlocked';
+            badge.className = 'status-badge unlocked';
+            document.getElementById('unlockBtn').disabled = true;
+            UNLOCK_ONLY.forEach(id => { document.getElementById(id).disabled = false; });
+            const panel = document.getElementById('recordsPanel');
+            panel.classList.remove('ciphertext');
+            panel.classList.add('decrypted');
+            document.getElementById('recordsIcon').textContent = '🔓';
+            document.getElementById('recordsHint').innerHTML =
+                'Unlocked view: <code>db.list(\'users\')</code> returns the plaintext fields.';
+        }
+
+        async function unlock() {
+            const passphrase = document.getElementById('passphrase').value;
+            const dbName = document.getElementById('encDbName').value;
+            if (!passphrase) {
+                log('Passphrase is required', 'error');
+                return;
+            }
+            try {
+                log(`Unlocking "${dbName}"…`);
+                db = await Database.openEncrypted(dbName, passphrase);
+                window.db = db;
+                log('Database unlocked', 'success');
+                setUnlocked();
+                await refreshViews();
+            } catch (e) {
+                db = null;
+                window.db = null;
+                log(`${e}`, 'error');
+            }
+        }
+
+        async function lock() {
+            db = null;
+            window.db = null;
+            log('Database locked — values now shown as ciphertext', 'warning');
+            setLocked();
+            await refreshViews();
+        }
+
+        async function seedSampleRecords() {
+            const samples = [
+                {name: 'Alice', email: 'alice@example.com', age: 30, role: 'admin'},
+                {name: 'Bob', email: 'bob@example.com', age: 24, role: 'user'},
+                {name: 'Carol', email: 'carol@example.com', age: 41, role: 'user'},
+                {name: 'Dan', email: 'dan@example.com', age: 35, role: 'editor'}
+            ];
+            try {
+                for (const s of samples) { await db.create('users', s); }
+                log(`Inserted ${samples.length} users`, 'success');
+                await refreshViews();
+            } catch (e) {
+                log(`${e}`, 'error');
+            }
+        }
+
+        async function addOneRecord() {
+            const n = Math.floor(Math.random() * 1000);
+            try {
+                const r = await db.create('users', {
+                    name: `User${n}`,
+                    email: `user${n}@example.com`,
+                    age: 20 + (n % 40),
+                    role: 'user'
+                });
+                log(`Created user ${r.id}`, 'success');
+                await refreshViews();
+            } catch (e) {
+                log(`${e}`, 'error');
+            }
+        }
+
+        async function clearUsers() {
+            try {
+                const users = await db.list('users', null);
+                for (const u of users) { await db.delete('users', u.id); }
+                log(`Deleted ${users.length} users`, 'success');
+                await refreshViews();
+            } catch (e) {
+                log(`${e}`, 'error');
+            }
+        }
+
+        async function refreshViews() {
+            await renderRecordsPanel();
+            await renderRawIndexedDB();
+        }
+
+        async function renderRecordsPanel() {
+            if (db) {
+                await renderUnlockedRecords();
+            } else {
+                await renderLockedRecords();
+            }
+        }
+
+        async function renderUnlockedRecords() {
+            const target = document.getElementById('recordsView');
+            try {
+                const users = await db.list('users', null);
+                document.getElementById('recordsCount').textContent =
+                    `${users.length} record${users.length === 1 ? '' : 's'}`;
+                if (users.length === 0) {
+                    target.innerHTML = '<p class="hint">No users yet. Click <code>Seed sample records</code>.</p>';
+                    return;
+                }
+                const rows = users.map(u => `
+                    <tr>
+                        <td><code>${escapeHtml(u.id)}</code></td>
+                        <td>${escapeHtml(u.name ?? '')}</td>
+                        <td>${escapeHtml(u.email ?? '')}</td>
+                        <td>${u.age ?? ''}</td>
+                        <td>${escapeHtml(u.role ?? '')}</td>
+                    </tr>`).join('');
+                target.innerHTML = `
+                    <div class="record-table">
+                        <table>
+                            <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Age</th><th>Role</th></tr></thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>`;
+            } catch (e) {
+                target.innerHTML = `<p class="error">Error: ${escapeHtml(String(e))}</p>`;
+            }
+        }
+
+        function toUint8(v) {
+            if (v instanceof Uint8Array) return v;
+            if (v instanceof ArrayBuffer) return new Uint8Array(v);
+            if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+            return null;
+        }
+
+        function decodeKey(key) {
+            const bytes = toUint8(key);
+            if (bytes) return new TextDecoder().decode(bytes);
+            return String(key);
+        }
+
+        function renderLockedRecords() {
+            const target = document.getElementById('recordsView');
+            const countBadge = document.getElementById('recordsCount');
+            target.innerHTML = '<p class="hint">Reading raw IndexedDB…</p>';
+            const dbName = document.getElementById('encDbName').value;
+            return new Promise(resolve => {
+                try {
+                    const request = indexedDB.open(dbName);
+                    request.onerror = () => {
+                        target.innerHTML = '<p class="hint">No database yet.</p>';
+                        countBadge.textContent = '—';
+                        resolve();
+                    };
+                    request.onsuccess = (event) => {
+                        const idb = event.target.result;
+                        const stores = Array.from(idb.objectStoreNames);
+                        if (stores.length === 0) {
+                            target.innerHTML = '<p class="hint">No storage yet.</p>';
+                            countBadge.textContent = '0 records';
+                            idb.close();
+                            resolve();
+                            return;
+                        }
+                        const tx = idb.transaction(stores, 'readonly');
+                        const records = [];
+                        let pending = stores.length;
+                        stores.forEach(storeName => {
+                            const store = tx.objectStore(storeName);
+                            const cur = store.openCursor();
+                            cur.onsuccess = (e) => {
+                                const c = e.target.result;
+                                if (c) {
+                                    const keyStr = decodeKey(c.key);
+                                    const valueBytes = toUint8(c.value);
+                                    const match = keyStr.match(/^data\/users\/(.+)$/);
+                                    if (match && valueBytes) {
+                                        records.push({ id: match[1], bytes: valueBytes });
+                                    }
+                                    c.continue();
+                                } else {
+                                    pending--;
+                                    if (pending === 0) {
+                                        countBadge.textContent = `${records.length} record${records.length === 1 ? '' : 's'}`;
+                                        if (records.length === 0) {
+                                            target.innerHTML = '<p class="hint">No user records on disk. Unlock and seed records first.</p>';
+                                        } else {
+                                            target.innerHTML = renderCiphertextTable(records);
+                                        }
+                                        idb.close();
+                                        resolve();
+                                    }
+                                }
+                            };
+                        });
+                    };
+                } catch (e) {
+                    target.innerHTML = `<p class="error">Error: ${escapeHtml(String(e))}</p>`;
+                    resolve();
+                }
+            });
+        }
+
+        function renderCiphertextTable(records) {
+            records.sort((a, b) => a.id.localeCompare(b.id, undefined, {numeric: true}));
+            const rows = records.map(r => {
+                const nonce = r.bytes.slice(0, 12);
+                const body = r.bytes.slice(12);
+                return `
+                    <tr>
+                        <td><code>${escapeHtml(r.id)}</code></td>
+                        <td style="font-family:monospace;font-size:12px;word-break:break-all;color:#4527a0">
+                            <span style="color:#888">nonce:</span> ${hexPreview(nonce, 12)}<br>
+                            <span style="color:#888">ciphertext (${body.length}B):</span> ${hexPreview(body, 40)}
+                        </td>
+                    </tr>`;
+            }).join('');
+            return `
+                <div class="record-table">
+                    <table>
+                        <thead><tr><th style="width:60px">ID</th><th>Encrypted value (AES-256-GCM)</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
+        }
+
+        function renderRawIndexedDB() {
+            const dbName = document.getElementById('encDbName').value;
+            const target = document.getElementById('rawView');
+            const countBadge = document.getElementById('rawCount');
+            target.textContent = 'Loading…';
+            try {
+                const request = indexedDB.open(dbName);
+                request.onerror = () => { target.textContent = 'Error opening IndexedDB'; };
+                request.onsuccess = (event) => {
+                    const idb = event.target.result;
+                    const stores = Array.from(idb.objectStoreNames);
+                    if (stores.length === 0) {
+                        target.textContent = 'No object stores yet.';
+                        countBadge.textContent = '0 entries';
+                        idb.close();
+                        return;
+                    }
+                    const tx = idb.transaction(stores, 'readonly');
+                    let entries = [];
+                    let pending = stores.length;
+                    stores.forEach(storeName => {
+                        const store = tx.objectStore(storeName);
+                        const cursor = store.openCursor();
+                        cursor.onsuccess = (e) => {
+                            const c = e.target.result;
+                            if (c) {
+                                entries.push(formatCiphertextEntry(storeName, c.key, c.value));
+                                c.continue();
+                            } else {
+                                pending--;
+                                if (pending === 0) {
+                                    countBadge.textContent = `${entries.length} entries`;
+                                    target.textContent = entries.length
+                                        ? entries.join('\n')
+                                        : 'Store is empty.';
+                                    idb.close();
+                                }
+                            }
+                        };
+                    });
+                };
+            } catch (e) {
+                target.textContent = `Error: ${e}`;
+            }
+        }
+
+        function formatCiphertextEntry(store, key, value) {
+            const keyStr = decodeKey(key);
+            const bytes = toUint8(value);
+            if (bytes) {
+                const preview = hexPreview(bytes, 48);
+                return `${keyStr}  →  [${bytes.length} bytes]  ${preview}`;
+            }
+            return `${keyStr}  →  ${JSON.stringify(value).slice(0, 120)}`;
+        }
+
+        function hexPreview(bytes, limit) {
+            const n = Math.min(bytes.length, limit);
+            let out = '';
+            for (let i = 0; i < n; i++) {
+                out += bytes[i].toString(16).padStart(2, '0');
+                if (i % 2 === 1) out += ' ';
+            }
+            return out.trim() + (bytes.length > limit ? ' …' : '');
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c =>
+                ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        async function addSchema() {
+            try {
+                await db.addSchemaAsync('users', {
+                    fields: [
+                        {name: 'name', type: 'string', required: true},
+                        {name: 'email', type: 'string', required: true},
+                        {name: 'age', type: 'number'},
+                        {name: 'active', type: 'boolean', default: true}
+                    ]
+                });
+                log('Schema for users added and persisted', 'success');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function getSchema() {
+            try {
+                const schema = db.getSchema('users');
+                log(schema ? `Schema: ${JSON.stringify(schema, null, 2)}` : 'No schema for users', schema ? 'success' : 'warning');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function addUnique() {
+            try { await db.addUniqueConstraintAsync('users', ['email']); log('Unique(email) added and persisted', 'success'); }
+            catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function addNotNull() {
+            try { await db.addNotNullAsync('users', 'name'); log('NOT NULL(name) added and persisted', 'success'); }
+            catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function addFK() {
+            try { await db.addForeignKeyAsync('posts', 'author_id', 'users', 'id', 'cascade'); log('FK posts.author_id → users.id CASCADE added', 'success'); }
+            catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function addIdx() {
+            try { await db.addIndexAsync('users', ['age']); log('Index on users.age added', 'success'); }
+            catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function addRel() {
+            try { await db.addRelationshipAsync('posts', 'author', 'users'); log('Relationship posts.author → users added', 'success'); }
+            catch (e) { log(`${e}`, 'error'); }
+        }
+
+        function checkBackend() {
+            const isMem = db.isMemoryBackend();
+            log(`isMemoryBackend() = ${isMem}`, isMem ? 'warning' : 'success');
+        }
+
+        async function crudRoundTrip() {
+            try {
+                const created = await db.create('items', {name: 'Secret Item', value: 42});
+                log(`Created: ${JSON.stringify(created)}`, 'success');
+                const read = await db.read('items', created.id);
+                const ok = read.name === 'Secret Item' && read.value === 42;
+                log(ok ? `Read verified: ${JSON.stringify(read)}` : 'Read returned wrong data', ok ? 'success' : 'error');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function runAllTests() {
+            log('=== Running Encrypted Storage Tests ===', 'info');
+
+            log('Test 1: database unlocked');
+            if (!db) { log('  ✗ Unlock the database first', 'error'); return; }
+            log('  ✓ unlocked', 'success');
+
+            log('Test 2: isMemoryBackend() returns false');
+            log(db.isMemoryBackend() ? '  ✗ expected persistent backend' : '  ✓ persistent backend', db.isMemoryBackend() ? 'error' : 'success');
+
+            log('Test 3: CRUD round-trip');
+            try {
+                const created = await db.create('enc_test', {secret: 'classified', code: 7});
+                const read = await db.read('enc_test', created.id);
+                log(read.secret === 'classified' ? `  ✓ round-trip ok (${read.secret})` : '  ✗ wrong data', read.secret === 'classified' ? 'success' : 'error');
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 4: addSchemaAsync persists schema');
+            try {
+                await db.addSchemaAsync('enc_users', {
+                    fields: [
+                        {name: 'name', type: 'string', required: true},
+                        {name: 'email', type: 'string', required: true}
+                    ]
+                });
+                const schema = db.getSchema('enc_users');
+                log(schema && schema.fields.length === 2 ? `  ✓ ${schema.fields.length} fields persisted` : '  ✗ schema missing', schema ? 'success' : 'error');
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 5: addUniqueConstraintAsync enforces uniqueness');
+            try {
+                await db.addUniqueConstraintAsync('enc_users', ['email']);
+                await db.create('enc_users', {name: 'Alice', email: 'alice@enc.com'});
+                try {
+                    await db.create('enc_users', {name: 'Bob', email: 'alice@enc.com'});
+                    log('  ✗ duplicate not rejected', 'error');
+                } catch { log('  ✓ duplicate rejected', 'success'); }
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 6: addNotNullAsync enforces non-null');
+            try {
+                await db.addNotNullAsync('enc_users', 'name');
+                try {
+                    await db.create('enc_users', {email: 'noname@enc.com'});
+                    log('  ✗ null name not rejected', 'error');
+                } catch { log('  ✓ null name rejected', 'success'); }
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 7: addForeignKeyAsync enforces FK');
+            try {
+                await db.addForeignKeyAsync('enc_posts', 'author_id', 'enc_users', 'id', 'cascade');
+                const user = await db.create('enc_users', {name: 'Author', email: 'author_' + Date.now() + '@enc.com'});
+                const post = await db.create('enc_posts', {title: 'Post', author_id: user.id});
+                log(`  ✓ valid FK: post ${post.id} → user ${user.id}`, 'success');
+                try {
+                    await db.create('enc_posts', {title: 'Bad', author_id: 'fake_id'});
+                    log('  ✗ invalid FK not rejected', 'error');
+                } catch { log('  ✓ invalid FK rejected', 'success'); }
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 8: addIndexAsync persists index');
+            try {
+                await db.addIndexAsync('enc_items', ['price']);
+                log('  ✓ addIndexAsync completed', 'success');
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 9: addRelationshipAsync enables includes');
+            try {
+                await db.addRelationshipAsync('enc_posts', 'author', 'enc_users');
+                const posts = await db.list('enc_posts', null);
+                if (posts.length > 0) {
+                    const withIncludes = await db.readWithIncludes('enc_posts', posts[0].id, ['author']);
+                    log(withIncludes.author ? `  ✓ includes embedded (${withIncludes.author.name})` : '  ✗ author not embedded', withIncludes.author ? 'success' : 'error');
+                } else {
+                    log('  ✗ no posts to test', 'error');
+                }
+            } catch (e) { log(`  ✗ ${e}`, 'error'); }
+
+            log('Test 10: raw IndexedDB still contains ciphertext');
+            await refreshViews();
+            log('  ✓ see the right-hand panel — every value is opaque bytes', 'success');
+
+            log('=== Encrypted Storage Tests Complete ===', 'success');
+        }
+
+        function log(msg, type = '') {
+            const pre = document.getElementById('log');
+            const time = new Date().toISOString().slice(11, 19);
+            const span = document.createElement('span');
+            span.className = type;
+            span.textContent = `${time} ${msg}\n`;
+            pre.appendChild(span);
+            pre.scrollTop = pre.scrollHeight;
+        }
+
+        main().catch(e => log(`Initialization error: ${e}`, 'error'));
+    </script>
+</body>
+</html>

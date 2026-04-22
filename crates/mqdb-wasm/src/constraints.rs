@@ -1,15 +1,19 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen};
-use crate::encoding::encode_value_for_index;
+use super::{
+    ChangeEvent, ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen,
+};
+use crate::types::WasmBatch;
+use mqdb_core::keys::{WASM_INDEX_PREFIX, encode_constraint_key, encode_index_definition_key};
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Adds a unique constraint on the specified fields.
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addUniqueConstraint")]
     pub fn add_unique_constraint(
         &self,
         entity: String,
@@ -36,6 +40,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addNotNull")]
     pub fn add_not_null(&self, entity: String, field: String) -> Result<(), JsValue> {
         let mut inner = self.borrow_inner_mut()?;
         inner
@@ -50,6 +55,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addForeignKey")]
     pub fn add_foreign_key(
         &self,
         source_entity: String,
@@ -75,13 +81,216 @@ impl WasmDatabase {
         Ok(())
     }
 
-    /// Adds an index on the specified fields.
+    /// Adds a unique constraint and persists to storage.
     ///
     /// # Errors
-    /// This function does not currently return errors but the signature allows for future validation.
+    /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addUniqueConstraintAsync")]
+    pub async fn add_unique_constraint_async(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+            inner
+                .unique_constraints
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        if !self.storage.is_memory() {
+            let name = fields.join("_");
+            let key = encode_constraint_key("unique", &entity, &name);
+            let bytes = serde_json::to_vec(&serde_json::json!({"fields": fields}))
+                .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+            self.persist_index_definitions(&entity).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds a NOT NULL constraint and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addNotNullAsync")]
+    pub async fn add_not_null_async(&self, entity: String, field: String) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .not_null_constraints
+                .entry(entity.clone())
+                .or_default()
+                .push(field.clone());
+        }
+
+        if !self.storage.is_memory() {
+            let key = encode_constraint_key("not_null", &entity, &field);
+            let bytes = serde_json::to_vec(&serde_json::json!({"field": field}))
+                .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds a foreign key constraint and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addForeignKeyAsync")]
+    pub async fn add_foreign_key_async(
+        &self,
+        source_entity: String,
+        source_field: String,
+        target_entity: String,
+        target_field: String,
+        on_delete: &str,
+    ) -> Result<(), JsValue> {
+        let on_delete_action = match on_delete {
+            "cascade" => OnDeleteAction::Cascade,
+            "set_null" => OnDeleteAction::SetNull,
+            _ => OnDeleteAction::Restrict,
+        };
+
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner.foreign_keys.push(ForeignKeyEntry {
+                source_entity: source_entity.clone(),
+                source_field: source_field.clone(),
+                target_entity: target_entity.clone(),
+                target_field: target_field.clone(),
+                on_delete: on_delete_action,
+            });
+        }
+
+        if !self.storage.is_memory() {
+            let key = encode_constraint_key("foreign_key", &source_entity, &source_field);
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "source_entity": source_entity,
+                "source_field": source_field,
+                "target_entity": target_entity,
+                "target_field": target_field,
+                "on_delete": on_delete
+            }))
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(&key, &bytes).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds an index on the specified fields and backfills from existing records (async).
+    ///
+    /// # Errors
+    /// Returns an error if the storage operation fails during backfill.
+    #[wasm_bindgen(js_name = "addIndexAsync")]
+    pub async fn add_index_async(
+        &self,
+        entity: String,
+        fields: Vec<String>,
+    ) -> Result<(), JsValue> {
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        if !self.storage.is_memory() {
+            self.persist_index_definitions(&entity).await?;
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
+        for (key, value) in items {
+            let id = Self::extract_id_from_data_key(&key);
+            let Some(id) = id else { continue };
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if let Some(index_key) = Self::build_index_key(&entity, &id, &fields, &parsed)? {
+                self.storage.insert(&index_key, &[]).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds a relationship definition and persists to storage.
+    ///
+    /// # Errors
+    /// Returns an error if storage fails.
+    #[wasm_bindgen(js_name = "addRelationshipAsync")]
+    pub async fn add_relationship_async(
+        &self,
+        source_entity: String,
+        field: String,
+        target_entity: String,
+    ) -> Result<(), JsValue> {
+        let field_suffix = format!("{field}_id");
+
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .relationships
+                .entry(source_entity.clone())
+                .or_default()
+                .push(Relationship {
+                    field: field.clone(),
+                    target_entity: target_entity.clone(),
+                    field_suffix: field_suffix.clone(),
+                });
+        }
+
+        if !self.storage.is_memory() {
+            let key = format!("meta/relationship/{source_entity}/{field}");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "target_entity": target_entity,
+                "field_suffix": field_suffix
+            }))
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+            self.storage.insert(key.as_bytes(), &bytes).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Adds an index on the specified fields and backfills from existing records (sync, memory only).
+    ///
+    /// # Errors
+    /// Returns an error if the backend is not memory-based or backfill fails.
+    #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "addIndex")]
     pub fn add_index(&self, entity: String, fields: Vec<String>) -> Result<(), JsValue> {
-        let mut inner = self.borrow_inner_mut()?;
-        inner.indexes.entry(entity).or_default().push(fields);
+        {
+            let mut inner = self.borrow_inner_mut()?;
+            inner
+                .indexes
+                .entry(entity.clone())
+                .or_default()
+                .push(fields.clone());
+        }
+
+        let prefix = format!("data/{entity}/");
+        let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
+        for (key, value) in items {
+            let id = Self::extract_id_from_data_key(&key);
+            let Some(id) = id else { continue };
+            let parsed: serde_json::Value = serde_json::from_slice(&value)
+                .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
+            if let Some(index_key) = Self::build_index_key(&entity, &id, &fields, &parsed)? {
+                self.storage.insert_sync(&index_key, &[])?;
+            }
+        }
         Ok(())
     }
 
@@ -89,6 +298,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// This function does not currently return errors but the signature allows for future validation.
+    #[wasm_bindgen(js_name = "addRelationship")]
     pub fn add_relationship(
         &self,
         source_entity: String,
@@ -110,6 +320,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "listRelationships")]
     pub fn list_relationships(&self, entity: &str) -> JsValue {
         let inner = match self.borrow_inner() {
             Ok(inner) => inner,
@@ -136,6 +347,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "listConstraints")]
     pub fn list_constraints(&self, entity: &str) -> JsValue {
         let inner = match self.borrow_inner() {
             Ok(inner) => inner,
@@ -173,7 +385,8 @@ impl WasmDatabase {
             }
         }
 
-        serde_wasm_bindgen::to_value(&constraints).unwrap_or(JsValue::NULL)
+        let json_str = serde_json::to_string(&constraints).unwrap_or_else(|_| "[]".to_string());
+        js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
     }
 }
 
@@ -209,36 +422,26 @@ impl WasmDatabase {
         };
 
         if let Some(constraints) = constraints {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
-
             for constraint_fields in constraints {
-                let new_values: Vec<Option<&serde_json::Value>> =
-                    constraint_fields.iter().map(|f| value.get(f)).collect();
+                if constraint_fields.iter().any(|f| {
+                    value.get(f).is_none() || value.get(f) == Some(&serde_json::Value::Null)
+                }) {
+                    continue;
+                }
 
-                for (_key, existing_data) in &items {
-                    let existing: serde_json::Value = serde_json::from_slice(existing_data)
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let index_prefix =
+                    Self::build_unique_index_prefix(entity, &constraint_fields, value)?;
+                let matches = self.storage.prefix_scan(&index_prefix).await?;
 
-                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
-                        && current_id == Some(existing_id)
-                    {
+                for (key, _) in &matches {
+                    let hit_id = Self::extract_id_from_index_key(key);
+                    if hit_id.as_deref() == current_id {
                         continue;
                     }
-
-                    let existing_values: Vec<Option<&serde_json::Value>> =
-                        constraint_fields.iter().map(|f| existing.get(f)).collect();
-
-                    if new_values == existing_values
-                        && new_values
-                            .iter()
-                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
-                    {
-                        return Err(JsValue::from_str(&format!(
-                            "unique constraint violation: {entity}.{}",
-                            constraint_fields.join(", ")
-                        )));
-                    }
+                    return Err(JsValue::from_str(&format!(
+                        "unique constraint violation: {entity}.{}",
+                        constraint_fields.join(", ")
+                    )));
                 }
             }
         }
@@ -320,14 +523,53 @@ impl WasmDatabase {
                         }
                         OnDeleteAction::SetNull => {
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                let data_key = format!("data/{}/{}", fk.source_entity, source_id);
+                                let existing_raw = self
+                                    .storage
+                                    .get_raw(data_key.as_bytes())
+                                    .await?
+                                    .ok_or_else(|| {
+                                        JsValue::from_str("set_null: record disappeared")
+                                    })?;
+
                                 let mut updated = value.clone();
+                                let old_version = updated
+                                    .get("_version")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
                                 if let Some(obj) = updated.as_object_mut() {
                                     obj.insert(fk.source_field.clone(), serde_json::Value::Null);
+                                    obj.insert(
+                                        "_version".to_string(),
+                                        serde_json::Value::Number((old_version + 1).into()),
+                                    );
                                 }
-                                let key = format!("data/{}/{}", fk.source_entity, source_id);
+
                                 let serialized = serde_json::to_vec(&updated)
                                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                                self.storage.insert(key.as_bytes(), &serialized).await?;
+                                let stored = self
+                                    .storage
+                                    .encrypt_if_needed(data_key.as_bytes(), &serialized)
+                                    .await?;
+
+                                let mut batch = self.storage.batch();
+                                batch.expect_value(data_key.as_bytes().to_vec(), existing_raw);
+                                batch.insert(data_key.as_bytes().to_vec(), stored);
+                                self.update_indexes_batch(
+                                    &mut batch,
+                                    &fk.source_entity,
+                                    source_id,
+                                    &updated,
+                                    Some(&value),
+                                )?;
+                                batch.commit().await?;
+
+                                let event = ChangeEvent::update(
+                                    fk.source_entity.clone(),
+                                    source_id.to_string(),
+                                    updated,
+                                );
+                                self.dispatch_event(&event);
                             }
                         }
                     }
@@ -336,55 +578,6 @@ impl WasmDatabase {
         }
 
         Ok(cascade_deletes)
-    }
-
-    pub(crate) async fn update_indexes_async(
-        &self,
-        entity: &str,
-        id: &str,
-        value: &serde_json::Value,
-        old_value: Option<&serde_json::Value>,
-    ) -> Result<(), JsValue> {
-        if let Some(old) = old_value {
-            self.remove_indexes_async(entity, id, old).await?;
-        }
-
-        let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.borrow_inner()?;
-            inner.indexes.get(entity).cloned()
-        };
-
-        if let Some(index_defs) = index_defs {
-            for fields in index_defs {
-                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    self.storage.insert(&key, &[]).await?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(crate) async fn remove_indexes_async(
-        &self,
-        entity: &str,
-        id: &str,
-        value: &serde_json::Value,
-    ) -> Result<(), JsValue> {
-        let index_defs: Option<Vec<Vec<String>>> = {
-            let inner = self.borrow_inner()?;
-            inner.indexes.get(entity).cloned()
-        };
-
-        if let Some(index_defs) = index_defs {
-            for fields in index_defs {
-                if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    let _ = self.storage.remove(&key).await;
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub(crate) fn validate_unique_sync(
@@ -399,36 +592,26 @@ impl WasmDatabase {
         };
 
         if let Some(constraints) = constraints {
-            let prefix = format!("data/{entity}/");
-            let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
-
             for constraint_fields in constraints {
-                let new_values: Vec<Option<&serde_json::Value>> =
-                    constraint_fields.iter().map(|f| value.get(f)).collect();
+                if constraint_fields.iter().any(|f| {
+                    value.get(f).is_none() || value.get(f) == Some(&serde_json::Value::Null)
+                }) {
+                    continue;
+                }
 
-                for (_key, existing_data) in &items {
-                    let existing: serde_json::Value = serde_json::from_slice(existing_data)
-                        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                let index_prefix =
+                    Self::build_unique_index_prefix(entity, &constraint_fields, value)?;
+                let matches = self.storage.prefix_scan_sync(&index_prefix)?;
 
-                    if let Some(existing_id) = existing.get("id").and_then(|v| v.as_str())
-                        && current_id == Some(existing_id)
-                    {
+                for (key, _) in &matches {
+                    let hit_id = Self::extract_id_from_index_key(key);
+                    if hit_id.as_deref() == current_id {
                         continue;
                     }
-
-                    let existing_values: Vec<Option<&serde_json::Value>> =
-                        constraint_fields.iter().map(|f| existing.get(f)).collect();
-
-                    if new_values == existing_values
-                        && new_values
-                            .iter()
-                            .all(|v| v.is_some() && *v != Some(&serde_json::Value::Null))
-                    {
-                        return Err(JsValue::from_str(&format!(
-                            "unique constraint violation: {entity}.{}",
-                            constraint_fields.join(", ")
-                        )));
-                    }
+                    return Err(JsValue::from_str(&format!(
+                        "unique constraint violation: {entity}.{}",
+                        constraint_fields.join(", ")
+                    )));
                 }
             }
         }
@@ -510,14 +693,46 @@ impl WasmDatabase {
                         }
                         OnDeleteAction::SetNull => {
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
+                                let data_key = format!("data/{}/{}", fk.source_entity, source_id);
+                                let existing_raw =
+                                    self.storage.get_raw_sync(data_key.as_bytes())?.ok_or_else(
+                                        || JsValue::from_str("set_null: record disappeared"),
+                                    )?;
+
                                 let mut updated = value.clone();
+                                let old_version = updated
+                                    .get("_version")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0);
                                 if let Some(obj) = updated.as_object_mut() {
                                     obj.insert(fk.source_field.clone(), serde_json::Value::Null);
+                                    obj.insert(
+                                        "_version".to_string(),
+                                        serde_json::Value::Number((old_version + 1).into()),
+                                    );
                                 }
-                                let key = format!("data/{}/{}", fk.source_entity, source_id);
+
                                 let serialized = serde_json::to_vec(&updated)
                                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
-                                self.storage.insert_sync(key.as_bytes(), &serialized)?;
+
+                                let mut batch = self.storage.batch();
+                                batch.expect_value(data_key.as_bytes().to_vec(), existing_raw);
+                                batch.insert(data_key.as_bytes().to_vec(), serialized);
+                                self.update_indexes_batch(
+                                    &mut batch,
+                                    &fk.source_entity,
+                                    source_id,
+                                    &updated,
+                                    Some(&value),
+                                )?;
+                                batch.commit_sync()?;
+
+                                let event = ChangeEvent::update(
+                                    fk.source_entity.clone(),
+                                    source_id.to_string(),
+                                    updated,
+                                );
+                                self.dispatch_event(&event);
                             }
                         }
                     }
@@ -528,15 +743,16 @@ impl WasmDatabase {
         Ok(cascade_deletes)
     }
 
-    pub(crate) fn update_indexes_sync(
+    pub(crate) fn update_indexes_batch(
         &self,
+        batch: &mut WasmBatch,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
         old_value: Option<&serde_json::Value>,
     ) -> Result<(), JsValue> {
         if let Some(old) = old_value {
-            self.remove_indexes_sync(entity, id, old)?;
+            self.remove_indexes_batch(batch, entity, id, old)?;
         }
 
         let index_defs: Option<Vec<Vec<String>>> = {
@@ -547,7 +763,7 @@ impl WasmDatabase {
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    self.storage.insert_sync(&key, &[])?;
+                    batch.insert(key, vec![]);
                 }
             }
         }
@@ -555,8 +771,9 @@ impl WasmDatabase {
         Ok(())
     }
 
-    pub(crate) fn remove_indexes_sync(
+    pub(crate) fn remove_indexes_batch(
         &self,
+        batch: &mut WasmBatch,
         entity: &str,
         id: &str,
         value: &serde_json::Value,
@@ -569,12 +786,41 @@ impl WasmDatabase {
         if let Some(index_defs) = index_defs {
             for fields in index_defs {
                 if let Some(key) = Self::build_index_key(entity, id, &fields, value)? {
-                    let _ = self.storage.remove_sync(&key);
+                    batch.remove(key);
                 }
             }
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn persist_index_definitions(&self, entity: &str) -> Result<(), JsValue> {
+        let all_indexes: Vec<Vec<String>> = {
+            let inner = self.borrow_inner()?;
+            inner.indexes.get(entity).cloned().unwrap_or_default()
+        };
+        let key = encode_index_definition_key(entity);
+        let bytes = serde_json::to_vec(&all_indexes)
+            .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+        self.storage.insert(&key, &bytes).await
+    }
+
+    fn build_unique_index_prefix(
+        entity: &str,
+        fields: &[String],
+        value: &serde_json::Value,
+    ) -> Result<Vec<u8>, JsValue> {
+        mqdb_core::query::build_unique_index_prefix(entity, fields, value, WASM_INDEX_PREFIX)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?
+            .ok_or_else(|| JsValue::from_str("missing field for unique check"))
+    }
+
+    fn extract_id_from_index_key(key: &[u8]) -> Option<String> {
+        mqdb_core::query::extract_id_from_index_key(key)
+    }
+
+    fn extract_id_from_data_key(key: &[u8]) -> Option<String> {
+        mqdb_core::query::extract_id_from_data_key(key)
     }
 
     fn build_index_key(
@@ -583,24 +829,7 @@ impl WasmDatabase {
         fields: &[String],
         value: &serde_json::Value,
     ) -> Result<Option<Vec<u8>>, JsValue> {
-        let mut encoded_values = Vec::new();
-        for field in fields {
-            let Some(v) = value.get(field) else {
-                return Ok(None);
-            };
-            let encoded = encode_value_for_index(v)?;
-            if !encoded_values.is_empty() {
-                encoded_values.push(0x00);
-            }
-            encoded_values.extend_from_slice(&encoded);
-        }
-
-        let prefix = format!("index/{entity}/{}/", fields.join("_"));
-        let mut key = Vec::with_capacity(prefix.len() + encoded_values.len() + 1 + id.len());
-        key.extend_from_slice(prefix.as_bytes());
-        key.extend_from_slice(&encoded_values);
-        key.push(b'/');
-        key.extend_from_slice(id.as_bytes());
-        Ok(Some(key))
+        mqdb_core::query::build_index_key(entity, id, fields, value, WASM_INDEX_PREFIX)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

@@ -3,7 +3,7 @@
 
 use super::{CursorOptions, JsValue, VecDeque, WasmDatabase, serialize_js, wasm_bindgen};
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Creates a cursor for streaming iteration over records.
     ///
@@ -16,6 +16,13 @@ impl WasmDatabase {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsValue::from_str(&format!("invalid options: {e}")))?
         };
+        Self::validate_query_limits(&opts.filters, &opts.sort)?;
+        self.validate_query_fields(
+            &entity,
+            &opts.filters,
+            &opts.sort,
+            opts.projection.as_deref(),
+        )?;
 
         let mut all_items = if let Some((records, remaining)) =
             self.try_index_scans_async(&entity, &opts.filters).await?
@@ -44,19 +51,20 @@ impl WasmDatabase {
     }
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "Cursor")]
 pub struct WasmCursor {
     buffer: VecDeque<serde_json::Value>,
     current_index: usize,
     exhausted: bool,
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Cursor")]
 impl WasmCursor {
     /// Returns the next item from the cursor.
     ///
     /// # Errors
     /// Returns an error if serialization fails.
+    #[wasm_bindgen(js_name = "nextItem")]
     pub fn next_item(&mut self) -> Result<JsValue, JsValue> {
         if self.exhausted || self.buffer.is_empty() {
             self.exhausted = true;
@@ -76,6 +84,7 @@ impl WasmCursor {
     ///
     /// # Errors
     /// Returns an error if serialization fails.
+    #[wasm_bindgen(js_name = "nextBatch")]
     pub fn next_batch(&mut self, size: usize) -> Result<JsValue, JsValue> {
         if self.exhausted || self.buffer.is_empty() {
             self.exhausted = true;
@@ -102,6 +111,7 @@ impl WasmCursor {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "hasMore")]
     pub fn has_more(&self) -> bool {
         !self.exhausted && !self.buffer.is_empty()
     }

@@ -5,14 +5,12 @@ use super::Database;
 use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::keys;
-use mqdb_core::types::{
-    Filter, FilterOp, MAX_FILTERS, MAX_SORT_FIELDS, Pagination, SortDirection, SortOrder,
-};
+use mqdb_core::query::RangeBound;
+use mqdb_core::types::{Filter, FilterOp, MAX_FILTERS, MAX_SORT_FIELDS, Pagination, SortOrder};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
 
-type RangeBound = (Vec<u8>, bool);
 type RangeBounds = (String, Option<RangeBound>, Option<RangeBound>);
 
 impl Database {
@@ -215,38 +213,14 @@ impl Database {
     ) -> Result<Option<RangeBounds>> {
         let range_field = filters
             .iter()
-            .find(|f| {
-                matches!(
-                    f.op,
-                    FilterOp::Gt | FilterOp::Gte | FilterOp::Lt | FilterOp::Lte
-                ) && is_indexed(&f.field)
-            })
+            .find(|f| f.op.is_range() && is_indexed(&f.field))
             .map(|f| f.field.clone());
 
         let Some(field) = range_field else {
             return Ok(None);
         };
 
-        let mut lower: Option<(Vec<u8>, bool)> = None;
-        let mut upper: Option<(Vec<u8>, bool)> = None;
-
-        for filter in filters.iter().filter(|f| f.field == field) {
-            match filter.op {
-                FilterOp::Gt => {
-                    lower = Some((keys::encode_value_for_index(&filter.value)?, false));
-                }
-                FilterOp::Gte => {
-                    lower = Some((keys::encode_value_for_index(&filter.value)?, true));
-                }
-                FilterOp::Lt => {
-                    upper = Some((keys::encode_value_for_index(&filter.value)?, false));
-                }
-                FilterOp::Lte => {
-                    upper = Some((keys::encode_value_for_index(&filter.value)?, true));
-                }
-                _ => {}
-            }
-        }
+        let (lower, upper, _consumed) = mqdb_core::query::collect_range_bounds(filters, &field)?;
 
         Ok(Some((field, lower, upper)))
     }
@@ -375,44 +349,7 @@ impl Database {
     }
 
     fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
-        results.sort_by(|a, b| {
-            for order in sort {
-                let a_val = a.get(&order.field);
-                let b_val = b.get(&order.field);
-
-                let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => Self::compare_json_values(av, bv),
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (None, None) => std::cmp::Ordering::Equal,
-                };
-
-                let cmp = match order.direction {
-                    SortDirection::Asc => cmp,
-                    SortDirection::Desc => cmp.reverse(),
-                };
-
-                if cmp != std::cmp::Ordering::Equal {
-                    return cmp;
-                }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
-
-    fn compare_json_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-        match (a, b) {
-            (Value::Number(a_num), Value::Number(b_num)) => {
-                let a_f64 = a_num.as_f64().unwrap_or(0.0);
-                let b_f64 = b_num.as_f64().unwrap_or(0.0);
-                a_f64
-                    .partial_cmp(&b_f64)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
-            (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
-            (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
-            _ => std::cmp::Ordering::Equal,
-        }
+        mqdb_core::query::sort_results(results, sort);
     }
 
     pub(super) fn matches_filters(entity: &Value, filters: &[Filter]) -> bool {

@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-04-22 — mqdb-core 0.6.0, mqdb-wasm 0.3.1, mqdb-agent 0.7.2
+
+### Added
+
+- New `mqdb-core::query` module — shared helpers for filter matching (`matches_all_filters`), sorting (`sort_results`, `compare_json_values`), range-bound collection, index-key construction, and id extraction — used by both `mqdb-agent` and `mqdb-wasm`
+- `FilterOp::from_js_op`, `FilterOp::is_equality`, `FilterOp::is_range`, `Filter::matches_document` helpers
+- `WASM_INDEX_PREFIX` constant in `mqdb-core::keys` for the WASM backend's `index/` key prefix
+- All 12 WASM example pages redesigned: per-page hero, "How it works" section with Mermaid flow diagrams, numbered "Try it" tour, inline pass/fail test summary panel next to every Run All Tests button
+- Schema and constraints pages now use form builders with dropdowns for type / operator / on-delete action instead of free-text JSON
+
+### Fixed
+
+- `mqdb-wasm` `listConstraints` returned `[{}, {}]` in JS because `serde_wasm_bindgen::to_value(&Vec<serde_json::Value>)` loses `Value::Object` map contents — now routes through `serde_json::to_string` + `JSON.parse` (same workaround used by `listRelationships`). Two new regression tests cover this and the parallel fix in `getSchema` for non-primitive defaults.
+
+### Changed
+
+- `mqdb-agent` and `mqdb-wasm` now delegate filter / sort / range-bound / index-key logic to `mqdb-core::query` instead of maintaining parallel copies (~300 duplicated lines removed)
+- Deleted `mqdb-wasm/src/encoding.rs` — superseded by `mqdb-core::keys::encode_value_for_index`
+
+## 2026-04-20 — mqdb-wasm 0.3.0
+
+### Added
+
+- Persistent metadata reload: `openPersistent` and `openEncrypted` now restore schemas, constraints, indexes, relationships, and ID counters from IndexedDB on reopen
+- Async admin variants: `addSchemaAsync`, `addUniqueConstraintAsync`, `addNotNullAsync`, `addForeignKeyAsync`, `addIndexAsync`, `addRelationshipAsync` — persist definitions to IndexedDB
+- Index backfill on `addIndex` / `addIndexAsync` — existing records are indexed immediately
+- camelCase JavaScript API: all multi-word methods use camelCase (`addSchema`, `readSync`, etc.) and structs drop the `Wasm` prefix (`Database`, `Cursor`)
+- `in` filter operator for set-membership queries
+- `$DB/_admin/index/*/add` and `$DB/_catalog` admin operations via `execute()`
+- Atomic batch writes for CRUD operations (data + index entries written in a single transaction)
+- CAS precondition on update and delete via `expect_value` in batch writes
+
+### Fixed
+
+- SetNull cascade now bumps `_version`, updates index entries, and dispatches update events
+- Unique constraint validation uses index lookup (O(1)) instead of full entity scan (O(N))
+- `serde_wasm_bindgen` Map/Object mismatch: `to_value` produces JS `Map` for struct options, causing `#[serde(default)]` to silently drop filter/sort/pagination fields — fixed by routing through `JSON.parse` for struct deserialization targets
+
 ## 2026-04-15 — mqdb-core 0.5.2, mqdb-agent 0.7.1
 
 ### Added

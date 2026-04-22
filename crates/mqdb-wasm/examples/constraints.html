@@ -5,6 +5,127 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Constraints</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .page-hero {
+            background: linear-gradient(135deg, #c62828, #b71c1c);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .constraint-list {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+        .constraint-list li {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-left: 4px solid #c62828;
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-bottom: 6px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+        }
+        .constraint-list li.unique { border-left-color: #1565c0; }
+        .constraint-list li.not_null { border-left-color: #558b2f; }
+        .constraint-list li.foreign_key { border-left-color: #ef6c00; }
+        .constraint-list li .ctype {
+            display: inline-block;
+            font-size: 11px;
+            padding: 1px 6px;
+            border-radius: 3px;
+            margin-right: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .ctype.unique { background: #e3f2fd; color: #1565c0; }
+        .ctype.not_null { background: #e8f5e9; color: #558b2f; }
+        .ctype.foreign_key { background: #fff3e0; color: #ef6c00; }
+
+        .data-table {
+            max-height: 260px;
+            overflow-y: auto;
+        }
+        .field-pill {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1565c0;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            margin: 2px;
+            cursor: pointer;
+        }
+        .field-pill.selected {
+            background: #1565c0;
+            color: white;
+        }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 300px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
+        .test-summary .title { color: #333; font-weight: 600; }
+    </style>
 </head>
 <body>
     <nav>
@@ -17,152 +138,258 @@
         <a href="relationships.html">Relationships</a>
         <a href="cursor.html">Cursor</a>
         <a href="persistent.html">Persistent</a>
+        <a href="encrypted.html">Encrypted</a>
+        <a href="sync-api.html">Sync API</a>
+        <a href="execute.html">Execute</a>
+        <a href="count.html">Count</a>
     </nav>
 
-    <h1>Constraints</h1>
+    <div class="page-hero">
+        <h2>Constraints — write-time integrity</h2>
+        <p>Constraints reject bad writes before they land. UNIQUE prevents duplicate values on a field; NOT NULL requires the field to be present; FOREIGN KEY links to another entity and governs what happens when the referenced row is deleted (CASCADE, RESTRICT, or SET NULL).</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><strong>UNIQUE</strong>: a write that would create a duplicate on the chosen fields fails with <code>unique constraint violation</code>. Composite keys (multiple fields) are allowed.</li>
+                <li><strong>NOT NULL</strong>: writes missing the field, or setting it to <code>null</code>, are rejected.</li>
+                <li><strong>FOREIGN KEY</strong>: a write with a non-existent parent id is rejected. When the parent is deleted, the child rows are handled by the <code>on_delete</code> action:
+                    <ul>
+                        <li><strong>CASCADE</strong> — children are deleted too</li>
+                        <li><strong>RESTRICT</strong> — the parent delete itself is rejected while children exist</li>
+                        <li><strong>SET NULL</strong> — children keep existing with the FK field nulled out</li>
+                    </ul>
+                </li>
+                <li>Constraints are stored per entity. Call <code>listConstraints(entity)</code> to inspect them.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart TD
+    W["db.create or update"] --> Q{Check all<br/>constraints}
+    Q -- UNIQUE collision --> X1[reject: unique]
+    Q -- NOT NULL missing --> X2[reject: not_null]
+    Q -- FK parent absent --> X3[reject: foreign_key]
+    Q -- all pass --> OK[write lands]
+    D["db.delete parent"] --> DQ{FK on_delete?}
+    DQ -- CASCADE --> D1[delete children too]
+    DQ -- RESTRICT --> D2[reject if children]
+    DQ -- SET NULL --> D3[null out FK on children]
+    style X1 fill:#ffcdd2,stroke:#c62828
+    style X2 fill:#ffcdd2,stroke:#c62828
+    style X3 fill:#ffcdd2,stroke:#c62828
+    style D2 fill:#ffcdd2,stroke:#c62828
+    style OK fill:#c8e6c9,stroke:#2e7d32
+    style D1 fill:#c8e6c9,stroke:#2e7d32
+    style D3 fill:#c8e6c9,stroke:#2e7d32
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a five-step tour</h3>
+        <ol>
+            <li>The <strong>Add constraint</strong> form is pre-filled with a UNIQUE constraint on <code>users.email</code>. Click <code>Add</code> — the constraint appears in the list to the right.</li>
+            <li>Scroll to <strong>Scenario playground</strong> and click <code>Seed data</code> to create two users with the same email. The second insert is rejected (log shows <code>✗ unique constraint violation</code>).</li>
+            <li>Switch the constraint type to <code>Foreign key</code>. Source is pre-filled: <code>posts.author_id → users.id</code>, on delete <code>CASCADE</code>. Click <code>Add</code>, then <code>Setup FK demo</code> → <code>Delete parent</code>. The child posts vanish with the user.</li>
+            <li>Change on-delete to <code>RESTRICT</code>, reset the demo, and try to delete the parent again. The delete is rejected while children exist.</li>
+            <li>Click <code>Run all tests</code> at the bottom to see all six scenarios exercised automatically.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
-            <h2>Add Constraint</h2>
-            <div class="row">
-                <label>Entity:</label>
-                <input type="text" id="constraintEntity" value="users">
-            </div>
-            <div class="row">
-                <label>Type:</label>
+            <h2>Add constraint</h2>
+            <div class="kv-grid">
+                <label for="constraintEntity">Entity</label>
+                <select id="constraintEntity">
+                    <option value="users" selected>users</option>
+                    <option value="posts">posts</option>
+                    <option value="comments">comments</option>
+                    <option value="__custom__">Other…</option>
+                </select>
+
+                <label id="customEntityLabel" for="customEntity" style="display:none">Custom name</label>
+                <input type="text" id="customEntity" placeholder="e.g. products" style="display:none">
+
+                <label for="constraintType">Type</label>
                 <select id="constraintType">
-                    <option value="unique">Unique</option>
+                    <option value="unique" selected>UNIQUE</option>
                     <option value="not_null">NOT NULL</option>
-                    <option value="foreign_key">Foreign Key</option>
+                    <option value="foreign_key">FOREIGN KEY</option>
                 </select>
             </div>
 
             <div id="uniqueFields" class="card mt-10">
-                <h3>Unique Constraint</h3>
-                <div class="row">
-                    <label>Fields:</label>
-                    <input type="text" id="uniqueFieldList" value="email" placeholder="comma-separated">
+                <h3>UNIQUE</h3>
+                <p class="hint">Pick one or more fields to require unique values across the entity.</p>
+                <div class="kv-grid">
+                    <label for="uniqueFieldList">Fields</label>
+                    <input type="text" id="uniqueFieldList" value="email" placeholder="comma-separated e.g. email,tenant_id">
                 </div>
             </div>
 
             <div id="notNullFields" class="card mt-10 hidden">
-                <h3>NOT NULL Constraint</h3>
-                <div class="row">
-                    <label>Field:</label>
+                <h3>NOT NULL</h3>
+                <p class="hint">Pick the field that must always be present and non-null.</p>
+                <div class="kv-grid">
+                    <label for="notNullField">Field</label>
                     <input type="text" id="notNullField" value="name">
                 </div>
             </div>
 
             <div id="fkFields" class="card mt-10 hidden">
-                <h3>Foreign Key Constraint</h3>
-                <div class="row">
-                    <label>Source Field:</label>
-                    <input type="text" id="fkSourceField" value="user_id">
-                </div>
-                <div class="row">
-                    <label>Target Entity:</label>
-                    <input type="text" id="fkTargetEntity" value="users">
-                </div>
-                <div class="row">
-                    <label>Target Field:</label>
-                    <input type="text" id="fkTargetField" value="id">
-                </div>
-                <div class="row">
-                    <label>On Delete:</label>
+                <h3>FOREIGN KEY</h3>
+                <p class="hint">Reject writes whose parent id doesn't exist; when the parent is deleted, do the action below.</p>
+                <div class="kv-grid">
+                    <label for="fkSourceField">Source field</label>
+                    <input type="text" id="fkSourceField" value="author_id">
+
+                    <label for="fkTargetEntity">Target entity</label>
+                    <select id="fkTargetEntity">
+                        <option value="users" selected>users</option>
+                        <option value="posts">posts</option>
+                        <option value="comments">comments</option>
+                    </select>
+
+                    <label for="fkTargetField">Target field</label>
+                    <select id="fkTargetField">
+                        <option value="id" selected>id</option>
+                    </select>
+
+                    <label for="fkOnDelete">On delete</label>
                     <select id="fkOnDelete">
-                        <option value="restrict">RESTRICT</option>
-                        <option value="cascade">CASCADE</option>
-                        <option value="set_null">SET NULL</option>
+                        <option value="cascade" selected>CASCADE — delete children</option>
+                        <option value="restrict">RESTRICT — reject parent delete</option>
+                        <option value="set_null">SET NULL — null out FK on children</option>
                     </select>
                 </div>
             </div>
 
             <div class="row mt-10">
-                <button id="addConstraintBtn" class="success">Add Constraint</button>
-                <button id="listConstraintsBtn">List Constraints</button>
+                <button id="addConstraintBtn" class="success">Add</button>
+                <button id="listConstraintsBtn" class="secondary">Reload list</button>
             </div>
         </div>
 
         <div class="section">
-            <h2>Test Operations</h2>
-            <div class="card">
-                <h3>Quick Tests</h3>
-                <button id="runAllConstraintTests">Run All Tests</button>
-            </div>
-            <div class="card mt-10">
-                <h3>Unique Constraint</h3>
-                <button id="testUniquePass" class="success">Create Unique</button>
-                <button id="testUniqueFail" class="danger">Duplicate (Fail)</button>
-            </div>
-            <div class="card mt-10">
-                <h3>Foreign Key</h3>
-                <button id="setupFK">Setup FK Demo</button>
-                <button id="testFKPass" class="success">Valid FK</button>
-                <button id="testFKFail" class="danger">Invalid FK</button>
-            </div>
-            <div class="card mt-10">
-                <h3>Cascade Delete</h3>
-                <button id="setupCascade">Setup CASCADE</button>
-                <button id="testCascade" class="danger">Delete Parent</button>
-            </div>
-            <div class="card mt-10">
-                <h3>Restrict Delete</h3>
-                <button id="setupRestrict">Setup RESTRICT</button>
-                <button id="testRestrict" class="danger">Delete Parent</button>
+            <h2>Defined constraints <span class="badge" id="constraintCount">0</span></h2>
+            <div id="constraintsDisplay">
+                <p class="hint">No constraints yet. Use the form on the left.</p>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Current Constraints</h2>
-        <div id="constraintsDisplay">
-            <p style="color:#999">No constraints defined yet</p>
-        </div>
-    </div>
-
-    <div class="section">
-        <h2>Data View</h2>
+        <h2>Scenario playground</h2>
+        <p class="hint">Pre-built scenarios that show each constraint in action. Each runs in isolation — start with <code>Reset demo data</code> between runs if you want a clean slate.</p>
         <div class="row">
-            <label>Entity:</label>
+            <button id="resetDemo" class="secondary">Reset demo data</button>
+        </div>
+
+        <div class="grid-2 mt-10">
+            <div class="card">
+                <h3>UNIQUE: reject duplicate email</h3>
+                <p class="hint">Adds a UNIQUE constraint on <code>users.email</code>, inserts Alice, then tries Bob with Alice's email.</p>
+                <button id="testUniquePass" class="success">Create unique user</button>
+                <button id="testUniqueFail" class="danger">Try duplicate (should fail)</button>
+            </div>
+
+            <div class="card">
+                <h3>FOREIGN KEY: valid / invalid parent</h3>
+                <p class="hint">Adds FK <code>posts.user_id → users.id</code> (RESTRICT), creates a user, then tries to add posts referencing real and fake user ids.</p>
+                <button id="setupFK">Setup FK</button>
+                <button id="testFKPass" class="success">Post with real parent</button>
+                <button id="testFKFail" class="danger">Post with fake parent</button>
+            </div>
+
+            <div class="card">
+                <h3>CASCADE: delete parent wipes children</h3>
+                <p class="hint">Adds FK <code>comments.post_id → posts.id</code> (CASCADE), creates a post with two comments, then deletes the post — comments vanish.</p>
+                <button id="setupCascade">Setup CASCADE</button>
+                <button id="testCascade" class="danger">Delete parent</button>
+            </div>
+
+            <div class="card">
+                <h3>RESTRICT: delete is blocked while children exist</h3>
+                <p class="hint">Adds FK <code>comments.post_id → posts.id</code> (RESTRICT), creates a post with one comment, then tries to delete the post — rejected.</p>
+                <button id="setupRestrict">Setup RESTRICT</button>
+                <button id="testRestrict" class="danger">Delete parent (should fail)</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Data view</h2>
+        <div class="row">
+            <label for="viewEntity">Entity</label>
             <select id="viewEntity">
-                <option value="users">users</option>
+                <option value="users" selected>users</option>
                 <option value="posts">posts</option>
                 <option value="comments">comments</option>
             </select>
             <button id="refreshData">Refresh</button>
-            <button id="clearData" class="danger">Clear</button>
+            <button id="clearData" class="danger">Delete all rows</button>
         </div>
-        <table id="dataTable">
-            <thead><tr><th>ID</th><th>Data</th></tr></thead>
-            <tbody id="dataBody"></tbody>
-        </table>
+        <div class="data-table">
+            <table id="dataTable">
+                <thead><tr><th>ID</th><th>Data</th></tr></thead>
+                <tbody id="dataBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> performs six scenarios in a fresh namespace (prefix <code>test_</code>) and reports each as pass or fail:</p>
+        <ol>
+            <li>UNIQUE on <code>test_users.email</code> rejects duplicate inserts</li>
+            <li>NOT NULL on <code>test_users.name</code> rejects rows without <code>name</code></li>
+            <li>Valid FK insert succeeds</li>
+            <li>Invalid FK insert is rejected</li>
+            <li>CASCADE delete removes all children</li>
+            <li>RESTRICT delete is blocked while children exist</li>
+        </ol>
+        <div class="row">
+            <button id="runAllConstraintTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
     <script type="module">
-        import init, { WasmDatabase } from '../pkg/mqdb_wasm.js';
+        import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
         const trackedEntities = new Set(['users', 'posts', 'comments']);
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
-            db = new WasmDatabase();
+            db = new Database();
             window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
+            updateConstraintsDisplay();
         }
 
         function setupEventListeners() {
             document.getElementById('constraintType').onchange = updateConstraintForm;
+            document.getElementById('constraintEntity').onchange = onEntityChange;
             document.getElementById('addConstraintBtn').onclick = addConstraint;
-            document.getElementById('listConstraintsBtn').onclick = listConstraints;
-            document.getElementById('runAllConstraintTests').onclick = runAllConstraintTests;
+            document.getElementById('listConstraintsBtn').onclick = updateConstraintsDisplay;
+            document.getElementById('resetDemo').onclick = resetDemo;
             document.getElementById('testUniquePass').onclick = testUniquePass;
             document.getElementById('testUniqueFail').onclick = testUniqueFail;
             document.getElementById('setupFK').onclick = setupFK;
@@ -175,6 +402,22 @@
             document.getElementById('refreshData').onclick = refreshData;
             document.getElementById('clearData').onclick = clearData;
             document.getElementById('viewEntity').onchange = refreshData;
+            document.getElementById('runAllConstraintTests').onclick = runAllConstraintTests;
+        }
+
+        function onEntityChange() {
+            const v = document.getElementById('constraintEntity').value;
+            const show = v === '__custom__';
+            document.getElementById('customEntityLabel').style.display = show ? 'block' : 'none';
+            document.getElementById('customEntity').style.display = show ? 'block' : 'none';
+        }
+
+        function resolveEntity() {
+            const v = document.getElementById('constraintEntity').value;
+            if (v === '__custom__') {
+                return document.getElementById('customEntity').value.trim() || 'users';
+            }
+            return v;
         }
 
         function updateConstraintForm() {
@@ -186,67 +429,57 @@
 
         async function addConstraint() {
             try {
-                const entity = document.getElementById('constraintEntity').value;
+                const entity = resolveEntity();
                 const type = document.getElementById('constraintType').value;
-
                 if (type === 'unique') {
-                    const fields = document.getElementById('uniqueFieldList').value.split(',').map(f => f.trim());
-                    log(`Adding unique constraint on ${entity}(${fields.join(', ')})...`);
-                    db.add_unique_constraint(entity, fields);
-                    log(`Unique constraint added`, 'success');
+                    const fields = document.getElementById('uniqueFieldList').value
+                        .split(',').map(f => f.trim()).filter(Boolean);
+                    if (fields.length === 0) return log('At least one field required', 'warning');
+                    db.addUniqueConstraint(entity, fields);
+                    log(`UNIQUE(${fields.join(', ')}) on ${entity}`, 'success');
                 } else if (type === 'not_null') {
-                    const field = document.getElementById('notNullField').value;
-                    log(`Adding NOT NULL constraint on ${entity}.${field}...`);
-                    db.add_not_null(entity, field);
-                    log(`NOT NULL constraint added`, 'success');
-                } else if (type === 'foreign_key') {
-                    const sourceField = document.getElementById('fkSourceField').value;
-                    const targetEntity = document.getElementById('fkTargetEntity').value;
-                    const targetField = document.getElementById('fkTargetField').value;
-                    const onDelete = document.getElementById('fkOnDelete').value;
-                    log(`Adding FK: ${entity}.${sourceField} -> ${targetEntity}.${targetField} (${onDelete.toUpperCase()})...`);
-                    db.add_foreign_key(entity, sourceField, targetEntity, targetField, onDelete);
-                    log(`Foreign key constraint added`, 'success');
+                    const field = document.getElementById('notNullField').value.trim();
+                    if (!field) return log('Field required', 'warning');
+                    db.addNotNull(entity, field);
+                    log(`NOT NULL(${field}) on ${entity}`, 'success');
+                } else {
+                    const sf = document.getElementById('fkSourceField').value.trim();
+                    const te = document.getElementById('fkTargetEntity').value;
+                    const tf = document.getElementById('fkTargetField').value;
+                    const od = document.getElementById('fkOnDelete').value;
+                    db.addForeignKey(entity, sf, te, tf, od);
+                    log(`FK ${entity}.${sf} → ${te}.${tf} ${od.toUpperCase()}`, 'success');
                 }
-
                 trackedEntities.add(entity);
                 updateConstraintsDisplay();
             } catch (e) {
-                log(`Error: ${e}`, 'error');
+                log(`${e}`, 'error');
             }
-        }
-
-        async function listConstraints() {
-            const entity = document.getElementById('constraintEntity').value;
-            log(`Listing constraints for ${entity}...`);
-            const constraints = db.list_constraints(entity);
-            log(`Constraints: ${JSON.stringify(constraints, null, 2)}`, 'info');
         }
 
         function updateConstraintsDisplay() {
             const container = document.getElementById('constraintsDisplay');
             let html = '';
-
+            let total = 0;
             for (const entity of trackedEntities) {
-                const constraints = db.list_constraints(entity);
-                if (constraints && constraints.length > 0) {
-                    html += `<div class="card">
-                        <h3>${entity}</h3>
-                        <ul>`;
-                    for (const c of constraints) {
+                const cs = db ? db.listConstraints(entity) : [];
+                if (cs && cs.length > 0) {
+                    total += cs.length;
+                    html += `<h3>${entity}</h3><ul class="constraint-list">`;
+                    for (const c of cs) {
                         if (c.type === 'unique') {
-                            html += `<li>UNIQUE(${c.fields.join(', ')})</li>`;
+                            html += `<li class="unique"><span class="ctype unique">unique</span>(${c.fields.join(', ')})</li>`;
                         } else if (c.type === 'not_null') {
-                            html += `<li>NOT NULL(${c.field})</li>`;
+                            html += `<li class="not_null"><span class="ctype not_null">not null</span>${c.field}</li>`;
                         } else if (c.type === 'foreign_key') {
-                            html += `<li>FK: ${c.field} → ${c.target_entity}.${c.target_field} (${c.on_delete.toUpperCase()})</li>`;
+                            html += `<li class="foreign_key"><span class="ctype foreign_key">fk</span>${c.field} → ${c.target_entity}.${c.target_field} <code>${(c.on_delete || '').toUpperCase()}</code></li>`;
                         }
                     }
-                    html += '</ul></div>';
+                    html += '</ul>';
                 }
             }
-
-            container.innerHTML = html || '<p style="color:#999">No constraints defined yet</p>';
+            document.getElementById('constraintCount').textContent = `${total}`;
+            container.innerHTML = html || '<p class="hint">No constraints yet.</p>';
         }
 
         async function refreshData() {
@@ -255,17 +488,17 @@
                 const records = await db.list(entity, null);
                 const tbody = document.getElementById('dataBody');
                 tbody.innerHTML = '';
-                for (const record of records) {
-                    const {id, ...rest} = record;
+                for (const r of records) {
+                    const { id, ...rest } = r;
                     const tr = document.createElement('tr');
-                    tr.innerHTML = `<td><code>${id}</code></td><td><code>${JSON.stringify(rest)}</code></td>`;
+                    tr.innerHTML = `<td><code>${escapeHtml(id)}</code></td><td><code>${escapeHtml(JSON.stringify(rest))}</code></td>`;
                     tbody.appendChild(tr);
                 }
                 if (records.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;color:#999">No records</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="2" class="hint" style="text-align:center">No records</td></tr>';
                 }
             } catch (e) {
-                log(`Error: ${e}`, 'error');
+                log(`${e}`, 'error');
             }
         }
 
@@ -274,215 +507,208 @@
             try {
                 const records = await db.list(entity, null);
                 for (const r of records) {
-                    try { await db.delete(entity, r.id); } catch (e) {}
+                    try { await db.delete(entity, r.id); } catch {}
                 }
-                log(`Cleared ${entity}`, 'success');
+                log(`Cleared ${records.length} from ${entity}`, 'success');
                 refreshData();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        async function resetDemo() {
+            for (const entity of ['users', 'posts', 'comments']) {
+                try {
+                    const records = await db.list(entity, null);
+                    for (const r of records) {
+                        try { await db.delete(entity, r.id); } catch {}
+                    }
+                } catch {}
             }
+            log('Demo data reset (users / posts / comments cleared)', 'success');
+            refreshData();
         }
 
         async function testUniquePass() {
-            log('Testing unique constraint (should pass)...');
-            db.add_unique_constraint('users', ['email']);
             try {
-                const result = await db.create('users', {name: 'Alice', email: 'unique_' + Date.now() + '@test.com'});
-                log(`✓ Created user: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`✗ Error: ${e}`, 'error');
-            }
+                db.addUniqueConstraint('users', ['email']);
+                const r = await db.create('users', { name: 'Alice', email: 'unique_' + Date.now() + '@test.com' });
+                log(`Created ${r.id}: ${r.name} (${r.email})`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
             updateConstraintsDisplay();
             refreshData();
         }
 
         async function testUniqueFail() {
-            log('Testing unique constraint (should fail)...');
-            db.add_unique_constraint('users', ['email']);
-            const email = 'duplicate@test.com';
             try {
-                await db.create('users', {name: 'First', email: email});
-                await db.create('users', {name: 'Second', email: email});
-                log('✗ Should have thrown error', 'error');
-            } catch (e) {
-                log(`✓ Correctly rejected duplicate: ${e}`, 'success');
-            }
+                db.addUniqueConstraint('users', ['email']);
+                const email = 'duplicate@test.com';
+                await db.create('users', { name: 'First', email });
+                try {
+                    await db.create('users', { name: 'Second', email });
+                    log('✗ Duplicate was NOT rejected', 'error');
+                } catch (e) {
+                    log(`✓ Duplicate rejected: ${e}`, 'success');
+                }
+            } catch (e) { log(`${e}`, 'error'); }
             updateConstraintsDisplay();
             refreshData();
         }
 
         async function setupFK() {
-            log('Setting up FK demo: posts.user_id -> users.id (RESTRICT)...');
-            db.add_foreign_key('posts', 'user_id', 'users', 'id', 'restrict');
-            const user = await db.create('users', {name: 'FK Demo User', email: 'fk_' + Date.now() + '@test.com'});
-            log(`Created user: ${JSON.stringify(user)}`, 'success');
+            try {
+                db.addForeignKey('posts', 'user_id', 'users', 'id', 'restrict');
+                const user = await db.create('users', { name: 'FK demo', email: 'fk_' + Date.now() + '@test.com' });
+                log(`Parent user ${user.id} created`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
             updateConstraintsDisplay();
             refreshData();
         }
 
         async function testFKPass() {
-            log('Testing FK with valid reference...');
             try {
                 const users = await db.list('users', null);
-                if (users.length === 0) {
-                    log('No users found. Run "Setup FK Demo" first.', 'warning');
-                    return;
-                }
-                const userId = users[0].id;
-                const post = await db.create('posts', {title: 'Test Post', user_id: userId});
-                log(`✓ Created post with valid FK: ${JSON.stringify(post)}`, 'success');
-            } catch (e) {
-                log(`✗ Error: ${e}`, 'error');
-            }
+                if (users.length === 0) return log('Click "Setup FK" first', 'warning');
+                const post = await db.create('posts', { title: 'Valid post', user_id: users[0].id });
+                log(`✓ Post ${post.id} → user ${users[0].id}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
             refreshData();
         }
 
         async function testFKFail() {
-            log('Testing FK with invalid reference...');
             try {
-                await db.create('posts', {title: 'Bad Post', user_id: 'nonexistent_999'});
-                log('✗ Should have thrown FK violation', 'error');
+                await db.create('posts', { title: 'Bad post', user_id: 'nonexistent_999' });
+                log('✗ Invalid FK was NOT rejected', 'error');
             } catch (e) {
-                log(`✓ Correctly rejected invalid FK: ${e}`, 'success');
+                log(`✓ Invalid FK rejected: ${e}`, 'success');
             }
         }
 
         async function setupCascade() {
-            log('Setting up CASCADE demo: comments.post_id -> posts.id (CASCADE)...');
-            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'cascade');
-            const post = await db.create('posts', {title: 'Parent Post', content: 'Will be deleted'});
-            const comment1 = await db.create('comments', {text: 'Comment 1', post_id: post.id});
-            const comment2 = await db.create('comments', {text: 'Comment 2', post_id: post.id});
-            log(`Created post ${post.id} with 2 comments`, 'success');
+            try {
+                db.addForeignKey('comments', 'post_id', 'posts', 'id', 'cascade');
+                const post = await db.create('posts', { title: 'Parent post' });
+                await db.create('comments', { text: 'Comment 1', post_id: post.id });
+                await db.create('comments', { text: 'Comment 2', post_id: post.id });
+                log(`Parent post ${post.id} + 2 comments (CASCADE)`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
             updateConstraintsDisplay();
             refreshData();
         }
 
         async function testCascade() {
-            log('Testing CASCADE delete...');
             try {
                 const posts = await db.list('posts', null);
-                if (posts.length === 0) {
-                    log('No posts found. Run "Setup CASCADE" first.', 'warning');
-                    return;
-                }
-                const postId = posts[0].id;
-                const commentsBefore = await db.list('comments', null);
-                log(`Before: ${posts.length} posts, ${commentsBefore.length} comments`);
-
-                await db.delete('posts', postId);
-
-                const postsAfter = await db.list('posts', null);
-                const commentsAfter = await db.list('comments', null);
-                log(`After: ${postsAfter.length} posts, ${commentsAfter.length} comments`);
-
-                if (commentsAfter.length < commentsBefore.length) {
-                    log('✓ CASCADE delete worked - comments were deleted', 'success');
-                } else {
-                    log('✗ Comments were not cascaded', 'error');
-                }
-            } catch (e) {
-                log(`✗ Error: ${e}`, 'error');
-            }
+                if (posts.length === 0) return log('Click "Setup CASCADE" first', 'warning');
+                const before = await db.list('comments', null);
+                await db.delete('posts', posts[0].id);
+                const after = await db.list('comments', null);
+                const ok = after.length < before.length;
+                log(ok ? `✓ CASCADE worked: comments ${before.length} → ${after.length}` : '✗ Comments not cascaded', ok ? 'success' : 'error');
+            } catch (e) { log(`${e}`, 'error'); }
             refreshData();
         }
 
         async function setupRestrict() {
-            log('Setting up RESTRICT demo...');
-            db.add_foreign_key('comments', 'post_id', 'posts', 'id', 'restrict');
-            const post = await db.create('posts', {title: 'Protected Post', content: 'Cannot delete while has comments'});
-            const comment = await db.create('comments', {text: 'Blocking comment', post_id: post.id});
-            log(`Created post ${post.id} with 1 comment`, 'success');
+            try {
+                db.addForeignKey('comments', 'post_id', 'posts', 'id', 'restrict');
+                const post = await db.create('posts', { title: 'Protected post' });
+                await db.create('comments', { text: 'Blocking comment', post_id: post.id });
+                log(`Parent post ${post.id} + 1 blocking comment (RESTRICT)`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
             updateConstraintsDisplay();
             refreshData();
         }
 
         async function testRestrict() {
-            log('Testing RESTRICT delete...');
             try {
                 const posts = await db.list('posts', null);
-                if (posts.length === 0) {
-                    log('No posts found. Run "Setup RESTRICT" first.', 'warning');
-                    return;
-                }
-                const postId = posts[0].id;
-                await db.delete('posts', postId);
-                log('✗ Should have been blocked by RESTRICT', 'error');
+                if (posts.length === 0) return log('Click "Setup RESTRICT" first', 'warning');
+                await db.delete('posts', posts[0].id);
+                log('✗ RESTRICT did NOT block delete', 'error');
             } catch (e) {
                 log(`✓ RESTRICT blocked delete: ${e}`, 'success');
             }
             refreshData();
         }
 
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
         async function runAllConstraintTests() {
-            log('=== Running All Constraint Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Constraint tests (test_* namespace) ===', 'title');
 
-            log('\n--- Test 1: Unique Constraint ---');
-            db.add_unique_constraint('test_users', ['email']);
-            await db.create('test_users', {name: 'User1', email: 'unique@test.com'});
-            log('Created first user with unique@test.com', 'success');
+            summaryLine('Test 1 — UNIQUE(email)');
             try {
-                await db.create('test_users', {name: 'User2', email: 'unique@test.com'});
-                log('✗ Duplicate should have been rejected', 'error');
-            } catch (e) {
-                log('✓ Duplicate correctly rejected', 'success');
-            }
+                db.addUniqueConstraint('test_users', ['email']);
+                await db.create('test_users', { name: 'User1', email: 'unique@test.com' });
+                try {
+                    await db.create('test_users', { name: 'User2', email: 'unique@test.com' });
+                    summaryLine('  ✗ duplicate accepted', 'fail');
+                } catch { summaryLine('  ✓ duplicate rejected', 'pass'); }
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\n--- Test 2: NOT NULL Constraint ---');
-            db.add_not_null('test_users', 'name');
+            summaryLine('Test 2 — NOT NULL(name)');
             try {
-                await db.create('test_users', {email: 'noname@test.com'});
-                log('✗ Missing required field should have been rejected', 'error');
-            } catch (e) {
-                log('✓ Missing NOT NULL field correctly rejected', 'success');
-            }
+                db.addNotNull('test_users', 'name');
+                try {
+                    await db.create('test_users', { email: 'noname@test.com' });
+                    summaryLine('  ✗ missing name accepted', 'fail');
+                } catch { summaryLine('  ✓ missing name rejected', 'pass'); }
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\n--- Test 3: Foreign Key (Valid) ---');
-            db.add_foreign_key('test_posts', 'author_id', 'test_users', 'id', 'restrict');
-            const user = await db.create('test_users', {name: 'Author', email: 'author_' + Date.now() + '@test.com'});
+            summaryLine('Test 3 — valid FK');
             try {
-                const post = await db.create('test_posts', {title: 'Post', author_id: user.id});
-                log(`✓ Created post with valid FK: ${post.id}`, 'success');
-            } catch (e) {
-                log(`✗ Valid FK rejected: ${e}`, 'error');
-            }
+                db.addForeignKey('test_posts', 'author_id', 'test_users', 'id', 'restrict');
+                const user = await db.create('test_users', { name: 'Author', email: 'author_' + Date.now() + '@test.com' });
+                const post = await db.create('test_posts', { title: 'Post', author_id: user.id });
+                summaryLine(`  ✓ post ${post.id} → user ${user.id}`, 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\n--- Test 4: Foreign Key (Invalid) ---');
+            summaryLine('Test 4 — invalid FK');
             try {
-                await db.create('test_posts', {title: 'Bad Post', author_id: 'fake_id'});
-                log('✗ Invalid FK should have been rejected', 'error');
-            } catch (e) {
-                log('✓ Invalid FK correctly rejected', 'success');
-            }
+                await db.create('test_posts', { title: 'Bad post', author_id: 'fake_id' });
+                summaryLine('  ✗ invalid FK accepted', 'fail');
+            } catch { summaryLine('  ✓ invalid FK rejected', 'pass'); }
 
-            log('\n--- Test 5: CASCADE Delete ---');
-            db.add_foreign_key('test_comments', 'post_id', 'test_posts', 'id', 'cascade');
-            const testPosts = await db.list('test_posts', null);
-            if (testPosts.length > 0) {
-                const pid = testPosts[0].id;
-                await db.create('test_comments', {text: 'Comment', post_id: pid});
-                await db.create('test_comments', {text: 'Comment 2', post_id: pid});
-                const before = await db.list('test_comments', null);
-                log(`Before delete: ${before.length} comments`);
-                await db.delete('test_posts', pid);
-                const after = await db.list('test_comments', null);
-                log(`After delete: ${after.length} comments`);
-                log('✓ CASCADE delete completed', 'success');
-            }
-
-            log('\n--- Test 6: RESTRICT Delete ---');
-            const newUser = await db.create('test_users', {name: 'Protected', email: 'protected_' + Date.now() + '@test.com'});
-            db.add_foreign_key('test_profiles', 'user_id', 'test_users', 'id', 'restrict');
-            await db.create('test_profiles', {bio: 'My bio', user_id: newUser.id});
+            summaryLine('Test 5 — CASCADE delete');
             try {
-                await db.delete('test_users', newUser.id);
-                log('✗ RESTRICT should have blocked delete', 'error');
-            } catch (e) {
-                log('✓ RESTRICT correctly blocked delete', 'success');
-            }
+                db.addForeignKey('test_comments', 'post_id', 'test_posts', 'id', 'cascade');
+                const posts = await db.list('test_posts', null);
+                if (posts.length > 0) {
+                    const pid = posts[0].id;
+                    await db.create('test_comments', { text: 'c1', post_id: pid });
+                    await db.create('test_comments', { text: 'c2', post_id: pid });
+                    const before = await db.list('test_comments', null);
+                    await db.delete('test_posts', pid);
+                    const after = await db.list('test_comments', null);
+                    summaryLine(after.length < before.length ? `  ✓ children ${before.length} → ${after.length}` : '  ✗ children not cascaded', after.length < before.length ? 'pass' : 'fail');
+                }
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('\n=== All Constraint Tests Complete ===', 'success');
+            summaryLine('Test 6 — RESTRICT delete');
+            try {
+                const user = await db.create('test_users', { name: 'Protected', email: 'protected_' + Date.now() + '@test.com' });
+                db.addForeignKey('test_profiles', 'user_id', 'test_users', 'id', 'restrict');
+                await db.create('test_profiles', { bio: 'My bio', user_id: user.id });
+                try {
+                    await db.delete('test_users', user.id);
+                    summaryLine('  ✗ RESTRICT did not block', 'fail');
+                } catch { summaryLine('  ✓ RESTRICT blocked delete', 'pass'); }
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
+
+            summaryLine('=== Done ===', 'pass');
             updateConstraintsDisplay();
+        }
+
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
         function log(msg, type = '') {

@@ -5,7 +5,7 @@ use super::{
     ChangeEvent, JsValue, Relationship, WasmDatabase, deserialize_js, serialize_js, wasm_bindgen,
 };
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Creates a new record in the specified entity.
     ///
@@ -55,9 +55,14 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert(key.as_bytes(), &serialized).await?;
-        self.update_indexes_async(&entity, &id, &value, None)
+        let stored = self
+            .storage
+            .encrypt_if_needed(key.as_bytes(), &serialized)
             .await?;
+        let mut batch = self.storage.batch();
+        batch.insert(key.as_bytes().to_vec(), stored);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, None)?;
+        batch.commit().await?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -88,6 +93,7 @@ impl WasmDatabase {
     ///
     /// # Errors
     /// Returns an error if the record is not found or includes cannot be loaded.
+    #[wasm_bindgen(js_name = "readWithIncludes")]
     pub async fn read_with_includes(
         &self,
         entity: String,
@@ -190,6 +196,12 @@ impl WasmDatabase {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
 
+        let existing_raw = self
+            .storage
+            .get_raw(key.as_bytes())
+            .await?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
+
         let existing_data = self
             .storage
             .get(key.as_bytes())
@@ -237,9 +249,15 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert(key.as_bytes(), &serialized).await?;
-        self.update_indexes_async(&entity, &id, &value, Some(&existing))
+        let stored = self
+            .storage
+            .encrypt_if_needed(key.as_bytes(), &serialized)
             .await?;
+        let mut batch = self.storage.batch();
+        batch.expect_value(key.as_bytes().to_vec(), existing_raw);
+        batch.insert(key.as_bytes().to_vec(), stored);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, Some(&existing))?;
+        batch.commit().await?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -267,8 +285,10 @@ impl WasmDatabase {
             .check_foreign_key_constraints_async(&entity, &id)
             .await?;
 
-        self.storage.remove(key.as_bytes()).await?;
-        self.remove_indexes_async(&entity, &id, &existing).await?;
+        let mut batch = self.storage.batch();
+        batch.remove(key.as_bytes().to_vec());
+        self.remove_indexes_batch(&mut batch, &entity, &id, &existing)?;
+        batch.commit().await?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = Box::pin(self.delete(cascade_entity, cascade_id)).await;
@@ -281,6 +301,7 @@ impl WasmDatabase {
     }
 
     #[must_use]
+    #[wasm_bindgen(js_name = "isMemoryBackend")]
     pub fn is_memory_backend(&self) -> bool {
         self.storage.is_memory()
     }
@@ -288,6 +309,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if the record is not found or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "readSync")]
     pub fn read_sync(&self, entity: String, id: String) -> Result<JsValue, JsValue> {
         let key = format!("data/{entity}/{id}");
 
@@ -305,6 +327,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if validation fails or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "createSync")]
     pub fn create_sync(&self, entity: String, data: JsValue) -> Result<JsValue, JsValue> {
         let mut value: serde_json::Value = deserialize_js(&data)?;
 
@@ -349,8 +372,10 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert_sync(key.as_bytes(), &serialized)?;
-        self.update_indexes_sync(&entity, &id, &value, None)?;
+        let mut batch = self.storage.batch();
+        batch.insert(key.as_bytes().to_vec(), serialized);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, None)?;
+        batch.commit_sync()?;
 
         let event = ChangeEvent::create(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -361,6 +386,7 @@ impl WasmDatabase {
     /// # Errors
     /// Returns an error if the record is not found, validation fails, or the backend is not memory-based.
     #[allow(clippy::needless_pass_by_value)]
+    #[wasm_bindgen(js_name = "updateSync")]
     pub fn update_sync(
         &self,
         entity: String,
@@ -369,6 +395,11 @@ impl WasmDatabase {
     ) -> Result<JsValue, JsValue> {
         let key = format!("data/{entity}/{id}");
         let updates: serde_json::Value = deserialize_js(&fields)?;
+
+        let existing_raw = self
+            .storage
+            .get_raw_sync(key.as_bytes())?
+            .ok_or_else(|| JsValue::from_str(&format!("not found: {entity}/{id}")))?;
 
         let existing_data = self
             .storage
@@ -415,8 +446,11 @@ impl WasmDatabase {
         let serialized = serde_json::to_vec(&value)
             .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
 
-        self.storage.insert_sync(key.as_bytes(), &serialized)?;
-        self.update_indexes_sync(&entity, &id, &value, Some(&existing))?;
+        let mut batch = self.storage.batch();
+        batch.expect_value(key.as_bytes().to_vec(), existing_raw);
+        batch.insert(key.as_bytes().to_vec(), serialized);
+        self.update_indexes_batch(&mut batch, &entity, &id, &value, Some(&existing))?;
+        batch.commit_sync()?;
 
         let event = ChangeEvent::update(entity, id, value.clone());
         self.dispatch_event(&event);
@@ -426,6 +460,7 @@ impl WasmDatabase {
 
     /// # Errors
     /// Returns an error if the record is not found, foreign key constraints prevent deletion, or the backend is not memory-based.
+    #[wasm_bindgen(js_name = "deleteSync")]
     pub fn delete_sync(&self, entity: String, id: String) -> Result<(), JsValue> {
         let key = format!("data/{entity}/{id}");
 
@@ -439,8 +474,10 @@ impl WasmDatabase {
 
         let cascade_deletes = self.check_foreign_key_constraints_sync(&entity, &id)?;
 
-        self.storage.remove_sync(key.as_bytes())?;
-        self.remove_indexes_sync(&entity, &id, &existing)?;
+        let mut batch = self.storage.batch();
+        batch.remove(key.as_bytes().to_vec());
+        self.remove_indexes_batch(&mut batch, &entity, &id, &existing)?;
+        batch.commit_sync()?;
 
         for (cascade_entity, cascade_id) in cascade_deletes {
             let _ = self.delete_sync(cascade_entity, cascade_id);
