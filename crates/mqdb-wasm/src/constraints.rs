@@ -4,9 +4,8 @@
 use super::{
     ChangeEvent, ForeignKeyEntry, JsValue, OnDeleteAction, Relationship, WasmDatabase, wasm_bindgen,
 };
-use crate::encoding::encode_value_for_index;
 use crate::types::WasmBatch;
-use mqdb_core::keys::{encode_constraint_key, encode_index_definition_key};
+use mqdb_core::keys::{WASM_INDEX_PREFIX, encode_constraint_key, encode_index_definition_key};
 
 #[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
@@ -386,7 +385,8 @@ impl WasmDatabase {
             }
         }
 
-        serde_wasm_bindgen::to_value(&constraints).unwrap_or(JsValue::NULL)
+        let json_str = serde_json::to_string(&constraints).unwrap_or_else(|_| "[]".to_string());
+        js_sys::JSON::parse(&json_str).unwrap_or(JsValue::NULL)
     }
 }
 
@@ -810,37 +810,17 @@ impl WasmDatabase {
         fields: &[String],
         value: &serde_json::Value,
     ) -> Result<Vec<u8>, JsValue> {
-        let mut encoded_values = Vec::new();
-        for field in fields {
-            let v = value
-                .get(field)
-                .ok_or_else(|| JsValue::from_str("missing field for unique check"))?;
-            let encoded = encode_value_for_index(v)?;
-            if !encoded_values.is_empty() {
-                encoded_values.push(0x00);
-            }
-            encoded_values.extend_from_slice(&encoded);
-        }
-
-        let prefix_str = format!("index/{entity}/{}/", fields.join("_"));
-        let mut prefix = Vec::with_capacity(prefix_str.len() + encoded_values.len() + 1);
-        prefix.extend_from_slice(prefix_str.as_bytes());
-        prefix.extend_from_slice(&encoded_values);
-        prefix.push(b'/');
-        Ok(prefix)
+        mqdb_core::query::build_unique_index_prefix(entity, fields, value, WASM_INDEX_PREFIX)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?
+            .ok_or_else(|| JsValue::from_str("missing field for unique check"))
     }
 
     fn extract_id_from_index_key(key: &[u8]) -> Option<String> {
-        let key_str = std::str::from_utf8(key).ok()?;
-        let last_slash = key_str.rfind('/')?;
-        Some(key_str[last_slash + 1..].to_string())
+        mqdb_core::query::extract_id_from_index_key(key)
     }
 
     fn extract_id_from_data_key(key: &[u8]) -> Option<String> {
-        let key_str = std::str::from_utf8(key).ok()?;
-        let rest = key_str.strip_prefix("data/")?;
-        let slash_pos = rest.find('/')?;
-        Some(rest[slash_pos + 1..].to_string())
+        mqdb_core::query::extract_id_from_data_key(key)
     }
 
     fn build_index_key(
@@ -849,24 +829,7 @@ impl WasmDatabase {
         fields: &[String],
         value: &serde_json::Value,
     ) -> Result<Option<Vec<u8>>, JsValue> {
-        let mut encoded_values = Vec::new();
-        for field in fields {
-            let Some(v) = value.get(field) else {
-                return Ok(None);
-            };
-            let encoded = encode_value_for_index(v)?;
-            if !encoded_values.is_empty() {
-                encoded_values.push(0x00);
-            }
-            encoded_values.extend_from_slice(&encoded);
-        }
-
-        let prefix = format!("index/{entity}/{}/", fields.join("_"));
-        let mut key = Vec::with_capacity(prefix.len() + encoded_values.len() + 1 + id.len());
-        key.extend_from_slice(prefix.as_bytes());
-        key.extend_from_slice(&encoded_values);
-        key.push(b'/');
-        key.extend_from_slice(id.as_bytes());
-        Ok(Some(key))
+        mqdb_core::query::build_index_key(entity, id, fields, value, WASM_INDEX_PREFIX)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

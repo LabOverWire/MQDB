@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 pub const SEPARATOR: u8 = b'/';
 pub const DATA_PREFIX: &[u8] = b"data";
 pub const INDEX_PREFIX: &[u8] = b"idx";
+pub const WASM_INDEX_PREFIX: &str = "index";
 pub const SUB_PREFIX: &[u8] = b"sub";
 pub const DEDUP_PREFIX: &[u8] = b"dedup";
 pub const META_PREFIX: &[u8] = b"meta";

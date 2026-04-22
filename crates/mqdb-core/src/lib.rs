@@ -13,6 +13,7 @@ pub mod license;
 pub mod outbox;
 pub mod partition;
 pub mod protocol;
+pub mod query;
 pub mod relationship;
 pub mod schema;
 pub mod storage;

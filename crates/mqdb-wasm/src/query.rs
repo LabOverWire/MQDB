@@ -4,15 +4,18 @@
 use super::{
     CountOptions, FilterJs, JsValue, ListOptions, SortOrderJs, WasmDatabase, wasm_bindgen,
 };
-use crate::encoding::encode_value_for_index;
+use mqdb_core::keys::{WASM_INDEX_PREFIX, encode_value_for_index};
 
 const MAX_FILTERS: usize = mqdb_core::types::MAX_FILTERS;
 const MAX_SORT_FIELDS: usize = mqdb_core::types::MAX_SORT_FIELDS;
 const MAX_LIST_RESULTS: usize = mqdb_core::types::MAX_LIST_RESULTS;
 
 type ScanResult = Option<(Vec<serde_json::Value>, Vec<FilterJs>)>;
-type RangeBound = Option<(Vec<u8>, bool)>;
-type RangeBounds = (RangeBound, RangeBound, Vec<usize>);
+type RangeBoundsResult = (
+    Option<mqdb_core::query::RangeBound>,
+    Option<mqdb_core::query::RangeBound>,
+    Vec<usize>,
+);
 
 #[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
@@ -154,18 +157,14 @@ impl WasmDatabase {
             return Ok(Self::apply_remaining_filters(records, &remaining).len());
         }
 
+        let core_filters: Vec<_> = opts.filters.iter().map(FilterJs::to_core_filter).collect();
         let prefix = format!("data/{entity}/");
         let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
         let mut count = 0usize;
         for (_key, value) in items {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
+            if mqdb_core::query::matches_all_filters(&parsed, &core_filters) {
                 count += 1;
             }
         }
@@ -199,18 +198,14 @@ impl WasmDatabase {
             return Ok(Self::apply_remaining_filters(records, &remaining).len());
         }
 
+        let core_filters: Vec<_> = opts.filters.iter().map(FilterJs::to_core_filter).collect();
         let prefix = format!("data/{entity}/");
         let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
         let mut count = 0usize;
         for (_key, value) in items {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-
-            if opts
-                .filters
-                .iter()
-                .all(|f| Self::matches_filter(&parsed, f))
-            {
+            if mqdb_core::query::matches_all_filters(&parsed, &core_filters) {
                 count += 1;
             }
         }
@@ -220,20 +215,21 @@ impl WasmDatabase {
 
 impl WasmDatabase {
     fn is_equality_op(op: &str) -> bool {
-        matches!(op, "" | "eq")
+        mqdb_core::FilterOp::from_js_op(op).is_some_and(|o| o.is_equality())
     }
 
     fn is_range_op(op: &str) -> bool {
-        matches!(op, "gt" | ">" | "gte" | ">=" | "lt" | "<" | "lte" | "<=")
+        mqdb_core::FilterOp::from_js_op(op).is_some_and(|o| o.is_range())
     }
 
     pub(crate) fn apply_remaining_filters(
         records: Vec<serde_json::Value>,
         remaining: &[FilterJs],
     ) -> Vec<serde_json::Value> {
+        let core_filters: Vec<_> = remaining.iter().map(FilterJs::to_core_filter).collect();
         records
             .into_iter()
-            .filter(|r| remaining.iter().all(|f| Self::matches_filter(r, f)))
+            .filter(|r| mqdb_core::query::matches_all_filters(r, &core_filters))
             .collect()
     }
 
@@ -242,13 +238,14 @@ impl WasmDatabase {
         entity: &str,
         filters: &[FilterJs],
     ) -> Result<Vec<serde_json::Value>, JsValue> {
+        let core_filters: Vec<_> = filters.iter().map(FilterJs::to_core_filter).collect();
         let prefix = format!("data/{entity}/");
         let items = self.storage.prefix_scan(prefix.as_bytes()).await?;
         let mut filtered = Vec::new();
         for (_key, value) in items {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-            if filters.iter().all(|f| Self::matches_filter(&parsed, f)) {
+            if mqdb_core::query::matches_all_filters(&parsed, &core_filters) {
                 filtered.push(parsed);
             }
         }
@@ -260,13 +257,14 @@ impl WasmDatabase {
         entity: &str,
         filters: &[FilterJs],
     ) -> Result<Vec<serde_json::Value>, JsValue> {
+        let core_filters: Vec<_> = filters.iter().map(FilterJs::to_core_filter).collect();
         let prefix = format!("data/{entity}/");
         let items = self.storage.prefix_scan_sync(prefix.as_bytes())?;
         let mut filtered = Vec::new();
         for (_key, value) in items {
             let parsed: serde_json::Value = serde_json::from_slice(&value)
                 .map_err(|e| JsValue::from_str(&format!("deserialization error: {e}")))?;
-            if filters.iter().all(|f| Self::matches_filter(&parsed, f)) {
+            if mqdb_core::query::matches_all_filters(&parsed, &core_filters) {
                 filtered.push(parsed);
             }
         }
@@ -347,95 +345,13 @@ impl WasmDatabase {
         Ok(None)
     }
 
-    fn collect_range_bounds(filters: &[FilterJs], field: &str) -> Result<RangeBounds, JsValue> {
-        let mut lower: Option<(Vec<u8>, bool)> = None;
-        let mut upper: Option<(Vec<u8>, bool)> = None;
-        let mut consumed_indices = Vec::new();
-
-        for (i, filter) in filters.iter().enumerate() {
-            if filter.field != field {
-                continue;
-            }
-            match filter.op.as_str() {
-                "gt" | ">" => {
-                    lower = Some((encode_value_for_index(&filter.value)?, false));
-                    consumed_indices.push(i);
-                }
-                "gte" | ">=" => {
-                    lower = Some((encode_value_for_index(&filter.value)?, true));
-                    consumed_indices.push(i);
-                }
-                "lt" | "<" => {
-                    upper = Some((encode_value_for_index(&filter.value)?, false));
-                    consumed_indices.push(i);
-                }
-                "lte" | "<=" => {
-                    upper = Some((encode_value_for_index(&filter.value)?, true));
-                    consumed_indices.push(i);
-                }
-                _ => {}
-            }
-        }
-
-        Ok((lower, upper, consumed_indices))
-    }
-
-    fn build_range_keys(
-        entity: &str,
+    fn collect_range_bounds(
+        filters: &[FilterJs],
         field: &str,
-        lower: Option<(&[u8], bool)>,
-        upper: Option<(&[u8], bool)>,
-    ) -> (Vec<u8>, Vec<u8>) {
-        let field_prefix = format!("index/{entity}/{field}");
-        let field_prefix_bytes = field_prefix.as_bytes();
-
-        let start = if let Some((value, inclusive)) = lower {
-            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1 + value.len() + 2);
-            key.extend_from_slice(field_prefix_bytes);
-            key.push(b'/');
-            key.extend_from_slice(value);
-            key.push(b'/');
-            if !inclusive {
-                key.push(0xFF);
-            }
-            key
-        } else {
-            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1);
-            key.extend_from_slice(field_prefix_bytes);
-            key.push(b'/');
-            key
-        };
-
-        let end = if let Some((value, inclusive)) = upper {
-            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1 + value.len() + 2);
-            key.extend_from_slice(field_prefix_bytes);
-            key.push(b'/');
-            key.extend_from_slice(value);
-            key.push(b'/');
-            if inclusive {
-                key.push(0xFF);
-            }
-            key
-        } else {
-            let mut key = Vec::with_capacity(field_prefix_bytes.len() + 1);
-            key.extend_from_slice(field_prefix_bytes);
-            key.push(0xFF);
-            key
-        };
-
-        (start, end)
-    }
-
-    fn extract_ids_from_index_keys(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<String> {
-        let mut ids = Vec::new();
-        for (key, _) in entries {
-            if let Some(id_start) = key.iter().rposition(|&b| b == b'/')
-                && let Ok(id) = String::from_utf8(key[id_start + 1..].to_vec())
-            {
-                ids.push(id);
-            }
-        }
-        ids
+    ) -> Result<RangeBoundsResult, JsValue> {
+        let core_filters: Vec<_> = filters.iter().map(FilterJs::to_core_filter).collect();
+        mqdb_core::query::collect_range_bounds(&core_filters, field)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
     async fn equality_scan_async(
@@ -448,13 +364,14 @@ impl WasmDatabase {
             return Ok(None);
         };
 
-        let encoded_value = encode_value_for_index(&matched_filter.value)?;
+        let encoded_value = encode_value_for_index(&matched_filter.value)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let mut index_prefix = format!("index/{entity}/{}/", matched_filter.field).into_bytes();
         index_prefix.extend_from_slice(&encoded_value);
         index_prefix.push(b'/');
 
         let index_entries = self.storage.prefix_scan(&index_prefix).await?;
-        let ids = Self::extract_ids_from_index_keys(&index_entries);
+        let ids = mqdb_core::query::extract_ids_from_index_keys(&index_entries);
 
         let mut records = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -486,13 +403,14 @@ impl WasmDatabase {
             return Ok(None);
         };
 
-        let encoded_value = encode_value_for_index(&matched_filter.value)?;
+        let encoded_value = encode_value_for_index(&matched_filter.value)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let mut index_prefix = format!("index/{entity}/{}/", matched_filter.field).into_bytes();
         index_prefix.extend_from_slice(&encoded_value);
         index_prefix.push(b'/');
 
         let index_entries = self.storage.prefix_scan_sync(&index_prefix)?;
-        let ids = Self::extract_ids_from_index_keys(&index_entries);
+        let ids = mqdb_core::query::extract_ids_from_index_keys(&index_entries);
 
         let mut records = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -524,15 +442,16 @@ impl WasmDatabase {
         };
 
         let (lower, upper, consumed) = Self::collect_range_bounds(filters, &field)?;
-        let (start, end) = Self::build_range_keys(
+        let (start, end) = mqdb_core::query::build_range_keys(
             entity,
             &field,
             lower.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
             upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+            WASM_INDEX_PREFIX,
         );
 
         let index_entries = self.storage.range_scan(&start, &end).await?;
-        let ids = Self::extract_ids_from_index_keys(&index_entries);
+        let ids = mqdb_core::query::extract_ids_from_index_keys(&index_entries);
 
         let mut records = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -560,15 +479,16 @@ impl WasmDatabase {
         };
 
         let (lower, upper, consumed) = Self::collect_range_bounds(filters, &field)?;
-        let (start, end) = Self::build_range_keys(
+        let (start, end) = mqdb_core::query::build_range_keys(
             entity,
             &field,
             lower.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
             upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
+            WASM_INDEX_PREFIX,
         );
 
         let index_entries = self.storage.range_scan_sync(&start, &end)?;
-        let ids = Self::extract_ids_from_index_keys(&index_entries);
+        let ids = mqdb_core::query::extract_ids_from_index_keys(&index_entries);
 
         let mut records = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -590,134 +510,18 @@ impl WasmDatabase {
         Ok(Some((records, remaining)))
     }
 
-    pub(crate) fn matches_filter(value: &serde_json::Value, filter: &FilterJs) -> bool {
-        let field_value = value.get(&filter.field);
-
-        match filter.op.as_str() {
-            "ne" | "<>" => field_value != Some(&filter.value),
-            "gt" | ">" => {
-                Self::compare_values(field_value, &filter.value)
-                    == Some(std::cmp::Ordering::Greater)
-            }
-            "lt" | "<" => {
-                Self::compare_values(field_value, &filter.value) == Some(std::cmp::Ordering::Less)
-            }
-            "gte" | ">=" => Self::compare_values(field_value, &filter.value)
-                .is_some_and(|ord| ord != std::cmp::Ordering::Less),
-            "lte" | "<=" => Self::compare_values(field_value, &filter.value)
-                .is_some_and(|ord| ord != std::cmp::Ordering::Greater),
-            "glob" | "~" => {
-                if let (Some(serde_json::Value::String(s)), serde_json::Value::String(pattern)) =
-                    (field_value, &filter.value)
-                {
-                    Self::glob_match(s, pattern)
-                } else {
-                    false
-                }
-            }
-            "in" => {
-                if let (Some(fv), serde_json::Value::Array(arr)) = (field_value, &filter.value) {
-                    arr.contains(fv)
-                } else {
-                    false
-                }
-            }
-            "null" | "?" => field_value.is_none() || field_value == Some(&serde_json::Value::Null),
-            "not_null" | "!?" => {
-                field_value.is_some() && field_value != Some(&serde_json::Value::Null)
-            }
-            _ => field_value == Some(&filter.value),
-        }
-    }
-
-    fn compare_values(
-        a: Option<&serde_json::Value>,
-        b: &serde_json::Value,
-    ) -> Option<std::cmp::Ordering> {
-        let a = a?;
-        match (a, b) {
-            (serde_json::Value::Number(a_num), serde_json::Value::Number(b_num)) => {
-                let a_f = a_num.as_f64()?;
-                let b_f = b_num.as_f64()?;
-                a_f.partial_cmp(&b_f)
-            }
-            (serde_json::Value::String(a_str), serde_json::Value::String(b_str)) => {
-                Some(a_str.cmp(b_str))
-            }
-            _ => None,
-        }
-    }
-
-    fn glob_match(text: &str, pattern: &str) -> bool {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 1 {
-            return text == pattern;
-        }
-
-        let mut pos = 0;
-        for (i, part) in parts.iter().enumerate() {
-            if part.is_empty() {
-                continue;
-            }
-            if let Some(found) = text[pos..].find(part) {
-                if i == 0 && found != 0 {
-                    return false;
-                }
-                pos += found + part.len();
-            } else {
-                return false;
-            }
-        }
-
-        parts
-            .last()
-            .is_none_or(|last| last.is_empty() || text.ends_with(last))
-    }
-
     pub(crate) fn sort_results(results: &mut [serde_json::Value], sort: &[SortOrderJs]) {
-        results.sort_by(|a, b| {
-            for order in sort {
-                let a_val = a.get(&order.field);
-                let b_val = b.get(&order.field);
-
-                let cmp = match (a_val, b_val) {
-                    (Some(av), Some(bv)) => Self::compare_json_values(av, bv),
-                    (Some(_), None) => std::cmp::Ordering::Greater,
-                    (None, Some(_)) => std::cmp::Ordering::Less,
-                    (None, None) => std::cmp::Ordering::Equal,
-                };
-
-                let cmp = if order.direction == "desc" {
-                    cmp.reverse()
+        let core_sort: Vec<mqdb_core::SortOrder> = sort
+            .iter()
+            .map(|s| {
+                if s.direction == "desc" {
+                    mqdb_core::SortOrder::desc(s.field.clone())
                 } else {
-                    cmp
-                };
-
-                if cmp != std::cmp::Ordering::Equal {
-                    return cmp;
+                    mqdb_core::SortOrder::asc(s.field.clone())
                 }
-            }
-            std::cmp::Ordering::Equal
-        });
-    }
-
-    fn compare_json_values(a: &serde_json::Value, b: &serde_json::Value) -> std::cmp::Ordering {
-        match (a, b) {
-            (serde_json::Value::Number(a_num), serde_json::Value::Number(b_num)) => {
-                let a_f64 = a_num.as_f64().unwrap_or(0.0);
-                let b_f64 = b_num.as_f64().unwrap_or(0.0);
-                a_f64
-                    .partial_cmp(&b_f64)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            }
-            (serde_json::Value::String(a_str), serde_json::Value::String(b_str)) => {
-                a_str.cmp(b_str)
-            }
-            (serde_json::Value::Bool(a_bool), serde_json::Value::Bool(b_bool)) => {
-                a_bool.cmp(b_bool)
-            }
-            _ => std::cmp::Ordering::Equal,
-        }
+            })
+            .collect();
+        mqdb_core::query::sort_results(results, &core_sort);
     }
 
     pub(crate) fn validate_query_fields(

@@ -223,6 +223,35 @@ pub enum FilterOp {
     IsNotNull,
 }
 
+impl FilterOp {
+    #[must_use]
+    pub fn from_js_op(op: &str) -> Option<Self> {
+        match op {
+            "" | "eq" | "=" => Some(Self::Eq),
+            "ne" | "neq" | "<>" => Some(Self::Neq),
+            "gt" | ">" => Some(Self::Gt),
+            "gte" | ">=" => Some(Self::Gte),
+            "lt" | "<" => Some(Self::Lt),
+            "lte" | "<=" => Some(Self::Lte),
+            "in" => Some(Self::In),
+            "glob" | "like" | "~" => Some(Self::Like),
+            "null" | "?" | "is_null" => Some(Self::IsNull),
+            "not_null" | "!?" | "is_not_null" => Some(Self::IsNotNull),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_equality(&self) -> bool {
+        matches!(self, Self::Eq)
+    }
+
+    #[must_use]
+    pub fn is_range(&self) -> bool {
+        matches!(self, Self::Gt | Self::Gte | Self::Lt | Self::Lte)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Filter {
     pub field: String,
@@ -273,6 +302,27 @@ impl Filter {
             }
             FilterOp::IsNull => field_value.is_null(),
             FilterOp::IsNotNull => !field_value.is_null(),
+        }
+    }
+
+    #[must_use]
+    pub fn matches_document(&self, document: &Value) -> bool {
+        match self.op {
+            FilterOp::IsNull => {
+                let fv = document.get(&self.field);
+                fv.is_none() || fv == Some(&Value::Null)
+            }
+            FilterOp::IsNotNull => {
+                let fv = document.get(&self.field);
+                fv.is_some() && fv != Some(&Value::Null)
+            }
+            _ => {
+                if let Some(fv) = document.get(&self.field) {
+                    self.matches(fv)
+                } else {
+                    false
+                }
+            }
         }
     }
 

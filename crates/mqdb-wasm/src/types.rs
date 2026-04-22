@@ -274,13 +274,7 @@ pub(crate) struct SubscriptionEntry {
     pub(crate) last_heartbeat: f64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) enum SubscriptionMode {
-    #[default]
-    Broadcast,
-    LoadBalanced,
-    Ordered,
-}
+pub(crate) use mqdb_core::subscription::SubscriptionMode;
 
 #[derive(Clone)]
 pub(crate) struct ForeignKeyEntry {
@@ -335,6 +329,13 @@ impl From<Filter> for FilterJs {
             op: format!("{:?}", f.op).to_lowercase(),
             value: f.value,
         }
+    }
+}
+
+impl FilterJs {
+    pub(crate) fn to_core_filter(&self) -> Filter {
+        let op = mqdb_core::FilterOp::from_js_op(&self.op).unwrap_or(mqdb_core::FilterOp::Eq);
+        Filter::new(self.field.clone(), op, self.value.clone())
     }
 }
 

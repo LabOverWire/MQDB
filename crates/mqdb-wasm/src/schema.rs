@@ -66,8 +66,10 @@ impl WasmDatabase {
                     .collect();
 
                 let def = SchemaDefinition { fields };
-                serde_wasm_bindgen::to_value(&def)
-                    .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))
+                let json_str = serde_json::to_string(&def)
+                    .map_err(|e| JsValue::from_str(&format!("serialization error: {e}")))?;
+                js_sys::JSON::parse(&json_str)
+                    .map_err(|e| JsValue::from_str(&format!("JSON parse error: {e:?}")))
             }
             None => Ok(JsValue::NULL),
         }

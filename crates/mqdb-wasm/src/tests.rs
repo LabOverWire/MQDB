@@ -552,3 +552,62 @@ fn test_set_null_cascade_sync_bumps_version() {
     assert_eq!(val["author_id"], serde_json::Value::Null);
     assert_eq!(val["_version"], 2);
 }
+
+#[wasm_bindgen_test]
+fn test_list_constraints_populates_fields() {
+    let db = WasmDatabase::new();
+    db.add_unique_constraint("users".into(), vec!["email".into()])
+        .unwrap();
+    db.add_not_null("users".into(), "name".into()).unwrap();
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        "cascade",
+    )
+    .unwrap();
+
+    let user_constraints: serde_json::Value =
+        serde_wasm_bindgen::from_value(db.list_constraints("users")).unwrap();
+    let arr = user_constraints.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    let unique = arr.iter().find(|c| c["type"] == "unique").unwrap();
+    assert_eq!(unique["fields"][0], "email");
+    let not_null = arr.iter().find(|c| c["type"] == "not_null").unwrap();
+    assert_eq!(not_null["field"], "name");
+
+    let post_constraints: serde_json::Value =
+        serde_wasm_bindgen::from_value(db.list_constraints("posts")).unwrap();
+    let arr = post_constraints.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["type"], "foreign_key");
+    assert_eq!(arr[0]["field"], "author_id");
+    assert_eq!(arr[0]["target_entity"], "users");
+    assert_eq!(arr[0]["target_field"], "id");
+    assert_eq!(arr[0]["on_delete"], "cascade");
+}
+
+#[wasm_bindgen_test]
+fn test_get_schema_preserves_default_values() {
+    let db = WasmDatabase::new();
+    let schema_js = json_to_js(&serde_json::json!({
+        "fields": [
+            {"name": "name", "type": "string", "required": true},
+            {"name": "active", "type": "boolean", "default": true},
+            {"name": "status", "type": "string", "default": "pending"}
+        ]
+    }));
+    db.add_schema("users".into(), schema_js).unwrap();
+
+    let schema: serde_json::Value =
+        serde_wasm_bindgen::from_value(db.get_schema("users").unwrap()).unwrap();
+    let fields = schema["fields"].as_array().unwrap();
+    assert_eq!(fields.len(), 3);
+
+    let active = fields.iter().find(|f| f["name"] == "active").unwrap();
+    assert_eq!(active["default"], serde_json::Value::Bool(true));
+
+    let status = fields.iter().find(|f| f["name"] == "status").unwrap();
+    assert_eq!(status["default"], "pending");
+}
