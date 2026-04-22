@@ -5,55 +5,124 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Sync API</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
-        .sync-hero {
-            background: linear-gradient(135deg, #00897b, #00695c);
+        .page-hero {
+            background: linear-gradient(135deg, #00897b, #004d40);
             color: white;
             padding: 30px;
             border-radius: 8px;
             margin-bottom: 20px;
         }
-        .sync-hero h2 {
-            color: white;
-            margin: 0 0 10px 0;
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
         }
-        .sync-hero p {
-            margin: 0;
-            opacity: 0.9;
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
         }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .backend-banner {
+            background: #ede7f6;
+            border-left: 4px solid #5e35b1;
+            padding: 12px 16px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        .backend-banner.ok { background: #e8f5e9; border-left-color: #2e7d32; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 120px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
         .perf-comparison {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            margin-top: 15px;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
         }
         .perf-box {
             background: white;
             border-radius: 8px;
-            padding: 20px;
+            padding: 18px;
             text-align: center;
+            border: 1px solid #e0e0e0;
         }
+        .perf-box.sync  { border-top: 4px solid #00897b; }
+        .perf-box.async { border-top: 4px solid #ef6c00; }
+        .perf-box.ratio { border-top: 4px solid #5e35b1; }
         .perf-box .label {
             color: #666;
-            font-size: 14px;
-            margin-bottom: 5px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
         }
         .perf-box .value {
-            font-size: 36px;
+            font-size: 32px;
             font-weight: bold;
-            color: #333;
         }
-        .perf-box .unit {
-            color: #999;
-            font-size: 14px;
-        }
+        .perf-box.sync  .value { color: #00897b; }
+        .perf-box.async .value { color: #ef6c00; }
+        .perf-box.ratio .value { color: #5e35b1; }
+        .perf-box .unit { color: #999; font-size: 13px; }
+
         .count-display {
             font-size: 48px;
             font-weight: bold;
             color: #00897b;
             text-align: center;
-            padding: 15px;
+            padding: 10px;
         }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 320px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
     </style>
 </head>
 <body>
@@ -73,27 +142,66 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <div class="sync-hero">
-        <h2>Synchronous API (Memory-Only)</h2>
-        <p>Sync methods return values directly instead of Promises. They only work on in-memory databases
-            created with <code>new Database()</code>. No <code>await</code> needed.</p>
+    <div class="page-hero">
+        <h2>Sync API — no <code style="background:rgba(255,255,255,0.2);color:white">await</code>, direct returns</h2>
+        <p>The in-memory backend supports a synchronous mirror of every CRUD method: <code style="background:rgba(255,255,255,0.2);color:white">createSync</code>, <code style="background:rgba(255,255,255,0.2);color:white">readSync</code>, <code style="background:rgba(255,255,255,0.2);color:white">updateSync</code>, <code style="background:rgba(255,255,255,0.2);color:white">deleteSync</code>, <code style="background:rgba(255,255,255,0.2);color:white">listSync</code>, <code style="background:rgba(255,255,255,0.2);color:white">countSync</code>. No Promises, no microtasks — useful for tight loops, tests, and synchronous event handlers where you can't <code style="background:rgba(255,255,255,0.2);color:white">await</code>.</p>
+    </div>
+
+    <div class="backend-banner ok" id="backendBanner">Checking backend…</div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li>The async API (<code>create</code>, <code>list</code>, …) always returns a <code>Promise</code>, so it works on any backend.</li>
+                <li>The sync API (<code>createSync</code>, <code>listSync</code>, …) returns the value directly and only works when the data lives in memory — for IndexedDB and encrypted backends it throws.</li>
+                <li>Check at runtime with <code>db.isMemoryBackend()</code>; <code>true</code> means the sync methods are safe to call.</li>
+                <li><strong>When to use sync</strong>: tight loops (seeding test data), synchronous hot paths, code that already owns a <code>Database</code> and doesn't want to propagate async. The sync path avoids one microtask hop per call.</li>
+                <li><strong>When to use async</strong>: anything that might later run against IndexedDB or encrypted storage; any code path that already uses <code>await</code> anyway — the sync/async perf gap disappears once you have I/O.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    A["db.create(...)"] --> P[Promise] --> V1[record]
+    S["db.createSync(...)"] --> V2[record]
+    S -. throws on<br/>persistent backend .-> X[Error]
+    A -. works on<br/>any backend .-> ALL[memory · IDB · encrypted]
+    style A fill:#fff3e0,stroke:#ef6c00
+    style S fill:#e0f2f1,stroke:#00897b
+    style X fill:#ffcdd2,stroke:#c62828
+    style ALL fill:#e8f5e9,stroke:#2e7d32
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a three-step tour</h3>
+        <ol>
+            <li>Click <code>Seed 20 records</code>. 20 <code>createSync</code> calls land in the <code>users</code> entity.</li>
+            <li>Click <code>listSync (all)</code>, <code>listSync (filter age&nbsp;&gt;&nbsp;50)</code>, and <code>listSync (sort age desc)</code>. Each returns the array immediately — no <code>await</code> in the handler code.</li>
+            <li>Click <code>Performance comparison</code>. Runs 1000 sync creates vs 1000 async creates side by side and shows the ratio.</li>
+        </ol>
     </div>
 
     <div class="grid-2">
         <div class="section">
             <h2>Sync CRUD</h2>
-            <div class="row">
-                <label>Entity:</label>
-                <input type="text" id="entity" value="users">
+            <div class="kv-grid">
+                <label for="entity">Entity</label>
+                <select id="entity">
+                    <option value="users" selected>users</option>
+                    <option value="items">items</option>
+                    <option value="orders">orders</option>
+                </select>
+
+                <label for="recordId">ID</label>
+                <input type="text" id="recordId" placeholder="(empty = create)">
             </div>
-            <div class="row">
-                <label>ID:</label>
-                <input type="text" id="recordId" placeholder="Leave empty for create">
-            </div>
-            <div class="row">
-                <label>Data (JSON):</label>
-            </div>
-            <textarea id="recordData">{"name": "Alice", "email": "alice@example.com", "age": 30}</textarea>
+            <div class="row mt-10"><label>Data (JSON)</label></div>
+            <textarea id="recordData">{ "name": "Alice", "email": "alice@example.com", "age": 30 }</textarea>
             <div class="row mt-10">
                 <button id="createSyncBtn" class="success">createSync</button>
                 <button id="readSyncBtn" class="secondary">readSync</button>
@@ -103,53 +211,62 @@
         </div>
 
         <div class="section">
-            <h2>Count & Stats</h2>
+            <h2>Queries</h2>
+
             <div class="card">
                 <h3>countSync</h3>
                 <div class="count-display" id="countDisplay">0</div>
                 <div class="row" style="justify-content:center">
-                    <button id="countAllBtn">Count All</button>
-                    <button id="countFilteredBtn">Count Filtered</button>
+                    <button id="countAllBtn">Count all</button>
+                    <button id="countFilteredBtn">Count (age &gt; 50)</button>
                 </div>
             </div>
+
             <div class="card mt-10">
                 <h3>listSync</h3>
-                <button id="listSyncBtn">listSync (all)</button>
-                <button id="listFilteredBtn">listSync (filtered)</button>
-                <button id="listSortedBtn">listSync (sorted)</button>
+                <div class="row">
+                    <button id="listSyncBtn">listSync (all)</button>
+                    <button id="listFilteredBtn">listSync (filter age &gt; 50)</button>
+                    <button id="listSortedBtn">listSync (sort age desc)</button>
+                </div>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Quick Tests</h2>
+        <h2>Quick actions</h2>
         <div class="flex gap-10 flex-wrap">
-            <button id="runAllTests" class="success">Run All Tests</button>
-            <button id="seedBtn">Seed 20 Records</button>
-            <button id="perfBtn">Performance Comparison</button>
+            <button id="seedBtn" class="success">Seed 20 records</button>
+            <button id="perfBtn">Performance comparison</button>
+            <button id="refreshList" class="secondary">Refresh table</button>
+            <button id="clearAllBtn" class="danger">Delete all rows</button>
         </div>
     </div>
 
     <div class="section" id="perfSection" style="display:none">
-        <h2>Performance: Sync vs Async</h2>
-        <p>Time to create 1000 records:</p>
+        <h2>Performance: sync vs async (1000 creates each)</h2>
         <div class="perf-comparison">
-            <div class="perf-box">
-                <div class="label">createSync (1000x)</div>
-                <div class="value" id="syncTime">-</div>
+            <div class="perf-box sync">
+                <div class="label">createSync × 1000</div>
+                <div class="value" id="syncTime">—</div>
                 <div class="unit">milliseconds</div>
             </div>
-            <div class="perf-box">
-                <div class="label">create (async, 1000x)</div>
-                <div class="value" id="asyncTime">-</div>
+            <div class="perf-box async">
+                <div class="label">create (async) × 1000</div>
+                <div class="value" id="asyncTime">—</div>
                 <div class="unit">milliseconds</div>
+            </div>
+            <div class="perf-box ratio">
+                <div class="label">async / sync</div>
+                <div class="value" id="ratio">—</div>
+                <div class="unit">×</div>
             </div>
         </div>
+        <p class="hint mt-10">The ratio shows how much overhead the async microtask dispatch costs on in-memory ops — typically 2–5×. Both are fast enough for normal use; the gap matters only in tight loops.</p>
     </div>
 
     <div class="section">
         <h2>Records</h2>
-        <button id="refreshList">Refresh List</button>
         <table id="recordsTable">
             <thead>
                 <tr><th>ID</th><th>Data</th><th>Actions</th></tr>
@@ -158,8 +275,30 @@
         </table>
     </div>
 
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> runs 11 steps and reports pass/fail:</p>
+        <ol style="columns:2;column-gap:40px">
+            <li><code>isMemoryBackend()</code> is <code>true</code></li>
+            <li><code>createSync</code> returns <code>id</code> + <code>_version=1</code></li>
+            <li><code>readSync</code> returns matching fields</li>
+            <li><code>updateSync</code> bumps <code>_version</code> and merges</li>
+            <li><code>deleteSync</code> removes the row</li>
+            <li>Seed 20, <code>listSync</code> returns all 20</li>
+            <li><code>listSync</code> with filter returns subset</li>
+            <li><code>listSync</code> with desc sort is monotonic</li>
+            <li><code>countSync</code> without filter returns 20</li>
+            <li><code>countSync</code> with filter matches <code>listSync</code> length</li>
+            <li>Sync vs async create × 1000 — prints both timings</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
+    </div>
+
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -169,13 +308,28 @@
         let db;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
             window.db = db;
             log('Database initialized', 'success');
-
+            updateBackendBanner();
             setupEventListeners();
             refreshList();
+        }
+
+        function updateBackendBanner() {
+            const banner = document.getElementById('backendBanner');
+            if (db.isMemoryBackend()) {
+                banner.classList.add('ok');
+                banner.innerHTML = '✓ <code>isMemoryBackend() = true</code> — sync methods are available. (A persistent backend would throw on any <code>*Sync</code> call.)';
+            } else {
+                banner.classList.remove('ok');
+                banner.innerHTML = '⚠ <code>isMemoryBackend() = false</code> — sync methods will throw on this backend. Use the async API.';
+            }
         }
 
         function setupEventListeners() {
@@ -192,61 +346,51 @@
             document.getElementById('seedBtn').onclick = seedRecords;
             document.getElementById('perfBtn').onclick = perfComparison;
             document.getElementById('refreshList').onclick = refreshList;
+            document.getElementById('clearAllBtn').onclick = clearAll;
+            document.getElementById('entity').onchange = refreshList;
         }
 
-        function getEntity() {
-            return document.getElementById('entity').value;
-        }
-
-        function getData() {
-            return JSON.parse(document.getElementById('recordData').value);
-        }
+        function getEntity() { return document.getElementById('entity').value; }
+        function getData()   { return JSON.parse(document.getElementById('recordData').value); }
 
         function handleCreateSync() {
             try {
-                const result = db.createSync(getEntity(), getData());
-                log(`createSync: ${JSON.stringify(result)}`, 'success');
+                const r = db.createSync(getEntity(), getData());
+                document.getElementById('recordId').value = r.id;
+                log(`createSync → ${JSON.stringify(r)}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function handleReadSync() {
             try {
                 const id = document.getElementById('recordId').value;
-                if (!id) { log('Enter an ID', 'warning'); return; }
-                const result = db.readSync(getEntity(), id);
-                log(`readSync: ${JSON.stringify(result)}`, 'success');
-                document.getElementById('recordData').value = JSON.stringify(result, null, 2);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                if (!id) return log('Enter an id', 'warning');
+                const r = db.readSync(getEntity(), id);
+                document.getElementById('recordData').value = JSON.stringify(r, null, 2);
+                log(`readSync → ${JSON.stringify(r)}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function handleUpdateSync() {
             try {
                 const id = document.getElementById('recordId').value;
-                if (!id) { log('Enter an ID', 'warning'); return; }
-                const result = db.updateSync(getEntity(), id, getData());
-                log(`updateSync: ${JSON.stringify(result)}`, 'success');
+                if (!id) return log('Enter an id', 'warning');
+                const r = db.updateSync(getEntity(), id, getData());
+                log(`updateSync → ${JSON.stringify(r)}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function handleDeleteSync() {
             try {
                 const id = document.getElementById('recordId').value;
-                if (!id) { log('Enter an ID', 'warning'); return; }
+                if (!id) return log('Enter an id', 'warning');
                 db.deleteSync(getEntity(), id);
-                log(`deleteSync: deleted ${id}`, 'success');
                 document.getElementById('recordId').value = '';
+                log(`deleteSync ${id}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function countAll() {
@@ -254,103 +398,80 @@
                 const c = db.countSync(getEntity(), null);
                 document.getElementById('countDisplay').textContent = c;
                 log(`countSync(${getEntity()}) = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function countFiltered() {
             try {
-                const c = db.countSync(getEntity(), {
-                    filters: [{field: 'age', op: 'gt', value: 50}]
-                });
+                const c = db.countSync(getEntity(), { filters: [{ field: 'age', op: 'gt', value: 50 }] });
                 document.getElementById('countDisplay').textContent = c;
-                log(`countSync(${getEntity()}, age > 50) = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                log(`countSync(age > 50) = ${c}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function listAll() {
             try {
-                const results = db.listSync(getEntity(), null);
-                log(`listSync: ${results.length} records`, 'success');
-                for (const r of results.slice(0, 5)) {
-                    log(`  ${r.id}: ${JSON.stringify(r)}`, 'info');
-                }
-                if (results.length > 5) log(`  ... and ${results.length - 5} more`);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                const r = db.listSync(getEntity(), null);
+                log(`listSync → ${r.length} rows`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function listFiltered() {
             try {
-                const results = db.listSync(getEntity(), {
-                    filters: [{field: 'age', op: 'gt', value: 50}]
-                });
-                log(`listSync(age > 50): ${results.length} records`, 'success');
-                for (const r of results) {
-                    log(`  ${r.id}: age=${r.age}`, 'info');
-                }
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                const r = db.listSync(getEntity(), { filters: [{ field: 'age', op: 'gt', value: 50 }] });
+                log(`listSync(age > 50) → ${r.length} rows`, 'success');
+                for (const x of r) log(`  ${x.id}  age=${x.age}`, 'info');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function listSorted() {
             try {
-                const results = db.listSync(getEntity(), {
-                    sort: [{field: 'age', direction: 'desc'}]
-                });
-                log(`listSync(sorted by age desc): ${results.length} records`, 'success');
-                for (const r of results.slice(0, 5)) {
-                    log(`  ${r.id}: age=${r.age}`, 'info');
-                }
-                if (results.length > 5) log(`  ... and ${results.length - 5} more`);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                const r = db.listSync(getEntity(), { sort: [{ field: 'age', direction: 'desc' }] });
+                log(`listSync(sort age desc) → ${r.length} rows`, 'success');
+                for (const x of r.slice(0, 5)) log(`  ${x.id}  age=${x.age}`, 'info');
+                if (r.length > 5) log(`  … and ${r.length - 5} more`);
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function seedRecords() {
-            log('Seeding 20 records with createSync...');
             const entity = getEntity();
             for (let i = 0; i < 20; i++) {
                 db.createSync(entity, {
-                    name: `User ${i}`,
-                    email: `user${i}@example.com`,
+                    name: `User ${i + 1}`,
+                    email: `user${i + 1}@example.com`,
                     age: 20 + Math.floor(Math.random() * 60)
                 });
             }
-            log('Seeded 20 records', 'success');
+            log(`Seeded 20 records in ${entity}`, 'success');
+            refreshList();
+        }
+
+        async function clearAll() {
+            const entity = getEntity();
+            const rows = db.listSync(entity, null);
+            for (const r of rows) { try { db.deleteSync(entity, r.id); } catch {} }
+            log(`Deleted ${rows.length} rows`, 'success');
             refreshList();
         }
 
         async function perfComparison() {
             document.getElementById('perfSection').style.display = '';
-            log('=== Performance Comparison ===', 'info');
+            log('Running perf comparison…', 'info');
 
-            log('Sync: creating 1000 records...');
             const syncStart = performance.now();
-            for (let i = 0; i < 1000; i++) {
-                db.createSync('perf_sync', {name: `sync_${i}`, value: i});
-            }
+            for (let i = 0; i < 1000; i++) db.createSync('perf_sync', { name: `s${i}`, value: i });
             const syncMs = (performance.now() - syncStart).toFixed(1);
             document.getElementById('syncTime').textContent = syncMs;
-            log(`  createSync x1000: ${syncMs}ms`, 'success');
 
-            log('Async: creating 1000 records...');
             const asyncStart = performance.now();
-            for (let i = 0; i < 1000; i++) {
-                await db.create('perf_async', {name: `async_${i}`, value: i});
-            }
+            for (let i = 0; i < 1000; i++) await db.create('perf_async', { name: `a${i}`, value: i });
             const asyncMs = (performance.now() - asyncStart).toFixed(1);
             document.getElementById('asyncTime').textContent = asyncMs;
-            log(`  create x1000: ${asyncMs}ms`, 'success');
 
-            const ratio = (parseFloat(asyncMs) / parseFloat(syncMs)).toFixed(1);
-            log(`Sync is ~${ratio}x faster than async (for memory backend)`, 'info');
+            const ratio = (parseFloat(asyncMs) / Math.max(parseFloat(syncMs), 0.001)).toFixed(1);
+            document.getElementById('ratio').textContent = ratio;
+
+            log(`sync=${syncMs}ms  async=${asyncMs}ms  ratio=${ratio}×`, 'success');
         }
 
         function refreshList() {
@@ -359,160 +480,109 @@
                 const records = db.listSync(entity, null);
                 const tbody = document.getElementById('recordsBody');
                 tbody.innerHTML = '';
-
-                for (const record of records) {
-                    const {id, ...rest} = record;
+                for (const r of records) {
+                    const { id, ...rest } = r;
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
-                        <td><code>${id}</code></td>
-                        <td><code>${JSON.stringify(rest)}</code></td>
+                        <td><code>${escapeHtml(id)}</code></td>
+                        <td><code>${escapeHtml(JSON.stringify(rest))}</code></td>
                         <td>
                             <button onclick="window.selectRecord('${id}')">Select</button>
                             <button class="danger" onclick="window.deleteRecord('${id}')">Delete</button>
-                        </td>
-                    `;
+                        </td>`;
                     tbody.appendChild(tr);
                 }
-
                 if (records.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999">No records</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3" class="hint" style="text-align:center">No records</td></tr>';
                 }
-            } catch (e) {
-                log(`Error refreshing list: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
-        window.selectRecord = function(id) {
+        window.selectRecord = (id) => {
             document.getElementById('recordId').value = id;
             try {
-                const record = db.readSync(getEntity(), id);
-                const {id: _, ...rest} = record;
+                const r = db.readSync(getEntity(), id);
+                const { id: _, ...rest } = r;
                 document.getElementById('recordData').value = JSON.stringify(rest, null, 2);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
+        };
+        window.deleteRecord = (id) => {
+            try { db.deleteSync(getEntity(), id); log(`Deleted ${id}`, 'success'); refreshList(); }
+            catch (e) { log(`${e}`, 'error'); }
         };
 
-        window.deleteRecord = function(id) {
-            try {
-                db.deleteSync(getEntity(), id);
-                log(`Deleted ${id}`, 'success');
-                refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
-        };
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
 
         async function runAllTests() {
-            log('=== Running Sync API Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Sync API tests ===');
 
-            log('Test 1: isMemoryBackend() returns true');
-            if (db.isMemoryBackend()) {
-                log('  ✓ isMemoryBackend() = true', 'success');
-            } else {
-                log('  ✗ isMemoryBackend() should be true', 'error');
-            }
+            summaryLine('Test 1 — isMemoryBackend()');
+            summaryLine(db.isMemoryBackend() ? '  ✓ true' : '  ✗ expected true', db.isMemoryBackend() ? 'pass' : 'fail');
 
-            log('Test 2: createSync returns record with ID and _version');
-            const created = db.createSync('sync_test', {name: 'TestUser', value: 42});
-            if (created.id && created._version === 1) {
-                log(`  ✓ id=${created.id}, _version=${created._version}`, 'success');
-            } else {
-                log(`  ✗ Missing id or _version: ${JSON.stringify(created)}`, 'error');
-            }
+            summaryLine('Test 2 — createSync → id, _version=1');
+            const created = db.createSync('sync_test', { name: 'TestUser', value: 42 });
+            summaryLine(created.id && created._version === 1 ? `  ✓ id=${created.id} _version=${created._version}` : `  ✗ ${JSON.stringify(created)}`, created.id && created._version === 1 ? 'pass' : 'fail');
 
-            log('Test 3: readSync returns matching fields');
+            summaryLine('Test 3 — readSync');
             const read = db.readSync('sync_test', created.id);
-            if (read.name === 'TestUser' && read.value === 42) {
-                log(`  ✓ name="${read.name}", value=${read.value}`, 'success');
-            } else {
-                log(`  ✗ Wrong data: ${JSON.stringify(read)}`, 'error');
-            }
+            summaryLine(read.name === 'TestUser' && read.value === 42 ? '  ✓ fields match' : `  ✗ ${JSON.stringify(read)}`, read.name === 'TestUser' ? 'pass' : 'fail');
 
-            log('Test 4: updateSync increments _version and merges fields');
-            const updated = db.updateSync('sync_test', created.id, {name: 'UpdatedUser'});
-            if (updated._version === 2 && updated.name === 'UpdatedUser' && updated.value === 42) {
-                log(`  ✓ _version=${updated._version}, name="${updated.name}", value=${updated.value}`, 'success');
-            } else {
-                log(`  ✗ Wrong data: ${JSON.stringify(updated)}`, 'error');
-            }
+            summaryLine('Test 4 — updateSync merges, _version=2');
+            const upd = db.updateSync('sync_test', created.id, { name: 'UpdatedUser' });
+            const okU = upd._version === 2 && upd.name === 'UpdatedUser' && upd.value === 42;
+            summaryLine(okU ? `  ✓ _version=${upd._version} name=${upd.name} value=${upd.value}` : `  ✗ ${JSON.stringify(upd)}`, okU ? 'pass' : 'fail');
 
-            log('Test 5: deleteSync removes record');
+            summaryLine('Test 5 — deleteSync');
             db.deleteSync('sync_test', created.id);
-            try {
-                db.readSync('sync_test', created.id);
-                log('  ✗ Should have thrown error', 'error');
-            } catch (e) {
-                log('  ✓ readSync throws after delete', 'success');
-            }
+            try { db.readSync('sync_test', created.id); summaryLine('  ✗ read after delete succeeded', 'fail'); }
+            catch { summaryLine('  ✓ readSync throws after delete', 'pass'); }
 
-            log('Test 6: Seed 20 records, listSync returns all');
-            for (let i = 0; i < 20; i++) {
-                db.createSync('sync_list', {name: `User${i}`, value: i * 5});
-            }
-            const allRecords = db.listSync('sync_list', null);
-            if (allRecords.length === 20) {
-                log(`  ✓ listSync returned ${allRecords.length} records`, 'success');
-            } else {
-                log(`  ✗ Expected 20, got ${allRecords.length}`, 'error');
-            }
+            summaryLine('Test 6 — seed 20 + listSync');
+            for (let i = 0; i < 20; i++) db.createSync('sync_list', { name: `User${i}`, value: i * 5 });
+            const all = db.listSync('sync_list', null);
+            summaryLine(all.length === 20 ? '  ✓ 20 rows' : `  ✗ got ${all.length}`, all.length === 20 ? 'pass' : 'fail');
 
-            log('Test 7: listSync with filter');
-            const filtered = db.listSync('sync_list', {
-                filters: [{field: 'value', op: 'gt', value: 50}]
-            });
-            const expected = allRecords.filter(r => r.value > 50);
-            if (filtered.length === expected.length) {
-                log(`  ✓ Filtered (value > 50): ${filtered.length} records`, 'success');
-            } else {
-                log(`  ✗ Expected ${expected.length}, got ${filtered.length}`, 'error');
-            }
+            summaryLine('Test 7 — listSync filter value > 50');
+            const f = db.listSync('sync_list', { filters: [{ field: 'value', op: 'gt', value: 50 }] });
+            const expected = all.filter(r => r.value > 50).length;
+            summaryLine(f.length === expected ? `  ✓ ${f.length} rows` : `  ✗ expected ${expected}, got ${f.length}`, f.length === expected ? 'pass' : 'fail');
 
-            log('Test 8: listSync with sort (desc)');
-            const sorted = db.listSync('sync_list', {
-                sort: [{field: 'value', direction: 'desc'}]
-            });
-            const isDescending = sorted.every((r, i) => i === 0 || r.value <= sorted[i-1].value);
-            if (isDescending) {
-                log(`  ✓ Sorted descending: first=${sorted[0].value}, last=${sorted[sorted.length-1].value}`, 'success');
-            } else {
-                log('  ✗ Records not in descending order', 'error');
-            }
+            summaryLine('Test 8 — listSync sort value desc');
+            const s = db.listSync('sync_list', { sort: [{ field: 'value', direction: 'desc' }] });
+            const sorted = s.every((r, i) => i === 0 || r.value <= s[i - 1].value);
+            summaryLine(sorted ? `  ✓ first=${s[0].value} last=${s.at(-1).value}` : '  ✗ not sorted', sorted ? 'pass' : 'fail');
 
-            log('Test 9: countSync with no filter');
-            const countAll = db.countSync('sync_list', null);
-            if (countAll === 20) {
-                log(`  ✓ countSync() = ${countAll}`, 'success');
-            } else {
-                log(`  ✗ Expected 20, got ${countAll}`, 'error');
-            }
+            summaryLine('Test 9 — countSync no filter');
+            const ca = db.countSync('sync_list', null);
+            summaryLine(ca === 20 ? `  ✓ count=20` : `  ✗ got ${ca}`, ca === 20 ? 'pass' : 'fail');
 
-            log('Test 10: countSync with filter matches listSync length');
-            const countFiltered = db.countSync('sync_list', {
-                filters: [{field: 'value', op: 'gt', value: 50}]
-            });
-            if (countFiltered === filtered.length) {
-                log(`  ✓ countSync(value > 50) = ${countFiltered} matches listSync`, 'success');
-            } else {
-                log(`  ✗ countSync=${countFiltered} != listSync.length=${filtered.length}`, 'error');
-            }
+            summaryLine('Test 10 — countSync filter matches listSync');
+            const cf = db.countSync('sync_list', { filters: [{ field: 'value', op: 'gt', value: 50 }] });
+            summaryLine(cf === f.length ? `  ✓ ${cf} matches` : `  ✗ ${cf} vs ${f.length}`, cf === f.length ? 'pass' : 'fail');
 
-            log('Test 11: Performance (sync vs async, 1000 creates)');
-            const syncStart = performance.now();
-            for (let i = 0; i < 1000; i++) {
-                db.createSync('perf_test_s', {n: i});
-            }
-            const syncMs = (performance.now() - syncStart).toFixed(1);
+            summaryLine('Test 11 — perf sync vs async × 1000');
+            const sStart = performance.now();
+            for (let i = 0; i < 1000; i++) db.createSync('perf_test_s', { n: i });
+            const syncMs = (performance.now() - sStart).toFixed(1);
+            const aStart = performance.now();
+            for (let i = 0; i < 1000; i++) await db.create('perf_test_a', { n: i });
+            const asyncMs = (performance.now() - aStart).toFixed(1);
+            summaryLine(`  ✓ sync=${syncMs}ms  async=${asyncMs}ms`, 'pass');
 
-            const asyncStart = performance.now();
-            for (let i = 0; i < 1000; i++) {
-                await db.create('perf_test_a', {n: i});
-            }
-            const asyncMs = (performance.now() - asyncStart).toFixed(1);
-
-            log(`  ✓ Sync: ${syncMs}ms, Async: ${asyncMs}ms`, 'success');
-
-            log('=== All Sync API Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
             refreshList();
         }
 

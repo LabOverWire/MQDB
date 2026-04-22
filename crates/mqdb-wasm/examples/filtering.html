@@ -5,6 +5,71 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Filtering & Sorting</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .page-hero {
+            background: linear-gradient(135deg, #00838f, #006064);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .filter-row { margin-bottom: 8px; }
+        .filter-row select, .filter-row input { min-width: 0; }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 320px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
+    </style>
 </head>
 <body>
     <nav>
@@ -23,14 +88,53 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <h1>Filtering & Sorting</h1>
+    <div class="page-hero">
+        <h2>Filters, sort, pagination, projection</h2>
+        <p>Every <code style="background:rgba(255,255,255,0.2);color:white">list()</code> and <code style="background:rgba(255,255,255,0.2);color:white">count()</code> call takes an options bag — combine any of <code style="background:rgba(255,255,255,0.2);color:white">filters</code>, <code style="background:rgba(255,255,255,0.2);color:white">sort</code>, <code style="background:rgba(255,255,255,0.2);color:white">pagination</code>, <code style="background:rgba(255,255,255,0.2);color:white">projection</code>. Filters support equality, ranges, glob, null, and <code style="background:rgba(255,255,255,0.2);color:white">in</code>; multi-filter is AND.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><strong>Filters</strong>: each filter has <code>field</code>, <code>op</code>, <code>value</code>. Operators: <code>eq</code>, <code>ne</code>, <code>gt</code>, <code>gte</code>, <code>lt</code>, <code>lte</code>, <code>glob</code> (with <code>*</code>), <code>null</code>, <code>not_null</code>, <code>in</code>. Multiple filters are AND-ed.</li>
+                <li><strong>Sort</strong>: list of <code>{ field, direction }</code> pairs, applied in order. Types that compare: strings, numbers, booleans.</li>
+                <li><strong>Pagination</strong>: <code>{ offset, limit }</code>. Applied after filter+sort.</li>
+                <li><strong>Projection</strong>: array of field names — the returned rows include only these fields (plus <code>id</code>, always).</li>
+                <li><strong>Index acceleration</strong>: if there's a secondary index on the filter field and the operator is equality or a range, MQDB scans the index directly instead of every row. Otherwise it falls back to a full scan.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    Q["list(entity, opts)"] --> P{index<br/>available?}
+    P -- yes, eq/range --> IX[Index scan] --> A[Apply remaining filters]
+    P -- no --> FS[Full scan] --> A
+    A --> S[Sort] --> PG[Paginate] --> PR[Project fields] --> R[rows]
+    style IX fill:#c8e6c9,stroke:#2e7d32
+    style FS fill:#fff3e0,stroke:#ef6c00
+    style R  fill:#e3f2fd,stroke:#1565c0
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>Click <code>Seed test data</code> to create 20 people with random age/city/score.</li>
+            <li>Pick one of the <strong>Quick filter tests</strong> (e.g. <code>gt: age &gt; 30</code>). The row fills in automatically and <code>Execute query</code> runs it — the result table shows the matching rows.</li>
+            <li>Click <code>+ Add filter</code> and combine multiple filters (e.g. <code>city = New York</code> AND <code>age &gt; 25</code>). Execute to see both filters AND-ed.</li>
+            <li>Set <code>Sort</code> to <em>score desc</em> and limit to 5 — you get the top 5 scorers.</li>
+        </ol>
+    </div>
 
     <div class="section">
         <h2>Setup</h2>
         <div class="flex gap-10 flex-wrap">
-            <button id="seedData" class="success">Seed Test Data (20 records)</button>
-            <button id="clearData" class="danger">Clear All</button>
-            <button id="runAllFilterTests">Run All Tests</button>
+            <button id="seedData" class="success">Seed test data (20 records)</button>
+            <button id="clearData" class="danger">Clear all</button>
         </div>
     </div>
 
@@ -61,11 +165,11 @@
                     <button class="remove-filter danger" style="padding:4px 8px">&times;</button>
                 </div>
             </div>
-            <button id="addFilter" class="secondary mt-10">+ Add Filter</button>
+            <button id="addFilter" class="secondary mt-10">+ Add filter</button>
         </div>
 
         <div class="section">
-            <h2>Sort & Pagination</h2>
+            <h2>Sort &amp; pagination</h2>
             <div class="card">
                 <h3>Sort</h3>
                 <div class="row">
@@ -93,29 +197,20 @@
             </div>
             <div class="card mt-10">
                 <h3>Projection</h3>
+                <p class="hint">Uncheck a field to exclude it from the result.</p>
                 <div class="row">
-                    <label>
-                        <input type="checkbox" id="projName" checked> name
-                    </label>
-                    <label>
-                        <input type="checkbox" id="projAge" checked> age
-                    </label>
-                    <label>
-                        <input type="checkbox" id="projCity" checked> city
-                    </label>
-                    <label>
-                        <input type="checkbox" id="projScore" checked> score
-                    </label>
-                    <label>
-                        <input type="checkbox" id="projActive" checked> active
-                    </label>
+                    <label><input type="checkbox" id="projName" checked> name</label>
+                    <label><input type="checkbox" id="projAge" checked> age</label>
+                    <label><input type="checkbox" id="projCity" checked> city</label>
+                    <label><input type="checkbox" id="projScore" checked> score</label>
+                    <label><input type="checkbox" id="projActive" checked> active</label>
                 </div>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <button id="executeQuery" class="success">Execute Query</button>
+        <button id="executeQuery" class="success">Execute query</button>
         <span id="queryInfo" style="margin-left:15px;color:#666"></span>
     </div>
 
@@ -123,22 +218,15 @@
         <h2>Results</h2>
         <table>
             <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Name</th>
-                    <th>Age</th>
-                    <th>City</th>
-                    <th>Score</th>
-                    <th>Active</th>
-                </tr>
+                <tr><th>ID</th><th>Name</th><th>Age</th><th>City</th><th>Score</th><th>Active</th></tr>
             </thead>
-            <tbody id="resultsBody">
-            </tbody>
+            <tbody id="resultsBody"></tbody>
         </table>
     </div>
 
     <div class="section">
-        <h2>Quick Filter Tests</h2>
+        <h2>Quick filter tests</h2>
+        <p class="hint">Each preset fills the filter row(s) with a common pattern and executes immediately.</p>
         <div class="flex gap-10 flex-wrap">
             <button id="testEq">eq: name = "Alice"</button>
             <button id="testGt">gt: age &gt; 30</button>
@@ -150,8 +238,27 @@
         </div>
     </div>
 
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> rebuilds a 6-record people list in <code>people</code> (Alice, Bob, Charlie, Diana, Eve, Anna) with known ages and scores, then runs these 8 checks:</p>
+        <ol style="columns:2;column-gap:40px">
+            <li><code>eq</code> matches exactly Alice</li>
+            <li><code>gt age &gt; 30</code> returns 2 rows (Charlie, Eve)</li>
+            <li><code>glob A*</code> returns Alice + Anna</li>
+            <li><code>sort age asc</code> is monotonic</li>
+            <li><code>sort score desc</code> is monotonic</li>
+            <li><code>offset=2 limit=2</code> returns 2 rows</li>
+            <li><code>projection: ['name','age']</code> keeps only id/name/age</li>
+            <li>Combined query (<code>age &ge; 28</code>, sort score desc, limit 3) returns 3 rows</li>
+        </ol>
+        <div class="row">
+            <button id="runAllFilterTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
+    </div>
+
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -161,8 +268,13 @@
         let db;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
+            window.db = db;
             log('Database initialized', 'success');
 
             setupEventListeners();
@@ -225,18 +337,13 @@
                 const field = row.querySelector('.filter-field').value;
                 const op = row.querySelector('.filter-op').value;
                 let value = row.querySelector('.filter-value').value;
-
                 if (op === 'null' || op === 'not_null') {
-                    filters.push({field, op, value: null});
+                    filters.push({ field, op, value: null });
                 } else if (value !== '') {
-                    if (!isNaN(value) && value !== '') {
-                        value = parseFloat(value);
-                    } else if (value === 'true') {
-                        value = true;
-                    } else if (value === 'false') {
-                        value = false;
-                    }
-                    filters.push({field, op, value});
+                    if (!isNaN(value) && value !== '') value = parseFloat(value);
+                    else if (value === 'true') value = true;
+                    else if (value === 'false') value = false;
+                    filters.push({ field, op, value });
                 }
             }
             return filters;
@@ -245,22 +352,21 @@
         function getSort() {
             const field = document.getElementById('sortField').value;
             if (!field) return [];
-            const direction = document.getElementById('sortDirection').value;
-            return [{field, direction}];
+            return [{ field, direction: document.getElementById('sortDirection').value }];
         }
 
         function getPagination() {
-            const offset = parseInt(document.getElementById('offset').value) || 0;
-            const limit = parseInt(document.getElementById('limit').value) || 10;
-            return {offset, limit};
+            const offset = parseInt(document.getElementById('offset').value, 10) || 0;
+            const limit  = parseInt(document.getElementById('limit').value, 10) || 10;
+            return { offset, limit };
         }
 
         function getProjection() {
             const fields = [];
-            if (document.getElementById('projName').checked) fields.push('name');
-            if (document.getElementById('projAge').checked) fields.push('age');
-            if (document.getElementById('projCity').checked) fields.push('city');
-            if (document.getElementById('projScore').checked) fields.push('score');
+            if (document.getElementById('projName').checked)   fields.push('name');
+            if (document.getElementById('projAge').checked)    fields.push('age');
+            if (document.getElementById('projCity').checked)   fields.push('city');
+            if (document.getElementById('projScore').checked)  fields.push('score');
             if (document.getElementById('projActive').checked) fields.push('active');
             return fields.length === 5 ? null : fields;
         }
@@ -271,18 +377,14 @@
                 const sort = getSort();
                 const pagination = getPagination();
                 const projection = getProjection();
-
-                const options = {filters, sort, pagination};
+                const options = { filters, sort, pagination };
                 if (projection) options.projection = projection;
-
                 log(`Query: ${JSON.stringify(options)}`);
                 const results = await db.list('people', options);
                 displayResults(results);
                 document.getElementById('queryInfo').textContent = `${results.length} results`;
                 log(`Found ${results.length} results`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function displayResults(results) {
@@ -306,11 +408,10 @@
         }
 
         async function seedData() {
-            const names = ['Alice', 'Bob', 'Charlie', 'Diana', 'Eve', 'Frank', 'Grace', 'Henry', 'Ivy', 'Jack',
-                          'Karen', 'Leo', 'Mia', 'Noah', 'Olivia', 'Peter', 'Quinn', 'Rose', 'Sam', 'Tina'];
-            const cities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix'];
-
-            log('Seeding 20 test records...');
+            const names = ['Alice','Bob','Charlie','Diana','Eve','Frank','Grace','Henry','Ivy','Jack',
+                           'Karen','Leo','Mia','Noah','Olivia','Peter','Quinn','Rose','Sam','Tina'];
+            const cities = ['New York','Los Angeles','Chicago','Houston','Phoenix'];
+            log('Seeding 20 records…');
             for (let i = 0; i < 20; i++) {
                 await db.create('people', {
                     name: names[i],
@@ -326,46 +427,21 @@
 
         async function clearData() {
             const records = await db.list('people', null);
-            for (const r of records) {
-                await db.delete('people', r.id);
-            }
+            for (const r of records) await db.delete('people', r.id);
             log('Cleared all records', 'success');
             executeQuery();
         }
 
         async function quickTest(type) {
             clearFilters();
-
             switch (type) {
-                case 'eq':
-                    log('Testing: name = "Alice"');
-                    setFilter(0, 'name', 'eq', 'Alice');
-                    break;
-                case 'gt':
-                    log('Testing: age > 30');
-                    setFilter(0, 'age', 'gt', '30');
-                    break;
-                case 'glob':
-                    log('Testing: name ~ "A*"');
-                    setFilter(0, 'name', 'glob', 'A*');
-                    break;
-                case 'sortAsc':
-                    log('Testing: sort by age ascending');
-                    document.getElementById('sortField').value = 'age';
-                    document.getElementById('sortDirection').value = 'asc';
-                    break;
-                case 'sortDesc':
-                    log('Testing: sort by score descending');
-                    document.getElementById('sortField').value = 'score';
-                    document.getElementById('sortDirection').value = 'desc';
-                    break;
-                case 'pagination':
-                    log('Testing: offset=5, limit=5');
-                    document.getElementById('offset').value = '5';
-                    document.getElementById('limit').value = '5';
-                    break;
-                case 'projection':
-                    log('Testing: projection (name, age only)');
+                case 'eq':         log('Testing eq: name = "Alice"');    setFilter(0, 'name', 'eq', 'Alice'); break;
+                case 'gt':         log('Testing gt: age > 30');          setFilter(0, 'age', 'gt', '30'); break;
+                case 'glob':       log('Testing glob: name ~ "A*"');     setFilter(0, 'name', 'glob', 'A*'); break;
+                case 'sortAsc':    log('Testing sort: age asc');         document.getElementById('sortField').value = 'age'; document.getElementById('sortDirection').value = 'asc'; break;
+                case 'sortDesc':   log('Testing sort: score desc');      document.getElementById('sortField').value = 'score'; document.getElementById('sortDirection').value = 'desc'; break;
+                case 'pagination': log('Testing pagination: offset=5 limit=5'); document.getElementById('offset').value = '5'; document.getElementById('limit').value = '5'; break;
+                case 'projection': log('Testing projection: name+age only');
                     document.getElementById('projName').checked = true;
                     document.getElementById('projAge').checked = true;
                     document.getElementById('projCity').checked = false;
@@ -373,20 +449,14 @@
                     document.getElementById('projActive').checked = false;
                     break;
             }
-
             executeQuery();
         }
 
         function clearFilters() {
-            const container = document.getElementById('filterContainer');
-            const rows = container.querySelectorAll('.filter-row');
-            rows.forEach((row, i) => {
-                if (i > 0) row.remove();
-            });
+            const rows = document.querySelectorAll('#filterContainer .filter-row');
+            rows.forEach((row, i) => { if (i > 0) row.remove(); });
             const first = rows[0];
-            if (first) {
-                first.querySelector('.filter-value').value = '';
-            }
+            if (first) first.querySelector('.filter-value').value = '';
             document.getElementById('sortField').value = '';
             document.getElementById('offset').value = '0';
             document.getElementById('limit').value = '10';
@@ -403,65 +473,74 @@
             }
         }
 
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
         async function runAllFilterTests() {
-            log('=== Running All Filter Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Filter tests ===');
 
             await clearData();
             const testData = [
-                {name: 'Alice', age: 25, city: 'New York', score: 85, active: true},
-                {name: 'Bob', age: 30, city: 'Los Angeles', score: 72, active: true},
-                {name: 'Charlie', age: 35, city: 'Chicago', score: 90, active: false},
-                {name: 'Diana', age: 28, city: 'Houston', score: 65, active: true},
-                {name: 'Eve', age: 32, city: 'Phoenix', score: 88, active: true},
-                {name: 'Anna', age: 22, city: 'New York', score: 95, active: false}
+                { name: 'Alice',   age: 25, city: 'New York',    score: 85, active: true },
+                { name: 'Bob',     age: 30, city: 'Los Angeles', score: 72, active: true },
+                { name: 'Charlie', age: 35, city: 'Chicago',     score: 90, active: false },
+                { name: 'Diana',   age: 28, city: 'Houston',     score: 65, active: true },
+                { name: 'Eve',     age: 32, city: 'Phoenix',     score: 88, active: true },
+                { name: 'Anna',    age: 22, city: 'New York',    score: 95, active: false }
             ];
-            for (const d of testData) {
-                await db.create('people', d);
-            }
-            log('Created 6 test records');
+            for (const d of testData) await db.create('people', d);
+            summaryLine('  ✓ 6 test records created', 'pass');
 
-            log('\nTest 1: eq filter (name = "Alice")');
-            let r = await db.list('people', {filters: [{field: 'name', op: 'eq', value: 'Alice'}]});
-            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 1 ? 'success' : 'error');
+            summaryLine('Test 1 — eq name=Alice');
+            let r = await db.list('people', { filters: [{ field: 'name', op: 'eq', value: 'Alice' }] });
+            summaryLine(r.length === 1 ? `  ✓ 1 row (${r[0].name})` : `  ✗ got ${r.length}`, r.length === 1 ? 'pass' : 'fail');
 
-            log('\nTest 2: gt filter (age > 30)');
-            r = await db.list('people', {filters: [{field: 'age', op: 'gt', value: 30}]});
-            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 2 ? 'success' : 'error');
+            summaryLine('Test 2 — gt age > 30');
+            r = await db.list('people', { filters: [{ field: 'age', op: 'gt', value: 30 }] });
+            summaryLine(r.length === 2 ? `  ✓ 2 rows (${r.map(x=>x.name).join(', ')})` : `  ✗ got ${r.length}`, r.length === 2 ? 'pass' : 'fail');
 
-            log('\nTest 3: glob filter (name ~ "A*")');
-            r = await db.list('people', {filters: [{field: 'name', op: 'glob', value: 'A*'}]});
-            log(`  ✓ Found ${r.length} results: ${r.map(x => x.name).join(', ')}`, r.length === 2 ? 'success' : 'error');
+            summaryLine('Test 3 — glob name ~ A*');
+            r = await db.list('people', { filters: [{ field: 'name', op: 'glob', value: 'A*' }] });
+            summaryLine(r.length === 2 ? `  ✓ 2 rows (${r.map(x=>x.name).join(', ')})` : `  ✗ got ${r.length}`, r.length === 2 ? 'pass' : 'fail');
 
-            log('\nTest 4: sort by age ascending');
-            r = await db.list('people', {sort: [{field: 'age', direction: 'asc'}]});
+            summaryLine('Test 4 — sort age asc');
+            r = await db.list('people', { sort: [{ field: 'age', direction: 'asc' }] });
             const ages = r.map(x => x.age);
-            const sorted = ages.every((v, i, a) => !i || a[i-1] <= v);
-            log(`  ✓ Ages in order: ${ages.join(', ')}`, sorted ? 'success' : 'error');
+            const monoAsc = ages.every((v, i, a) => !i || a[i-1] <= v);
+            summaryLine(monoAsc ? `  ✓ [${ages.join(', ')}]` : '  ✗ not asc', monoAsc ? 'pass' : 'fail');
 
-            log('\nTest 5: sort by score descending');
-            r = await db.list('people', {sort: [{field: 'score', direction: 'desc'}]});
-            const scores = r.map(x => x.score);
-            const sortedDesc = scores.every((v, i, a) => !i || a[i-1] >= v);
-            log(`  ✓ Scores in order: ${scores.join(', ')}`, sortedDesc ? 'success' : 'error');
+            summaryLine('Test 5 — sort score desc');
+            r = await db.list('people', { sort: [{ field: 'score', direction: 'desc' }] });
+            const sc = r.map(x => x.score);
+            const monoDesc = sc.every((v, i, a) => !i || a[i-1] >= v);
+            summaryLine(monoDesc ? `  ✓ [${sc.join(', ')}]` : '  ✗ not desc', monoDesc ? 'pass' : 'fail');
 
-            log('\nTest 6: pagination (offset=2, limit=2)');
-            r = await db.list('people', {pagination: {offset: 2, limit: 2}});
-            log(`  ✓ Got ${r.length} results (expected 2)`, r.length === 2 ? 'success' : 'error');
+            summaryLine('Test 6 — pagination offset=2 limit=2');
+            r = await db.list('people', { pagination: { offset: 2, limit: 2 } });
+            summaryLine(r.length === 2 ? '  ✓ 2 rows' : `  ✗ got ${r.length}`, r.length === 2 ? 'pass' : 'fail');
 
-            log('\nTest 7: projection (name, age only)');
-            r = await db.list('people', {projection: ['name', 'age']});
-            const hasOnlyFields = r.every(x => Object.keys(x).sort().join(',') === 'age,id,name');
-            log(`  ✓ Fields: ${Object.keys(r[0]).join(', ')}`, hasOnlyFields ? 'success' : 'error');
+            summaryLine('Test 7 — projection ["name","age"]');
+            r = await db.list('people', { projection: ['name', 'age'] });
+            const keys = Object.keys(r[0] || {}).sort().join(',');
+            summaryLine(keys === 'age,id,name' ? `  ✓ keys=${keys}` : `  ✗ keys=${keys}`, keys === 'age,id,name' ? 'pass' : 'fail');
 
-            log('\nTest 8: combined (age >= 28, sort by score desc, limit 3)');
+            summaryLine('Test 8 — combined: age>=28 sort score desc limit 3');
             r = await db.list('people', {
-                filters: [{field: 'age', op: 'gte', value: 28}],
-                sort: [{field: 'score', direction: 'desc'}],
-                pagination: {offset: 0, limit: 3}
+                filters: [{ field: 'age', op: 'gte', value: 28 }],
+                sort: [{ field: 'score', direction: 'desc' }],
+                pagination: { offset: 0, limit: 3 }
             });
-            log(`  ✓ Found ${r.length} results: ${r.map(x => `${x.name}(${x.score})`).join(', ')}`, 'success');
+            summaryLine(r.length === 3 ? `  ✓ ${r.map(x => `${x.name}(${x.score})`).join(', ')}` : `  ✗ got ${r.length}`, r.length === 3 ? 'pass' : 'fail');
 
-            log('\n=== All Filter Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
             executeQuery();
         }
 

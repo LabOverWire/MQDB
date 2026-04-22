@@ -5,36 +5,113 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Cursor</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
-        .cursor-info {
-            display: flex;
+        .page-hero {
+            background: linear-gradient(135deg, #1565c0, #0d47a1);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
             gap: 20px;
-            margin-bottom: 15px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .cursor-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
         }
         .cursor-stat {
             background: #e3f2fd;
-            padding: 10px 20px;
+            padding: 12px 16px;
             border-radius: 8px;
             text-align: center;
         }
+        .cursor-stat.pos  { background: #e8f5e9; }
+        .cursor-stat.more { background: #fff3e0; }
         .cursor-stat .value {
-            font-size: 24px;
+            font-size: 28px;
             font-weight: bold;
             color: #1565c0;
         }
+        .cursor-stat.pos .value  { color: #2e7d32; }
+        .cursor-stat.more .value { color: #ef6c00; }
         .cursor-stat .label {
-            font-size: 12px;
+            font-size: 11px;
             color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
+
         .item-preview {
+            max-height: 280px;
+            overflow-y: auto;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            padding: 12px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 12px;
+        }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
             max-height: 300px;
             overflow-y: auto;
-            background: #f5f5f5;
-            padding: 10px;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
             border-radius: 4px;
-            font-family: monospace;
-            font-size: 12px;
+            padding: 10px;
         }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
     </style>
 </head>
 <body>
@@ -54,88 +131,152 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <h1>Cursor (Streaming Iteration)</h1>
+    <div class="page-hero">
+        <h2>Cursor — stream a filtered result set</h2>
+        <p>A cursor is a query in progress. It holds onto the filter/sort and hands out rows one-at-a-time (<code style="background:rgba(255,255,255,0.2);color:white">nextItem()</code>) or in small batches (<code style="background:rgba(255,255,255,0.2);color:white">nextBatch(n)</code>). Unlike <code style="background:rgba(255,255,255,0.2);color:white">list()</code>, it never builds the full array in memory — handy for large datasets, progress UIs, and pagination that survives across await boundaries.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>db.cursor(entity, opts)</code> evaluates the filter/sort and returns a <strong>Cursor</strong>. <code>opts</code> accepts the same <code>filters</code>, <code>sort</code>, and <code>projection</code> as <code>list()</code>.</li>
+                <li><code>cursor.nextItem()</code> returns the next row or <code>undefined</code> when exhausted.</li>
+                <li><code>cursor.nextBatch(n)</code> returns up to <code>n</code> rows; returns an empty array when exhausted.</li>
+                <li><code>cursor.count()</code> is the number of rows <em>remaining</em> (decreases as you advance).</li>
+                <li><code>cursor.position()</code> is how many rows you've already consumed. <code>cursor.hasMore()</code> is <code>count &gt; 0</code>.</li>
+                <li><code>cursor.reset()</code> rewinds to the start without re-running the query.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    L["list(opts)<br/><em>returns all rows at once</em>"] --> Arr[Array of all N rows]
+    C["cursor(opts)<br/><em>returns a handle</em>"] --> S["Cursor<br/>count=N  position=0"]
+    S --> N1["nextItem()"] --> R1[1 row, position=1]
+    R1 --> N2["nextBatch(10)"] --> R2[10 rows, position=11]
+    R2 --> NE{hasMore?}
+    NE -- yes --> N1
+    NE -- no --> E[done]
+    style L fill:#fff3e0,stroke:#ef6c00
+    style C fill:#e3f2fd,stroke:#1565c0
+    style E fill:#c8e6c9,stroke:#2e7d32
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>Click <code>Seed 100 records</code>. Creates items with random <code>value</code> (0–99) and <code>category</code>.</li>
+            <li>Click <code>Create cursor</code>. The default filter (<code>value &gt; 50</code>) runs — the status row shows how many rows remain.</li>
+            <li>Click <code>Next (1)</code> a few times, then <code>Next batch (10)</code>. Watch <code>Remaining</code> drop and <code>Position</code> climb.</li>
+            <li>Click <code>Reset</code> — same query, position returns to 0, you can iterate again.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
             <h2>Setup</h2>
+
             <div class="card">
-                <h3>Create Test Records</h3>
-                <div class="row">
-                    <label>Count:</label>
+                <h3>1 · Seed data</h3>
+                <div class="kv-grid">
+                    <label for="recordCount">Count</label>
                     <input type="number" id="recordCount" value="100" min="10" max="1000">
                 </div>
-                <button id="createRecords" class="success">Create Records</button>
+                <button id="createRecords" class="success mt-10">Seed records</button>
             </div>
 
             <div class="card mt-10">
-                <h3>Create Cursor</h3>
-                <div class="row">
-                    <label>Entity:</label>
-                    <input type="text" id="cursorEntity" value="items">
-                </div>
-                <div class="row">
-                    <label>Filter (value >):</label>
-                    <input type="number" id="filterValue" value="50">
-                </div>
-                <div class="row">
-                    <label>Sort by:</label>
+                <h3>2 · Create cursor</h3>
+                <div class="kv-grid">
+                    <label for="cursorEntity">Entity</label>
+                    <select id="cursorEntity">
+                        <option value="items" selected>items</option>
+                    </select>
+
+                    <label for="filterField">Filter field</label>
+                    <select id="filterField">
+                        <option value="value" selected>value</option>
+                        <option value="category">category</option>
+                    </select>
+
+                    <label for="filterOp">Operator</label>
+                    <select id="filterOp">
+                        <option value="gt" selected>&gt;</option>
+                        <option value="gte">&gt;=</option>
+                        <option value="lt">&lt;</option>
+                        <option value="lte">&lt;=</option>
+                        <option value="eq">=</option>
+                    </select>
+
+                    <label for="filterValue">Value</label>
+                    <input type="text" id="filterValue" value="50">
+
+                    <label for="sortField">Sort by</label>
                     <select id="sortField">
-                        <option value="">None</option>
-                        <option value="value">Value (asc)</option>
-                        <option value="value:desc">Value (desc)</option>
-                        <option value="name">Name (asc)</option>
+                        <option value="">(none)</option>
+                        <option value="value:asc">value ascending</option>
+                        <option value="value:desc">value descending</option>
+                        <option value="name">name</option>
                     </select>
                 </div>
-                <button id="createCursor" class="success">Create Cursor</button>
+                <button id="createCursor" class="success mt-10">Create cursor</button>
             </div>
         </div>
 
         <div class="section">
-            <h2>Cursor Operations</h2>
-            <div class="card">
-                <h3>Cursor Status</h3>
-                <div class="cursor-info">
-                    <div class="cursor-stat">
-                        <div class="value" id="cursorCount">-</div>
-                        <div class="label">Remaining</div>
-                    </div>
-                    <div class="cursor-stat">
-                        <div class="value" id="cursorPosition">-</div>
-                        <div class="label">Position</div>
-                    </div>
-                    <div class="cursor-stat">
-                        <div class="value" id="cursorHasMore">-</div>
-                        <div class="label">Has More</div>
-                    </div>
+            <h2>Cursor</h2>
+            <div class="cursor-stats">
+                <div class="cursor-stat">
+                    <div class="value" id="cursorCount">—</div>
+                    <div class="label">Remaining</div>
+                </div>
+                <div class="cursor-stat pos">
+                    <div class="value" id="cursorPosition">—</div>
+                    <div class="label">Position</div>
+                </div>
+                <div class="cursor-stat more">
+                    <div class="value" id="cursorHasMore">—</div>
+                    <div class="label">Has more</div>
                 </div>
             </div>
 
-            <div class="card mt-10">
-                <h3>Iterate</h3>
-                <div class="row">
-                    <button id="nextOne">Next (1)</button>
-                    <button id="nextBatch">Next Batch (10)</button>
-                    <button id="resetCursor">Reset</button>
-                </div>
+            <div class="row mt-20">
+                <button id="nextOne" class="success">Next (1)</button>
+                <button id="nextBatch">Next batch (10)</button>
+                <button id="resetCursor" class="secondary">Reset</button>
             </div>
 
-            <div class="card mt-10">
-                <h3>Latest Items</h3>
-                <div id="itemPreview" class="item-preview">
-                    <em>No items fetched yet</em>
-                </div>
-            </div>
+            <h3 class="mt-20">Latest items</h3>
+            <div id="itemPreview" class="item-preview">No items fetched yet.</div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Quick Tests</h2>
-        <button id="runAllTests" class="success">Run All Tests</button>
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> runs 8 steps across a fresh <code>test_cursor</code> namespace and reports pass/fail for each:</p>
+        <ol style="columns:2;column-gap:40px">
+            <li>Seed 50 records with values 1–50</li>
+            <li>Unfiltered cursor has 50 items</li>
+            <li>Filter <code>value &gt; 25</code> yields 25 items</li>
+            <li><code>nextItem</code> twice → position=2</li>
+            <li><code>nextBatch(10)</code> → position=12</li>
+            <li><code>hasMore()</code> agrees with <code>count() &gt; 0</code></li>
+            <li>Draining the cursor leaves 0 remaining</li>
+            <li>Sort desc returns rows in decreasing order</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -146,10 +287,14 @@
         let cursor = null;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
+            window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
         }
 
@@ -163,9 +308,8 @@
         }
 
         async function createRecords() {
-            const count = parseInt(document.getElementById('recordCount').value);
-            log(`Creating ${count} records...`, 'info');
-
+            const count = parseInt(document.getElementById('recordCount').value, 10) || 100;
+            log(`Creating ${count} records…`, 'info');
             try {
                 for (let i = 0; i < count; i++) {
                     await db.create('items', {
@@ -174,84 +318,55 @@
                         category: ['A', 'B', 'C'][i % 3]
                     });
                 }
-                log(`Created ${count} records`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                log(`Seeded ${count} records`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function createCursor() {
             const entity = document.getElementById('cursorEntity').value;
-            const filterValue = parseInt(document.getElementById('filterValue').value);
-            const sortField = document.getElementById('sortField').value;
+            const field = document.getElementById('filterField').value;
+            const op = document.getElementById('filterOp').value;
+            let value = document.getElementById('filterValue').value;
+            if (!isNaN(Number(value)) && value !== '') value = Number(value);
+            const sortSel = document.getElementById('sortField').value;
 
+            const options = {
+                filters: value === '' ? [] : [{ field, op, value }]
+            };
+            if (sortSel) {
+                const [sf, dir] = sortSel.includes(':') ? sortSel.split(':') : [sortSel, 'asc'];
+                options.sort = [{ field: sf, direction: dir }];
+            }
             try {
-                const options = {
-                    filters: [{ field: 'value', op: 'gt', value: filterValue }]
-                };
-
-                if (sortField) {
-                    const [field, dir] = sortField.includes(':') ? sortField.split(':') : [sortField, 'asc'];
-                    options.sort = [{ field, direction: dir }];
-                }
-
                 cursor = await db.cursor(entity, options);
                 updateCursorStatus();
-                log(`Cursor created with filter (value > ${filterValue})`, 'success');
-                log(`Items matching filter: ${cursor.count()}`);
-
-                document.getElementById('itemPreview').innerHTML = '<em>No items fetched yet</em>';
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                document.getElementById('itemPreview').textContent = 'No items fetched yet.';
+                log(`Cursor ready · ${cursor.count()} matching rows`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function nextOne() {
-            if (!cursor) {
-                log('Create a cursor first', 'warning');
-                return;
-            }
-
+            if (!cursor) return log('Create a cursor first', 'warning');
             try {
                 const item = cursor.nextItem();
-                if (item === undefined) {
-                    log('Cursor exhausted', 'info');
-                } else {
-                    log(`Got item: ${JSON.stringify(item)}`);
-                    document.getElementById('itemPreview').textContent = JSON.stringify(item, null, 2);
-                }
+                if (item === undefined) log('Cursor exhausted', 'info');
+                else document.getElementById('itemPreview').textContent = JSON.stringify(item, null, 2);
                 updateCursorStatus();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function nextBatch() {
-            if (!cursor) {
-                log('Create a cursor first', 'warning');
-                return;
-            }
-
+            if (!cursor) return log('Create a cursor first', 'warning');
             try {
                 const items = cursor.nextBatch(10);
-                if (items.length === 0) {
-                    log('Cursor exhausted', 'info');
-                } else {
-                    log(`Got batch of ${items.length} items`);
-                    document.getElementById('itemPreview').textContent = JSON.stringify(items, null, 2);
-                }
+                if (items.length === 0) log('Cursor exhausted', 'info');
+                else document.getElementById('itemPreview').textContent = JSON.stringify(items, null, 2);
                 updateCursorStatus();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function resetCursor() {
-            if (!cursor) {
-                log('Create a cursor first', 'warning');
-                return;
-            }
-
+            if (!cursor) return log('Create a cursor first', 'warning');
             cursor.reset();
             log('Cursor reset', 'success');
             updateCursorStatus();
@@ -263,90 +378,64 @@
                 document.getElementById('cursorPosition').textContent = cursor.position();
                 document.getElementById('cursorHasMore').textContent = cursor.hasMore() ? 'Yes' : 'No';
             } else {
-                document.getElementById('cursorCount').textContent = '-';
-                document.getElementById('cursorPosition').textContent = '-';
-                document.getElementById('cursorHasMore').textContent = '-';
+                document.getElementById('cursorCount').textContent = '—';
+                document.getElementById('cursorPosition').textContent = '—';
+                document.getElementById('cursorHasMore').textContent = '—';
             }
         }
 
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
         async function runAllTests() {
-            log('=== Running All Cursor Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Cursor tests (test_cursor) ===');
 
-            log('\nTest 1: Create 50 test records');
+            summaryLine('Test 1 — seed 50 records');
             for (let i = 0; i < 50; i++) {
-                await db.create('test_cursor', {
-                    name: `Test ${i + 1}`,
-                    value: i + 1
-                });
+                await db.create('test_cursor', { name: `Test ${i + 1}`, value: i + 1 });
             }
-            log('✓ Created 50 test records', 'success');
+            summaryLine('  ✓ seeded', 'pass');
 
-            log('\nTest 2: Create cursor without filter');
-            cursor = await db.cursor('test_cursor', {});
-            if (cursor.count() === 50) {
-                log(`✓ Cursor has 50 items (no filter)`, 'success');
-            } else {
-                log(`✗ Expected 50 items, got ${cursor.count()}`, 'error');
-            }
+            summaryLine('Test 2 — unfiltered cursor');
+            let c = await db.cursor('test_cursor', {});
+            summaryLine(c.count() === 50 ? '  ✓ 50 items' : `  ✗ got ${c.count()}`, c.count() === 50 ? 'pass' : 'fail');
 
-            log('\nTest 3: Create cursor with filter (value > 25)');
-            cursor = await db.cursor('test_cursor', {
-                filters: [{ field: 'value', op: 'gt', value: 25 }]
-            });
-            if (cursor.count() === 25) {
-                log(`✓ Cursor has 25 items (filtered)`, 'success');
-            } else {
-                log(`✗ Expected 25 items, got ${cursor.count()}`, 'error');
-            }
+            summaryLine('Test 3 — filter value > 25');
+            c = await db.cursor('test_cursor', { filters: [{ field: 'value', op: 'gt', value: 25 }] });
+            summaryLine(c.count() === 25 ? '  ✓ 25 items' : `  ✗ got ${c.count()}`, c.count() === 25 ? 'pass' : 'fail');
 
-            log('\nTest 4: next() iteration');
-            const item1 = cursor.nextItem();
-            const item2 = cursor.nextItem();
-            if (item1 && item2 && cursor.position() === 2) {
-                log(`✓ next() works: position = ${cursor.position()}`, 'success');
-            } else {
-                log('✗ next() failed', 'error');
-            }
+            summaryLine('Test 4 — nextItem twice');
+            const a1 = c.nextItem(), a2 = c.nextItem();
+            summaryLine(a1 && a2 && c.position() === 2 ? `  ✓ position=${c.position()}` : '  ✗ nextItem broken', a1 && a2 && c.position() === 2 ? 'pass' : 'fail');
 
-            log('\nTest 5: next_batch() iteration');
-            const batch = cursor.nextBatch(10);
-            if (batch.length === 10 && cursor.position() === 12) {
-                log(`✓ next_batch(10) works: got ${batch.length}, position = ${cursor.position()}`, 'success');
-            } else {
-                log(`✗ next_batch failed: got ${batch.length}, position = ${cursor.position()}`, 'error');
-            }
+            summaryLine('Test 5 — nextBatch(10)');
+            const batch = c.nextBatch(10);
+            summaryLine(batch.length === 10 && c.position() === 12 ? `  ✓ got ${batch.length}, position=${c.position()}` : `  ✗ got ${batch.length}, position=${c.position()}`, batch.length === 10 && c.position() === 12 ? 'pass' : 'fail');
 
-            log('\nTest 6: has_more() check');
-            const remaining = cursor.count();
-            const hasMore = cursor.hasMore();
-            if (hasMore === (remaining > 0)) {
-                log(`✓ has_more() = ${hasMore}, remaining = ${remaining}`, 'success');
-            } else {
-                log('✗ has_more() incorrect', 'error');
-            }
+            summaryLine('Test 6 — hasMore matches count > 0');
+            summaryLine(c.hasMore() === (c.count() > 0) ? `  ✓ consistent (${c.count()} remaining)` : '  ✗ inconsistent', c.hasMore() === (c.count() > 0) ? 'pass' : 'fail');
 
-            log('\nTest 7: Exhaust cursor');
-            cursor.nextBatch(100);
-            if (!cursor.hasMore() && cursor.count() === 0) {
-                log('✓ Cursor exhausted correctly', 'success');
-            } else {
-                log('✗ Cursor not exhausted', 'error');
-            }
+            summaryLine('Test 7 — drain exhausts cursor');
+            c.nextBatch(200);
+            summaryLine(!c.hasMore() && c.count() === 0 ? '  ✓ exhausted' : '  ✗ still has rows', !c.hasMore() && c.count() === 0 ? 'pass' : 'fail');
 
-            log('\nTest 8: Create sorted cursor');
-            cursor = await db.cursor('test_cursor', {
+            summaryLine('Test 8 — sorted cursor desc');
+            c = await db.cursor('test_cursor', {
                 filters: [{ field: 'value', op: 'lte', value: 10 }],
                 sort: [{ field: 'value', direction: 'desc' }]
             });
-            const first = cursor.nextItem();
-            const second = cursor.nextItem();
-            if (first.value > second.value) {
-                log(`✓ Sorted correctly: ${first.value} > ${second.value}`, 'success');
-            } else {
-                log(`✗ Sort failed: ${first.value} not > ${second.value}`, 'error');
-            }
+            const f1 = c.nextItem(), f2 = c.nextItem();
+            summaryLine(f1.value > f2.value ? `  ✓ desc (${f1.value} > ${f2.value})` : `  ✗ not sorted (${f1.value}, ${f2.value})`, f1.value > f2.value ? 'pass' : 'fail');
 
-            log('\n=== All Cursor Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
         }
 
         function log(msg, type = '') {

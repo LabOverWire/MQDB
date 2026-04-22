@@ -5,6 +5,144 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Schema Validation</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .page-hero {
+            background: linear-gradient(135deg, #7b1fa2, #4a148c);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .field-builder {
+            display: grid;
+            grid-template-columns: 1.5fr 1fr 100px 1.5fr 40px;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .field-builder input, .field-builder select {
+            width: 100%;
+        }
+        .field-builder .rm {
+            background: #f44336;
+            border: none;
+            color: white;
+            width: 36px;
+            height: 36px;
+            padding: 0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 18px;
+        }
+        .field-header {
+            display: grid;
+            grid-template-columns: 1.5fr 1fr 100px 1.5fr 40px;
+            gap: 8px;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #777;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+            padding: 0 4px;
+        }
+
+        .scenario-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        @media (max-width: 800px) { .scenario-grid { grid-template-columns: 1fr; } }
+        .scenario {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-left: 4px solid #7b1fa2;
+            border-radius: 6px;
+            padding: 12px 15px;
+        }
+        .scenario.valid { border-left-color: #2e7d32; }
+        .scenario.invalid { border-left-color: #c62828; }
+        .scenario h4 { margin: 0 0 6px 0; }
+        .scenario code {
+            display: block;
+            background: #f5f5f5;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin: 6px 0;
+            white-space: pre-wrap;
+        }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 130px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .schema-card {
+            background: #fafafa;
+            border-radius: 6px;
+            padding: 12px 15px;
+            margin-bottom: 8px;
+            border-left: 4px solid #7b1fa2;
+        }
+        .schema-card h3 { margin: 0 0 6px 0; }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
+    </style>
 </head>
 <body>
     <nav>
@@ -23,68 +161,154 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <h1>Schema Validation</h1>
+    <div class="page-hero">
+        <h2>Schemas — typed fields &amp; required checks</h2>
+        <p>Register a schema for an entity and every write is validated before it lands. MQDB checks types (<code style="background:rgba(255,255,255,0.2);color:white">string</code>, <code style="background:rgba(255,255,255,0.2);color:white">number</code>, <code style="background:rgba(255,255,255,0.2);color:white">boolean</code>, <code style="background:rgba(255,255,255,0.2);color:white">array</code>, <code style="background:rgba(255,255,255,0.2);color:white">object</code>), enforces <code style="background:rgba(255,255,255,0.2);color:white">required</code> fields, and fills in any <code style="background:rgba(255,255,255,0.2);color:white">default</code> values you declare.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>db.addSchema(entity, { fields: [...] })</code> registers a field list. Each field has <code>name</code>, <code>type</code>, optional <code>required</code>, optional <code>default</code>.</li>
+                <li>On every <code>create</code>/<code>update</code>, MQDB walks the fields: required-but-missing → reject; wrong type → reject; missing-with-default → fill the default.</li>
+                <li>Schemas are per-entity and can coexist with constraints — <code>UNIQUE</code> or <code>FOREIGN KEY</code> rules run after schema validation passes.</li>
+                <li>Reads are untouched — the schema only shapes writes.</li>
+                <li>To change a field later, call <code>addSchema</code> again with the new list; it replaces the previous one.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart TD
+    W["db.create(entity, data)"] --> S{schema?}
+    S -- no schema --> OK[write]
+    S -- has schema --> V{per-field<br/>validate}
+    V -- required missing --> R1[reject]
+    V -- wrong type --> R2[reject]
+    V -- missing<br/>(has default) --> F[fill default] --> OK
+    V -- all present,<br/>types ok --> OK
+    style R1 fill:#ffcdd2,stroke:#c62828
+    style R2 fill:#ffcdd2,stroke:#c62828
+    style OK fill:#c8e6c9,stroke:#2e7d32
+    style F fill:#fff3e0,stroke:#ef6c00
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>The Schema Builder is pre-filled with 4 fields (<code>name</code>, <code>email</code>, <code>age</code>, <code>active</code>). Click <code>Add schema</code>.</li>
+            <li>Click the four preset scenarios on the right. Two succeed, two fail — each shows a concrete example of what the validator enforces.</li>
+            <li>Add a new field via <code>+ Add field</code> (e.g. <code>role</code>, type <code>string</code>, default <code>'user'</code>), click <code>Add schema</code> again, then re-run the <em>Default value</em> preset — the record gets <code>role: 'user'</code> automatically.</li>
+            <li>Click <code>Run all tests</code> to see the 5 automated checks.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
-            <h2>Define Schema</h2>
-            <div class="row">
-                <label>Entity:</label>
-                <input type="text" id="schemaEntity" value="users">
+            <h2>Schema builder</h2>
+
+            <div class="kv-grid">
+                <label for="schemaEntity">Entity</label>
+                <select id="schemaEntity">
+                    <option value="users" selected>users</option>
+                    <option value="products">products</option>
+                    <option value="orders">orders</option>
+                    <option value="__custom__">Other…</option>
+                </select>
+
+                <label id="customEntityLabel" for="customEntity" style="display:none">Custom name</label>
+                <input type="text" id="customEntity" placeholder="entity name" style="display:none">
             </div>
-            <div class="row">
-                <label>Schema (JSON):</label>
+
+            <h3 class="mt-20">Fields</h3>
+            <div class="field-header">
+                <div>Name</div><div>Type</div><div>Required</div><div>Default</div><div></div>
             </div>
-            <textarea id="schemaDefinition">{
-  "fields": [
-    {"name": "name", "type": "string", "required": true},
-    {"name": "email", "type": "string", "required": true},
-    {"name": "age", "type": "number", "required": false},
-    {"name": "active", "type": "boolean", "default": true}
-  ]
-}</textarea>
-            <div class="row mt-10">
-                <button id="addSchemaBtn" class="success">Add Schema</button>
-                <button id="getSchemaBtn">Get Schema</button>
+            <div id="fieldList"></div>
+            <button id="addFieldBtn" class="secondary">+ Add field</button>
+
+            <div class="row mt-20">
+                <button id="addSchemaBtn" class="success">Add schema</button>
+                <button id="getSchemaBtn">Reload from DB</button>
+                <button id="showJson" class="secondary">Show as JSON</button>
+            </div>
+
+            <div id="jsonPreview" style="display:none" class="mt-10">
+                <p class="hint">Raw JSON equivalent — feeds into <code>db.addSchema</code>.</p>
+                <textarea id="jsonOutput" readonly style="min-height:140px"></textarea>
             </div>
         </div>
 
         <div class="section">
-            <h2>Test Data</h2>
-            <div class="row">
-                <label>Entity:</label>
-                <input type="text" id="testEntity" value="users">
+            <h2>Preset scenarios</h2>
+            <p class="hint">Each preset uses the <code>users</code> schema above. Run them one after another to see validator behaviour.</p>
+            <div class="scenario-grid">
+                <div class="scenario valid">
+                    <h4>1 · Valid data</h4>
+                    <code id="presetValidCode">{ name: "Alice", email: "alice@example.com", age: 30 }</code>
+                    <button id="testValidData" class="success">Run (should succeed)</button>
+                </div>
+                <div class="scenario invalid">
+                    <h4>2 · Wrong type</h4>
+                    <code id="presetWrongCode">{ name: "Bob", email: "bob@x.com", age: "thirty" }</code>
+                    <button id="testWrongType" class="danger">Run (should fail)</button>
+                </div>
+                <div class="scenario invalid">
+                    <h4>3 · Missing required</h4>
+                    <code id="presetMissingCode">{ name: "Charlie" }  // no email</code>
+                    <button id="testMissingRequired" class="danger">Run (should fail)</button>
+                </div>
+                <div class="scenario valid">
+                    <h4>4 · Default value applied</h4>
+                    <code id="presetDefaultCode">{ name: "Diana", email: "diana@x.com" }  // → active=true</code>
+                    <button id="testDefaultValue" class="success">Run (default should fill)</button>
+                </div>
             </div>
-            <div class="row">
-                <label>Data (JSON):</label>
+
+            <h2 class="mt-20">Manual write</h2>
+            <div class="kv-grid">
+                <label for="testEntity">Entity</label>
+                <select id="testEntity">
+                    <option value="users" selected>users</option>
+                    <option value="products">products</option>
+                    <option value="orders">orders</option>
+                </select>
             </div>
-            <textarea id="testData">{"name": "Alice", "email": "alice@example.com", "age": 30}</textarea>
+            <div class="row mt-10"><label>Data (JSON)</label></div>
+            <textarea id="testData">{ "name": "Alice", "email": "alice@example.com", "age": 30 }</textarea>
             <div class="row mt-10">
-                <button id="validateCreateBtn" class="success">Create (Validates)</button>
+                <button id="validateCreateBtn" class="success">Create (runs validation)</button>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Test Scenarios</h2>
-        <div class="flex gap-10 flex-wrap">
-            <button id="runAllSchemaTests">Run All Tests</button>
-            <button id="testValidData" class="success">Test Valid Data</button>
-            <button id="testWrongType" class="danger">Test Wrong Type</button>
-            <button id="testMissingRequired" class="danger">Test Missing Required</button>
-            <button id="testDefaultValue">Test Default Value</button>
-        </div>
+        <h2>Registered schemas <span class="badge" id="schemaCount">0</span></h2>
+        <div id="schemasDisplay"><p class="hint">No schemas yet.</p></div>
     </div>
 
     <div class="section">
-        <h2>Current Schemas</h2>
-        <div id="schemasDisplay">
-            <p style="color:#999">No schemas defined yet</p>
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> creates a <code>test_users</code> schema and runs these 5 steps:</p>
+        <ol>
+            <li>Valid data is accepted</li>
+            <li>Wrong type (<code>age</code> as string) is rejected</li>
+            <li>Missing required (<code>email</code>) is rejected</li>
+            <li>Default value is applied when field is omitted</li>
+            <li><code>getSchema</code> returns the exact 4-field definition</li>
+        </ol>
+        <div class="row">
+            <button id="runAllSchemaTests" class="success">Run all tests</button>
         </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -94,52 +318,134 @@
         let db;
         const registeredSchemas = new Set();
 
+        const DEFAULT_FIELDS = [
+            { name: 'name',   type: 'string',  required: true,  def: '' },
+            { name: 'email',  type: 'string',  required: true,  def: '' },
+            { name: 'age',    type: 'number',  required: false, def: '' },
+            { name: 'active', type: 'boolean', required: false, def: 'true' }
+        ];
+
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
+            window.db = db;
             log('Database initialized', 'success');
-
+            renderFieldList(DEFAULT_FIELDS);
             setupEventListeners();
         }
 
         function setupEventListeners() {
+            document.getElementById('addFieldBtn').onclick = () => addFieldRow({ name: '', type: 'string', required: false, def: '' });
             document.getElementById('addSchemaBtn').onclick = addSchema;
-            document.getElementById('getSchemaBtn').onclick = getSchema;
+            document.getElementById('getSchemaBtn').onclick = reloadFromDb;
+            document.getElementById('showJson').onclick = toggleJson;
             document.getElementById('validateCreateBtn').onclick = validateCreate;
             document.getElementById('runAllSchemaTests').onclick = runAllSchemaTests;
             document.getElementById('testValidData').onclick = testValidData;
             document.getElementById('testWrongType').onclick = testWrongType;
             document.getElementById('testMissingRequired').onclick = testMissingRequired;
             document.getElementById('testDefaultValue').onclick = testDefaultValue;
+            document.getElementById('schemaEntity').onchange = onEntityChange;
+        }
+
+        function onEntityChange() {
+            const v = document.getElementById('schemaEntity').value;
+            const show = v === '__custom__';
+            document.getElementById('customEntityLabel').style.display = show ? 'block' : 'none';
+            document.getElementById('customEntity').style.display = show ? 'block' : 'none';
+        }
+
+        function resolveEntity() {
+            const v = document.getElementById('schemaEntity').value;
+            if (v === '__custom__') return document.getElementById('customEntity').value.trim() || 'users';
+            return v;
+        }
+
+        function renderFieldList(fields) {
+            const el = document.getElementById('fieldList');
+            el.innerHTML = '';
+            fields.forEach(f => addFieldRow(f));
+        }
+
+        function addFieldRow(f) {
+            const row = document.createElement('div');
+            row.className = 'field-builder';
+            row.innerHTML = `
+                <input type="text" class="fname" placeholder="field name" value="${escapeAttr(f.name)}">
+                <select class="ftype">
+                    ${['string','number','boolean','array','object'].map(t =>
+                        `<option value="${t}" ${t === f.type ? 'selected' : ''}>${t}</option>`).join('')}
+                </select>
+                <select class="freq">
+                    <option value="no"  ${!f.required ? 'selected' : ''}>No</option>
+                    <option value="yes" ${f.required ? 'selected' : ''}>Yes</option>
+                </select>
+                <input type="text" class="fdef" placeholder="(optional)" value="${escapeAttr(f.def ?? '')}">
+                <button class="rm" title="remove field">×</button>
+            `;
+            row.querySelector('.rm').onclick = () => row.remove();
+            document.getElementById('fieldList').appendChild(row);
+        }
+
+        function readFieldList() {
+            const rows = document.querySelectorAll('#fieldList .field-builder');
+            const fields = [];
+            for (const row of rows) {
+                const name = row.querySelector('.fname').value.trim();
+                if (!name) continue;
+                const type = row.querySelector('.ftype').value;
+                const required = row.querySelector('.freq').value === 'yes';
+                const def = row.querySelector('.fdef').value.trim();
+                const field = { name, type, required };
+                if (def !== '') {
+                    try { field.default = JSON.parse(def); }
+                    catch { field.default = def; }
+                }
+                fields.push(field);
+            }
+            return fields;
         }
 
         async function addSchema() {
             try {
-                const entity = document.getElementById('schemaEntity').value;
-                const schema = JSON.parse(document.getElementById('schemaDefinition').value);
-                log(`Adding schema for ${entity}...`);
-                db.addSchema(entity, schema);
+                const entity = resolveEntity();
+                const fields = readFieldList();
+                if (fields.length === 0) return log('At least one field is required', 'warning');
+                db.addSchema(entity, { fields });
                 registeredSchemas.add(entity);
-                log(`Schema added for ${entity}`, 'success');
+                log(`Schema for ${entity} (${fields.length} fields)`, 'success');
                 updateSchemasDisplay();
             } catch (e) {
-                log(`Error: ${e}`, 'error');
+                log(`${e}`, 'error');
             }
         }
 
-        async function getSchema() {
+        function reloadFromDb() {
             try {
-                const entity = document.getElementById('schemaEntity').value;
-                log(`Getting schema for ${entity}...`);
+                const entity = resolveEntity();
                 const schema = db.getSchema(entity);
-                if (schema) {
-                    log(`Schema: ${JSON.stringify(schema, null, 2)}`, 'success');
-                    document.getElementById('schemaDefinition').value = JSON.stringify(schema, null, 2);
-                } else {
-                    log(`No schema found for ${entity}`, 'warning');
-                }
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
+                if (!schema) return log(`No schema for ${entity}`, 'warning');
+                renderFieldList(schema.fields.map(f => ({
+                    name: f.name,
+                    type: f.type,
+                    required: !!f.required,
+                    def: f.default !== undefined ? (typeof f.default === 'string' ? f.default : JSON.stringify(f.default)) : ''
+                })));
+                log(`Loaded schema for ${entity}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        function toggleJson() {
+            const el = document.getElementById('jsonPreview');
+            const show = el.style.display === 'none';
+            el.style.display = show ? 'block' : 'none';
+            if (show) {
+                const schema = { fields: readFieldList() };
+                document.getElementById('jsonOutput').value = JSON.stringify(schema, null, 2);
             }
         }
 
@@ -147,181 +453,154 @@
             try {
                 const entity = document.getElementById('testEntity').value;
                 const data = JSON.parse(document.getElementById('testData').value);
-                log(`Creating ${entity} with validation...`);
-                const result = await db.create(entity, data);
-                log(`Created: ${JSON.stringify(result)}`, 'success');
+                const r = await db.create(entity, data);
+                log(`Created ${JSON.stringify(r)}`, 'success');
             } catch (e) {
-                log(`Validation error: ${e}`, 'error');
+                log(`${e}`, 'error');
             }
         }
 
-        async function updateSchemasDisplay() {
+        function updateSchemasDisplay() {
             const container = document.getElementById('schemasDisplay');
+            document.getElementById('schemaCount').textContent = registeredSchemas.size;
             if (registeredSchemas.size === 0) {
-                container.innerHTML = '<p style="color:#999">No schemas defined yet</p>';
+                container.innerHTML = '<p class="hint">No schemas yet.</p>';
                 return;
             }
-
             let html = '';
             for (const entity of registeredSchemas) {
                 const schema = db.getSchema(entity);
-                if (schema) {
-                    html += `<div class="card">
-                        <h3>${entity}</h3>
-                        <table>
-                            <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th></tr></thead>
-                            <tbody>`;
-                    for (const field of schema.fields) {
-                        html += `<tr>
-                            <td><code>${field.name}</code></td>
-                            <td>${field.type}</td>
-                            <td>${field.required ? 'Yes' : 'No'}</td>
-                            <td>${field.default !== undefined ? JSON.stringify(field.default) : '-'}</td>
-                        </tr>`;
-                    }
-                    html += '</tbody></table></div>';
+                if (!schema) continue;
+                html += `<div class="schema-card">
+                    <h3>${escapeHtml(entity)}</h3>
+                    <table>
+                        <thead><tr><th>Field</th><th>Type</th><th>Required</th><th>Default</th></tr></thead>
+                        <tbody>`;
+                for (const f of schema.fields) {
+                    html += `<tr>
+                        <td><code>${escapeHtml(f.name)}</code></td>
+                        <td>${escapeHtml(f.type)}</td>
+                        <td>${f.required ? 'Yes' : 'No'}</td>
+                        <td>${f.default !== undefined ? `<code>${escapeHtml(JSON.stringify(f.default))}</code>` : '—'}</td>
+                    </tr>`;
                 }
+                html += '</tbody></table></div>';
             }
             container.innerHTML = html;
         }
 
-        async function runAllSchemaTests() {
-            log('=== Running Schema Tests ===', 'info');
-
-            db.addSchema('test_users', {
+        function ensureUsersSchema() {
+            db.addSchema('users', {
                 fields: [
-                    {name: 'name', type: 'string', required: true},
-                    {name: 'email', type: 'string', required: true},
-                    {name: 'age', type: 'number', required: false},
-                    {name: 'active', type: 'boolean', default: true}
+                    { name: 'name',   type: 'string',  required: true },
+                    { name: 'email',  type: 'string',  required: true },
+                    { name: 'age',    type: 'number' },
+                    { name: 'active', type: 'boolean', default: true }
                 ]
             });
-            registeredSchemas.add('test_users');
-            log('Test schema added for test_users', 'success');
-
-            log('Test 1: Create with valid data');
-            try {
-                const result = await db.create('test_users', {name: 'Alice', email: 'alice@test.com', age: 30});
-                log(`  ✓ Created: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`  ✗ Unexpected error: ${e}`, 'error');
-            }
-
-            log('Test 2: Create with wrong type (age as string)');
-            try {
-                await db.create('test_users', {name: 'Bob', email: 'bob@test.com', age: 'thirty'});
-                log('  ✗ Should have thrown validation error', 'error');
-            } catch (e) {
-                log(`  ✓ Correctly rejected: ${e}`, 'success');
-            }
-
-            log('Test 3: Create with missing required field (no email)');
-            try {
-                await db.create('test_users', {name: 'Charlie'});
-                log('  ✗ Should have thrown validation error', 'error');
-            } catch (e) {
-                log(`  ✓ Correctly rejected: ${e}`, 'success');
-            }
-
-            log('Test 4: Create and verify default value applied');
-            try {
-                const result = await db.create('test_users', {name: 'Diana', email: 'diana@test.com'});
-                if (result.active === true) {
-                    log(`  ✓ Default value applied: active=${result.active}`, 'success');
-                } else {
-                    log(`  ✗ Default value not applied: ${JSON.stringify(result)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Unexpected error: ${e}`, 'error');
-            }
-
-            log('Test 5: Retrieve and verify schema');
-            const schema = db.getSchema('test_users');
-            if (schema && schema.fields.length === 4) {
-                log(`  ✓ Schema retrieved with ${schema.fields.length} fields`, 'success');
-            } else {
-                log('  ✗ Schema retrieval failed', 'error');
-            }
-
-            log('=== All Schema Tests Complete ===', 'success');
-            updateSchemasDisplay();
+            registeredSchemas.add('users');
         }
 
         async function testValidData() {
-            log('Testing valid data...');
-            db.addSchema('demo', {
-                fields: [
-                    {name: 'title', type: 'string', required: true},
-                    {name: 'count', type: 'number'}
-                ]
-            });
-            registeredSchemas.add('demo');
             try {
-                const result = await db.create('demo', {title: 'Test', count: 42});
-                log(`✓ Valid data accepted: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`✗ Error: ${e}`, 'error');
-            }
-            updateSchemasDisplay();
+                ensureUsersSchema();
+                const r = await db.create('users', { name: 'Alice', email: 'alice@example.com', age: 30 });
+                log(`✓ Accepted: ${JSON.stringify(r)}`, 'success');
+                updateSchemasDisplay();
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function testWrongType() {
-            log('Testing wrong type...');
-            db.addSchema('demo', {
-                fields: [
-                    {name: 'title', type: 'string', required: true},
-                    {name: 'count', type: 'number'}
-                ]
-            });
-            registeredSchemas.add('demo');
             try {
-                await db.create('demo', {title: 123, count: 'not a number'});
-                log('✗ Should have been rejected', 'error');
-            } catch (e) {
-                log(`✓ Correctly rejected wrong type: ${e}`, 'success');
-            }
-            updateSchemasDisplay();
+                ensureUsersSchema();
+                try {
+                    await db.create('users', { name: 'Bob', email: 'bob@x.com', age: 'thirty' });
+                    log('✗ wrong type accepted', 'error');
+                } catch (e) { log(`✓ wrong type rejected: ${e}`, 'success'); }
+                updateSchemasDisplay();
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function testMissingRequired() {
-            log('Testing missing required field...');
-            db.addSchema('demo', {
-                fields: [
-                    {name: 'title', type: 'string', required: true},
-                    {name: 'count', type: 'number'}
-                ]
-            });
-            registeredSchemas.add('demo');
             try {
-                await db.create('demo', {count: 42});
-                log('✗ Should have been rejected', 'error');
-            } catch (e) {
-                log(`✓ Correctly rejected missing required: ${e}`, 'success');
-            }
-            updateSchemasDisplay();
+                ensureUsersSchema();
+                try {
+                    await db.create('users', { name: 'Charlie' });
+                    log('✗ missing email accepted', 'error');
+                } catch (e) { log(`✓ missing required rejected: ${e}`, 'success'); }
+                updateSchemasDisplay();
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function testDefaultValue() {
-            log('Testing default value...');
-            db.addSchema('demo', {
+            try {
+                ensureUsersSchema();
+                const r = await db.create('users', { name: 'Diana', email: 'diana@x.com' });
+                log(r.active === true ? `✓ default filled: active=${r.active}` : `✗ default NOT applied: ${JSON.stringify(r)}`, r.active === true ? 'success' : 'error');
+                updateSchemasDisplay();
+            } catch (e) { log(`${e}`, 'error'); }
+        }
+
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
+        async function runAllSchemaTests() {
+            clearSummary();
+            summaryLine('=== Schema tests (test_users) ===');
+
+            db.addSchema('test_users', {
                 fields: [
-                    {name: 'title', type: 'string', required: true},
-                    {name: 'status', type: 'string', default: 'pending'}
+                    { name: 'name',   type: 'string',  required: true },
+                    { name: 'email',  type: 'string',  required: true },
+                    { name: 'age',    type: 'number' },
+                    { name: 'active', type: 'boolean', default: true }
                 ]
             });
-            registeredSchemas.add('demo');
+            registeredSchemas.add('test_users');
+
+            summaryLine('Test 1 — valid data accepted');
             try {
-                const result = await db.create('demo', {title: 'Test'});
-                if (result.status === 'pending') {
-                    log(`✓ Default value applied: status="${result.status}"`, 'success');
-                } else {
-                    log(`✗ Default not applied: ${JSON.stringify(result)}`, 'error');
-                }
-            } catch (e) {
-                log(`✗ Error: ${e}`, 'error');
-            }
+                const r = await db.create('test_users', { name: 'Alice', email: 'alice@test.com', age: 30 });
+                summaryLine(`  ✓ created ${r.id}`, 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
+
+            summaryLine('Test 2 — wrong type rejected');
+            try {
+                await db.create('test_users', { name: 'Bob', email: 'bob@test.com', age: 'thirty' });
+                summaryLine('  ✗ wrong type accepted', 'fail');
+            } catch { summaryLine('  ✓ rejected', 'pass'); }
+
+            summaryLine('Test 3 — missing required rejected');
+            try {
+                await db.create('test_users', { name: 'Charlie' });
+                summaryLine('  ✗ missing email accepted', 'fail');
+            } catch { summaryLine('  ✓ rejected', 'pass'); }
+
+            summaryLine('Test 4 — default value applied');
+            try {
+                const r = await db.create('test_users', { name: 'Diana', email: 'diana@test.com' });
+                summaryLine(r.active === true ? `  ✓ active=${r.active}` : `  ✗ default missing: ${JSON.stringify(r)}`, r.active === true ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
+
+            summaryLine('Test 5 — getSchema returns 4 fields');
+            const schema = db.getSchema('test_users');
+            summaryLine(schema && schema.fields && schema.fields.length === 4 ? `  ✓ ${schema.fields.length} fields` : '  ✗ wrong shape', schema && schema.fields.length === 4 ? 'pass' : 'fail');
+
+            summaryLine('=== Done ===', 'pass');
             updateSchemasDisplay();
         }
+
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        }
+        function escapeAttr(s) { return escapeHtml(s); }
 
         function log(msg, type = '') {
             const pre = document.getElementById('log');

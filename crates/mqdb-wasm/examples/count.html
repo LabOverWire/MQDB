@@ -3,9 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MQDB WASM - Count & Aggregation</title>
+    <title>MQDB WASM - Count</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
+        .page-hero {
+            background: linear-gradient(135deg, #1565c0, #0d47a1);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
         .big-count {
             font-size: 72px;
             font-weight: bold;
@@ -13,13 +59,16 @@
             text-align: center;
             padding: 20px;
             line-height: 1;
+            font-variant-numeric: tabular-nums;
         }
         .count-label {
             text-align: center;
             color: #666;
             font-size: 14px;
             margin-top: 5px;
+            min-height: 20px;
         }
+
         .verify-panel {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -42,18 +91,31 @@
             font-size: 32px;
             font-weight: bold;
         }
-        .verify-box .result.match {
-            color: #4caf50;
-        }
-        .verify-box .result.mismatch {
-            color: #f44336;
-        }
-        .filter-builder {
-            display: flex;
-            gap: 10px;
+        .verify-box .result.match { color: #4caf50; }
+        .verify-box .result.mismatch { color: #f44336; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 100px 1fr;
+            gap: 8px 12px;
             align-items: center;
-            flex-wrap: wrap;
         }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
     </style>
 </head>
 <body>
@@ -73,83 +135,147 @@
         <a href="count.html" class="active">Count</a>
     </nav>
 
-    <h1>Count & Aggregation</h1>
+    <div class="page-hero">
+        <h2>Count — how many rows match, without loading them</h2>
+        <p><code style="background:rgba(255,255,255,0.2);color:white">db.count(entity, opts)</code> returns just the number of matching rows. Use it for pagination totals, badge counts, and quick checks where you don't need the data itself. Same filter vocabulary as <code style="background:rgba(255,255,255,0.2);color:white">list</code>.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>db.count(entity, opts)</code> returns a <code>Promise&lt;number&gt;</code>. <code>opts</code> accepts the same <code>filters</code> as <code>list</code> — <code>sort</code>, <code>pagination</code>, and <code>projection</code> are ignored (they can't change the count).</li>
+                <li><code>db.countSync(entity, opts)</code> is the synchronous version for the in-memory backend.</li>
+                <li>For indexed filter fields, <code>count</code> walks the index. Otherwise it walks the data and counts matches — same cost as <code>list(...).length</code> but without allocating an array.</li>
+                <li><strong>When to use</strong>: "how many unread messages", "records on this page", pagination total, boolean "does anything match".</li>
+                <li>The <em>Count vs list verification</em> panel below shows that <code>count(opts) === list(opts).length</code> always.</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    A["count(entity, opts)"] --> I{index<br/>available?}
+    I -- yes --> IX[Index scan] --> N[count]
+    I -- no --> DS[Data scan] --> N
+    B["list(entity, opts)"] --> DS2[Data scan] --> Arr[array of rows] --> L["arr.length"]
+    L -. should equal .- N
+    style N fill:#c8e6c9,stroke:#2e7d32
+    style L fill:#fff3e0,stroke:#ef6c00
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>Click <code>Seed 50 products</code>. Products have a random <code>price</code> and a <code>category</code> chosen round-robin from 5 categories (so 10 electronics, 10 books, etc.).</li>
+            <li>Click <code>Count all</code> — reads 50.</li>
+            <li>Click <code>Count (price &gt; 50)</code> and <code>Count (electronics)</code> — the counter updates with the filtered count and the label explains what was counted.</li>
+            <li>Click <code>Verify count vs list</code> — runs both queries and shows that <code>count(opts)</code> and <code>list(opts).length</code> agree.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
             <h2>Setup</h2>
             <div class="card">
-                <h3>Seed Data</h3>
-                <p>Create 50 products with random prices and categories</p>
-                <button id="seedBtn" class="success">Seed 50 Products</button>
-                <button id="clearBtn" class="danger">Clear Products</button>
+                <h3>Seed data</h3>
+                <p class="hint">50 products with random price (0–100) and a category cycling through <code>electronics</code>, <code>books</code>, <code>clothing</code>, <code>food</code>, <code>toys</code> (10 of each).</p>
+                <button id="seedBtn" class="success">Seed 50 products</button>
+                <button id="clearBtn" class="danger">Clear products</button>
             </div>
+
             <div class="card mt-10">
                 <h3>Entity</h3>
-                <div class="row">
-                    <label>Entity:</label>
-                    <input type="text" id="entity" value="products">
+                <div class="kv-grid">
+                    <label for="entity">Entity</label>
+                    <select id="entity">
+                        <option value="products" selected>products</option>
+                    </select>
                 </div>
             </div>
         </div>
 
         <div class="section">
-            <h2>Count Result</h2>
+            <h2>Count result</h2>
             <div class="big-count" id="countDisplay">0</div>
-            <div class="count-label" id="countLabel">records</div>
+            <div class="count-label" id="countLabel">—</div>
             <div class="row mt-10" style="justify-content:center">
-                <button id="countAllBtn" class="success">Count All</button>
-                <button id="countFilteredBtn">Count (price > 50)</button>
+                <button id="countAllBtn" class="success">Count all</button>
+                <button id="countFilteredBtn">Count (price &gt; 50)</button>
                 <button id="countCategoryBtn">Count (electronics)</button>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Custom Filter</h2>
-        <div class="filter-builder">
-            <label>Field:</label>
-            <input type="text" id="filterField" value="price" style="width:100px">
-            <label>Op:</label>
+        <h2>Custom filter</h2>
+        <p class="hint">Build any filter and see its count. Value can be a string, a number (auto-detected), <code>true</code>/<code>false</code>, or empty for null operators.</p>
+        <div class="kv-grid" style="max-width:600px">
+            <label for="filterField">Field</label>
+            <select id="filterField">
+                <option value="price" selected>price</option>
+                <option value="category">category</option>
+                <option value="name">name</option>
+            </select>
+            <label for="filterOp">Operator</label>
             <select id="filterOp">
                 <option value="eq">eq (=)</option>
-                <option value="gt" selected>gt (>)</option>
-                <option value="lt">lt (<)</option>
-                <option value="gte">gte (>=)</option>
-                <option value="lte">lte (<=)</option>
-                <option value="ne">ne (<>)</option>
+                <option value="ne">ne (!=)</option>
+                <option value="gt" selected>gt (&gt;)</option>
+                <option value="gte">gte (&gt;=)</option>
+                <option value="lt">lt (&lt;)</option>
+                <option value="lte">lte (&lt;=)</option>
                 <option value="glob">glob (~)</option>
             </select>
-            <label>Value:</label>
-            <input type="text" id="filterValue" value="50" style="width:100px">
-            <button id="countCustomBtn">Count</button>
+            <label for="filterValue">Value</label>
+            <input type="text" id="filterValue" value="50">
+        </div>
+        <div class="row mt-10">
+            <button id="countCustomBtn" class="success">Count with custom filter</button>
         </div>
     </div>
 
     <div class="section">
-        <h2>Count vs List Verification</h2>
-        <p>Verifies that <code>count(opts)</code> === <code>list(opts).length</code></p>
-        <button id="verifyBtn">Verify count vs list</button>
-        <button id="verifySyncBtn">Verify countSync vs listSync</button>
+        <h2>Count vs list verification</h2>
+        <p class="hint">Confirms that <code>count(opts)</code> and <code>list(opts).length</code> always agree for the same options.</p>
+        <div class="row">
+            <button id="verifyBtn" class="success">Verify count vs list</button>
+            <button id="verifySyncBtn">Verify countSync vs listSync</button>
+        </div>
         <div class="verify-panel" id="verifyPanel" style="display:none">
             <div class="verify-box">
                 <div class="method">count(entity, opts)</div>
-                <div class="result" id="verifyCount">-</div>
+                <div class="result" id="verifyCount">—</div>
             </div>
             <div class="verify-box">
                 <div class="method">list(entity, opts).length</div>
-                <div class="result" id="verifyList">-</div>
+                <div class="result" id="verifyList">—</div>
             </div>
         </div>
     </div>
 
     <div class="section">
-        <h2>Quick Tests</h2>
-        <button id="runAllTests" class="success">Run All Tests</button>
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> seeds 50 rows into <code>count_test</code> and runs these 6 checks:</p>
+        <ol>
+            <li>Unfiltered count returns 50</li>
+            <li><code>count(price &gt; 50)</code> matches <code>list(...)</code> length</li>
+            <li><code>count(category = "electronics")</code> returns 10 (seed is deterministic)</li>
+            <li>Multi-filter (<code>price &gt; 20 AND category = "books"</code>) matches list length</li>
+            <li><code>countSync</code> returns the same number as <code>count</code></li>
+            <li><code>count</code> on an empty entity returns 0</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
     </div>
 
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -160,11 +286,14 @@
         const categories = ['electronics', 'books', 'clothing', 'food', 'toys'];
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
             window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
         }
 
@@ -180,12 +309,10 @@
             document.getElementById('runAllTests').onclick = runAllTests;
         }
 
-        function getEntity() {
-            return document.getElementById('entity').value;
-        }
+        function getEntity() { return document.getElementById('entity').value; }
 
         async function seedProducts() {
-            log('Seeding 50 products...');
+            log('Seeding 50 products…');
             for (let i = 0; i < 50; i++) {
                 await db.create('products', {
                     name: `Product ${i}`,
@@ -194,22 +321,15 @@
                 });
             }
             log('Seeded 50 products', 'success');
-            await updateCount();
+            await countAll();
         }
 
         async function clearProducts() {
-            const records = await db.list('products', null);
-            for (const r of records) {
-                await db.delete('products', r.id);
-            }
-            log(`Cleared ${records.length} products`, 'success');
+            const rows = await db.list('products', null);
+            for (const r of rows) await db.delete('products', r.id);
+            log(`Cleared ${rows.length} products`, 'success');
             document.getElementById('countDisplay').textContent = '0';
-        }
-
-        async function updateCount() {
-            const c = await db.count(getEntity(), null);
-            document.getElementById('countDisplay').textContent = c;
-            document.getElementById('countLabel').textContent = 'records';
+            document.getElementById('countLabel').textContent = '—';
         }
 
         async function countAll() {
@@ -218,35 +338,25 @@
                 document.getElementById('countDisplay').textContent = c;
                 document.getElementById('countLabel').textContent = 'total records';
                 log(`count("${getEntity()}") = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function countPriceAbove50() {
             try {
-                const c = await db.count(getEntity(), {
-                    filters: [{field: 'price', op: 'gt', value: 50}]
-                });
+                const c = await db.count(getEntity(), { filters: [{ field: 'price', op: 'gt', value: 50 }] });
                 document.getElementById('countDisplay').textContent = c;
                 document.getElementById('countLabel').textContent = 'where price > 50';
                 log(`count(price > 50) = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function countElectronics() {
             try {
-                const c = await db.count(getEntity(), {
-                    filters: [{field: 'category', op: 'eq', value: 'electronics'}]
-                });
+                const c = await db.count(getEntity(), { filters: [{ field: 'category', op: 'eq', value: 'electronics' }] });
                 document.getElementById('countDisplay').textContent = c;
                 document.getElementById('countLabel').textContent = 'electronics';
                 log(`count(category = "electronics") = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function countCustom() {
@@ -254,82 +364,62 @@
                 const field = document.getElementById('filterField').value;
                 const op = document.getElementById('filterOp').value;
                 let value = document.getElementById('filterValue').value;
-                const numVal = Number(value);
-                if (!isNaN(numVal) && value !== '') value = numVal;
-
-                const c = await db.count(getEntity(), {
-                    filters: [{field, op, value}]
-                });
+                const num = Number(value);
+                if (!isNaN(num) && value !== '') value = num;
+                else if (value === 'true') value = true;
+                else if (value === 'false') value = false;
+                const c = await db.count(getEntity(), { filters: [{ field, op, value }] });
                 document.getElementById('countDisplay').textContent = c;
                 document.getElementById('countLabel').textContent = `where ${field} ${op} ${value}`;
-                log(`count(${field} ${op} ${value}) = ${c}`, 'success');
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                log(`count(${field} ${op} ${JSON.stringify(value)}) = ${c}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function verifyCountVsList() {
-            const panel = document.getElementById('verifyPanel');
-            panel.style.display = '';
-
-            const opts = {
-                filters: [{field: 'price', op: 'gt', value: 50}]
-            };
-
+            document.getElementById('verifyPanel').style.display = '';
+            const opts = { filters: [{ field: 'price', op: 'gt', value: 50 }] };
             try {
-                const countResult = await db.count(getEntity(), opts);
-                const listResult = await db.list(getEntity(), opts);
-
-                document.getElementById('verifyCount').textContent = countResult;
-                document.getElementById('verifyList').textContent = listResult.length;
-
-                const match = countResult === listResult.length;
+                const c = await db.count(getEntity(), opts);
+                const l = await db.list(getEntity(), opts);
+                document.getElementById('verifyCount').textContent = c;
+                document.getElementById('verifyList').textContent = l.length;
+                const match = c === l.length;
                 document.getElementById('verifyCount').className = 'result ' + (match ? 'match' : 'mismatch');
-                document.getElementById('verifyList').className = 'result ' + (match ? 'match' : 'mismatch');
-
-                if (match) {
-                    log(`Verification passed: count=${countResult} === list.length=${listResult.length}`, 'success');
-                } else {
-                    log(`Verification FAILED: count=${countResult} !== list.length=${listResult.length}`, 'error');
-                }
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                document.getElementById('verifyList').className  = 'result ' + (match ? 'match' : 'mismatch');
+                log(match ? `✓ count=${c} === list.length=${l.length}` : `✗ count=${c} !== list.length=${l.length}`, match ? 'success' : 'error');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         function verifySyncCountVsList() {
-            const panel = document.getElementById('verifyPanel');
-            panel.style.display = '';
-
-            const opts = {
-                filters: [{field: 'price', op: 'gt', value: 50}]
-            };
-
+            document.getElementById('verifyPanel').style.display = '';
+            const opts = { filters: [{ field: 'price', op: 'gt', value: 50 }] };
             try {
-                const countResult = db.countSync(getEntity(), opts);
-                const listResult = db.listSync(getEntity(), opts);
-
-                document.getElementById('verifyCount').textContent = countResult;
-                document.getElementById('verifyList').textContent = listResult.length;
-
-                const match = countResult === listResult.length;
+                const c = db.countSync(getEntity(), opts);
+                const l = db.listSync(getEntity(), opts);
+                document.getElementById('verifyCount').textContent = c;
+                document.getElementById('verifyList').textContent = l.length;
+                const match = c === l.length;
                 document.getElementById('verifyCount').className = 'result ' + (match ? 'match' : 'mismatch');
-                document.getElementById('verifyList').className = 'result ' + (match ? 'match' : 'mismatch');
-
-                if (match) {
-                    log(`Sync verification passed: countSync=${countResult} === listSync.length=${listResult.length}`, 'success');
-                } else {
-                    log(`Sync verification FAILED: countSync=${countResult} !== listSync.length=${listResult.length}`, 'error');
-                }
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                document.getElementById('verifyList').className  = 'result ' + (match ? 'match' : 'mismatch');
+                log(match ? `✓ countSync=${c} === listSync.length=${l.length}` : `✗ mismatch`, match ? 'success' : 'error');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
-        async function runAllTests() {
-            log('=== Running Count Tests ===', 'info');
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
 
-            log('Test 1: Seed 50 products');
+        async function runAllTests() {
+            clearSummary();
+            summaryLine('=== Count tests (count_test) ===');
+
+            summaryLine('Test 1 — seed 50 rows');
             for (let i = 0; i < 50; i++) {
                 await db.create('count_test', {
                     name: `Product ${i}`,
@@ -337,77 +427,34 @@
                     category: categories[i % categories.length]
                 });
             }
-            log('  ✓ Seeded 50 products', 'success');
-
-            log('Test 2: count with no filter returns 50');
             const total = await db.count('count_test', null);
-            if (total === 50) {
-                log(`  ✓ count() = ${total}`, 'success');
-            } else {
-                log(`  ✗ Expected 50, got ${total}`, 'error');
-            }
+            summaryLine(total === 50 ? `  ✓ count = 50` : `  ✗ got ${total}`, total === 50 ? 'pass' : 'fail');
 
-            log('Test 3: count with price > 50 filter');
-            const priceFiltered = await db.count('count_test', {
-                filters: [{field: 'price', op: 'gt', value: 50}]
-            });
-            const priceList = await db.list('count_test', {
-                filters: [{field: 'price', op: 'gt', value: 50}]
-            });
-            if (priceFiltered === priceList.length) {
-                log(`  ✓ count(price > 50) = ${priceFiltered} matches list length`, 'success');
-            } else {
-                log(`  ✗ count=${priceFiltered} != list.length=${priceList.length}`, 'error');
-            }
+            summaryLine('Test 2 — count(price > 50) matches list length');
+            const opts1 = { filters: [{ field: 'price', op: 'gt', value: 50 }] };
+            const c1 = await db.count('count_test', opts1);
+            const l1 = await db.list('count_test', opts1);
+            summaryLine(c1 === l1.length ? `  ✓ both = ${c1}` : `  ✗ ${c1} vs ${l1.length}`, c1 === l1.length ? 'pass' : 'fail');
 
-            log('Test 4: count with category = "electronics"');
-            const catFiltered = await db.count('count_test', {
-                filters: [{field: 'category', op: 'eq', value: 'electronics'}]
-            });
-            if (catFiltered === 10) {
-                log(`  ✓ count(category = "electronics") = ${catFiltered}`, 'success');
-            } else {
-                log(`  ✗ Expected 10, got ${catFiltered}`, 'error');
-            }
+            summaryLine('Test 3 — count(category = "electronics") = 10');
+            const c2 = await db.count('count_test', { filters: [{ field: 'category', op: 'eq', value: 'electronics' }] });
+            summaryLine(c2 === 10 ? `  ✓ count = 10` : `  ✗ got ${c2}`, c2 === 10 ? 'pass' : 'fail');
 
-            log('Test 5: Multiple filters (price > 20 AND category = "books")');
-            const multiFiltered = await db.count('count_test', {
-                filters: [
-                    {field: 'price', op: 'gt', value: 20},
-                    {field: 'category', op: 'eq', value: 'books'}
-                ]
-            });
-            const multiList = await db.list('count_test', {
-                filters: [
-                    {field: 'price', op: 'gt', value: 20},
-                    {field: 'category', op: 'eq', value: 'books'}
-                ]
-            });
-            if (multiFiltered === multiList.length) {
-                log(`  ✓ count(price>20 AND category="books") = ${multiFiltered} matches list`, 'success');
-            } else {
-                log(`  ✗ count=${multiFiltered} != list.length=${multiList.length}`, 'error');
-            }
+            summaryLine('Test 4 — multi-filter price > 20 AND category = "books"');
+            const opts3 = { filters: [{ field: 'price', op: 'gt', value: 20 }, { field: 'category', op: 'eq', value: 'books' }] };
+            const c3 = await db.count('count_test', opts3);
+            const l3 = await db.list('count_test', opts3);
+            summaryLine(c3 === l3.length ? `  ✓ both = ${c3}` : `  ✗ ${c3} vs ${l3.length}`, c3 === l3.length ? 'pass' : 'fail');
 
-            log('Test 6: countSync matches count for same query');
-            const syncCount = db.countSync('count_test', {
-                filters: [{field: 'price', op: 'gt', value: 50}]
-            });
-            if (syncCount === priceFiltered) {
-                log(`  ✓ countSync(price > 50) = ${syncCount} matches async count`, 'success');
-            } else {
-                log(`  ✗ countSync=${syncCount} != count=${priceFiltered}`, 'error');
-            }
+            summaryLine('Test 5 — countSync = count');
+            const cs = db.countSync('count_test', opts1);
+            summaryLine(cs === c1 ? `  ✓ countSync = ${cs}` : `  ✗ ${cs} vs ${c1}`, cs === c1 ? 'pass' : 'fail');
 
-            log('Test 7: count vs list length (no filter)');
-            const allList = await db.list('count_test', null);
-            if (total === allList.length) {
-                log(`  ✓ count(null) = ${total} === list(null).length = ${allList.length}`, 'success');
-            } else {
-                log(`  ✗ count=${total} != list.length=${allList.length}`, 'error');
-            }
+            summaryLine('Test 6 — count on empty entity = 0');
+            const ce = await db.count('definitely_empty_entity_xyz', null);
+            summaryLine(ce === 0 ? `  ✓ count = 0` : `  ✗ got ${ce}`, ce === 0 ? 'pass' : 'fail');
 
-            log('=== All Count Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
         }
 
         function log(msg, type = '') {

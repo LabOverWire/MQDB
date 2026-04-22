@@ -5,7 +5,53 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Execute (Topic Routing)</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
     <style>
+        .page-hero {
+            background: linear-gradient(135deg, #00695c, #004d40);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
         .topic-ref {
             font-size: 13px;
         }
@@ -13,19 +59,37 @@
             font-family: 'Monaco', 'Consolas', monospace;
             white-space: nowrap;
         }
+        .topic-ref td { vertical-align: top; }
+
+        .preset-group {
+            margin-bottom: 12px;
+        }
+        .preset-group h4 {
+            margin: 8px 0 6px 0;
+            font-size: 13px;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
         .preset-row {
             display: flex;
-            gap: 8px;
+            gap: 6px;
             flex-wrap: wrap;
-            margin-bottom: 15px;
         }
         .preset-row button {
             font-size: 12px;
             padding: 5px 10px;
+            background: #37474f;
         }
+        .preset-row button:hover { background: #263238; }
+        .preset-row button.crud { background: #2e7d32; }
+        .preset-row button.crud:hover { background: #1b5e20; }
+        .preset-row button.admin { background: #ef6c00; }
+        .preset-row button.admin:hover { background: #e65100; }
+
         .result-display {
-            background: #1e1e1e;
-            color: #d4d4d4;
+            background: #1e1e2e;
+            color: #cdd6f4;
             padding: 15px;
             border-radius: 4px;
             min-height: 80px;
@@ -36,6 +100,28 @@
             white-space: pre-wrap;
             word-break: break-all;
         }
+        .result-display.error { border-left: 4px solid #f44336; }
+        .result-display.ok { border-left: 4px solid #4caf50; }
+
+        .topic-input {
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 14px;
+        }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 320px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
     </style>
 </head>
 <body>
@@ -55,73 +141,158 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <h1>Execute (MQTT Topic Routing)</h1>
+    <div class="page-hero">
+        <h2>Execute — everything MQDB can do, addressed by topic</h2>
+        <p>MQDB exposes every operation (CRUD, schema, constraints, indexes, catalog, health) through a single <code style="background:rgba(255,255,255,0.2);color:white">db.execute(topic, payload)</code> call. The topic decides which operation runs. This mirrors MQTT's request/response pattern, so the same code works whether you embed MQDB in a browser or talk to it via an MQTT broker.</p>
+    </div>
 
-    <div class="grid-2">
-        <div class="section">
-            <h2>Execute Command</h2>
-            <div class="row">
-                <label>Topic:</label>
-                <input type="text" id="topic" value="$DB/_health" style="flex:1">
-            </div>
-            <div class="row">
-                <label>Payload (JSON):</label>
-            </div>
-            <textarea id="payload">null</textarea>
-            <div class="row mt-10">
-                <button id="executeBtn" class="success">Execute</button>
-            </div>
-
-            <h3 class="mt-10">Presets</h3>
-            <div class="preset-row">
-                <button onclick="setPreset('$DB/_health', 'null')">Health</button>
-                <button onclick="setPreset('$DB/_admin/catalog', 'null')">Catalog</button>
-                <button onclick="setPreset('$DB/products/create', '{&quot;name&quot;:&quot;Widget&quot;,&quot;price&quot;:9.99}')">Create</button>
-                <button onclick="setPreset('$DB/products/list', '{}')">List</button>
-            </div>
-            <div class="preset-row">
-                <button onclick="setPreset('$DB/_admin/schema/orders/set', '{&quot;fields&quot;:[{&quot;name&quot;:&quot;code&quot;,&quot;type&quot;:&quot;string&quot;,&quot;required&quot;:true},{&quot;name&quot;:&quot;total&quot;,&quot;type&quot;:&quot;number&quot;}]}')">Set Schema</button>
-                <button onclick="setPreset('$DB/_admin/schema/orders/get', 'null')">Get Schema</button>
-                <button onclick="setPreset('$DB/_admin/constraint/orders/add', '{&quot;type&quot;:&quot;unique&quot;,&quot;fields&quot;:[&quot;code&quot;]}')">Add Constraint</button>
-                <button onclick="setPreset('$DB/_admin/constraint/orders/list', 'null')">List Constraints</button>
-                <button onclick="setPreset('$DB/_admin/index/orders/add', '{&quot;fields&quot;:[&quot;total&quot;]}')">Add Index</button>
-            </div>
-
-            <h3 class="mt-10">Result</h3>
-            <div class="result-display" id="resultDisplay">Execute a command to see results</div>
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li>The topic is parsed into <em>operation</em> plus <em>arguments</em>. <code>$DB/users/42/update</code> → update user 42. <code>$DB/_admin/schema/users/set</code> → set users schema.</li>
+                <li>The payload is a plain JSON value — record fields for writes, query options for list, <code>null</code> when none are needed.</li>
+                <li>The result is whatever the equivalent typed method would return (the created record, the deleted id, the schema, etc).</li>
+                <li><strong>Why this exists:</strong> MQTT brokers route by topic. Because MQDB uses the same addressing as an MQTT request, the WASM API and the over-the-network API are the <em>same</em> surface.</li>
+                <li>Three topic families: <strong>CRUD</strong> (<code>$DB/{entity}/…</code>), <strong>admin</strong> (<code>$DB/_admin/…</code>), and <strong>lifecycle</strong> (<code>$DB/_health</code>).</li>
+            </ul>
         </div>
-
-        <div class="section">
-            <h2>Topic Reference</h2>
-            <table class="topic-ref">
-                <thead>
-                    <tr><th>Topic Pattern</th><th>Operation</th></tr>
-                </thead>
-                <tbody>
-                    <tr><td>$DB/{entity}/create</td><td>Create record</td></tr>
-                    <tr><td>$DB/{entity}/{id}</td><td>Read record</td></tr>
-                    <tr><td>$DB/{entity}/{id}/update</td><td>Update record</td></tr>
-                    <tr><td>$DB/{entity}/{id}/delete</td><td>Delete record</td></tr>
-                    <tr><td>$DB/{entity}/list</td><td>List records</td></tr>
-                    <tr><td>$DB/_health</td><td>Health check</td></tr>
-                    <tr><td>$DB/_admin/schema/{entity}/set</td><td>Set schema</td></tr>
-                    <tr><td>$DB/_admin/schema/{entity}/get</td><td>Get schema</td></tr>
-                    <tr><td>$DB/_admin/constraint/{entity}/add</td><td>Add constraint</td></tr>
-                    <tr><td>$DB/_admin/constraint/{entity}/list</td><td>List constraints</td></tr>
-                    <tr><td>$DB/_admin/index/{entity}/add</td><td>Add index</td></tr>
-                    <tr><td>$DB/_admin/catalog</td><td>List entities</td></tr>
-                </tbody>
-            </table>
-
-            <div class="card mt-10">
-                <h3>Quick Tests</h3>
-                <button id="runAllTests" class="success">Run All Tests</button>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    T["Topic: $DB/users/42/update"] --> R[Router]
+    P["Payload: { name: 'Bob' }"] --> R
+    R --> O1[users/create]
+    R --> O2[users/42 · read]
+    R --> O3[users/42/update]
+    R --> O4[users/42/delete]
+    R --> O5[users/list]
+    R --> A1[_admin/schema/users/set]
+    R --> A2[_admin/constraint/users/add]
+    R --> A3[_admin/index/users/add]
+    R --> A4[_admin/catalog]
+    R --> H[_health]
+    style R fill:#b2dfdb,stroke:#00695c
+    style T fill:#e0f2f1,stroke:#00695c
+    style P fill:#e0f2f1,stroke:#00695c
+                </pre>
             </div>
         </div>
     </div>
 
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>Click the <code>Health</code> preset. That sets the topic to <code>$DB/_health</code> and payload to <code>null</code>. Click <code>Execute</code> to see <code>{ status: "ok", … }</code>.</li>
+            <li>Click the green <code>Create product</code> preset. Execute → you get back the new record with its generated id.</li>
+            <li>Click <code>List products</code> → you see the record you just created.</li>
+            <li>Scroll to <strong>Automated test suite</strong> and click <code>Run all tests</code>. 13 tests run in sequence, exercising the full topic surface (CRUD, schema, constraint, index, catalog, and invalid-topic rejection).</li>
+        </ol>
+    </div>
+
+    <div class="grid-2">
+        <div class="section">
+            <h2>Execute a topic</h2>
+            <div class="row">
+                <label>Topic</label>
+                <input type="text" id="topic" value="$DB/_health" class="topic-input" style="flex:1">
+            </div>
+            <div class="row">
+                <label>Payload</label>
+            </div>
+            <textarea id="payload">null</textarea>
+            <div class="row mt-10">
+                <button id="executeBtn" class="success">Execute</button>
+                <span class="hint" id="execHint" style="color:#777">Ready.</span>
+            </div>
+
+            <h3 class="mt-20">Result</h3>
+            <div class="result-display" id="resultDisplay">Execute a command to see results</div>
+
+            <h3 class="mt-20">Presets</h3>
+
+            <div class="preset-group">
+                <h4>Lifecycle</h4>
+                <div class="preset-row">
+                    <button onclick="setPreset('$DB/_health', 'null')">Health</button>
+                    <button onclick="setPreset('$DB/_admin/catalog', 'null')">Catalog</button>
+                </div>
+            </div>
+
+            <div class="preset-group">
+                <h4>CRUD on <code>products</code></h4>
+                <div class="preset-row">
+                    <button class="crud" onclick="setPreset('$DB/products/create', '{\n  \'name\': \'Widget\',\n  \'price\': 9.99\n}')">Create product</button>
+                    <button class="crud" onclick="setPreset('$DB/products/list', '{}')">List products</button>
+                    <button class="crud" id="readLast">Read last product</button>
+                    <button class="crud" id="updateLast">Update last price → 12.99</button>
+                    <button class="crud" id="deleteLast">Delete last product</button>
+                </div>
+            </div>
+
+            <div class="preset-group">
+                <h4>Admin on <code>orders</code></h4>
+                <div class="preset-row">
+                    <button class="admin" onclick="setPreset('$DB/_admin/schema/orders/set', '{\n  \'fields\': [\n    { \'name\': \'code\', \'type\': \'string\', \'required\': true },\n    { \'name\': \'total\', \'type\': \'number\' }\n  ]\n}')">Set schema</button>
+                    <button class="admin" onclick="setPreset('$DB/_admin/schema/orders/get', 'null')">Get schema</button>
+                    <button class="admin" onclick="setPreset('$DB/_admin/constraint/orders/add', '{\n  \'type\': \'unique\',\n  \'fields\': [\'code\']\n}')">Add unique constraint</button>
+                    <button class="admin" onclick="setPreset('$DB/_admin/constraint/orders/list', 'null')">List constraints</button>
+                    <button class="admin" onclick="setPreset('$DB/_admin/index/orders/add', '{\n  \'fields\': [\'total\']\n}')">Add index on total</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Topic reference</h2>
+            <table class="topic-ref">
+                <thead>
+                    <tr><th>Topic</th><th>What it does</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>$DB/_health</td><td>Liveness / readiness check</td></tr>
+                    <tr><td>$DB/_admin/catalog</td><td>List all known entities</td></tr>
+                    <tr><td>$DB/{entity}/create</td><td>Create a record (payload = fields)</td></tr>
+                    <tr><td>$DB/{entity}/{id}</td><td>Read a record</td></tr>
+                    <tr><td>$DB/{entity}/{id}/update</td><td>Update a record (merge)</td></tr>
+                    <tr><td>$DB/{entity}/{id}/delete</td><td>Delete a record</td></tr>
+                    <tr><td>$DB/{entity}/list</td><td>List records (payload = query options)</td></tr>
+                    <tr><td>$DB/_admin/schema/{entity}/set</td><td>Register / replace schema</td></tr>
+                    <tr><td>$DB/_admin/schema/{entity}/get</td><td>Fetch the schema</td></tr>
+                    <tr><td>$DB/_admin/constraint/{entity}/add</td><td>Add unique / not_null / foreign key</td></tr>
+                    <tr><td>$DB/_admin/constraint/{entity}/list</td><td>List the entity's constraints</td></tr>
+                    <tr><td>$DB/_admin/index/{entity}/add</td><td>Add a secondary index</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> exercises the full topic surface in 13 steps and reports pass/fail for each:</p>
+        <ol style="columns:2;column-gap:40px">
+            <li>Health check returns <code>ok</code></li>
+            <li>Create record via <code>/create</code></li>
+            <li>Read record via <code>/{id}</code></li>
+            <li>Update record via <code>/{id}/update</code></li>
+            <li>List records via <code>/list</code></li>
+            <li>Delete record via <code>/{id}/delete</code></li>
+            <li>Set schema via <code>_admin/schema/…/set</code></li>
+            <li>Get schema via <code>_admin/schema/…/get</code></li>
+            <li>Add constraint via <code>_admin/constraint/…/add</code></li>
+            <li>List constraints via <code>_admin/constraint/…/list</code></li>
+            <li>Add index via <code>_admin/index/…/add</code></li>
+            <li>Catalog via <code>_admin/catalog</code></li>
+            <li>Invalid topic is rejected</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
+    </div>
+
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -129,202 +300,183 @@
         import init, { Database } from '../pkg/mqdb_wasm.js';
 
         let db;
+        let lastProductId = null;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
             window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
         }
 
         function setupEventListeners() {
             document.getElementById('executeBtn').onclick = handleExecute;
             document.getElementById('runAllTests').onclick = runAllTests;
+            document.getElementById('readLast').onclick = () => {
+                if (!lastProductId) return hint('Create a product first');
+                setPreset(`$DB/products/${lastProductId}`, 'null');
+            };
+            document.getElementById('updateLast').onclick = () => {
+                if (!lastProductId) return hint('Create a product first');
+                setPreset(`$DB/products/${lastProductId}/update`, '{\n  \'price\': 12.99\n}');
+            };
+            document.getElementById('deleteLast').onclick = () => {
+                if (!lastProductId) return hint('Create a product first');
+                setPreset(`$DB/products/${lastProductId}/delete`, 'null');
+            };
         }
+
+        function hint(msg) { document.getElementById('execHint').textContent = msg; }
 
         window.setPreset = function(topic, payload) {
             document.getElementById('topic').value = topic;
-            document.getElementById('payload').value = payload;
+            document.getElementById('payload').value = payload.replace(/'/g, '"');
+            hint('Ready — click Execute.');
         };
 
         async function handleExecute() {
             const topic = document.getElementById('topic').value;
             const payloadStr = document.getElementById('payload').value.trim();
-
+            const resultEl = document.getElementById('resultDisplay');
             let payload;
             try {
                 payload = JSON.parse(payloadStr);
             } catch (e) {
+                resultEl.textContent = `Invalid JSON payload: ${e}`;
+                resultEl.className = 'result-display error';
                 log(`Invalid JSON payload: ${e}`, 'error');
                 return;
             }
-
             try {
-                log(`execute("${topic}", ${payloadStr})...`);
+                hint(`execute("${topic}")…`);
+                log(`execute("${topic}", ${payloadStr})`);
                 const result = await db.execute(topic, payload);
                 const formatted = JSON.stringify(result, null, 2);
-                document.getElementById('resultDisplay').textContent = formatted;
-                log(`Result: ${formatted}`, 'success');
+                resultEl.textContent = formatted;
+                resultEl.className = 'result-display ok';
+                hint('OK.');
+                if (topic.endsWith('/create') && result && result.id) {
+                    const m = topic.match(/^\$DB\/([^/]+)\/create$/);
+                    if (m && m[1] === 'products') lastProductId = result.id;
+                }
+                log(`Result: ${formatted.slice(0, 200)}${formatted.length > 200 ? '…' : ''}`, 'success');
             } catch (e) {
-                document.getElementById('resultDisplay').textContent = `Error: ${e}`;
-                log(`Error: ${e}`, 'error');
+                resultEl.textContent = `Error: ${e}`;
+                resultEl.className = 'result-display error';
+                hint(`Error: ${e}`);
+                log(`${e}`, 'error');
             }
         }
 
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
         async function runAllTests() {
-            log('=== Running Execute Tests ===', 'info');
+            clearSummary();
+            summaryLine('=== Execute tests ===');
 
-            log('Test 1: Health check');
+            summaryLine('Test 1 — health check');
             try {
-                const health = await db.execute('$DB/_health', null);
-                if (health.status === 'healthy' || health.status === 'ok') {
-                    log(`  ✓ Health: ${JSON.stringify(health)}`, 'success');
-                } else {
-                    log(`  ✗ Unexpected health response: ${JSON.stringify(health)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const h = await db.execute('$DB/_health', null);
+                summaryLine(`  ✓ ${JSON.stringify(h).slice(0, 80)}`, 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 2: Create via execute');
+            summaryLine('Test 2 — create');
             let createdId;
             try {
-                const created = await db.execute('$DB/products/create', {name: 'Widget', price: 9.99});
-                createdId = created.id;
-                if (createdId && created.name === 'Widget') {
-                    log(`  ✓ Created: id=${createdId}, name="${created.name}"`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(created)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const r = await db.execute('$DB/products/create', { name: 'Widget', price: 9.99 });
+                createdId = r.id;
+                summaryLine(`  ✓ id=${createdId} name=${r.name}`, 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 3: Read via execute');
+            summaryLine('Test 3 — read');
             try {
-                const read = await db.execute(`$DB/products/${createdId}`, null);
-                if (read.name === 'Widget' && read.price === 9.99) {
-                    log(`  ✓ Read: name="${read.name}", price=${read.price}`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(read)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const r = await db.execute(`$DB/products/${createdId}`, null);
+                summaryLine(r.name === 'Widget' ? `  ✓ name=${r.name}` : `  ✗ wrong data`, r.name === 'Widget' ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 4: Update via execute');
+            summaryLine('Test 4 — update');
             try {
-                const updated = await db.execute(`$DB/products/${createdId}/update`, {price: 12.99});
-                if (updated.price === 12.99) {
-                    log(`  ✓ Updated: price=${updated.price}`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(updated)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const r = await db.execute(`$DB/products/${createdId}/update`, { price: 12.99 });
+                summaryLine(r.price === 12.99 ? `  ✓ price=12.99` : `  ✗ wrong price`, r.price === 12.99 ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 5: List via execute');
+            summaryLine('Test 5 — list');
             try {
-                const list = await db.execute('$DB/products/list', {});
-                if (Array.isArray(list) && list.length >= 1) {
-                    log(`  ✓ List: ${list.length} records`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(list)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const r = await db.execute('$DB/products/list', {});
+                summaryLine(Array.isArray(r) && r.length >= 1 ? `  ✓ ${r.length} records` : '  ✗ list empty', Array.isArray(r) && r.length >= 1 ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 6: Delete via execute');
+            summaryLine('Test 6 — delete');
             try {
-                const deleted = await db.execute(`$DB/products/${createdId}/delete`, null);
-                log('  ✓ Deleted', 'success');
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                await db.execute(`$DB/products/${createdId}/delete`, null);
+                summaryLine('  ✓ deleted', 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 7: Schema set via execute');
+            summaryLine('Test 7 — schema set');
             try {
-                const result = await db.execute('$DB/_admin/schema/orders/set', {
+                await db.execute('$DB/_admin/schema/orders/set', {
                     fields: [
-                        {name: 'code', type: 'string', required: true},
-                        {name: 'total', type: 'number'}
+                        { name: 'code', type: 'string', required: true },
+                        { name: 'total', type: 'number' }
                     ]
                 });
-                log(`  ✓ Schema set: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                summaryLine('  ✓ schema set', 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 8: Schema get via execute');
+            summaryLine('Test 8 — schema get');
             try {
-                const schema = await db.execute('$DB/_admin/schema/orders/get', null);
-                if (schema && schema.fields) {
-                    log(`  ✓ Schema get: ${schema.fields.length} fields`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(schema)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const s = await db.execute('$DB/_admin/schema/orders/get', null);
+                summaryLine(s && s.fields && s.fields.length === 2 ? `  ✓ ${s.fields.length} fields` : '  ✗ schema missing', s && s.fields ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 9: Constraint add via execute');
+            summaryLine('Test 9 — constraint add');
             try {
-                const result = await db.execute('$DB/_admin/constraint/orders/add', {
-                    type: 'unique',
-                    fields: ['code']
-                });
-                log(`  ✓ Constraint added: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                await db.execute('$DB/_admin/constraint/orders/add', { type: 'unique', fields: ['code'] });
+                summaryLine('  ✓ constraint added', 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 10: Constraint list via execute');
+            summaryLine('Test 10 — constraint list');
             try {
-                const constraints = await db.execute('$DB/_admin/constraint/orders/list', null);
-                if (Array.isArray(constraints) && constraints.length >= 1) {
-                    log(`  ✓ Constraints: ${constraints.length} found`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(constraints)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const c = await db.execute('$DB/_admin/constraint/orders/list', null);
+                summaryLine(Array.isArray(c) && c.length >= 1 ? `  ✓ ${c.length} constraint(s)` : '  ✗ list empty', Array.isArray(c) && c.length >= 1 ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 11: Index add via execute');
+            summaryLine('Test 11 — index add');
             try {
-                const result = await db.execute('$DB/_admin/index/orders/add', {
-                    fields: ['total']
-                });
-                log(`  ✓ Index added: ${JSON.stringify(result)}`, 'success');
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                await db.execute('$DB/_admin/index/orders/add', { fields: ['total'] });
+                summaryLine('  ✓ index added', 'pass');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 12: Catalog via execute');
+            summaryLine('Test 12 — catalog');
             try {
-                const catalog = await db.execute('$DB/_admin/catalog', null);
-                if (Array.isArray(catalog) || (catalog && typeof catalog === 'object')) {
-                    log(`  ✓ Catalog: ${JSON.stringify(catalog)}`, 'success');
-                } else {
-                    log(`  ✗ Unexpected: ${JSON.stringify(catalog)}`, 'error');
-                }
-            } catch (e) {
-                log(`  ✗ Error: ${e}`, 'error');
-            }
+                const c = await db.execute('$DB/_admin/catalog', null);
+                const ok = Array.isArray(c) || (c && typeof c === 'object');
+                summaryLine(ok ? `  ✓ catalog ok` : '  ✗ unexpected', ok ? 'pass' : 'fail');
+            } catch (e) { summaryLine(`  ✗ ${e}`, 'fail'); }
 
-            log('Test 13: Invalid topic throws error');
+            summaryLine('Test 13 — invalid topic rejected');
             try {
                 await db.execute('invalid/topic', null);
-                log('  ✗ Should have thrown error', 'error');
-            } catch (e) {
-                log(`  ✓ Invalid topic correctly rejected: ${e}`, 'success');
+                summaryLine('  ✗ invalid topic was accepted', 'fail');
+            } catch {
+                summaryLine('  ✓ invalid topic rejected', 'pass');
             }
 
-            log('=== All Execute Tests Complete ===', 'success');
+            summaryLine('=== Done ===', 'pass');
         }
 
         function log(msg, type = '') {

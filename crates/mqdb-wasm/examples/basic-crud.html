@@ -5,6 +5,76 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MQDB WASM - Basic CRUD</title>
     <link rel="stylesheet" href="shared/common.css">
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        .page-hero {
+            background: linear-gradient(135deg, #2e7d32, #1b5e20);
+            color: white;
+            padding: 30px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .page-hero h2 { color: white; margin: 0 0 10px 0; }
+        .page-hero p { margin: 0; opacity: 0.95; }
+
+        .how-it-works {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            align-items: start;
+        }
+        .how-it-works h2 { margin: 0 0 10px 0; }
+        .how-it-works ul { margin: 8px 0; padding-left: 20px; }
+        .how-it-works li { margin-bottom: 6px; }
+        .how-it-works .diagram {
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .tour {
+            background: #fff8e1;
+            border-left: 4px solid #ffa000;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .tour h3 { margin: 0 0 10px 0; color: #e65100; }
+        .tour ol { margin: 0; padding-left: 20px; }
+        .tour li { margin-bottom: 6px; }
+        .tour code { background: rgba(255,160,0,0.15); padding: 1px 6px; border-radius: 3px; }
+
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 100px 1fr;
+            gap: 8px 12px;
+            align-items: center;
+        }
+        .kv-grid label { font-weight: 500; color: #555; font-size: 13px; }
+
+        .test-summary {
+            margin-top: 10px;
+            font-family: 'Monaco', 'Consolas', monospace;
+            font-size: 13px;
+            max-height: 280px;
+            overflow-y: auto;
+            background: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 10px;
+        }
+        .test-summary .pass { color: #2e7d32; }
+        .test-summary .fail { color: #c62828; }
+        .test-summary .step { color: #555; }
+    </style>
 </head>
 <body>
     <nav>
@@ -23,27 +93,66 @@
         <a href="count.html">Count</a>
     </nav>
 
-    <h1>Basic CRUD Operations</h1>
+    <div class="page-hero">
+        <h2>CRUD — the four shapes of writes and one shape of read</h2>
+        <p>Every entity supports <code style="background:rgba(255,255,255,0.2);color:white">create</code>, <code style="background:rgba(255,255,255,0.2);color:white">read</code>, <code style="background:rgba(255,255,255,0.2);color:white">update</code>, <code style="background:rgba(255,255,255,0.2);color:white">delete</code>. IDs are auto-generated as incrementing strings unless you pass one in. Updates are <em>merge</em> semantics — omitted fields keep their previous values and <code style="background:rgba(255,255,255,0.2);color:white">_version</code> increments.</p>
+    </div>
+
+    <div class="how-it-works">
+        <div>
+            <h2>How it works</h2>
+            <ul>
+                <li><code>db.create(entity, data)</code> → returns the new record with <code>id</code> and <code>_version: 1</code>. Provide <code>id</code> in the payload if you want a specific one; otherwise MQDB assigns the next integer.</li>
+                <li><code>db.read(entity, id)</code> → returns the record or throws <code>not found</code>.</li>
+                <li><code>db.update(entity, id, patch)</code> → merges <code>patch</code> into the stored record, bumps <code>_version</code>, returns the new record.</li>
+                <li><code>db.delete(entity, id)</code> → removes the record. A later <code>read</code> on that id throws.</li>
+                <li>Writes also fire change events to any matching subscription (see the Subscriptions page).</li>
+            </ul>
+        </div>
+        <div>
+            <div class="diagram">
+                <pre class="mermaid">
+flowchart LR
+    C["create({ name, email })"] --> R1["{ id: '1', name, email, _version: 1 }"]
+    R1 --> U["update(id, { name: 'Bob' })"] --> R2["{ id: '1', name: 'Bob', email, _version: 2 }"]
+    R2 --> D["delete(id)"] --> X[gone]
+    R1 --> Q["read(id)"] --> R1
+    X --> Q2["read(id)"] --> E[throws: not found]
+    style R1 fill:#e8f5e9,stroke:#2e7d32
+    style R2 fill:#fff3e0,stroke:#ef6c00
+    style X  fill:#ffcdd2,stroke:#c62828
+    style E  fill:#ffcdd2,stroke:#c62828
+                </pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="tour">
+        <h3>Try it — a four-step tour</h3>
+        <ol>
+            <li>Click <code>Create</code>. A new user is inserted with the default JSON body; the form autofills the new <code>id</code>.</li>
+            <li>Change <code>age</code> in the data box to <code>35</code> and click <code>Update</code>. The record's <code>_version</code> bumps to 2 and the record table shows the new value — email was untouched (merge semantics).</li>
+            <li>Click <code>Delete</code>. Row removed. Click <code>Read</code> → you see an error.</li>
+            <li>Click <code>Seed 5 users</code> in Quick actions, then switch entity to <code>posts</code> and <code>Seed 5 posts</code>. Use <code>Clear current entity</code> to wipe and start over.</li>
+        </ol>
+    </div>
 
     <div class="grid-2">
         <div class="section">
-            <h2>Create / Update Record</h2>
-            <div class="row">
-                <label>Entity:</label>
+            <h2>Create / update record</h2>
+            <div class="kv-grid">
+                <label for="entity">Entity</label>
                 <select id="entity">
-                    <option value="users">users</option>
+                    <option value="users" selected>users</option>
                     <option value="posts">posts</option>
                     <option value="products">products</option>
                 </select>
+
+                <label for="recordId">ID</label>
+                <input type="text" id="recordId" placeholder="(empty = create, auto-assigned)">
             </div>
-            <div class="row">
-                <label>ID:</label>
-                <input type="text" id="recordId" placeholder="Leave empty for create">
-            </div>
-            <div class="row">
-                <label>Data (JSON):</label>
-            </div>
-            <textarea id="recordData">{"name": "Alice", "email": "alice@example.com", "age": 30}</textarea>
+            <div class="row mt-10"><label>Data (JSON)</label></div>
+            <textarea id="recordData">{ "name": "Alice", "email": "alice@example.com", "age": 30 }</textarea>
             <div class="row mt-10">
                 <button id="createBtn" class="success">Create</button>
                 <button id="updateBtn">Update</button>
@@ -53,41 +162,55 @@
         </div>
 
         <div class="section">
-            <h2>Quick Actions</h2>
+            <h2>Quick actions</h2>
             <div class="card">
-                <h3>Test Scenarios</h3>
-                <button id="runAllTests">Run All Tests</button>
+                <h3>Seed sample data</h3>
+                <p class="hint">One click drops 5 records into the selected entity.</p>
+                <div class="row">
+                    <button id="seedUsers" class="success">Seed 5 users</button>
+                    <button id="seedPosts" class="success">Seed 5 posts</button>
+                </div>
             </div>
-            <div class="card mt-10">
-                <h3>Sample Data</h3>
-                <button id="seedUsers">Seed 5 Users</button>
-                <button id="seedPosts">Seed 5 Posts</button>
-            </div>
+
             <div class="card mt-10">
                 <h3>Cleanup</h3>
-                <button id="clearEntity" class="danger">Clear Current Entity</button>
+                <button id="clearEntity" class="danger">Clear current entity</button>
             </div>
         </div>
     </div>
 
     <div class="section">
         <h2>Records</h2>
-        <button id="refreshList">Refresh List</button>
-        <table id="recordsTable">
+        <div class="row">
+            <button id="refreshList">Refresh</button>
+        </div>
+        <table id="recordsTable" class="mt-10">
             <thead>
-                <tr>
-                    <th>ID</th>
-                    <th>Data</th>
-                    <th>Actions</th>
-                </tr>
+                <tr><th>ID</th><th>Data</th><th>Actions</th></tr>
             </thead>
-            <tbody id="recordsBody">
-            </tbody>
+            <tbody id="recordsBody"></tbody>
         </table>
     </div>
 
+    <div class="section">
+        <h2>Automated test suite</h2>
+        <p><strong>Run all tests</strong> runs the CRUD lifecycle end-to-end in 6 steps:</p>
+        <ol>
+            <li>Create a user → returned object has an <code>id</code></li>
+            <li>Read it back → fields match</li>
+            <li>Update only <code>name</code> → new name, original email preserved (merge)</li>
+            <li>Delete the user</li>
+            <li>Read the deleted user → throws <code>not found</code></li>
+            <li>List all users → returns an array</li>
+        </ol>
+        <div class="row">
+            <button id="runAllTests" class="success">Run all tests</button>
+        </div>
+        <div class="test-summary" id="testSummary">Click the button to run.</div>
+    </div>
+
     <div id="output">
-        <h3>Output</h3>
+        <h3>Log</h3>
         <pre id="log"></pre>
     </div>
 
@@ -97,11 +220,14 @@
         let db;
 
         async function main() {
+            if (window.mermaid) {
+                window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', flowchart: { htmlLabels: true } });
+                await window.mermaid.run({ querySelector: 'pre.mermaid' }).catch(() => {});
+            }
             await init();
             db = new Database();
             window.db = db;
             log('Database initialized', 'success');
-
             setupEventListeners();
             refreshList();
         }
@@ -119,82 +245,50 @@
             document.getElementById('clearEntity').onclick = clearEntity;
         }
 
-        function getEntity() {
-            return document.getElementById('entity').value;
-        }
-
-        function getData() {
-            try {
-                return JSON.parse(document.getElementById('recordData').value);
-            } catch (e) {
-                throw new Error('Invalid JSON: ' + e.message);
-            }
+        function getEntity() { return document.getElementById('entity').value; }
+        function getData()   {
+            try { return JSON.parse(document.getElementById('recordData').value); }
+            catch (e) { throw new Error('Invalid JSON: ' + e.message); }
         }
 
         async function handleCreate() {
             try {
-                const entity = getEntity();
-                const data = getData();
-                log(`Creating ${entity}...`);
-                const result = await db.create(entity, data);
-                log(`Created: ${JSON.stringify(result)}`, 'success');
+                const r = await db.create(getEntity(), getData());
+                document.getElementById('recordId').value = r.id;
+                log(`create → ${JSON.stringify(r)}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function handleRead() {
             try {
-                const entity = getEntity();
                 const id = document.getElementById('recordId').value;
-                if (!id) {
-                    log('Please enter an ID to read', 'warning');
-                    return;
-                }
-                log(`Reading ${entity}/${id}...`);
-                const result = await db.read(entity, id);
-                log(`Read: ${JSON.stringify(result)}`, 'success');
-                document.getElementById('recordData').value = JSON.stringify(result, null, 2);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+                if (!id) return log('Enter an id', 'warning');
+                const r = await db.read(getEntity(), id);
+                document.getElementById('recordData').value = JSON.stringify(r, null, 2);
+                log(`read → ${JSON.stringify(r)}`, 'success');
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function handleUpdate() {
             try {
-                const entity = getEntity();
                 const id = document.getElementById('recordId').value;
-                if (!id) {
-                    log('Please enter an ID to update', 'warning');
-                    return;
-                }
-                const data = getData();
-                log(`Updating ${entity}/${id}...`);
-                const result = await db.update(entity, id, data);
-                log(`Updated: ${JSON.stringify(result)}`, 'success');
+                if (!id) return log('Enter an id', 'warning');
+                const r = await db.update(getEntity(), id, getData());
+                log(`update → ${JSON.stringify(r)}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function handleDelete() {
             try {
-                const entity = getEntity();
                 const id = document.getElementById('recordId').value;
-                if (!id) {
-                    log('Please enter an ID to delete', 'warning');
-                    return;
-                }
-                log(`Deleting ${entity}/${id}...`);
-                await db.delete(entity, id);
-                log(`Deleted ${entity}/${id}`, 'success');
+                if (!id) return log('Enter an id', 'warning');
+                await db.delete(getEntity(), id);
                 document.getElementById('recordId').value = '';
+                log(`delete ${id}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
         async function refreshList() {
@@ -203,137 +297,120 @@
                 const records = await db.list(entity, null);
                 const tbody = document.getElementById('recordsBody');
                 tbody.innerHTML = '';
-
                 for (const record of records) {
+                    const { id, ...rest } = record;
                     const tr = document.createElement('tr');
-                    const {id, ...rest} = record;
                     tr.innerHTML = `
-                        <td><code>${id}</code></td>
-                        <td><code>${JSON.stringify(rest)}</code></td>
+                        <td><code>${escapeHtml(id)}</code></td>
+                        <td><code>${escapeHtml(JSON.stringify(rest))}</code></td>
                         <td>
                             <button onclick="window.selectRecord('${id}')">Select</button>
                             <button class="danger" onclick="window.deleteRecord('${id}')">Delete</button>
-                        </td>
-                    `;
+                        </td>`;
                     tbody.appendChild(tr);
                 }
-
                 if (records.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:#999">No records</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3" class="hint" style="text-align:center">No records</td></tr>';
                 }
-            } catch (e) {
-                log(`Error refreshing list: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         }
 
-        window.selectRecord = async function(id) {
+        window.selectRecord = async (id) => {
             document.getElementById('recordId').value = id;
             try {
-                const entity = getEntity();
-                const record = await db.read(entity, id);
-                const {id: _, ...rest} = record;
+                const r = await db.read(getEntity(), id);
+                const { id: _, ...rest } = r;
                 document.getElementById('recordData').value = JSON.stringify(rest, null, 2);
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         };
 
-        window.deleteRecord = async function(id) {
+        window.deleteRecord = async (id) => {
             try {
-                const entity = getEntity();
-                await db.delete(entity, id);
-                log(`Deleted ${entity}/${id}`, 'success');
+                await db.delete(getEntity(), id);
+                log(`delete ${id}`, 'success');
                 refreshList();
-            } catch (e) {
-                log(`Error: ${e}`, 'error');
-            }
+            } catch (e) { log(`${e}`, 'error'); }
         };
-
-        async function runAllTests() {
-            log('=== Running CRUD Tests ===', 'info');
-
-            log('Test 1: Create a user');
-            const created = await db.create('users', {name: 'TestUser', email: 'test@test.com'});
-            const testId = created.id;
-            log(`  ✓ Created user with id=${testId}`, 'success');
-
-            log('Test 2: Read the user');
-            const read = await db.read('users', testId);
-            if (read.name === 'TestUser') {
-                log(`  ✓ Read user: ${JSON.stringify(read)}`, 'success');
-            } else {
-                log('  ✗ Read returned wrong data', 'error');
-            }
-
-            log('Test 3: Update user name');
-            const updated = await db.update('users', testId, {name: 'UpdatedUser'});
-            if (updated.name === 'UpdatedUser' && updated.email === 'test@test.com') {
-                log(`  ✓ Updated user: ${JSON.stringify(updated)}`, 'success');
-            } else {
-                log('  ✗ Update failed', 'error');
-            }
-
-            log('Test 4: Delete user');
-            await db.delete('users', testId);
-            log('  ✓ Deleted user', 'success');
-
-            log('Test 5: Read deleted user (should fail)');
-            try {
-                await db.read('users', testId);
-                log('  ✗ Should have thrown error', 'error');
-            } catch (e) {
-                log('  ✓ Correctly threw error: ' + e, 'success');
-            }
-
-            log('Test 6: List all users');
-            const list = await db.list('users', null);
-            log(`  ✓ Listed ${list.length} users`, 'success');
-
-            log('=== All CRUD Tests Passed ===', 'success');
-            refreshList();
-        }
 
         async function seedUsers() {
             const users = [
-                {name: 'Alice', email: 'alice@example.com', age: 30},
-                {name: 'Bob', email: 'bob@example.com', age: 25},
-                {name: 'Charlie', email: 'charlie@example.com', age: 35},
-                {name: 'Diana', email: 'diana@example.com', age: 28},
-                {name: 'Eve', email: 'eve@example.com', age: 32}
+                { name: 'Alice',   email: 'alice@example.com',   age: 30 },
+                { name: 'Bob',     email: 'bob@example.com',     age: 25 },
+                { name: 'Charlie', email: 'charlie@example.com', age: 35 },
+                { name: 'Diana',   email: 'diana@example.com',   age: 28 },
+                { name: 'Eve',     email: 'eve@example.com',     age: 32 }
             ];
-            log('Seeding 5 users...');
-            for (const user of users) {
-                await db.create('users', user);
-            }
+            for (const u of users) await db.create('users', u);
             log('Seeded 5 users', 'success');
             if (getEntity() === 'users') refreshList();
         }
 
         async function seedPosts() {
             const posts = [
-                {title: 'First Post', content: 'Hello World!', views: 100},
-                {title: 'Second Post', content: 'More content', views: 50},
-                {title: 'Third Post', content: 'Even more', views: 200},
-                {title: 'Fourth Post', content: 'Almost done', views: 75},
-                {title: 'Fifth Post', content: 'The end', views: 150}
+                { title: 'First Post',  content: 'Hello World!',  views: 100 },
+                { title: 'Second Post', content: 'More content',  views:  50 },
+                { title: 'Third Post',  content: 'Even more',     views: 200 },
+                { title: 'Fourth Post', content: 'Almost done',   views:  75 },
+                { title: 'Fifth Post',  content: 'The end',       views: 150 }
             ];
-            log('Seeding 5 posts...');
-            for (const post of posts) {
-                await db.create('posts', post);
-            }
+            for (const p of posts) await db.create('posts', p);
             log('Seeded 5 posts', 'success');
             if (getEntity() === 'posts') refreshList();
         }
 
         async function clearEntity() {
             const entity = getEntity();
-            log(`Clearing all ${entity}...`);
-            const records = await db.list(entity, null);
-            for (const record of records) {
-                await db.delete(entity, record.id);
-            }
-            log(`Cleared ${records.length} ${entity}`, 'success');
+            const rows = await db.list(entity, null);
+            for (const r of rows) await db.delete(entity, r.id);
+            log(`Cleared ${rows.length} ${entity}`, 'success');
             refreshList();
+        }
+
+        function summaryLine(text, kind = 'step') {
+            const el = document.getElementById('testSummary');
+            const line = document.createElement('div');
+            line.className = kind;
+            line.textContent = text;
+            el.appendChild(line);
+            el.scrollTop = el.scrollHeight;
+        }
+        function clearSummary() { document.getElementById('testSummary').innerHTML = ''; }
+
+        async function runAllTests() {
+            clearSummary();
+            summaryLine('=== CRUD tests ===');
+
+            summaryLine('Test 1 — create');
+            const created = await db.create('users', { name: 'TestUser', email: 'test@test.com' });
+            summaryLine(created.id ? `  ✓ id=${created.id} _version=${created._version}` : '  ✗ no id returned', created.id ? 'pass' : 'fail');
+
+            summaryLine('Test 2 — read back');
+            const read = await db.read('users', created.id);
+            summaryLine(read.name === 'TestUser' ? '  ✓ fields match' : '  ✗ wrong data', read.name === 'TestUser' ? 'pass' : 'fail');
+
+            summaryLine('Test 3 — update (merge semantics)');
+            const updated = await db.update('users', created.id, { name: 'UpdatedUser' });
+            const okU = updated.name === 'UpdatedUser' && updated.email === 'test@test.com' && updated._version === 2;
+            summaryLine(okU ? `  ✓ name=${updated.name} email=${updated.email} _version=${updated._version}` : `  ✗ ${JSON.stringify(updated)}`, okU ? 'pass' : 'fail');
+
+            summaryLine('Test 4 — delete');
+            await db.delete('users', created.id);
+            summaryLine('  ✓ deleted', 'pass');
+
+            summaryLine('Test 5 — read after delete throws');
+            try { await db.read('users', created.id); summaryLine('  ✗ read succeeded', 'fail'); }
+            catch { summaryLine('  ✓ threw', 'pass'); }
+
+            summaryLine('Test 6 — list returns an array');
+            const list = await db.list('users', null);
+            summaryLine(Array.isArray(list) ? `  ✓ ${list.length} rows` : '  ✗ not an array', Array.isArray(list) ? 'pass' : 'fail');
+
+            summaryLine('=== Done ===', 'pass');
+            refreshList();
+        }
+
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         }
 
         function log(msg, type = '') {
