@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-04-22 — mqdb-core 0.6.0, mqdb-wasm 0.3.1, mqdb-agent 0.7.2
+## 2026-04-22 — mqdb-core 0.6.0, mqdb-wasm 0.3.1, mqdb-agent 0.7.2, mqdb-cli 0.7.3
 
 ### Added
 
