@@ -1463,6 +1463,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqdb-vault"
+version = "0.1.0"
+
+[[package]]
 name = "mqtt5"
 version = "0.31.4"
 source = "git+https://github.com/LabOverWire/mqtt-lib.git#f31e9bff215c8354f2baa21a280a76af6493ed26"

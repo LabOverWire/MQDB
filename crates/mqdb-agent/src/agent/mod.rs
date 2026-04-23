@@ -7,6 +7,7 @@ mod tasks;
 
 use crate::auth_config::AuthSetupConfig;
 use crate::database::Database;
+use crate::vault_backend::{NoopVaultBackend, VaultBackend};
 use mqdb_core::VaultKeyStore;
 use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, RateLimitConfig};
 use std::collections::HashSet;
@@ -38,6 +39,7 @@ pub struct MqdbAgent {
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
+    pub(super) vault_backend: Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
     pub(super) vault_unlock_limiter: Arc<RateLimiter>,
     pub(super) vault_min_passphrase_length: usize,
@@ -70,6 +72,7 @@ impl MqdbAgent {
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            vault_backend: Arc::new(NoopVaultBackend),
             #[cfg(feature = "http-api")]
             vault_unlock_limiter: Arc::new(RateLimiter::new(10)),
             vault_min_passphrase_length: 0,
@@ -200,6 +203,12 @@ impl MqdbAgent {
     #[must_use]
     pub fn with_vault_min_passphrase_length(mut self, len: usize) -> Self {
         self.vault_min_passphrase_length = len;
+        self
+    }
+
+    #[must_use]
+    pub fn with_vault_backend(mut self, backend: Arc<dyn VaultBackend>) -> Self {
+        self.vault_backend = backend;
         self
     }
 

@@ -4,6 +4,7 @@ members = [
     "crates/mqdb-agent",
     "crates/mqdb-cluster",
     "crates/mqdb-cli",
+    "crates/mqdb-vault",
 ]
 exclude = [
     "crates/mqdb-wasm",

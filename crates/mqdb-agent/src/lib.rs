@@ -16,6 +16,7 @@ pub mod subscription_registry;
 pub mod topic_protection;
 pub mod topic_rules;
 pub mod transport_execute;
+pub mod vault_backend;
 
 #[cfg(feature = "http-api")]
 pub mod http;
