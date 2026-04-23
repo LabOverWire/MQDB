@@ -97,8 +97,22 @@ pub(crate) async fn cmd_agent_start(
     let auth_setup = build_auth_setup_config(&args.auth, federated_content.as_deref())?;
     let mut agent = MqdbAgent::new(db)
         .with_bind_address(args.bind)
-        .with_auth_setup(auth_setup)
-        .with_vault_min_passphrase_length(args.vault_min_passphrase_length);
+        .with_auth_setup(auth_setup);
+
+    let vault_licensed = license_info
+        .as_ref()
+        .is_some_and(|info| info.features.vault);
+    if vault_licensed {
+        let unlock_rate_limit = if args.auth.no_rate_limit { u32::MAX } else { 5 };
+        let vault_backend = std::sync::Arc::new(mqdb_vault::VaultBackendImpl::new(
+            mqdb_vault::VaultBackendConfig {
+                min_passphrase_length: args.vault_min_passphrase_length,
+                unlock_rate_limit,
+                key_store: None,
+            },
+        ));
+        agent = agent.with_vault_backend(vault_backend);
+    }
 
     if let Some(ref info) = license_info {
         agent = agent.with_license_expiry(info.expires_at);
@@ -151,7 +165,7 @@ pub(crate) async fn cmd_agent_start(
 
     if let Some(http_bind) = args.oauth.http_bind {
         let ownership_for_http = agent.ownership_config_arc();
-        let mut http_config = build_http_config(
+        let http_config = build_http_config(
             http_bind,
             &args.auth,
             &args.oauth,
@@ -159,7 +173,6 @@ pub(crate) async fn cmd_agent_start(
             ownership_for_http,
             &args.db_path,
         )?;
-        http_config.vault_min_passphrase_length = args.vault_min_passphrase_length;
         if !http_config.cookie_secure {
             tracing::warn!(
                 "session cookies will be sent without Secure flag — use --cookie-secure in production"
@@ -390,9 +403,9 @@ pub(crate) fn build_http_config(
         trust_proxy: oauth.trust_proxy,
         identity_crypto,
         ownership_config,
-        vault_key_store: None,
-        vault_unlock_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
-        vault_min_passphrase_length: 0,
+        db: None,
+        vault_backend: None,
+        auth_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
         email_auth: oauth.email_auth,
     })
 }

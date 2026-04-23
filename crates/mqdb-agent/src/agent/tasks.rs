@@ -56,10 +56,9 @@ impl MqdbAgent {
             Arc::clone(&self.ownership_config)
         };
         let scope_config = Arc::clone(&self.scope_config);
-        let vault_key_store = Arc::clone(&self.vault_key_store);
-        let vault_min_passphrase_length = self.vault_min_passphrase_length;
+        let vault_backend = Arc::clone(&self.vault_backend);
         #[cfg(feature = "http-api")]
-        let vault_unlock_limiter = Arc::clone(&self.vault_unlock_limiter);
+        let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
         #[cfg(feature = "http-api")]
         let identity_crypto = self.identity_crypto.clone();
 
@@ -127,10 +126,9 @@ impl MqdbAgent {
                                 ownership: &ownership_config,
                                 scope_config: &scope_config,
                                 auth_providers: auth_providers.as_deref(),
-                                vault_key_store: &vault_key_store,
-                                vault_min_passphrase_length,
+                                vault_backend: &vault_backend,
                                 #[cfg(feature = "http-api")]
-                                vault_unlock_limiter: &vault_unlock_limiter,
+                                auth_rate_limiter: &auth_rate_limiter,
                                 #[cfg(feature = "http-api")]
                                 identity_crypto: identity_crypto.as_ref(),
                             };
@@ -237,7 +235,8 @@ impl MqdbAgent {
             .ok()
             .and_then(|mut guard| guard.take())?;
 
-        http_config.vault_key_store = Some(Arc::clone(&self.vault_key_store));
+        http_config.vault_backend = Some(Arc::clone(&self.vault_backend));
+        http_config.db = Some(Arc::clone(&self.db));
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
         let http_addr = resolve_connect_address(bind_addr);

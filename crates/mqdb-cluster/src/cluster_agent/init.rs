@@ -144,7 +144,7 @@ impl ClusteredAgent {
         let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
         let ownership_arc = Arc::new(config.ownership.clone());
-        let vault_key_store = Arc::new(mqdb_core::vault_keys::VaultKeyStore::new());
+        let vault_key_store = Arc::new(mqdb_vault::VaultKeyStore::new());
         let mut controller = NodeController::new_with_storage(
             node_id,
             transport.clone(),
@@ -309,7 +309,8 @@ impl ClusteredAgent {
         service_password: Option<&String>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let mut http_config = self.http_config.take()?;
-        http_config.vault_key_store = Some(Arc::clone(&self.vault_key_store));
+        http_config.vault_backend = None;
+        http_config.db = None;
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
 

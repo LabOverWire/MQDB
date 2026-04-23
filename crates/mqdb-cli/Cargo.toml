@@ -34,6 +34,7 @@ rustls = { workspace = true, optional = true }
 regex.workspace = true
 glob.workspace = true
 base64.workspace = true
+mqdb-vault = { version = "0.1.0", path = "../mqdb-vault" }
 
 [features]
 default = ["cluster", "http-api"]

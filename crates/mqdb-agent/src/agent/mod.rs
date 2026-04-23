@@ -8,7 +8,6 @@ mod tasks;
 use crate::auth_config::AuthSetupConfig;
 use crate::database::Database;
 use crate::vault_backend::{NoopVaultBackend, VaultBackend};
-use mqdb_core::VaultKeyStore;
 use mqtt5::broker::config::{FederatedJwtConfig, JwtConfig, RateLimitConfig};
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -38,11 +37,9 @@ pub struct MqdbAgent {
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
-    pub(super) vault_key_store: Arc<VaultKeyStore>,
     pub(super) vault_backend: Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
-    pub(super) vault_unlock_limiter: Arc<RateLimiter>,
-    pub(super) vault_min_passphrase_length: usize,
+    pub(super) auth_rate_limiter: Arc<RateLimiter>,
     #[cfg(feature = "http-api")]
     pub(super) identity_crypto: Option<Arc<crate::http::IdentityCrypto>>,
     pub(super) license_expires_at: Option<u64>,
@@ -71,11 +68,9 @@ impl MqdbAgent {
             http_config: std::sync::Mutex::new(None),
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
-            vault_key_store: Arc::new(VaultKeyStore::new()),
             vault_backend: Arc::new(NoopVaultBackend),
             #[cfg(feature = "http-api")]
-            vault_unlock_limiter: Arc::new(RateLimiter::new(10)),
-            vault_min_passphrase_length: 0,
+            auth_rate_limiter: Arc::new(RateLimiter::new(10)),
             #[cfg(feature = "http-api")]
             identity_crypto: None,
             license_expires_at: None,
@@ -201,12 +196,6 @@ impl MqdbAgent {
     }
 
     #[must_use]
-    pub fn with_vault_min_passphrase_length(mut self, len: usize) -> Self {
-        self.vault_min_passphrase_length = len;
-        self
-    }
-
-    #[must_use]
     pub fn with_vault_backend(mut self, backend: Arc<dyn VaultBackend>) -> Self {
         self.vault_backend = backend;
         self
@@ -225,8 +214,8 @@ impl MqdbAgent {
     }
 
     #[must_use]
-    pub fn vault_key_store_arc(&self) -> Arc<VaultKeyStore> {
-        Arc::clone(&self.vault_key_store)
+    pub fn vault_backend_arc(&self) -> Arc<dyn VaultBackend> {
+        Arc::clone(&self.vault_backend)
     }
 
     #[must_use]

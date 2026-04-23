@@ -16,7 +16,7 @@ use crate::cluster::{
     RaftAdminCommand, RaftEvent, RaftStatus,
 };
 use mqdb_core::config::DurabilityMode;
-use mqdb_core::vault_keys::VaultKeyStore;
+use mqdb_vault::VaultKeyStore;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use std::net::SocketAddr;
 use std::path::PathBuf;

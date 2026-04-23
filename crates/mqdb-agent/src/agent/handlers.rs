@@ -4,16 +4,11 @@
 use std::sync::Arc;
 
 use crate::database::Database;
-use crate::http::VaultCrypto;
-use crate::vault_transform::{
-    build_vault_skip_fields, ensure_id, is_vault_eligible, vault_decrypt_fields,
-    vault_encrypt_fields,
-};
-use mqdb_core::VaultKeyStore;
+use crate::vault_backend::{VaultBackend, VaultError};
 use mqdb_core::constraint::Constraint;
-use mqdb_core::protocol::{AdminOperation, DbOp, build_request, parse_admin_topic, parse_db_topic};
-use mqdb_core::transport::{Request, Response};
-use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
+use mqdb_core::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
+use mqdb_core::transport::Response;
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqtt5::QoS;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
@@ -21,7 +16,7 @@ use mqtt5::client::MqttClient;
 use mqtt5::types::Message;
 use serde_json::Value;
 use std::path::Path;
-use tracing::{debug, error, info_span, warn};
+use tracing::{error, info_span, warn};
 
 #[cfg(feature = "http-api")]
 use crate::http::rate_limiter::RateLimiter;
@@ -61,10 +56,9 @@ pub(super) struct MessageContext<'a> {
     pub ownership: &'a OwnershipConfig,
     pub scope_config: &'a ScopeConfig,
     pub auth_providers: Option<&'a ComprehensiveAuthProvider>,
-    pub vault_key_store: &'a VaultKeyStore,
-    pub vault_min_passphrase_length: usize,
+    pub vault_backend: &'a Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
-    pub vault_unlock_limiter: &'a RateLimiter,
+    pub auth_rate_limiter: &'a RateLimiter,
     #[cfg(feature = "http-api")]
     pub identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
@@ -75,7 +69,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     let client = ctx.client;
     let ownership = ctx.ownership;
     let scope_config = ctx.scope_config;
-    let vault_key_store = ctx.vault_key_store;
+    let vault_backend = ctx.vault_backend;
     let topic = &message.topic;
 
     if topic.contains("/events") {
@@ -91,10 +85,9 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             auth_providers: ctx.auth_providers,
             ownership,
             scope_config,
-            vault_key_store,
-            vault_min_passphrase_length: ctx.vault_min_passphrase_length,
+            vault_backend,
             #[cfg(feature = "http-api")]
-            vault_unlock_limiter: ctx.vault_unlock_limiter,
+            auth_rate_limiter: ctx.auth_rate_limiter,
             #[cfg(feature = "http-api")]
             identity_crypto: ctx.identity_crypto,
         };
@@ -107,7 +100,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         return;
     };
 
-    let mut request = match build_request(op.clone(), &message.payload) {
+    let request = match build_request(op.clone(), &message.payload) {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to build request from {}: {}", topic, e);
@@ -141,51 +134,32 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         .find(|(k, _)| k == "x-mqtt-client-id")
         .map(|(_, v)| v.as_str());
 
-    let has_vault = sender_uid
-        .filter(|_| is_vault_eligible(&op.entity, ownership))
-        .is_some();
-
-    if has_vault && let Some(uid) = sender_uid {
-        vault_key_store.read_fence(uid).await;
+    if vault_backend.is_eligible(&op.entity, ownership, sender_uid)
+        && let Some(uid) = sender_uid
+    {
+        vault_backend.await_read_fence(uid).await;
     }
 
-    let vault_crypto = sender_uid
-        .filter(|_| is_vault_eligible(&op.entity, ownership))
-        .and_then(|uid| vault_key_store.get(uid))
-        .and_then(|key_bytes| VaultCrypto::from_key_bytes(&key_bytes));
-
-    let create_constraint_data = if vault_crypto.is_some() {
-        if let Request::Create { ref mut data, .. } = request {
-            ensure_id(data);
-            Some(data.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let (request, update_constraint_data) = if let Some(ref crypto) = vault_crypto {
-        match vault_transform_request(db, crypto, &op.entity, ownership, request, sender_uid).await
-        {
-            Ok((r, ucd)) => (r, ucd),
-            Err(err_response) => {
-                if let Some(response_topic) = &message.properties.response_topic
-                    && let Ok(payload) = serde_json::to_vec(&err_response)
-                {
-                    publish_response(
-                        client,
-                        response_topic,
-                        message.properties.correlation_data.as_deref(),
-                        payload,
-                    )
-                    .await;
-                }
-                return;
+    let (request, vault_constraint) = match vault_backend
+        .encrypt_request(db, &op.entity, ownership, sender_uid, request)
+        .await
+    {
+        Ok((r, vc)) => (r, vc),
+        Err(vault_err) => {
+            let err_response = vault_error_to_response(&vault_err);
+            if let Some(response_topic) = &message.properties.response_topic
+                && let Ok(payload) = serde_json::to_vec(&err_response)
+            {
+                publish_response(
+                    client,
+                    response_topic,
+                    message.properties.correlation_data.as_deref(),
+                    payload,
+                )
+                .await;
             }
+            return;
         }
-    } else {
-        (request, None)
     };
 
     let span = info_span!(
@@ -216,13 +190,6 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         span
     };
 
-    let vault_constraint = if let Some(cd) = create_constraint_data {
-        Some(mqdb_core::VaultConstraintData::Create(cd))
-    } else {
-        update_constraint_data
-            .map(|(new_data, old_data)| mqdb_core::VaultConstraintData::Update(new_data, old_data))
-    };
-
     let mut response = db
         .execute_with_sender(
             request,
@@ -235,9 +202,9 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         .instrument(span)
         .await;
 
-    if let Some(ref crypto) = vault_crypto {
-        vault_decrypt_response(crypto, &op.entity, op.operation, ownership, &mut response);
-    }
+    vault_backend
+        .decrypt_response(&op.entity, op.operation, ownership, sender_uid, &mut response)
+        .await;
 
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
@@ -257,148 +224,32 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     }
 }
 
-async fn vault_transform_request(
-    db: &Database,
-    crypto: &VaultCrypto,
-    entity: &str,
-    ownership: &OwnershipConfig,
-    request: Request,
-    sender_uid: Option<&str>,
-) -> Result<(Request, Option<(Value, Value)>), Response> {
-    let skip = build_vault_skip_fields(entity, ownership);
-    match request {
-        Request::Create { entity, mut data } => {
-            let id = ensure_id(&mut data);
-            vault_encrypt_fields(crypto, &entity, &id, &mut data, &skip);
-            debug!(entity = %entity, id = %id, "vault-encrypted create");
-            Ok((Request::Create { entity, data }, None))
+fn vault_error_to_response(err: &VaultError) -> Response {
+    match err {
+        VaultError::NotEnabled => {
+            Response::error(mqdb_core::ErrorCode::BadRequest, "vault not enabled")
         }
-        Request::Update {
-            entity,
-            id,
-            fields: delta,
-        } => {
-            let params = VaultUpdateParams {
-                crypto,
-                skip_fields: &skip,
-                sender_uid,
-                ownership,
-            };
-            let (encrypted_request, constraint_data) =
-                vault_pre_update(db, &params, &entity, &id, delta).await?;
-            debug!(entity = %entity, id = %id, "vault-encrypted update");
-            Ok((encrypted_request, constraint_data))
+        VaultError::AlreadyEnabled => {
+            Response::error(mqdb_core::ErrorCode::Conflict, "vault already enabled")
         }
-        other => Ok((other, None)),
-    }
-}
-
-struct VaultUpdateParams<'a> {
-    crypto: &'a VaultCrypto,
-    skip_fields: &'a [String],
-    sender_uid: Option<&'a str>,
-    ownership: &'a OwnershipConfig,
-}
-
-async fn vault_pre_update(
-    db: &Database,
-    params: &VaultUpdateParams<'_>,
-    entity: &str,
-    id: &str,
-    delta: Value,
-) -> Result<(Request, Option<(Value, Value)>), Response> {
-    if let OwnershipDecision::Check {
-        owner_field,
-        sender: uid,
-    } = params.ownership.evaluate(entity, params.sender_uid)
-        && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
-    {
-        return Err(e.into());
-    }
-
-    let Ok(mut decrypted_existing) = db
-        .read(entity.to_string(), id.to_string(), vec![], None)
-        .await
-    else {
-        return Ok((
-            Request::Update {
-                entity: entity.to_string(),
-                id: id.to_string(),
-                fields: delta,
-            },
-            None,
-        ));
-    };
-
-    vault_decrypt_fields(
-        params.crypto,
-        entity,
-        id,
-        &mut decrypted_existing,
-        params.skip_fields,
-    );
-
-    let plaintext_existing = decrypted_existing.clone();
-
-    if let (Some(base), Some(patch)) = (decrypted_existing.as_object_mut(), delta.as_object()) {
-        for (k, v) in patch {
-            base.insert(k.clone(), v.clone());
+        VaultError::InvalidPassphrase => {
+            Response::error(mqdb_core::ErrorCode::Unauthorized, "invalid passphrase")
         }
-    }
-
-    let plaintext_merged = decrypted_existing.clone();
-
-    if let Some(obj) = decrypted_existing.as_object_mut() {
-        obj.remove("id");
-        for sf in params.skip_fields {
-            if sf != "id" {
-                obj.remove(sf.as_str());
-            }
+        VaultError::NotUnlocked => {
+            Response::error(mqdb_core::ErrorCode::Unauthorized, "vault not unlocked")
         }
-    }
-
-    let mut merged = decrypted_existing;
-    vault_encrypt_fields(params.crypto, entity, id, &mut merged, params.skip_fields);
-
-    Ok((
-        Request::Update {
-            entity: entity.to_string(),
-            id: id.to_string(),
-            fields: merged,
-        },
-        Some((plaintext_merged, plaintext_existing)),
-    ))
-}
-
-fn vault_decrypt_response(
-    crypto: &VaultCrypto,
-    entity: &str,
-    operation: DbOp,
-    ownership: &OwnershipConfig,
-    response: &mut Response,
-) {
-    let Response::Ok { data } = response else {
-        return;
-    };
-
-    let skip = build_vault_skip_fields(entity, ownership);
-
-    match operation {
-        DbOp::Create | DbOp::Read | DbOp::Update => {
-            if let Some(id) = data.get("id").and_then(|v| v.as_str()).map(String::from) {
-                vault_decrypt_fields(crypto, entity, &id, data, &skip);
-            }
+        VaultError::RateLimited => {
+            Response::error(mqdb_core::ErrorCode::Conflict, "rate limited")
         }
-        DbOp::List => {
-            if let Some(items) = data.as_array_mut() {
-                for item in items {
-                    if let Some(id) = item.get("id").and_then(|v| v.as_str()).map(String::from) {
-                        vault_decrypt_fields(crypto, entity, &id, item, &skip);
-                    }
-                }
-            }
+        VaultError::PassphraseTooShort(n) => Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            format!("passphrase must be at least {n} characters"),
+        ),
+        VaultError::Unavailable => {
+            Response::error(mqdb_core::ErrorCode::BadRequest, "vault not available")
         }
-        DbOp::Delete => {}
+        VaultError::BadRequest(m) => Response::error(mqdb_core::ErrorCode::BadRequest, m.as_str()),
+        VaultError::Internal(m) => Response::error(mqdb_core::ErrorCode::Internal, m.as_str()),
     }
 }
 
@@ -410,10 +261,9 @@ struct AdminContext<'a> {
     auth_providers: Option<&'a ComprehensiveAuthProvider>,
     ownership: &'a OwnershipConfig,
     scope_config: &'a ScopeConfig,
-    vault_key_store: &'a VaultKeyStore,
-    vault_min_passphrase_length: usize,
+    vault_backend: &'a Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
-    vault_unlock_limiter: &'a RateLimiter,
+    auth_rate_limiter: &'a RateLimiter,
     #[cfg(feature = "http-api")]
     identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
 }
@@ -484,18 +334,12 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         }
         AdminOperation::IndexAdd { entity } => handle_index_add(ctx.db, entity, &payload).await,
         AdminOperation::Catalog => handle_catalog(ctx.db, ctx.ownership, ctx.scope_config).await,
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultEnable => handle_vault_enable_mqtt(ctx, &payload).await,
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultUnlock => handle_vault_unlock_mqtt(ctx, &payload).await,
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultLock => handle_vault_lock_mqtt(ctx),
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultDisable => handle_vault_disable_mqtt(ctx, &payload).await,
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultChange => handle_vault_change_mqtt(ctx, &payload).await,
-        #[cfg(feature = "http-api")]
-        AdminOperation::VaultStatus => handle_vault_status_mqtt(ctx).await,
+        AdminOperation::VaultEnable
+        | AdminOperation::VaultUnlock
+        | AdminOperation::VaultLock
+        | AdminOperation::VaultDisable
+        | AdminOperation::VaultChange
+        | AdminOperation::VaultStatus => dispatch_vault_admin_mqtt(ctx, &op, &payload).await,
         #[cfg(feature = "http-api")]
         AdminOperation::PasswordChange => handle_password_change_mqtt(ctx, &payload).await,
         #[cfg(feature = "http-api")]
@@ -503,15 +347,6 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         #[cfg(feature = "http-api")]
         AdminOperation::PasswordResetSubmit => {
             handle_password_reset_submit_mqtt(ctx, &payload).await
-        }
-        #[cfg(not(feature = "http-api"))]
-        AdminOperation::VaultEnable
-        | AdminOperation::VaultUnlock
-        | AdminOperation::VaultLock
-        | AdminOperation::VaultDisable
-        | AdminOperation::VaultChange
-        | AdminOperation::VaultStatus => {
-            Response::error(mqdb_core::ErrorCode::Forbidden, "requires http-api feature")
         }
         #[cfg(not(feature = "http-api"))]
         AdminOperation::PasswordChange
@@ -863,7 +698,7 @@ async fn handle_catalog(
             "constraints": constraint_data,
             "ownership": ownership_info,
             "scope": scope_info,
-            "vault_eligible": is_vault_eligible(name, ownership),
+            "vault_eligible": !name.starts_with('_') && ownership.entity_owner_fields.contains_key(name),
         }));
     }
 
@@ -1182,432 +1017,80 @@ fn extract_sender(message: &Message) -> Option<&str> {
         .map(|(_, v)| v.as_str())
 }
 
-#[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
-async fn handle_vault_enable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
+async fn dispatch_vault_admin_mqtt(
+    ctx: &AdminContext<'_>,
+    op: &AdminOperation,
+    payload: &Value,
+) -> Response {
+    let Some(canonical_id) = ctx
+        .message
+        .properties
+        .user_properties
+        .iter()
+        .find(|(k, _)| k == "x-mqtt-sender")
+        .map(|(_, v)| v.as_str())
+    else {
         return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
     };
 
-    let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase field");
-    };
-
-    let min_len = ctx.vault_min_passphrase_length;
-    if min_len > 0 && passphrase.len() < min_len {
-        return Response::error(
-            mqdb_core::ErrorCode::BadRequest,
-            format!("passphrase must be at least {min_len} characters"),
-        );
-    }
-
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many unlock attempts, try again later",
-        );
-    }
-
-    let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
-    else {
-        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
-    };
-
-    if identity
-        .get("vault_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Response::error(mqdb_core::ErrorCode::Conflict, "vault already enabled");
-    }
-
-    let salt = VaultCrypto::generate_salt();
-    let (crypto, key_bytes) = VaultCrypto::derive_with_raw_key(passphrase, &salt);
-
-    let check_token = match crypto.create_check_token() {
-        Ok(t) => t,
-        Err(e) => {
-            error!(error = %e, "vault check token creation failed");
-            return Response::error(mqdb_core::ErrorCode::Internal, "encryption failed");
+    let result = match op {
+        AdminOperation::VaultEnable => {
+            let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
+                return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase");
+            };
+            ctx.vault_backend
+                .admin_enable(ctx.db, ctx.ownership, canonical_id, passphrase)
+                .await
         }
-    };
-
-    let _fence = ctx.vault_key_store.acquire_fence(canonical_id).await;
-    ctx.vault_key_store.set(canonical_id, key_bytes);
-
-    let salt_b64 = BASE64.encode(salt);
-    let migration_start = json!({
-        "vault_enabled": true,
-        "vault_salt": salt_b64,
-        "vault_check": check_token,
-        "vault_migration_status": "pending",
-        "vault_migration_mode": "encrypt",
-    });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
-
-    let batch = crate::vault_ops::batch_vault_operation_db(
-        ctx.db,
-        ctx.ownership,
-        canonical_id,
-        &crypto,
-        crate::vault_ops::VaultMode::Encrypt,
-    )
-    .await;
-
-    let migration_done = json!({"vault_migration_status": "complete"});
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_done).await;
-
-    let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
-    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
-        body["failed"] = json!(batch.failed);
-        body["warning"] = json!("some records could not be processed");
-    }
-    Response::ok(body)
-}
-
-#[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
-async fn handle_vault_unlock_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
-    let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase field");
-    };
-
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many unlock attempts, try again later",
-        );
-    }
-
-    let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
-    else {
-        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
-    };
-
-    if !identity
-        .get("vault_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "vault not enabled");
-    }
-
-    let Some(salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
-        return Response::error(
-            mqdb_core::ErrorCode::Internal,
-            "vault salt missing from identity",
-        );
-    };
-    let Ok(salt) = BASE64.decode(salt_b64) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "invalid vault salt");
-    };
-
-    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "vault check token missing");
-    };
-
-    let (crypto, key_bytes) = VaultCrypto::derive_with_raw_key(passphrase, &salt);
-    if !crypto.verify_check_token(check_token) {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "incorrect passphrase");
-    }
-
-    let _fence = ctx.vault_key_store.acquire_fence(canonical_id).await;
-    ctx.vault_key_store.set(canonical_id, key_bytes);
-
-    let resume_result = crate::vault_ops::resume_pending_migration_db(
-        ctx.db,
-        ctx.ownership,
-        ctx.vault_key_store,
-        canonical_id,
-        &crypto,
-        &identity,
-        passphrase,
-    )
-    .await;
-
-    let status = if resume_result.as_ref().is_some_and(|r| r.mode == "decrypt") {
-        "vault_disabled"
-    } else {
-        "unlocked"
-    };
-    let mut body = json!({"status": status});
-    if let Some(migration) = resume_result {
-        body["migration_resumed"] = json!(migration.mode);
-        body["records_processed"] = json!(migration.succeeded);
-        if migration.failed > 0 {
-            body["migration_failed"] = json!(migration.failed);
+        AdminOperation::VaultUnlock => {
+            let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
+                return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase");
+            };
+            ctx.vault_backend
+                .admin_unlock(ctx.db, ctx.ownership, canonical_id, passphrase)
+                .await
         }
-    }
-    Response::ok(body)
-}
-
-#[cfg(feature = "http-api")]
-fn handle_vault_lock_mqtt(ctx: &AdminContext<'_>) -> Response {
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
-    ctx.vault_key_store.remove(canonical_id);
-    Response::ok(json!({"status": "locked"}))
-}
-
-#[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
-async fn handle_vault_disable_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
-    let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase field");
-    };
-
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many unlock attempts, try again later",
-        );
-    }
-
-    let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
-    else {
-        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
-    };
-
-    if !identity
-        .get("vault_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "vault not enabled");
-    }
-
-    let Some(salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "vault salt missing");
-    };
-    let Ok(salt) = BASE64.decode(salt_b64) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "invalid vault salt");
-    };
-
-    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "vault check token missing");
-    };
-
-    let crypto = VaultCrypto::derive(passphrase, &salt);
-    if !crypto.verify_check_token(check_token) {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "incorrect passphrase");
-    }
-
-    let _fence = ctx.vault_key_store.acquire_fence(canonical_id).await;
-    ctx.vault_key_store.remove(canonical_id);
-
-    let migration_start = json!({
-        "vault_migration_status": "pending",
-        "vault_migration_mode": "decrypt",
-    });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
-
-    let batch = crate::vault_ops::batch_vault_operation_db(
-        ctx.db,
-        ctx.ownership,
-        canonical_id,
-        &crypto,
-        crate::vault_ops::VaultMode::Decrypt,
-    )
-    .await;
-
-    let identity_update = json!({
-        "vault_enabled": false,
-        "vault_salt": null,
-        "vault_check": null,
-        "vault_migration_status": "complete",
-        "vault_migration_mode": null,
-    });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &identity_update).await;
-
-    let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
-    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
-        body["failed"] = json!(batch.failed);
-        body["warning"] = json!("some records could not be processed");
-    }
-    Response::ok(body)
-}
-
-#[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
-async fn handle_vault_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
-    let Some(old_passphrase) = payload.get("old_passphrase").and_then(|v| v.as_str()) else {
-        return Response::error(
-            mqdb_core::ErrorCode::BadRequest,
-            "missing old_passphrase field",
-        );
-    };
-    let Some(new_passphrase) = payload.get("new_passphrase").and_then(|v| v.as_str()) else {
-        return Response::error(
-            mqdb_core::ErrorCode::BadRequest,
-            "missing new_passphrase field",
-        );
-    };
-
-    let min_len = ctx.vault_min_passphrase_length;
-    if min_len > 0 && new_passphrase.len() < min_len {
-        return Response::error(
-            mqdb_core::ErrorCode::BadRequest,
-            format!("passphrase must be at least {min_len} characters"),
-        );
-    }
-
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many unlock attempts, try again later",
-        );
-    }
-
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many unlock attempts, try again later",
-        );
-    }
-
-    let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
-    else {
-        return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
-    };
-
-    if !identity
-        .get("vault_enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "vault not enabled");
-    }
-
-    let Some(old_salt_b64) = identity.get("vault_salt").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "vault salt missing");
-    };
-    let Ok(old_salt) = BASE64.decode(old_salt_b64) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "invalid vault salt");
-    };
-
-    let Some(check_token) = identity.get("vault_check").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::Internal, "vault check token missing");
-    };
-
-    let old_crypto = VaultCrypto::derive(old_passphrase, &old_salt);
-    if !old_crypto.verify_check_token(check_token) {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "incorrect old passphrase");
-    }
-
-    let new_salt = VaultCrypto::generate_salt();
-    let (new_crypto, new_key_bytes) = VaultCrypto::derive_with_raw_key(new_passphrase, &new_salt);
-
-    let new_check = match new_crypto.create_check_token() {
-        Ok(t) => t,
-        Err(e) => {
-            error!(error = %e, "new vault check token creation failed");
-            return Response::error(mqdb_core::ErrorCode::Internal, "encryption failed");
+        AdminOperation::VaultLock => ctx.vault_backend.admin_lock(canonical_id).await,
+        AdminOperation::VaultDisable => {
+            let Some(passphrase) = payload.get("passphrase").and_then(|v| v.as_str()) else {
+                return Response::error(mqdb_core::ErrorCode::BadRequest, "missing passphrase");
+            };
+            ctx.vault_backend
+                .admin_disable(ctx.db, ctx.ownership, canonical_id, passphrase)
+                .await
         }
+        AdminOperation::VaultChange => {
+            let Some(old_passphrase) = payload.get("current_passphrase").and_then(|v| v.as_str())
+            else {
+                return Response::error(
+                    mqdb_core::ErrorCode::BadRequest,
+                    "missing current_passphrase",
+                );
+            };
+            let Some(new_passphrase) = payload.get("new_passphrase").and_then(|v| v.as_str()) else {
+                return Response::error(
+                    mqdb_core::ErrorCode::BadRequest,
+                    "missing new_passphrase",
+                );
+            };
+            ctx.vault_backend
+                .admin_change(
+                    ctx.db,
+                    ctx.ownership,
+                    canonical_id,
+                    old_passphrase,
+                    new_passphrase,
+                )
+                .await
+        }
+        AdminOperation::VaultStatus => ctx.vault_backend.admin_status(ctx.db, canonical_id).await,
+        _ => unreachable!("dispatch_vault_admin_mqtt received non-vault op"),
     };
 
-    let _fence = ctx.vault_key_store.acquire_fence(canonical_id).await;
-    ctx.vault_key_store.set(canonical_id, new_key_bytes);
-
-    let new_salt_b64 = BASE64.encode(new_salt);
-    let old_salt_b64_encoded = BASE64.encode(&old_salt);
-    let migration_start = json!({
-        "vault_salt": new_salt_b64,
-        "vault_check": new_check,
-        "vault_migration_status": "pending",
-        "vault_migration_mode": "re_encrypt",
-        "vault_old_check": check_token,
-        "vault_old_salt": old_salt_b64_encoded,
-    });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_start).await;
-
-    let batch = crate::vault_ops::batch_vault_re_encrypt_db(
-        ctx.db,
-        ctx.ownership,
-        canonical_id,
-        &old_crypto,
-        &new_crypto,
-    )
-    .await;
-
-    let migration_done = json!({
-        "vault_migration_status": "complete",
-        "vault_migration_mode": null,
-        "vault_old_check": null,
-        "vault_old_salt": null,
-    });
-    crate::vault_ops::update_entity_db(ctx.db, "_identities", canonical_id, &migration_done).await;
-
-    let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
-    if batch.failed > 0 || !batch.entities_skipped.is_empty() {
-        body["failed"] = json!(batch.failed);
-        body["warning"] = json!("some records could not be processed");
+    match result {
+        Ok(outcome) => Response::ok(outcome.body),
+        Err(err) => vault_error_to_response(&err),
     }
-    Response::ok(body)
-}
-
-#[cfg(feature = "http-api")]
-async fn handle_vault_status_mqtt(ctx: &AdminContext<'_>) -> Response {
-    use serde_json::json;
-
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
-    let identity = crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await;
-    let vault_enabled = identity
-        .as_ref()
-        .and_then(|i| i.get("vault_enabled"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let migration_pending = identity
-        .as_ref()
-        .and_then(|i| i.get("vault_migration_status"))
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| s == "pending");
-
-    let unlocked = ctx.vault_key_store.get(canonical_id).is_some();
-
-    let mut body = json!({"vault_enabled": vault_enabled, "unlocked": unlocked});
-    if migration_pending {
-        body["migration_pending"] = json!(true);
-    }
-    Response::ok(body)
 }
 
 #[cfg(feature = "http-api")]
@@ -1636,7 +1119,7 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
         return Response::error(mqdb_core::ErrorCode::BadRequest, e);
     }
 
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+    if !ctx.auth_rate_limiter.check_and_record(canonical_id) {
         return Response::error(
             mqdb_core::ErrorCode::RateLimited,
             "too many attempts, try again later",
@@ -1644,7 +1127,7 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
     }
 
     let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
+        crate::db_helpers::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1660,7 +1143,7 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
         );
     }
 
-    let Some(cred) = crate::vault_ops::read_entity_db(ctx.db, "_credentials", canonical_id).await
+    let Some(cred) = crate::db_helpers::read_entity_db(ctx.db, "_credentials", canonical_id).await
     else {
         return Response::error(
             mqdb_core::ErrorCode::NotFound,
@@ -1690,7 +1173,7 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
         }
     };
 
-    crate::vault_ops::update_entity_db(
+    crate::db_helpers::update_entity_db(
         ctx.db,
         "_credentials",
         canonical_id,
@@ -1714,7 +1197,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         return Response::error(mqdb_core::ErrorCode::BadRequest, "missing email field");
     };
 
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+    if !ctx.auth_rate_limiter.check_and_record(canonical_id) {
         return Response::error(
             mqdb_core::ErrorCode::RateLimited,
             "too many attempts, try again later",
@@ -1722,7 +1205,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
     }
 
     let Some(identity) =
-        crate::vault_ops::read_entity_db(ctx.db, "_identities", canonical_id).await
+        crate::db_helpers::read_entity_db(ctx.db, "_identities", canonical_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "identity not found");
     };
@@ -1752,7 +1235,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         email,
     );
 
-    if let Some(challenges) = crate::vault_ops::list_entities_db(
+    if let Some(challenges) = crate::db_helpers::list_entities_db(
         ctx.db,
         "_verification_challenges",
         &format!("target_hash={target_hash}"),
@@ -1768,7 +1251,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
                 continue;
             }
             if let Some(id) = challenge.get("id").and_then(|v| v.as_str()) {
-                crate::vault_ops::update_entity_db(
+                crate::db_helpers::update_entity_db(
                     ctx.db,
                     "_verification_challenges",
                     id,
@@ -1802,7 +1285,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         "expires_at": expires_at.to_string(),
     });
 
-    if !crate::vault_ops::create_entity_db(ctx.db, "_verification_challenges", &challenge_data)
+    if !crate::db_helpers::create_entity_db(ctx.db, "_verification_challenges", &challenge_data)
         .await
     {
         return Response::error(
@@ -1867,7 +1350,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         return Response::error(mqdb_core::ErrorCode::BadRequest, e);
     }
 
-    if !ctx.vault_unlock_limiter.check_and_record(canonical_id) {
+    if !ctx.auth_rate_limiter.check_and_record(canonical_id) {
         return Response::error(
             mqdb_core::ErrorCode::RateLimited,
             "too many attempts, try again later",
@@ -1875,7 +1358,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     }
 
     let Some(challenge) =
-        crate::vault_ops::read_entity_db(ctx.db, "_verification_challenges", challenge_id).await
+        crate::db_helpers::read_entity_db(ctx.db, "_verification_challenges", challenge_id).await
     else {
         return Response::error(mqdb_core::ErrorCode::NotFound, "challenge not found");
     };
@@ -1917,7 +1400,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .unwrap_or(0);
     let now = crate::http::challenge_utils::now_unix();
     if expires_at > 0 && now >= expires_at {
-        crate::vault_ops::update_entity_db(
+        crate::db_helpers::update_entity_db(
             ctx.db,
             "_verification_challenges",
             challenge_id,
@@ -1936,7 +1419,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .and_then(Value::as_u64)
         .unwrap_or(5);
     if attempts >= max_attempts {
-        crate::vault_ops::update_entity_db(
+        crate::db_helpers::update_entity_db(
             ctx.db,
             "_verification_challenges",
             challenge_id,
@@ -1959,7 +1442,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         } else {
             status
         };
-        crate::vault_ops::update_entity_db(
+        crate::db_helpers::update_entity_db(
             ctx.db,
             "_verification_challenges",
             challenge_id,
@@ -1969,7 +1452,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         return Response::error(mqdb_core::ErrorCode::Unauthorized, "invalid code");
     }
 
-    crate::vault_ops::update_entity_db(
+    crate::db_helpers::update_entity_db(
         ctx.db,
         "_verification_challenges",
         challenge_id,
@@ -1991,9 +1474,9 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .unwrap_or("");
 
     let existing_creds =
-        crate::vault_ops::read_entity_db(ctx.db, "_credentials", canonical_id).await;
+        crate::db_helpers::read_entity_db(ctx.db, "_credentials", canonical_id).await;
     if existing_creds.is_some() {
-        crate::vault_ops::update_entity_db(
+        crate::db_helpers::update_entity_db(
             ctx.db,
             "_credentials",
             canonical_id,
@@ -2001,7 +1484,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         )
         .await;
     } else {
-        crate::vault_ops::create_entity_db(
+        crate::db_helpers::create_entity_db(
             ctx.db,
             "_credentials",
             &json!({
@@ -2013,7 +1496,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .await;
     }
 
-    crate::vault_ops::update_entity_db(
+    crate::db_helpers::update_entity_db(
         ctx.db,
         "_identities",
         canonical_id,

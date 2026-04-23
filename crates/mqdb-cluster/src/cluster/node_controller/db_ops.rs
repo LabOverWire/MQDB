@@ -491,10 +491,10 @@ impl<T: ClusterTransport> NodeController<T> {
         let Some(key_bytes) = self.vault_key_store.get(sender) else {
             return payload;
         };
-        let Some(crypto) = mqdb_agent::http::VaultCrypto::from_key_bytes(&key_bytes) else {
+        let Some(crypto) = mqdb_vault::VaultCrypto::from_key_bytes(&key_bytes) else {
             return payload;
         };
-        let skip = mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+        let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
         let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(&payload) else {
             return payload;
         };
@@ -504,7 +504,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 if let Some(data) = parsed.get_mut("data") {
                     let id = data.get("id").and_then(|v| v.as_str()).map(String::from);
                     if let Some(id) = id {
-                        mqdb_agent::vault_transform::vault_decrypt_fields(
+                        mqdb_vault::transform::vault_decrypt_fields(
                             &crypto, entity, &id, data, &skip,
                         );
                     }
@@ -2067,7 +2067,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .map_or(0, |d| d.as_nanos() as u64);
 
         if let Some(sender_id) = sender
-            && mqdb_agent::vault_transform::is_vault_eligible(entity, &self.ownership)
+            && mqdb_vault::transform::is_vault_eligible(entity, &self.ownership)
             && self.vault_key_store.get(sender_id).is_some()
         {
             let op_str = match op {

@@ -15,15 +15,12 @@ pub mod session;
 pub mod subscription_registry;
 pub mod topic_protection;
 pub mod topic_rules;
+pub mod db_helpers;
 pub mod transport_execute;
 pub mod vault_backend;
 
 #[cfg(feature = "http-api")]
 pub mod http;
-#[cfg(feature = "http-api")]
-pub mod vault_ops;
-#[cfg(feature = "http-api")]
-pub mod vault_transform;
 
 pub use agent::MqdbAgent;
 pub use consumer_group::{
