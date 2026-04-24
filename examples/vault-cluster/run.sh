@@ -628,7 +628,7 @@ echo "  Starting node 4 (port $PORT4, no http)..."
 RUST_LOG=mqdb=debug "$MQDB_BIN" cluster start \
     --node-id 4 --bind "127.0.0.1:$PORT4" \
     --db "$TEST_DIR/db4" \
-    --peers "1@127.0.0.1:$PORT1" \
+    --peers "1@127.0.0.1:$PORT1,2@127.0.0.1:$PORT2,3@127.0.0.1:$PORT3" \
     "${COMMON_AUTH_ARGS[@]}" \
     "${COMMON_QUIC_ARGS[@]}" \
     > "$TEST_DIR/node4.log" 2>&1 &

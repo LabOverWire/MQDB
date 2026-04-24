@@ -44,6 +44,10 @@ impl StoreManager {
                 entity::IDEMPOTENCY,
                 self.idempotency.export_for_partition(partition),
             ),
+            (
+                entity::DB_DATA,
+                self.db_data.export_for_partition(partition),
+            ),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -139,6 +143,10 @@ impl StoreManager {
                     .idempotency
                     .import_records(store_data)
                     .map_err(|_| StoreApplyError::IdempotencyError)?,
+                entity::DB_DATA => self
+                    .db_data
+                    .import_entities(store_data)
+                    .map_err(|_| StoreApplyError::DbDataError)?,
                 _ => continue,
             };
 
