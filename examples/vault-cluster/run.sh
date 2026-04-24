@@ -6,6 +6,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MQDB_BIN="$REPO_ROOT/target/release/mqdb"
 TEST_DIR="/tmp/vault-cluster-e2e"
 CERT_DIR="$REPO_ROOT/test_certs"
+
+if [[ -z "${MQDB_LICENSE_FILE:-}" ]]; then
+    echo "ERROR: cluster + vault require an Enterprise license." >&2
+    echo "Set MQDB_LICENSE_FILE to a license key path and retry." >&2
+    exit 1
+fi
+if [[ ! -f "$MQDB_LICENSE_FILE" ]]; then
+    echo "ERROR: MQDB_LICENSE_FILE does not exist: $MQDB_LICENSE_FILE" >&2
+    exit 1
+fi
 NODE_PIDS=()
 PASS=0
 FAIL=0
@@ -159,6 +169,7 @@ COMMON_AUTH_ARGS=(
     --admin-users "$OBSERVER_USER"
     --no-rate-limit
     --cors-origin http://localhost:8080
+    --license "$MQDB_LICENSE_FILE"
 )
 
 COMMON_QUIC_ARGS=(

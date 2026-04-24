@@ -403,7 +403,7 @@ pub(crate) fn build_http_config(
         trust_proxy: oauth.trust_proxy,
         identity_crypto,
         ownership_config,
-        db: None,
+        db_access: std::sync::Arc::new(mqdb_agent::vault_backend::NoopDbAccess),
         vault_backend: None,
         auth_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
         email_auth: oauth.email_auth,

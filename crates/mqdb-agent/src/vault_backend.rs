@@ -41,6 +41,33 @@ pub struct VaultAdminOutcome {
     pub session_update: Option<bool>,
 }
 
+pub trait DbAccess: Send + Sync {
+    fn read_entity<'a>(
+        &'a self,
+        entity: &'a str,
+        id: &'a str,
+    ) -> VaultFuture<'a, Option<serde_json::Value>>;
+
+    fn update_entity<'a>(
+        &'a self,
+        entity: &'a str,
+        id: &'a str,
+        data: serde_json::Value,
+    ) -> VaultFuture<'a, bool>;
+
+    fn list_entities<'a>(
+        &'a self,
+        entity: &'a str,
+        filter: &'a str,
+    ) -> VaultFuture<'a, Option<Vec<serde_json::Value>>>;
+
+    fn create_entity<'a>(
+        &'a self,
+        entity: &'a str,
+        data: serde_json::Value,
+    ) -> VaultFuture<'a, bool>;
+}
+
 pub trait VaultBackend: Send + Sync {
     fn is_eligible(
         &self,
@@ -71,7 +98,7 @@ pub trait VaultBackend: Send + Sync {
 
     fn admin_enable<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -79,7 +106,7 @@ pub trait VaultBackend: Send + Sync {
 
     fn admin_unlock<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -92,7 +119,7 @@ pub trait VaultBackend: Send + Sync {
 
     fn admin_disable<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -100,7 +127,7 @@ pub trait VaultBackend: Send + Sync {
 
     fn admin_change<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         old_passphrase: &'a str,
@@ -109,9 +136,43 @@ pub trait VaultBackend: Send + Sync {
 
     fn admin_status<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         canonical_id: &'a str,
     ) -> VaultFuture<'a, VaultResult<VaultAdminOutcome>>;
+}
+
+pub struct NoopDbAccess;
+
+impl DbAccess for NoopDbAccess {
+    fn read_entity<'a>(
+        &'a self,
+        _entity: &'a str,
+        _id: &'a str,
+    ) -> VaultFuture<'a, Option<serde_json::Value>> {
+        Box::pin(async { None })
+    }
+    fn update_entity<'a>(
+        &'a self,
+        _entity: &'a str,
+        _id: &'a str,
+        _data: serde_json::Value,
+    ) -> VaultFuture<'a, bool> {
+        Box::pin(async { false })
+    }
+    fn list_entities<'a>(
+        &'a self,
+        _entity: &'a str,
+        _filter: &'a str,
+    ) -> VaultFuture<'a, Option<Vec<serde_json::Value>>> {
+        Box::pin(async { None })
+    }
+    fn create_entity<'a>(
+        &'a self,
+        _entity: &'a str,
+        _data: serde_json::Value,
+    ) -> VaultFuture<'a, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub struct NoopVaultBackend;
@@ -154,7 +215,7 @@ impl VaultBackend for NoopVaultBackend {
 
     fn admin_enable<'a>(
         &'a self,
-        _db: &'a Database,
+        _db: &'a dyn DbAccess,
         _ownership: &'a OwnershipConfig,
         _canonical_id: &'a str,
         _passphrase: &'a str,
@@ -164,7 +225,7 @@ impl VaultBackend for NoopVaultBackend {
 
     fn admin_unlock<'a>(
         &'a self,
-        _db: &'a Database,
+        _db: &'a dyn DbAccess,
         _ownership: &'a OwnershipConfig,
         _canonical_id: &'a str,
         _passphrase: &'a str,
@@ -181,7 +242,7 @@ impl VaultBackend for NoopVaultBackend {
 
     fn admin_disable<'a>(
         &'a self,
-        _db: &'a Database,
+        _db: &'a dyn DbAccess,
         _ownership: &'a OwnershipConfig,
         _canonical_id: &'a str,
         _passphrase: &'a str,
@@ -191,7 +252,7 @@ impl VaultBackend for NoopVaultBackend {
 
     fn admin_change<'a>(
         &'a self,
-        _db: &'a Database,
+        _db: &'a dyn DbAccess,
         _ownership: &'a OwnershipConfig,
         _canonical_id: &'a str,
         _old_passphrase: &'a str,
@@ -202,7 +263,7 @@ impl VaultBackend for NoopVaultBackend {
 
     fn admin_status<'a>(
         &'a self,
-        _db: &'a Database,
+        _db: &'a dyn DbAccess,
         _canonical_id: &'a str,
     ) -> VaultFuture<'a, VaultResult<VaultAdminOutcome>> {
         Box::pin(async { Err(VaultError::Unavailable) })

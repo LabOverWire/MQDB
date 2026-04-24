@@ -236,7 +236,7 @@ impl MqdbAgent {
             .and_then(|mut guard| guard.take())?;
 
         http_config.vault_backend = Some(Arc::clone(&self.vault_backend));
-        http_config.db = Some(Arc::clone(&self.db));
+        http_config.db_access = Arc::clone(&self.db) as Arc<dyn crate::vault_backend::DbAccess>;
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
         let http_addr = resolve_connect_address(bind_addr);

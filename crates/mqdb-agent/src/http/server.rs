@@ -8,8 +8,7 @@ use super::pkce::PkceCache;
 use super::providers::ProviderRegistry;
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
-use crate::database::Database;
-use crate::vault_backend::{NoopVaultBackend, VaultBackend};
+use crate::vault_backend::{DbAccess, NoopVaultBackend, VaultBackend};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -36,7 +35,7 @@ pub struct HttpServerConfig {
     pub trust_proxy: bool,
     pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
-    pub db: Option<Arc<Database>>,
+    pub db_access: Arc<dyn DbAccess>,
     pub vault_backend: Option<Arc<dyn VaultBackend>>,
     pub auth_rate_limit: u32,
     pub email_auth: bool,
@@ -78,7 +77,7 @@ impl HttpServer {
             jwt_config: self.config.jwt_config,
             pkce_cache: Mutex::new(PkceCache::new()),
             mqtt_client: self.mqtt_client,
-            db: self.config.db,
+            db_access: self.config.db_access,
             frontend_redirect_uri: self.config.frontend_redirect_uri,
             session_store: SessionStore::new(),
             ticket_expiry_secs: self.config.ticket_expiry_secs,

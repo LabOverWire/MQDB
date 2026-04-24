@@ -11,10 +11,10 @@ use crate::transform::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mqdb_agent::Database;
-use mqdb_agent::db_helpers::{read_entity_db, update_entity_db};
 use mqdb_agent::http::rate_limiter::RateLimiter;
 use mqdb_agent::vault_backend::{
-    EncryptRequestOutput, VaultAdminOutcome, VaultBackend, VaultError, VaultFuture, VaultResult,
+    DbAccess, EncryptRequestOutput, VaultAdminOutcome, VaultBackend, VaultError, VaultFuture,
+    VaultResult,
 };
 use mqdb_core::protocol::DbOp;
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
@@ -260,7 +260,7 @@ impl VaultBackend for VaultBackendImpl {
 
     fn admin_enable<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -271,7 +271,7 @@ impl VaultBackend for VaultBackendImpl {
             }
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
+            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
                 return Err(VaultError::NotFound("identity not found".into()));
             };
             if identity
@@ -300,9 +300,10 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "pending",
                 "vault_migration_mode": "encrypt",
             });
-            update_entity_db(db, "_identities", canonical_id, &migration_start).await;
+            db.update_entity("_identities", canonical_id, migration_start)
+                .await;
 
-            let batch = ops::batch_vault_operation_db(
+            let batch = ops::batch_vault_operation(
                 db,
                 ownership,
                 canonical_id,
@@ -312,7 +313,8 @@ impl VaultBackend for VaultBackendImpl {
             .await;
 
             let migration_done = json!({"vault_migration_status": "complete"});
-            update_entity_db(db, "_identities", canonical_id, &migration_done).await;
+            db.update_entity("_identities", canonical_id, migration_done)
+                .await;
 
             let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -328,7 +330,7 @@ impl VaultBackend for VaultBackendImpl {
 
     fn admin_unlock<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -336,7 +338,7 @@ impl VaultBackend for VaultBackendImpl {
         Box::pin(async move {
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
+            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
                 return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
@@ -365,7 +367,7 @@ impl VaultBackend for VaultBackendImpl {
             let _fence = self.key_store.acquire_fence(canonical_id).await;
             self.key_store.set(canonical_id, key_bytes);
 
-            let resume_result = ops::resume_pending_migration_db(
+            let resume_result = ops::resume_pending_migration(
                 db,
                 ownership,
                 &self.key_store,
@@ -411,7 +413,7 @@ impl VaultBackend for VaultBackendImpl {
 
     fn admin_disable<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         passphrase: &'a str,
@@ -419,7 +421,7 @@ impl VaultBackend for VaultBackendImpl {
         Box::pin(async move {
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
+            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
                 return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
@@ -452,9 +454,10 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "pending",
                 "vault_migration_mode": "decrypt",
             });
-            update_entity_db(db, "_identities", canonical_id, &migration_start).await;
+            db.update_entity("_identities", canonical_id, migration_start)
+                .await;
 
-            let batch = ops::batch_vault_operation_db(
+            let batch = ops::batch_vault_operation(
                 db,
                 ownership,
                 canonical_id,
@@ -470,7 +473,8 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "complete",
                 "vault_migration_mode": null,
             });
-            update_entity_db(db, "_identities", canonical_id, &identity_update).await;
+            db.update_entity("_identities", canonical_id, identity_update)
+                .await;
 
             let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -486,7 +490,7 @@ impl VaultBackend for VaultBackendImpl {
 
     fn admin_change<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         ownership: &'a OwnershipConfig,
         canonical_id: &'a str,
         old_passphrase: &'a str,
@@ -498,7 +502,7 @@ impl VaultBackend for VaultBackendImpl {
             }
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
+            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
                 return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
@@ -545,16 +549,12 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_old_check": check_token,
                 "vault_old_salt": old_salt_b64_encoded,
             });
-            update_entity_db(db, "_identities", canonical_id, &migration_start).await;
+            db.update_entity("_identities", canonical_id, migration_start)
+                .await;
 
-            let batch = ops::batch_vault_re_encrypt_db(
-                db,
-                ownership,
-                canonical_id,
-                &old_crypto,
-                &new_crypto,
-            )
-            .await;
+            let batch =
+                ops::batch_vault_re_encrypt(db, ownership, canonical_id, &old_crypto, &new_crypto)
+                    .await;
 
             let migration_done = json!({
                 "vault_migration_status": "complete",
@@ -562,7 +562,8 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_old_check": null,
                 "vault_old_salt": null,
             });
-            update_entity_db(db, "_identities", canonical_id, &migration_done).await;
+            db.update_entity("_identities", canonical_id, migration_done)
+                .await;
 
             let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -578,11 +579,11 @@ impl VaultBackend for VaultBackendImpl {
 
     fn admin_status<'a>(
         &'a self,
-        db: &'a Database,
+        db: &'a dyn DbAccess,
         canonical_id: &'a str,
     ) -> VaultFuture<'a, VaultResult<VaultAdminOutcome>> {
         Box::pin(async move {
-            let identity = read_entity_db(db, "_identities", canonical_id).await;
+            let identity = db.read_entity("_identities", canonical_id).await;
             let vault_enabled = identity
                 .as_ref()
                 .and_then(|i| i.get("vault_enabled"))

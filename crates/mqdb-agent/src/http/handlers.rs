@@ -9,8 +9,7 @@ use super::pkce::PkceCache;
 use super::providers::{ProviderIdentity, ProviderRegistry};
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, NewSession, SessionStore};
-use crate::database::Database;
-use crate::vault_backend::{VaultBackend, VaultError};
+use crate::vault_backend::{DbAccess, VaultBackend, VaultError};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::Response;
@@ -52,7 +51,7 @@ pub struct ServerState {
     pub jwt_config: JwtSigningConfig,
     pub pkce_cache: Mutex<PkceCache>,
     pub mqtt_client: Arc<MqttClient>,
-    pub db: Option<Arc<Database>>,
+    pub db_access: Arc<dyn DbAccess>,
     pub frontend_redirect_uri: Option<String>,
     pub session_store: SessionStore,
     pub ticket_expiry_secs: u64,
@@ -1444,10 +1443,7 @@ pub async fn handle_vault_enable(
     let result = state
         .vault_backend
         .admin_enable(
-            match state.db.as_deref() {
-                Some(db) => db,
-                None => return vault_error_to_http(&VaultError::Unavailable, cors),
-            },
+            &*state.db_access,
             &state.ownership_config,
             &canonical_id,
             passphrase,
@@ -1489,10 +1485,7 @@ pub async fn handle_vault_unlock(
     let result = state
         .vault_backend
         .admin_unlock(
-            match state.db.as_deref() {
-                Some(db) => db,
-                None => return vault_error_to_http(&VaultError::Unavailable, cors),
-            },
+            &*state.db_access,
             &state.ownership_config,
             &canonical_id,
             passphrase,
@@ -1551,10 +1544,7 @@ pub async fn handle_vault_disable(
     let result = state
         .vault_backend
         .admin_disable(
-            match state.db.as_deref() {
-                Some(db) => db,
-                None => return vault_error_to_http(&VaultError::Unavailable, cors),
-            },
+            &*state.db_access,
             &state.ownership_config,
             &canonical_id,
             passphrase,
@@ -1607,10 +1597,7 @@ pub async fn handle_vault_change(
     let result = state
         .vault_backend
         .admin_change(
-            match state.db.as_deref() {
-                Some(db) => db,
-                None => return vault_error_to_http(&VaultError::Unavailable, cors),
-            },
+            &*state.db_access,
             &state.ownership_config,
             &canonical_id,
             old_passphrase,
@@ -1635,13 +1622,7 @@ pub async fn handle_vault_status(state: &ServerState, headers: &HeaderMap) -> Ht
     let canonical_id = session.canonical_id.clone();
     let result = state
         .vault_backend
-        .admin_status(
-            match state.db.as_deref() {
-                Some(db) => db,
-                None => return vault_error_to_http(&VaultError::Unavailable, cors),
-            },
-            &canonical_id,
-        )
+        .admin_status(&*state.db_access, &canonical_id)
         .await;
     match result {
         Ok(outcome) => json_response_with_credentials(200, &outcome.body, cors),
