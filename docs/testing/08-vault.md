@@ -15,6 +15,12 @@ Vault requires:
 - `--jwt-audience` (required for OAuth client_id)
 - Authentication (`--passwd` or `--scram-file` + `--jwt-algorithm` + `--jwt-key`)
 
+> **Without a license:** the agent still starts and all non-vault functionality works,
+> but vault is bound to `NoopVaultBackend`. Every `$DB/_vault/*` topic and every
+> `/vault/*` HTTP endpoint returns `code 400` / HTTP 400 with message
+> `"vault not available"`. This is the enforcement path; it is the expected state for
+> free-tier and agent-only builds.
+
 > **Note:** The MQTT username must match the `canonical_id` returned by dev-login for
 > ownership to work. Use the same string as MQTT username and dev-login canonical_id.
 
@@ -205,8 +211,9 @@ This runs 70 tests covering:
 **MQTT Vault Admin:**
 - [ ] All 6 vault topics work over MQTT request-response (`$DB/_vault/*`)
 - [ ] Short passphrase rejected when `--vault-min-passphrase-length` configured
-- [ ] Wrong passphrase returns error code 401
+- [ ] Wrong passphrase returns error code 403 (Forbidden), message `"incorrect passphrase"`
 - [ ] Rate limiting returns error code 429
+- [ ] Unlicensed agent returns code 400 with message `"vault not available"` on every admin topic
 - [ ] All 28 E2E assertions pass (`examples/vault-mqtt-admin/run.sh`)
 
 **Cluster Mode:**
