@@ -24,21 +24,25 @@ All contributors must sign our [Contributor License Agreement](CLA.md) before an
 ```bash
 git clone https://github.com/LabOverWire/MQDB.git
 cd mqdb
+git config core.hooksPath .githooks   # enables the pre-commit hook
 cargo make dev
 ```
 
 `cargo make dev` runs formatting, clippy (pedantic), and the full test suite.
+
+The `git config core.hooksPath .githooks` line wires up `.githooks/pre-commit`, which runs `cargo make format-check` + `cargo make clippy` before every commit so CI failures are caught locally. Tests are not run in the hook — use `cargo make ci` when you want to run them explicitly before pushing.
 
 ## Code Standards
 
 - Run `cargo make clippy` before submitting — pedantic warnings are enabled and must be zero
 - Run `cargo make test` to verify all tests pass
 - Run `cargo make format` to auto-format code
-- All new files must include the AGPL-3.0 copyright header:
+- All new files must include an SPDX header:
 
 ```rust
-// Copyright (C) 2025-2026 LabOverWire
-// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2025-2026 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0        // for mqdb-core / mqdb-agent / mqdb-wasm
+// SPDX-License-Identifier: AGPL-3.0-only     // for mqdb-vault / mqdb-cluster / mqdb-cli
 ```
 
 ## Pull Request Process
