@@ -13,7 +13,6 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-license = "AGPL-3.0-only"
 authors = ["LabOverWire"]
 repository = "https://github.com/LabOverWire/MQDB"
 

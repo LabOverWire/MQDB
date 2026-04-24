@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 use super::cookies::{build_delete_cookie_header, build_set_cookie_header, parse_session_id};
 use super::credentials;
