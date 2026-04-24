@@ -247,7 +247,7 @@ echo "  Verifying cross-node CRUD works..."
 for i in $(seq 1 20); do
     PROBE=$("$MQDB_BIN" create notes --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 5 \
         -d "{\"title\":\"probe\",\"userId\":\"$CANONICAL_ID\"}" 2>/dev/null)
-    PROBE_ID=$(json_field "$PROBE" "id")
+    PROBE_ID=$(json_field "$PROBE" "data.id")
     if [[ -n "$PROBE_ID" && "$PROBE_ID" != "__PARSE_ERROR__" ]]; then
         "$MQDB_BIN" delete notes "$PROBE_ID" --broker "127.0.0.1:$PORT1" --user "$CANONICAL_ID" --pass "$MQTT_PASS" --timeout 5 > /dev/null 2>&1
         echo "  Cross-node CRUD verified after ${i}s"
