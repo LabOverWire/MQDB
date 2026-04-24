@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 use super::MqdbAgent;
 use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};

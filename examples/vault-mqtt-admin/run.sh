@@ -5,6 +5,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MQDB_BIN="$REPO_ROOT/target/release/mqdb"
 TEST_DIR="/tmp/vault-mqtt-admin-test"
+
+if [[ -z "${MQDB_LICENSE_FILE:-}" ]]; then
+    echo "ERROR: vault admin requires a Pro or Enterprise license." >&2
+    echo "Set MQDB_LICENSE_FILE to a license key path and retry." >&2
+    exit 1
+fi
+if [[ ! -f "$MQDB_LICENSE_FILE" ]]; then
+    echo "ERROR: MQDB_LICENSE_FILE does not exist: $MQDB_LICENSE_FILE" >&2
+    exit 1
+fi
 AGENT_PID=""
 PASS=0
 FAIL=0
@@ -159,6 +169,7 @@ RUST_LOG=mqdb=debug "$MQDB_BIN" agent start \
     --admin-users "$OBSERVER_USER" \
     --no-rate-limit \
     --vault-min-passphrase-length 8 \
+    --license "$MQDB_LICENSE_FILE" \
     > "$TEST_DIR/agent.log" 2>&1 &
 AGENT_PID=$!
 

@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::http::VaultCrypto;
+use crate::crypto::VaultCrypto;
 use mqdb_core::types::OwnershipConfig;
 use serde_json::Value;
 

@@ -14,7 +14,7 @@ use super::node_controller::{
 };
 use super::transport::ClusterTransport;
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
-use mqdb_core::vault_keys::VaultKeyStore;
+use mqdb_vault::VaultKeyStore;
 use std::sync::Arc;
 
 pub struct MqttRequestContext<'a> {
@@ -167,24 +167,23 @@ impl DbRequestHandler {
         &self,
         entity: &str,
         sender: Option<&str>,
-    ) -> Option<mqdb_agent::http::VaultCrypto> {
-        let uid = sender
-            .filter(|_| mqdb_agent::vault_transform::is_vault_eligible(entity, &self.ownership))?;
+    ) -> Option<mqdb_vault::VaultCrypto> {
+        let uid =
+            sender.filter(|_| mqdb_vault::transform::is_vault_eligible(entity, &self.ownership))?;
         let key_bytes = self.vault_key_store.get(uid)?;
-        mqdb_agent::http::VaultCrypto::from_key_bytes(&key_bytes)
+        mqdb_vault::VaultCrypto::from_key_bytes(&key_bytes)
     }
 
     fn vault_encrypt_if_needed(
         &self,
-        vault_crypto: Option<&mqdb_agent::http::VaultCrypto>,
+        vault_crypto: Option<&mqdb_vault::VaultCrypto>,
         entity: &str,
         id: &str,
         mut data: serde_json::Value,
     ) -> serde_json::Value {
         if let Some(crypto) = vault_crypto {
-            let skip =
-                mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership);
-            mqdb_agent::vault_transform::vault_encrypt_fields(crypto, entity, id, &mut data, &skip);
+            let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
+            mqdb_vault::transform::vault_encrypt_fields(crypto, entity, id, &mut data, &skip);
         }
         data
     }
@@ -199,7 +198,7 @@ impl DbRequestHandler {
         let Some(crypto) = self.resolve_vault_crypto(entity, sender) else {
             return payload;
         };
-        let skip = mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+        let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
         let Ok(mut parsed) = serde_json::from_slice::<serde_json::Value>(&payload) else {
             return payload;
         };
@@ -209,7 +208,7 @@ impl DbRequestHandler {
                 if let Some(data) = parsed.get_mut("data") {
                     let id = data.get("id").and_then(|v| v.as_str()).map(String::from);
                     if let Some(id) = id {
-                        mqdb_agent::vault_transform::vault_decrypt_fields(
+                        mqdb_vault::transform::vault_decrypt_fields(
                             &crypto, entity, &id, data, &skip,
                         );
                     }

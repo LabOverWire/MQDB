@@ -1,0 +1,25 @@
+[package]
+name = "mqdb-vault"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+license = "AGPL-3.0-only"
+authors.workspace = true
+repository.workspace = true
+description = "Vault transparent encryption for MQDB (AGPL, Pro/Enterprise feature)"
+
+[dependencies]
+base64.workspace = true
+mqdb-agent = { version = "0.7.2", path = "../mqdb-agent" }
+mqdb-core = { version = "0.6.0", path = "../mqdb-core" }
+mqtt5.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

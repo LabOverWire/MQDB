@@ -1,7 +1,23 @@
 MQDB
 Copyright 2025-2026 LabOverWire
 
-Licensed under the GNU Affero General Public License v3.0.
-See LICENSE for details.
+This repository contains multiple crates under two different licenses.
 
-All components are licensed under the AGPL-3.0-only license.
+Permissively-licensed crates (Apache-2.0) — see LICENSE-APACHE:
+  - mqdb-core    Core types, storage, schema, and protocol
+  - mqdb-agent   Standalone MQTT broker agent with embedded database
+  - mqdb-wasm    WASM client library for reactive frontend frameworks
+
+Copyleft-licensed crates (AGPL-3.0-only) — see LICENSE-AGPL:
+  - mqdb-vault   Vault transparent encryption (Pro/Enterprise feature)
+  - mqdb-cluster Distributed clustering, Raft consensus, and QUIC transport
+  - mqdb-cli    The `mqdb` command-line binary
+
+Downstream Rust crates that depend only on the permissive crates (mqdb-core,
+mqdb-agent, mqdb-wasm) inherit Apache-2.0 terms. Building or linking with any
+of the AGPL crates creates a combined work governed by AGPL-3.0 — see
+LICENSE-AGPL for its terms, including the network-use source-disclosure
+requirement.
+
+Individual contributors are covered by the Contributor License Agreement in
+CLA.md.

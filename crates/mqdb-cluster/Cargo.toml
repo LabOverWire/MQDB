@@ -3,7 +3,7 @@ name = "mqdb-cluster"
 version = "0.3.0"
 publish = false
 edition.workspace = true
-license.workspace = true
+license = "AGPL-3.0-only"
 authors.workspace = true
 repository.workspace = true
 description = "Distributed clustering, Raft consensus, and QUIC transport for MQDB"
@@ -37,6 +37,7 @@ quinn.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 rustls-native-certs.workspace = true
+mqdb-vault = { version = "0.1.0", path = "../mqdb-vault" }
 
 [features]
 default = []

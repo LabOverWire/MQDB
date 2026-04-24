@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 pub mod checksum;
 pub mod config;
@@ -20,7 +20,6 @@ pub mod storage;
 pub mod subscription;
 pub mod transport;
 pub mod types;
-pub mod vault_keys;
 
 pub use constraint::{ForeignKeyConstraint, NotNullConstraint, OnDeleteAction, UniqueConstraint};
 pub use error::{Error, Result};
@@ -48,4 +47,3 @@ pub use partition::{
     Epoch, NUM_PARTITIONS, NodeId, PartitionAssignment, PartitionId, PartitionMap, PartitionRole,
     data_partition, generate_id_for_partition, index_partition, schema_partition, unique_partition,
 };
-pub use vault_keys::VaultKeyStore;

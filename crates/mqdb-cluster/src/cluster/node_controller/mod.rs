@@ -40,7 +40,7 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, PartitionMapExt};
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig};
-use mqdb_core::vault_keys::VaultKeyStore;
+use mqdb_vault::VaultKeyStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;

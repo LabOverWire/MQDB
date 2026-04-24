@@ -144,7 +144,7 @@ impl ClusteredAgent {
         let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
         let ownership_arc = Arc::new(config.ownership.clone());
-        let vault_key_store = Arc::new(mqdb_core::vault_keys::VaultKeyStore::new());
+        let vault_key_store = Arc::new(mqdb_vault::VaultKeyStore::new());
         let mut controller = NodeController::new_with_storage(
             node_id,
             transport.clone(),
@@ -309,17 +309,35 @@ impl ClusteredAgent {
         service_password: Option<&String>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let mut http_config = self.http_config.take()?;
-        http_config.vault_key_store = Some(Arc::clone(&self.vault_key_store));
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
 
-        let http_mqtt_client = mqtt5::MqttClient::new("mqdb-http-oauth");
+        let http_mqtt_client = std::sync::Arc::new(mqtt5::MqttClient::new("mqdb-http-oauth"));
         let http_connect_ip = if self.bind_address.ip().is_unspecified() {
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         } else {
             self.bind_address.ip()
         };
         let http_addr = format!("{}:{}", http_connect_ip, self.bind_address.port());
+
+        let db_access: std::sync::Arc<dyn mqdb_agent::vault_backend::DbAccess> =
+            std::sync::Arc::new(mqdb_agent::db_helpers::MqttDbAccess::new(
+                std::sync::Arc::clone(&http_mqtt_client),
+            ));
+        http_config.db_access = db_access;
+
+        let unlock_rate_limit = if http_config.auth_rate_limit == u32::MAX {
+            u32::MAX
+        } else {
+            5
+        };
+        http_config.vault_backend = Some(std::sync::Arc::new(mqdb_vault::VaultBackendImpl::new(
+            mqdb_vault::VaultBackendConfig {
+                min_passphrase_length: 0,
+                unlock_rate_limit,
+                key_store: Some(std::sync::Arc::clone(&self.vault_key_store)),
+            },
+        )));
 
         let http_svc_user = service_username.cloned();
         let http_svc_pass = service_password.cloned();
@@ -343,11 +361,8 @@ impl ClusteredAgent {
             }
 
             info!(addr = %http_bind, "starting HTTP OAuth server");
-            let server = mqdb_agent::http::HttpServer::new(
-                http_config,
-                std::sync::Arc::new(http_mqtt_client),
-                http_shutdown_rx,
-            );
+            let server =
+                mqdb_agent::http::HttpServer::new(http_config, http_mqtt_client, http_shutdown_rx);
             if let Err(e) = server.run().await {
                 tracing::error!("HTTP server error: {}", e);
             }

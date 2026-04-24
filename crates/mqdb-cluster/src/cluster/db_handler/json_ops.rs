@@ -362,7 +362,7 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
         data: &Value,
-        vault_crypto: Option<&mqdb_agent::http::VaultCrypto>,
+        vault_crypto: Option<&mqdb_vault::VaultCrypto>,
     ) -> JsonOpResult {
         let entity = ctx.entity;
         let id = ctx.id.unwrap_or("");
@@ -607,11 +607,9 @@ impl DbRequestHandler {
                 let mut data: Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
                 if let Some(crypto) = self.resolve_vault_crypto(entity, sender) {
-                    let skip = mqdb_agent::vault_transform::build_vault_skip_fields(
-                        entity,
-                        &self.ownership,
-                    );
-                    mqdb_agent::vault_transform::vault_decrypt_fields(
+                    let skip =
+                        mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
+                    mqdb_vault::transform::vault_decrypt_fields(
                         &crypto, entity, id, &mut data, &skip,
                     );
                 }
@@ -1153,7 +1151,7 @@ impl DbRequestHandler {
         let vault_crypto = self.resolve_vault_crypto(entity, sender);
         let vault_skip = vault_crypto
             .as_ref()
-            .map(|_| mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership));
+            .map(|_| mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership));
 
         let entities = controller.db_list(entity);
         let mut items: Vec<Value> = entities
@@ -1161,7 +1159,7 @@ impl DbRequestHandler {
             .filter_map(|e| {
                 let mut data: Value = serde_json::from_slice(&e.data).ok()?;
                 if let (Some(crypto), Some(skip)) = (&vault_crypto, &vault_skip) {
-                    mqdb_agent::vault_transform::vault_decrypt_fields(
+                    mqdb_vault::transform::vault_decrypt_fields(
                         crypto,
                         entity,
                         e.id_str(),
@@ -1676,11 +1674,10 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         updates: Value,
-        vault_crypto: Option<&mqdb_agent::http::VaultCrypto>,
+        vault_crypto: Option<&mqdb_vault::VaultCrypto>,
     ) -> Result<(Value, Value), Vec<u8>> {
         if let Some(crypto) = vault_crypto {
-            let skip =
-                mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership);
+            let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
             let Some(existing) = controller.db_get(entity, id) else {
                 return Err(Self::json_error(
                     404,
@@ -1689,7 +1686,7 @@ impl DbRequestHandler {
             };
             let mut existing_data: Value = serde_json::from_slice(&existing.data)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            mqdb_agent::vault_transform::vault_decrypt_fields(
+            mqdb_vault::transform::vault_decrypt_fields(
                 crypto,
                 entity,
                 id,
@@ -1731,8 +1728,8 @@ impl DbRequestHandler {
         let Ok(mut delta) = serde_json::from_slice::<Value>(payload) else {
             return payload.to_vec();
         };
-        let skip = mqdb_agent::vault_transform::build_vault_skip_fields(entity, &self.ownership);
-        mqdb_agent::vault_transform::vault_encrypt_fields(&crypto, entity, id, &mut delta, &skip);
+        let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
+        mqdb_vault::transform::vault_encrypt_fields(&crypto, entity, id, &mut delta, &skip);
         serde_json::to_vec(&delta).unwrap_or_else(|_| payload.to_vec())
     }
 

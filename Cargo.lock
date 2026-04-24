@@ -1395,6 +1395,7 @@ dependencies = [
  "mqdb-agent",
  "mqdb-cluster",
  "mqdb-core",
+ "mqdb-vault",
  "mqtt5",
  "regex",
  "ring",
@@ -1422,6 +1423,7 @@ dependencies = [
  "lru",
  "mqdb-agent",
  "mqdb-core",
+ "mqdb-vault",
  "mqtt5",
  "quinn",
  "regex",
@@ -1459,6 +1461,24 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "mqdb-vault"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "mqdb-agent",
+ "mqdb-core",
+ "mqtt5",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "zeroize",
 ]
 

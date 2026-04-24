@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 pub mod agent;
 pub mod auth_config;
@@ -7,6 +7,7 @@ pub mod broker_defaults;
 pub mod consumer_group;
 pub mod cursor;
 pub mod database;
+pub mod db_helpers;
 pub mod dedup;
 pub mod dispatcher;
 pub mod outbox_processor;
@@ -16,13 +17,10 @@ pub mod subscription_registry;
 pub mod topic_protection;
 pub mod topic_rules;
 pub mod transport_execute;
+pub mod vault_backend;
 
 #[cfg(feature = "http-api")]
 pub mod http;
-#[cfg(feature = "http-api")]
-pub mod vault_ops;
-#[cfg(feature = "http-api")]
-pub mod vault_transform;
 
 pub use agent::MqdbAgent;
 pub use consumer_group::{

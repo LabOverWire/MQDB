@@ -2,17 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::collections::HashMap;
-use std::sync::RwLock;
-use zeroize::Zeroizing;
-
-#[cfg(feature = "native")]
-use std::sync::Arc;
-#[cfg(feature = "native")]
+use std::sync::{Arc, RwLock};
 use tokio::sync::OwnedRwLockWriteGuard;
+use zeroize::Zeroizing;
 
 pub struct VaultKeyStore {
     keys: RwLock<HashMap<String, Zeroizing<Vec<u8>>>>,
-    #[cfg(feature = "native")]
     fences: RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
@@ -27,7 +22,6 @@ impl VaultKeyStore {
     pub fn new() -> Self {
         Self {
             keys: RwLock::new(HashMap::new()),
-            #[cfg(feature = "native")]
             fences: RwLock::new(HashMap::new()),
         }
     }
@@ -42,7 +36,6 @@ impl VaultKeyStore {
         if let Ok(mut map) = self.keys.write() {
             map.remove(canonical_id);
         }
-        #[cfg(feature = "native")]
         if let Ok(mut map) = self.fences.write() {
             map.remove(canonical_id);
         }
@@ -54,7 +47,6 @@ impl VaultKeyStore {
         map.get(canonical_id).cloned()
     }
 
-    #[cfg(feature = "native")]
     pub async fn acquire_fence(&self, canonical_id: &str) -> OwnedRwLockWriteGuard<()> {
         let lock = {
             let mut map = self
@@ -68,7 +60,6 @@ impl VaultKeyStore {
         lock.write_owned().await
     }
 
-    #[cfg(feature = "native")]
     pub async fn read_fence(&self, canonical_id: &str) {
         let lock = {
             let map = self
@@ -111,7 +102,6 @@ mod tests {
         assert!(store.get("nonexistent").is_none());
     }
 
-    #[cfg(feature = "native")]
     #[tokio::test]
     async fn fence_blocks_concurrent_reads() {
         let store = Arc::new(VaultKeyStore::new());
@@ -134,7 +124,6 @@ mod tests {
         assert!(read_completed.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[cfg(feature = "native")]
     #[tokio::test]
     async fn read_fence_noop_without_active_batch() {
         let store = VaultKeyStore::new();

@@ -1040,6 +1040,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. All contributions require
 
 ## License
 
-MQDB is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+MQDB ships under a split license model:
 
-For commercial licensing inquiries, contact contact@laboverwire.ca.
+- **Apache-2.0** for the permissive crates — `mqdb-core`, `mqdb-agent`, `mqdb-wasm`. Downstream projects can embed these as libraries without copyleft obligations. See [LICENSE-APACHE](LICENSE-APACHE).
+- **AGPL-3.0-only** for the copyleft crates — `mqdb-vault` (Pro/Enterprise vault encryption), `mqdb-cluster` (distributed clustering), and the `mqdb-cli` binary. Building or linking with these creates a combined work governed by AGPL-3.0. See [LICENSE-AGPL](LICENSE-AGPL).
+
+See [NOTICE](NOTICE) for a full per-crate breakdown.
+
+For commercial licensing inquiries (including relicensing of AGPL crates), contact contact@laboverwire.ca.

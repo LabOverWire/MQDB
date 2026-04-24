@@ -232,7 +232,7 @@ impl ClusteredAgent {
             "constraints": constraint_data,
             "ownership": ownership_info,
             "scope": scope_info,
-            "vault_eligible": mqdb_agent::vault_transform::is_vault_eligible(name, &self.ownership),
+            "vault_eligible": mqdb_vault::transform::is_vault_eligible(name, &self.ownership),
         })
     }
 

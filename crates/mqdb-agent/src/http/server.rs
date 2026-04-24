@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 use super::handlers::{self, ServerState};
 use super::identity_crypto::IdentityCrypto;
@@ -8,13 +8,13 @@ use super::pkce::PkceCache;
 use super::providers::ProviderRegistry;
 use super::rate_limiter::RateLimiter;
 use super::session_store::{JtiRevocationStore, SessionStore};
+use crate::vault_backend::{DbAccess, NoopVaultBackend, VaultBackend};
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response};
-use mqdb_core::VaultKeyStore;
 use mqdb_core::types::OwnershipConfig;
 use mqtt5::client::MqttClient;
 use std::net::SocketAddr;
@@ -35,9 +35,9 @@ pub struct HttpServerConfig {
     pub trust_proxy: bool,
     pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
-    pub vault_key_store: Option<Arc<VaultKeyStore>>,
-    pub vault_unlock_rate_limit: u32,
-    pub vault_min_passphrase_length: usize,
+    pub db_access: Arc<dyn DbAccess>,
+    pub vault_backend: Option<Arc<dyn VaultBackend>>,
+    pub auth_rate_limit: u32,
     pub email_auth: bool,
 }
 
@@ -67,31 +67,30 @@ impl HttpServer {
         let listener = TcpListener::bind(self.config.bind_address).await?;
         info!(addr = %self.config.bind_address, "HTTP server listening");
 
-        let vault_key_store = self
+        let vault_backend = self
             .config
-            .vault_key_store
-            .unwrap_or_else(|| Arc::new(VaultKeyStore::new()));
-        let no_rate_limit = self.config.vault_unlock_rate_limit == u32::MAX;
+            .vault_backend
+            .unwrap_or_else(|| Arc::new(NoopVaultBackend));
+        let no_rate_limit = self.config.auth_rate_limit == u32::MAX;
         let state = Arc::new(ServerState {
             provider_registry: self.config.provider_registry,
             jwt_config: self.config.jwt_config,
             pkce_cache: Mutex::new(PkceCache::new()),
             mqtt_client: self.mqtt_client,
+            db_access: self.config.db_access,
             frontend_redirect_uri: self.config.frontend_redirect_uri,
             session_store: SessionStore::new(),
             ticket_expiry_secs: self.config.ticket_expiry_secs,
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
-            vault_unlock_limiter: RateLimiter::new(self.config.vault_unlock_rate_limit),
             login_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 10 }),
             register_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 5 }),
             jti_revocation: JtiRevocationStore::new(),
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,
-            vault_key_store,
-            vault_min_passphrase_length: self.config.vault_min_passphrase_length,
+            vault_backend,
             email_auth: self.config.email_auth,
             verify_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 3 }),
             password_change_rate_limiter: RateLimiter::new(if no_rate_limit {
@@ -326,7 +325,7 @@ async fn handle_request(
                 .unwrap_or_default();
             handlers::handle_vault_unlock(&state, &headers, &body).await
         }
-        (&Method::POST, "/vault/lock") => handlers::handle_vault_lock(&state, &headers),
+        (&Method::POST, "/vault/lock") => handlers::handle_vault_lock(&state, &headers).await,
         (&Method::POST, "/vault/disable") => {
             let body = req
                 .collect()

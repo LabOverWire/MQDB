@@ -8,7 +8,7 @@ use super::db_handler::DbRequestHandler;
 use super::node_controller::NodeController;
 use super::transport::{ClusterMessage, ClusterTransport};
 use super::{ForwardTarget, LwtPublisher, NodeId, TopicSubscriptionBroadcast, WildcardBroadcast};
-use mqdb_core::vault_keys::VaultKeyStore;
+use mqdb_vault::VaultKeyStore;
 use mqtt5::QoS;
 use std::collections::HashMap;
 use std::sync::Arc;
