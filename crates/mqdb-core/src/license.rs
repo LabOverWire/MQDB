@@ -98,4 +98,59 @@ mod tests {
         };
         assert_eq!(none.to_string(), "none");
     }
+
+    #[test]
+    fn check_runtime_expiry_past_returns_true() {
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        assert!(LicenseInfo::check_runtime_expiry(past));
+    }
+
+    #[test]
+    fn check_runtime_expiry_future_returns_false() {
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        assert!(!LicenseInfo::check_runtime_expiry(future));
+    }
+
+    #[test]
+    fn check_runtime_expiry_exact_now_returns_false() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(!LicenseInfo::check_runtime_expiry(now));
+    }
+
+    #[test]
+    fn is_expired_reflects_runtime_check() {
+        let info_expired = LicenseInfo {
+            customer: "x".into(),
+            tier: LicenseTier::Pro,
+            features: LicenseFeatures::default(),
+            expires_at: 0,
+            trial: false,
+        };
+        assert!(info_expired.is_expired());
+
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86400;
+        let info_valid = LicenseInfo {
+            customer: "x".into(),
+            tier: LicenseTier::Pro,
+            features: LicenseFeatures::default(),
+            expires_at: future,
+            trial: false,
+        };
+        assert!(!info_valid.is_expired());
+    }
 }
