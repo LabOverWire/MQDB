@@ -2062,16 +2062,13 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         if primary == self.node_id {
-            let has_replica_role = self
-                .replicas
-                .get(&partition.get())
-                .map(|s| format!("{:?}", s.role()));
+            let replica_role = self.replicas.get(&partition.get()).map(|s| s.role());
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
                 primary_from_map = primary.get(),
-                has_replica_role = ?has_replica_role,
-                "forward_failed_primary_is_self (is_primary_for_partition and partition_map disagree)"
+                replica_role = ?replica_role,
+                "forward_failed_primary_is_self"
             );
             return false;
         }
