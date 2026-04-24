@@ -22,11 +22,9 @@ deny = [
     "AGPL-3.0",
 ]
 exceptions = [
-    { allow = ["AGPL-3.0-only"], crate = "mqdb-core" },
-    { allow = ["AGPL-3.0-only"], crate = "mqdb-agent" },
+    { allow = ["AGPL-3.0-only"], crate = "mqdb-vault" },
     { allow = ["AGPL-3.0-only"], crate = "mqdb-cluster" },
     { allow = ["AGPL-3.0-only"], crate = "mqdb-cli" },
-    { allow = ["AGPL-3.0-only"], crate = "mqdb-wasm" },
 ]
 
 [[licenses.clarify]]
