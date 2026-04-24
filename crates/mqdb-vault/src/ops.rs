@@ -12,9 +12,9 @@ use tracing::warn;
 
 use crate::crypto::VaultCrypto;
 use crate::key_store::VaultKeyStore;
+use mqdb_agent::Database;
 use mqdb_agent::db_helpers::{list_entities_db, update_entity_db};
 use mqdb_agent::http::SessionStore;
-use mqdb_agent::Database;
 
 #[derive(Clone, Copy)]
 pub enum VaultMode {

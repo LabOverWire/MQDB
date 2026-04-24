@@ -7,6 +7,7 @@ pub mod broker_defaults;
 pub mod consumer_group;
 pub mod cursor;
 pub mod database;
+pub mod db_helpers;
 pub mod dedup;
 pub mod dispatcher;
 pub mod outbox_processor;
@@ -15,7 +16,6 @@ pub mod session;
 pub mod subscription_registry;
 pub mod topic_protection;
 pub mod topic_rules;
-pub mod db_helpers;
 pub mod transport_execute;
 pub mod vault_backend;
 

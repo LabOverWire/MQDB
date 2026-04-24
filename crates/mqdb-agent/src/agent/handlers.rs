@@ -203,7 +203,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         .await;
 
     vault_backend
-        .decrypt_response(&op.entity, op.operation, ownership, sender_uid, &mut response)
+        .decrypt_response(
+            &op.entity,
+            op.operation,
+            ownership,
+            sender_uid,
+            &mut response,
+        )
         .await;
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -238,9 +244,7 @@ fn vault_error_to_response(err: &VaultError) -> Response {
         VaultError::NotUnlocked => {
             Response::error(mqdb_core::ErrorCode::Unauthorized, "vault not unlocked")
         }
-        VaultError::RateLimited => {
-            Response::error(mqdb_core::ErrorCode::Conflict, "rate limited")
-        }
+        VaultError::RateLimited => Response::error(mqdb_core::ErrorCode::Conflict, "rate limited"),
         VaultError::PassphraseTooShort(n) => Response::error(
             mqdb_core::ErrorCode::BadRequest,
             format!("passphrase must be at least {n} characters"),
@@ -1067,11 +1071,9 @@ async fn dispatch_vault_admin_mqtt(
                     "missing current_passphrase",
                 );
             };
-            let Some(new_passphrase) = payload.get("new_passphrase").and_then(|v| v.as_str()) else {
-                return Response::error(
-                    mqdb_core::ErrorCode::BadRequest,
-                    "missing new_passphrase",
-                );
+            let Some(new_passphrase) = payload.get("new_passphrase").and_then(|v| v.as_str())
+            else {
+                return Response::error(mqdb_core::ErrorCode::BadRequest, "missing new_passphrase");
             };
             ctx.vault_backend
                 .admin_change(

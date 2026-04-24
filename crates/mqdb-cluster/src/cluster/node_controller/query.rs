@@ -92,8 +92,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
 
-        let vault_eligible =
-            mqdb_vault::transform::is_vault_eligible(entity, &self.ownership);
+        let vault_eligible = mqdb_vault::transform::is_vault_eligible(entity, &self.ownership);
         let scatter_payload: &[u8] = if vault_eligible { b"" } else { payload };
 
         let local_results = self.handle_json_list_local(entity, scatter_payload);
@@ -189,10 +188,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 })
                 .collect();
             if let Some(ref vault_sender) = completed.vault_sender
-                && mqdb_vault::transform::is_vault_eligible(
-                    &completed.entity,
-                    &self.ownership,
-                )
+                && mqdb_vault::transform::is_vault_eligible(&completed.entity, &self.ownership)
                 && let Some(key_bytes) = self.vault_key_store.get(vault_sender)
                 && let Some(crypto) = mqdb_vault::VaultCrypto::from_key_bytes(&key_bytes)
             {

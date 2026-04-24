@@ -1589,7 +1589,9 @@ pub async fn handle_vault_change(
             );
         }
     };
-    let Some(old_passphrase) = body_value.get("current_passphrase").and_then(|v| v.as_str())
+    let Some(old_passphrase) = body_value
+        .get("current_passphrase")
+        .and_then(|v| v.as_str())
     else {
         return json_response_with_credentials(
             400,

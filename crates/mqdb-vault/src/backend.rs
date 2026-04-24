@@ -191,10 +191,9 @@ impl VaultBackend for VaultBackendImpl {
                     )
                     .await
                     {
-                        Ok((req, Some((new_data, old_data)))) => Ok((
-                            req,
-                            Some(VaultConstraintData::Update(new_data, old_data)),
-                        )),
+                        Ok((req, Some((new_data, old_data)))) => {
+                            Ok((req, Some(VaultConstraintData::Update(new_data, old_data))))
+                        }
                         Ok((req, None)) => Ok((req, None)),
                         Err(err_resp) => {
                             let msg = match &err_resp {
@@ -494,9 +493,7 @@ impl VaultBackend for VaultBackendImpl {
         new_passphrase: &'a str,
     ) -> VaultFuture<'a, VaultResult<VaultAdminOutcome>> {
         Box::pin(async move {
-            if self.min_passphrase_length > 0
-                && new_passphrase.len() < self.min_passphrase_length
-            {
+            if self.min_passphrase_length > 0 && new_passphrase.len() < self.min_passphrase_length {
                 return Err(VaultError::PassphraseTooShort(self.min_passphrase_length));
             }
             self.check_rate_limit(canonical_id)?;
@@ -609,4 +606,3 @@ impl VaultBackend for VaultBackendImpl {
         })
     }
 }
-

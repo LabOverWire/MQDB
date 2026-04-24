@@ -168,8 +168,8 @@ impl DbRequestHandler {
         entity: &str,
         sender: Option<&str>,
     ) -> Option<mqdb_vault::VaultCrypto> {
-        let uid = sender
-            .filter(|_| mqdb_vault::transform::is_vault_eligible(entity, &self.ownership))?;
+        let uid =
+            sender.filter(|_| mqdb_vault::transform::is_vault_eligible(entity, &self.ownership))?;
         let key_bytes = self.vault_key_store.get(uid)?;
         mqdb_vault::VaultCrypto::from_key_bytes(&key_bytes)
     }
@@ -182,8 +182,7 @@ impl DbRequestHandler {
         mut data: serde_json::Value,
     ) -> serde_json::Value {
         if let Some(crypto) = vault_crypto {
-            let skip =
-                mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
+            let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
             mqdb_vault::transform::vault_encrypt_fields(crypto, entity, id, &mut data, &skip);
         }
         data
