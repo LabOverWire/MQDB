@@ -134,32 +134,36 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         .find(|(k, _)| k == "x-mqtt-client-id")
         .map(|(_, v)| v.as_str());
 
-    if vault_backend.is_eligible(&op.entity, ownership, sender_uid)
-        && let Some(uid) = sender_uid
-    {
+    let vault_eligible = vault_backend.is_eligible(&op.entity, ownership, sender_uid);
+
+    if vault_eligible && let Some(uid) = sender_uid {
         vault_backend.await_read_fence(uid).await;
     }
 
-    let (request, vault_constraint) = match vault_backend
-        .encrypt_request(db, &op.entity, ownership, sender_uid, request)
-        .await
-    {
-        Ok((r, vc)) => (r, vc),
-        Err(vault_err) => {
-            let err_response = vault_error_to_response(&vault_err);
-            if let Some(response_topic) = &message.properties.response_topic
-                && let Ok(payload) = serde_json::to_vec(&err_response)
-            {
-                publish_response(
-                    client,
-                    response_topic,
-                    message.properties.correlation_data.as_deref(),
-                    payload,
-                )
-                .await;
+    let (request, vault_constraint) = if vault_eligible {
+        match vault_backend
+            .encrypt_request(db, &op.entity, ownership, sender_uid, request)
+            .await
+        {
+            Ok((r, vc)) => (r, vc),
+            Err(vault_err) => {
+                let err_response = vault_error_to_response(&vault_err);
+                if let Some(response_topic) = &message.properties.response_topic
+                    && let Ok(payload) = serde_json::to_vec(&err_response)
+                {
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
+                }
+                return;
             }
-            return;
         }
+    } else {
+        (request, None)
     };
 
     let span = info_span!(
@@ -202,15 +206,17 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         .instrument(span)
         .await;
 
-    vault_backend
-        .decrypt_response(
-            &op.entity,
-            op.operation,
-            ownership,
-            sender_uid,
-            &mut response,
-        )
-        .await;
+    if vault_eligible {
+        vault_backend
+            .decrypt_response(
+                &op.entity,
+                op.operation,
+                ownership,
+                sender_uid,
+                &mut response,
+            )
+            .await;
+    }
 
     if let Some(response_topic) = &message.properties.response_topic {
         match serde_json::to_vec(&response) {
@@ -239,12 +245,12 @@ fn vault_error_to_response(err: &VaultError) -> Response {
             Response::error(mqdb_core::ErrorCode::Conflict, "vault already enabled")
         }
         VaultError::InvalidPassphrase => {
-            Response::error(mqdb_core::ErrorCode::Unauthorized, "invalid passphrase")
+            Response::error(mqdb_core::ErrorCode::Forbidden, "incorrect passphrase")
         }
-        VaultError::NotUnlocked => {
-            Response::error(mqdb_core::ErrorCode::Unauthorized, "vault not unlocked")
-        }
-        VaultError::RateLimited => Response::error(mqdb_core::ErrorCode::Conflict, "rate limited"),
+        VaultError::RateLimited => Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many unlock attempts, try again later",
+        ),
         VaultError::PassphraseTooShort(n) => Response::error(
             mqdb_core::ErrorCode::BadRequest,
             format!("passphrase must be at least {n} characters"),
@@ -252,6 +258,7 @@ fn vault_error_to_response(err: &VaultError) -> Response {
         VaultError::Unavailable => {
             Response::error(mqdb_core::ErrorCode::BadRequest, "vault not available")
         }
+        VaultError::NotFound(m) => Response::error(mqdb_core::ErrorCode::NotFound, m.as_str()),
         VaultError::BadRequest(m) => Response::error(mqdb_core::ErrorCode::BadRequest, m.as_str()),
         VaultError::Internal(m) => Response::error(mqdb_core::ErrorCode::Internal, m.as_str()),
     }
@@ -1064,16 +1071,19 @@ async fn dispatch_vault_admin_mqtt(
                 .await
         }
         AdminOperation::VaultChange => {
-            let Some(old_passphrase) = payload.get("current_passphrase").and_then(|v| v.as_str())
+            let Some(old_passphrase) = payload.get("old_passphrase").and_then(|v| v.as_str())
             else {
                 return Response::error(
                     mqdb_core::ErrorCode::BadRequest,
-                    "missing current_passphrase",
+                    "missing old_passphrase field",
                 );
             };
             let Some(new_passphrase) = payload.get("new_passphrase").and_then(|v| v.as_str())
             else {
-                return Response::error(mqdb_core::ErrorCode::BadRequest, "missing new_passphrase");
+                return Response::error(
+                    mqdb_core::ErrorCode::BadRequest,
+                    "missing new_passphrase field",
+                );
             };
             ctx.vault_backend
                 .admin_change(

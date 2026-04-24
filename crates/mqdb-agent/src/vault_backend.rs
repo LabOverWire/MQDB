@@ -16,14 +16,14 @@ pub enum VaultError {
     AlreadyEnabled,
     #[error("invalid passphrase")]
     InvalidPassphrase,
-    #[error("not unlocked")]
-    NotUnlocked,
     #[error("rate limited")]
     RateLimited,
     #[error("passphrase must be at least {0} characters")]
     PassphraseTooShort(usize),
     #[error("vault not available")]
     Unavailable,
+    #[error("{0}")]
+    NotFound(String),
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]

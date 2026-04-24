@@ -272,7 +272,7 @@ impl VaultBackend for VaultBackendImpl {
             self.check_rate_limit(canonical_id)?;
 
             let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
-                return Err(VaultError::BadRequest("identity not found".into()));
+                return Err(VaultError::NotFound("identity not found".into()));
             };
             if identity
                 .get("vault_enabled")
@@ -337,7 +337,7 @@ impl VaultBackend for VaultBackendImpl {
             self.check_rate_limit(canonical_id)?;
 
             let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
-                return Err(VaultError::BadRequest("identity not found".into()));
+                return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
                 .get("vault_enabled")
@@ -420,7 +420,7 @@ impl VaultBackend for VaultBackendImpl {
             self.check_rate_limit(canonical_id)?;
 
             let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
-                return Err(VaultError::BadRequest("identity not found".into()));
+                return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
                 .get("vault_enabled")
@@ -499,7 +499,7 @@ impl VaultBackend for VaultBackendImpl {
             self.check_rate_limit(canonical_id)?;
 
             let Some(identity) = read_entity_db(db, "_identities", canonical_id).await else {
-                return Err(VaultError::BadRequest("identity not found".into()));
+                return Err(VaultError::NotFound("identity not found".into()));
             };
             if !identity
                 .get("vault_enabled")

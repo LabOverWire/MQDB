@@ -1398,13 +1398,13 @@ fn vault_error_to_http(err: &VaultError, cors: Option<&str>) -> HttpResponse {
     let (status, msg) = match err {
         VaultError::NotEnabled => (400, "vault not enabled".to_string()),
         VaultError::AlreadyEnabled => (409, "vault already enabled".to_string()),
-        VaultError::InvalidPassphrase => (401, "invalid passphrase".to_string()),
-        VaultError::NotUnlocked => (403, "vault not unlocked".to_string()),
-        VaultError::RateLimited => (429, "rate limited".to_string()),
+        VaultError::InvalidPassphrase => (401, "incorrect passphrase".to_string()),
+        VaultError::RateLimited => (429, "too many unlock attempts, try again later".to_string()),
         VaultError::PassphraseTooShort(n) => {
             (400, format!("passphrase must be at least {n} characters"))
         }
         VaultError::Unavailable => (400, "vault not available".to_string()),
+        VaultError::NotFound(m) => (404, m.clone()),
         VaultError::BadRequest(m) => (400, m.clone()),
         VaultError::Internal(m) => (500, m.clone()),
     };
@@ -1589,20 +1589,17 @@ pub async fn handle_vault_change(
             );
         }
     };
-    let Some(old_passphrase) = body_value
-        .get("current_passphrase")
-        .and_then(|v| v.as_str())
-    else {
+    let Some(old_passphrase) = body_value.get("old_passphrase").and_then(|v| v.as_str()) else {
         return json_response_with_credentials(
             400,
-            &json!({"error": "missing current_passphrase"}),
+            &json!({"error": "missing old_passphrase field"}),
             cors,
         );
     };
     let Some(new_passphrase) = body_value.get("new_passphrase").and_then(|v| v.as_str()) else {
         return json_response_with_credentials(
             400,
-            &json!({"error": "missing new_passphrase"}),
+            &json!({"error": "missing new_passphrase field"}),
             cors,
         );
     };
