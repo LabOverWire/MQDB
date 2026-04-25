@@ -7,6 +7,7 @@ use super::{
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
     UniqueReservationParams, UniqueReserveStatus, entity,
 };
+use crate::cluster::replication::ReplicaState;
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipDecision};
@@ -2062,7 +2063,7 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         if primary == self.node_id {
-            let replica_role = self.replicas.get(&partition.get()).map(|s| s.role());
+            let replica_role = self.replicas.get(&partition.get()).map(ReplicaState::role);
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
