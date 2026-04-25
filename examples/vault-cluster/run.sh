@@ -625,10 +625,14 @@ echo ""
 
 echo "--- Test 30: start node 4 and wait for rebalancing ---"
 echo "  Starting node 4 (port $PORT4, no http)..."
+# FIXME: node 4 should only need --peers 1@... here; the explicit entries for
+# nodes 2 and 3 work around the fact that nodes don't auto-discover peer
+# addresses (heartbeats carry NodeId but not SocketAddr). Remove once cluster
+# supports address propagation via Raft or gossip.
 RUST_LOG=mqdb=debug "$MQDB_BIN" cluster start \
     --node-id 4 --bind "127.0.0.1:$PORT4" \
     --db "$TEST_DIR/db4" \
-    --peers "1@127.0.0.1:$PORT1" \
+    --peers "1@127.0.0.1:$PORT1,2@127.0.0.1:$PORT2,3@127.0.0.1:$PORT3" \
     "${COMMON_AUTH_ARGS[@]}" \
     "${COMMON_QUIC_ARGS[@]}" \
     > "$TEST_DIR/node4.log" 2>&1 &

@@ -44,6 +44,10 @@ impl StoreManager {
                 entity::IDEMPOTENCY,
                 self.idempotency.export_for_partition(partition),
             ),
+            (
+                entity::DB_DATA,
+                self.db_data.export_for_partition(partition),
+            ),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -139,6 +143,10 @@ impl StoreManager {
                     .idempotency
                     .import_records(store_data)
                     .map_err(|_| StoreApplyError::IdempotencyError)?,
+                entity::DB_DATA => self
+                    .db_data
+                    .import_entities(store_data)
+                    .map_err(|_| StoreApplyError::DbDataError)?,
                 _ => continue,
             };
 
@@ -159,6 +167,47 @@ impl StoreManager {
         total_cleared += self.inflight.clear_partition(partition);
         total_cleared += self.offsets.clear_partition(partition);
         total_cleared += self.idempotency.clear_partition(partition);
+        total_cleared += self.db_data.clear_partition(partition);
         total_cleared
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::NodeId;
+
+    fn node(id: u16) -> NodeId {
+        NodeId::validated(id).unwrap()
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_db_data() {
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new(node(2));
+
+        src.db_data
+            .create("notes", "n1", b"{\"title\":\"hello\"}", 1000)
+            .unwrap();
+        src.db_data
+            .create("notes", "n2", b"{\"title\":\"world\"}", 2000)
+            .unwrap();
+
+        let partition = src.db_data.get("notes", "n1").unwrap().partition();
+
+        let payload = src.export_partition(partition);
+        assert!(!payload.is_empty(), "snapshot payload must not be empty");
+
+        let imported = dst.import_partition(&payload).expect("import");
+        assert!(
+            imported >= 1,
+            "at least one record for partition must survive the roundtrip"
+        );
+
+        let note = dst
+            .db_data
+            .get("notes", "n1")
+            .expect("n1 must exist on destination after snapshot import");
+        assert_eq!(note.data, b"{\"title\":\"hello\"}");
     }
 }

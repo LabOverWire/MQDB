@@ -2053,11 +2053,23 @@ impl<T: ClusterTransport> NodeController<T> {
         let node_id = self.node_id.get();
 
         let Some(primary) = self.partition_map.primary(partition) else {
-            tracing::warn!(?partition, "cannot forward JSON request: no primary known");
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                "forward_failed_no_primary"
+            );
             return false;
         };
 
         if primary == self.node_id {
+            let replica_role = self.replicas.get(&partition.get()).map(|s| s.role());
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                primary_from_map = primary.get(),
+                replica_role = ?replica_role,
+                "forward_failed_primary_is_self"
+            );
             return false;
         }
 
