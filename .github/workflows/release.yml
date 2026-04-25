@@ -107,7 +107,7 @@ jobs:
             "name": "mqdb-wasm",
             "version": "${{ steps.wasm-version.outputs.version }}",
             "description": "WASM client library for MQDB reactive database",
-            "license": "AGPL-3.0-only",
+            "license": "Apache-2.0",
             "repository": {
               "type": "git",
               "url": "https://github.com/LabOverWire/MQDB"
@@ -124,7 +124,7 @@ jobs:
 
       - name: Copy LICENSE
         if: steps.npm-check.outputs.skip != 'true'
-        run: cp LICENSE pkg/
+        run: cp LICENSE-APACHE pkg/LICENSE
 
       - name: Publish to npm
         if: steps.npm-check.outputs.skip != 'true'
