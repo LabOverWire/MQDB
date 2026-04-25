@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-cli"
-version = "0.7.3"
+version = "0.7.4"
 publish = false
 edition.workspace = true
 license = "AGPL-3.0-only"

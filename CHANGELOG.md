@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-04-25 — mqdb-core 0.7.0, mqdb-agent 0.8.0, mqdb-wasm 0.3.2, mqdb-vault 0.1.0, mqdb-cluster 0.3.1, mqdb-cli 0.7.4
+
+### Added
+
+- New `mqdb-vault` crate (AGPL-3.0-only) housing all vault transparent-encryption logic behind a `VaultBackend` trait defined in `mqdb-agent`. The CLI instantiates `VaultBackendImpl` after the license check; unlicensed agents bind `NoopVaultBackend` and every `$DB/_vault/*` admin topic returns `vault not available`.
+- `DbAccess` trait in `mqdb-agent::db_helpers` so vault admin methods work in both agent (direct `Database`) and cluster (MQTT-mediated `MqttDbAccess`) modes without duplicating logic.
+- `.githooks/pre-commit` running `cargo make format-check` + `cargo make clippy` on every commit. Activation is per-clone: `git config core.hooksPath .githooks` (documented in `CONTRIBUTING.md`).
+- Four unit tests in `mqdb-core::license` covering `check_runtime_expiry` past/future/boundary semantics and the `is_expired` wrapper.
+- 11 integration tests in `crates/mqdb-vault/tests/backend_integration.rs` covering NoopBackend `Unavailable` responses, admin passphrase/identity error paths, encrypt-on-write / decrypt-on-read roundtrip with ciphertext-at-rest assertion, admin_change rotation, and admin_disable clearing vault state.
+- `export_import_roundtrip_preserves_db_data` test in `mqdb-cluster::store_manager::partition_io` guarding against future regressions in partition snapshot export.
+
+### Changed
+
+- **License split.** `mqdb-core`, `mqdb-agent`, and `mqdb-wasm` are now **Apache-2.0** so downstream consumers can embed them without copyleft obligations. `mqdb-vault`, `mqdb-cluster`, and `mqdb-cli` remain **AGPL-3.0-only** (Pro/Enterprise features + the network-service binary). Dep graph is unidirectional: Apache crates never depend on AGPL crates.
+- `LICENSE` renamed to `LICENSE-AGPL`; new `LICENSE-APACHE` added; `NOTICE` rewritten to describe the split; `README.md` licensing section updated; `deny.toml` AGPL exceptions narrowed to the three AGPL crates.
+- `VaultBackend` uses native `Pin<Box<dyn Future>>` futures (no `async_trait` crate), matching the existing `AuthProvider` pattern in `topic_protection.rs`.
+- `MqdbAgent` no longer owns `vault_key_store`, `vault_min_passphrase_length`, or `vault_unlock_limiter` — those are backend-internal now.
+- Six MQTT and six HTTP vault admin handlers in `mqdb-agent` collapsed into thin dispatchers that delegate to the backend (~1000 lines deleted, net shrinkage).
+- `handle_message` gates `vault_backend.encrypt_request` and `decrypt_response` on the sync `is_eligible` check so the NoopBackend path costs zero `Box::pin` allocations.
+- Cluster HTTP vault admin now works end-to-end via `MqttDbAccess`. Cluster MQTT vault admin remains intentionally unsupported (returns "vault admin not supported in cluster mode" as before).
+- `examples/vault-mqtt-admin/run.sh` and `examples/vault-cluster/run.sh` now require `MQDB_LICENSE_FILE` and pass `--license` to the agent/cluster.
+
+### Fixed
+
+- **Partition snapshot export was missing user data.** `StoreManager::export_partition` in `mqdb-cluster` was exporting 9 of 15 entity store types and omitting `db_data`. Not visible in normal operation (primaries write locally and replicate via the Raft log) but on rebalance-driven replica promotion the new primary returned `entity not found` for pre-rebalance records. Fix adds `db_data` to the export array, the `import_partition` match arm, and `clear_partition`.
+- Cluster E2E probe loop in `examples/vault-cluster/run.sh` now reads `.data.id` from `mqdb create` output (had been reading `.id` since the script landed, silently leaving 20 ghost records per run and skewing count-based test assertions by 20).
+- Cluster vault E2E node 4 `--peers` expanded to all three predecessors so QUIC connections are established to every prior node. Peer auto-discovery via Raft/gossip is tracked as future work.
+- Regressions caught in self-review of the vault extraction: `$DB/_vault/change` and `POST /vault/change` parse `old_passphrase` (not `current_passphrase`); MQTT `VaultError::RateLimited` returns `ErrorCode::RateLimited` (429); `identity not found` returns `NotFound` (404); MQTT `InvalidPassphrase` returns `ErrorCode::Forbidden` (matching pre-refactor behavior).
+
+### Removed
+
+- `mqdb-agent::vault_ops` module (560 lines). Replaced by `mqdb-vault::backend::VaultBackendImpl` behind the `VaultBackend` trait.
+- `mqdb-core::vault_keys` module. Moved to `mqdb-vault::key_store`.
+- `mqdb-agent::vault_transform` module. Moved to `mqdb-vault::transform`.
+- `mqdb-agent::http::vault_crypto`. Moved to `mqdb-vault::crypto`.
+
+### Breaking changes
+
+- `mqdb-core` 0.6.0 → **0.7.0**: `vault_keys` module removed from public API; consumers should depend on `mqdb-vault` directly (AGPL) or rely on the `VaultBackend` trait.
+- `mqdb-agent` 0.7.2 → **0.8.0**: `vault_ops` module removed; `MqdbAgent` lost vault-specific public fields; six vault admin handlers re-shaped as thin dispatchers over `VaultBackend`. Downstream callers that previously imported vault types from `mqdb-agent` must now import the trait from `mqdb-agent::vault_backend` and the implementation from `mqdb-vault` (under AGPL).
+
 ## 2026-04-22 — mqdb-core 0.6.0, mqdb-wasm 0.3.1, mqdb-agent 0.7.2, mqdb-cli 0.7.3
 
 ### Added

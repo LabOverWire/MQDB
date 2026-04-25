@@ -2062,7 +2062,10 @@ impl<T: ClusterTransport> NodeController<T> {
         };
 
         if primary == self.node_id {
-            let replica_role = self.replicas.get(&partition.get()).map(|s| s.role());
+            let replica_role = self
+                .replicas
+                .get(&partition.get())
+                .map(crate::cluster::replication::ReplicaState::role);
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
