@@ -1,6 +1,8 @@
 # MQDB Encryption Architecture
 
-MQDB implements two independent encryption-at-rest systems: **Vault** (user-controlled) and **Identity** (server-managed). Both use AES-256-GCM authenticated encryption. This document describes the verified architecture as implemented in code.
+> **Scope:** this document covers **server-side** encryption — Vault and Identity — as implemented in `mqdb-vault` and `mqdb-agent`. The client-side `mqdb-wasm` crate has its own, **separate** encryption feature exposed as `Database.openEncrypted(name, passphrase)`. It shares crypto primitives (AES-256-GCM, PBKDF2-SHA256, 600k iterations) with Vault but is a different system with a different threat model: it encrypts the whole client-side IndexedDB at the storage layer to keep plaintext off the user's device. It is **not** a port of Vault, has no lock/unlock state machine, no per-entity opt-in, and no operator-side admin endpoints. See `crates/mqdb-wasm/README.md` ("Client-Side Encryption vs Server-Side Vault") for the comparison and `crates/mqdb-wasm/src/crypto.rs` for the implementation.
+
+MQDB implements two independent encryption-at-rest systems on the server: **Vault** (user-controlled) and **Identity** (server-managed). Both use AES-256-GCM authenticated encryption. This document describes the verified architecture as implemented in code.
 
 ---
 

@@ -533,6 +533,8 @@ Password change and reset are also available over MQTT 5.0 request-response for 
 
 ## Vault Encryption
 
+> **Server-side only.** This section describes the `mqdb-vault` crate, which provides selective field-level encryption for the agent and cluster. The client-side `mqdb-wasm` crate has a **separate** encryption feature (`Database.openEncrypted`) that wraps the entire IndexedDB-backed database. They share crypto primitives but solve different problems — see [crates/mqdb-wasm/README.md](crates/mqdb-wasm/README.md#client-side-encryption-vs-server-side-vault) for the comparison.
+
 Per-user transparent encryption at rest. Each user derives an AES-256-GCM key from a passphrase. When the vault is unlocked, MQTT reads and writes transparently decrypt and encrypt owned entity fields. When locked, raw ciphertext is returned. Users without the vault key always see ciphertext, proving data is encrypted at rest.
 
 All JSON leaf values at any depth are encrypted, including strings, numbers, booleans, and nulls inside nested objects and arrays. Non-string types are serialized before encryption and restored to their original types on decryption. Keys starting with `_` (system metadata) are skipped at all depths; the ownership field and `id` are skipped at the top level only.

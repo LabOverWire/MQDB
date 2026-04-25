@@ -66,9 +66,28 @@ const listed = await db.execute("$DB/users/list", {});
 |-------------|---------|-------------|------------|--------------|
 | `new Database()` | Memory | No | No | Yes |
 | `Database.openPersistent(name)` | IndexedDB | Yes | No | No |
-| `Database.openEncrypted(name, passphrase)` | IndexedDB | Yes | AES-GCM | No |
+| `Database.openEncrypted(name, passphrase)` | IndexedDB | Yes | AES-256-GCM | No |
 
-Persistent backends automatically reload schemas, constraints, indexes, relationships, and ID counters on open. Encrypted backends derive a 256-bit key from the passphrase via PBKDF2 (100k iterations) and encrypt each record independently with AES-GCM.
+Persistent backends automatically reload schemas, constraints, indexes, relationships, and ID counters on open. Encrypted backends derive a 256-bit key from the passphrase via PBKDF2-SHA256 (600,000 iterations, 32-byte salt) using the browser's `SubtleCrypto` API, and encrypt every value going through the storage layer with AES-256-GCM (12-byte nonce, AAD bound to the storage key).
+
+## Client-Side Encryption vs Server-Side Vault
+
+`Database.openEncrypted` is **not** the same feature as MQDB's server-side **Vault** (`mqdb-vault`). They share crypto primitives (AES-256-GCM, PBKDF2-SHA256, 600k iterations) but solve different problems with different operational models — do not assume one is a port of the other.
+
+| | `openEncrypted` (this crate) | `mqdb-vault` (server-side) |
+|---|---|---|
+| **Where** | In-browser, via WebCrypto | Agent / cluster, via `ring` |
+| **License** | Apache-2.0 | AGPL-3.0-only (Pro/Enterprise) |
+| **Scope** | Whole database — every byte going through the storage backend (records, indexes, schemas, constraints, all metadata) | Selected JSON field values per entity, opt-in. Keys, IDs, owner field, and `_*` system fields stay plaintext |
+| **Granularity** | All-or-nothing at `open` time | Per-entity opt-in, can be enabled/disabled at runtime |
+| **Lock state machine** | None — passphrase entered once at `openEncrypted`, released only by closing the page | Full state machine: `enable`, `unlock`, `lock`, `disable`, `change` admin endpoints with rate-limited unlock |
+| **Migration** | Not needed — every byte encrypted from the start | Two-way migration: `enable` encrypts existing plaintext records; `disable` decrypts them |
+| **Indexes work on encrypted fields** | Yes — backend transparently decrypts index entries on lookup | No — encrypted field values become random base64 each write, so equality/range queries against encrypted fields fail |
+| **AAD** | Storage key (e.g. `data/people/rec-1`) | `entity:id` (e.g. `people:rec-1`) |
+| **Threat model** | Protects user data on the user's own device against other browser apps, IndexedDB inspection, device theft | Protects user data on a server operator's disk against the operator and their backups |
+| **Who holds the passphrase** | The end user | The application owner / operator |
+
+Use `openEncrypted` when you want a self-contained client-side database that never leaves plaintext at rest in the browser. Use `mqdb-vault` when you run a server and need selective field-level protection with operational lock/unlock controls.
 
 ## API
 
@@ -195,7 +214,7 @@ await db.execute("$DB/_catalog", {});
 
 - `new Database()` creates an in-memory instance (data lost on page refresh)
 - `Database.openPersistent(name)` creates an IndexedDB-backed instance that persists schemas, constraints, indexes, relationships, and data across page reloads
-- `Database.openEncrypted(name, passphrase)` adds AES-GCM encryption on top of IndexedDB persistence; wrong passphrase is detected on open
+- `Database.openEncrypted(name, passphrase)` adds AES-256-GCM encryption on top of IndexedDB persistence; wrong passphrase is detected on open. This is client-side whole-DB encryption — see "Client-Side Encryption vs Server-Side Vault" above for how this differs from `mqdb-vault`
 - Sync methods (`*Sync`) only work with the memory backend; they throw on IndexedDB
 - All records carry a `_version` field that increments on every update (used for CAS via `expect_value`)
 - Field types: `string`, `number`, `boolean`, `array`, `object`
