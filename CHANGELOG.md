@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-04-25 — mqdb-cli 0.7.5
+
+### Fixed
+
+- Release workflow updated for the `LICENSE` file rename (introduced by the 0.7.0/0.8.0 license split). The npm publish step in `.github/workflows/release.yml` was still running `cp LICENSE pkg/` and declaring `"license": "AGPL-3.0-only"` in `pkg/package.json` — both incorrect after `LICENSE` was split into `LICENSE-APACHE` + `LICENSE-AGPL` and `mqdb-wasm` was relicensed to Apache-2.0. The v0.7.4 tag's workflow run failed at the `Copy LICENSE` step before the npm publish could happen, so `mqdb-wasm 0.3.2` was not published. Bumping `mqdb-cli` to 0.7.5 lets us cut a fresh `v0.7.5` tag whose workflow run will use the fixed steps and complete the npm publish.
+
 ## 2026-04-24 — mqdb-core 0.7.0, mqdb-agent 0.8.0, mqdb-wasm 0.3.2, mqdb-vault 0.1.0, mqdb-cluster 0.3.1, mqdb-cli 0.7.4
 
 ### Added
