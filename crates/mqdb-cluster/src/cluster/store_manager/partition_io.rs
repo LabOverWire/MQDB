@@ -48,6 +48,23 @@ impl StoreManager {
                 entity::DB_DATA,
                 self.db_data.export_for_partition(partition),
             ),
+            (
+                entity::DB_SCHEMA,
+                self.db_schema.export_for_partition(partition),
+            ),
+            (
+                entity::DB_INDEX,
+                self.db_index.export_for_partition(partition),
+            ),
+            (
+                entity::DB_UNIQUE,
+                self.db_unique.export_for_partition(partition),
+            ),
+            (entity::DB_FK, self.db_fk.export_for_partition(partition)),
+            (
+                entity::DB_CONSTRAINT,
+                self.db_constraints.export_for_partition(partition),
+            ),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -147,6 +164,26 @@ impl StoreManager {
                     .db_data
                     .import_entities(store_data)
                     .map_err(|_| StoreApplyError::DbDataError)?,
+                entity::DB_SCHEMA => self
+                    .db_schema
+                    .import_schemas(store_data)
+                    .map_err(|_| StoreApplyError::DbSchemaError)?,
+                entity::DB_INDEX => self
+                    .db_index
+                    .import_entries(store_data)
+                    .map_err(|_| StoreApplyError::DbIndexError)?,
+                entity::DB_UNIQUE => self
+                    .db_unique
+                    .import_reservations(store_data)
+                    .map_err(|_| StoreApplyError::DbUniqueError)?,
+                entity::DB_FK => self
+                    .db_fk
+                    .import_requests(store_data)
+                    .map_err(|_| StoreApplyError::DbFkError)?,
+                entity::DB_CONSTRAINT => self
+                    .db_constraints
+                    .import_constraints(store_data)
+                    .map_err(|_| StoreApplyError::DbConstraintError)?,
                 _ => continue,
             };
 
@@ -168,6 +205,11 @@ impl StoreManager {
         total_cleared += self.offsets.clear_partition(partition);
         total_cleared += self.idempotency.clear_partition(partition);
         total_cleared += self.db_data.clear_partition(partition);
+        total_cleared += self.db_schema.clear_partition(partition);
+        total_cleared += self.db_index.clear_partition(partition);
+        total_cleared += self.db_unique.clear_partition(partition);
+        total_cleared += self.db_fk.clear_partition(partition);
+        total_cleared += self.db_constraints.clear_partition(partition);
         total_cleared
     }
 }
@@ -209,5 +251,149 @@ mod tests {
             .get("notes", "n1")
             .expect("n1 must exist on destination after snapshot import");
         assert_eq!(note.data, b"{\"title\":\"hello\"}");
+    }
+
+    #[test]
+    fn export_import_roundtrip_covers_all_db_stores() {
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new(node(2));
+
+        let entities = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        for entity in &entities {
+            populate_all_db_stores(&src, entity);
+        }
+
+        let target = src.db_data.get("alpha", "rec-1").unwrap().partition();
+
+        let payload = src.export_partition(target);
+        assert!(!payload.is_empty());
+        let total_imported = dst.import_partition(&payload).expect("import");
+        assert!(total_imported >= 1);
+
+        for entity in &entities {
+            assert_per_store_partition_filter(&src, &dst, entity, target);
+        }
+    }
+
+    fn populate_all_db_stores(store: &StoreManager, entity: &str) {
+        use crate::cluster::db::{
+            ClusterConstraint, FkValidationRequest, IndexEntry, UniqueReserveParams,
+        };
+        use mqdb_core::partition::data_partition;
+
+        store.db_data.create(entity, "rec-1", b"{}", 1000).unwrap();
+        store
+            .db_schema
+            .register(entity, b"{\"fields\":[]}")
+            .unwrap();
+        store
+            .db_constraints
+            .add(ClusterConstraint::unique(
+                entity,
+                &format!("uniq_{entity}"),
+                "email",
+            ))
+            .unwrap();
+
+        let value = format!("v-{entity}");
+        let dp = data_partition(entity, "rec-1");
+        store
+            .db_index
+            .add_entry(IndexEntry::create(
+                entity,
+                "email",
+                value.as_bytes(),
+                dp,
+                "rec-1",
+            ))
+            .unwrap();
+        store.db_unique.reserve(
+            &UniqueReserveParams {
+                entity,
+                field: "email",
+                value: value.as_bytes(),
+                record_id: "rec-1",
+                request_id: &format!("req-{entity}"),
+                data_partition: dp,
+                ttl_ms: 60_000,
+            },
+            1_000,
+        );
+        store
+            .db_fk
+            .add_request(FkValidationRequest::create(
+                entity,
+                "rec-1",
+                &format!("fk-{entity}"),
+                5000,
+                1000,
+            ))
+            .unwrap();
+    }
+
+    fn assert_per_store_partition_filter(
+        src: &StoreManager,
+        dst: &StoreManager,
+        entity: &str,
+        target: PartitionId,
+    ) {
+        use crate::cluster::db::IndexEntry;
+
+        let src_data_partition = src.db_data.get(entity, "rec-1").unwrap().partition();
+        assert_eq!(
+            dst.db_data.get(entity, "rec-1").is_some(),
+            src_data_partition == target,
+            "db_data for {entity}"
+        );
+
+        let value = format!("v-{entity}");
+        if let Some(ip) = src
+            .db_index
+            .lookup(entity, "email", value.as_bytes())
+            .first()
+            .map(IndexEntry::index_partition)
+        {
+            let dst_has = !dst
+                .db_index
+                .lookup(entity, "email", value.as_bytes())
+                .is_empty();
+            assert_eq!(dst_has, ip == target, "db_index for {entity}");
+        }
+
+        if let Some(up) = src
+            .db_unique
+            .get(entity, "email", value.as_bytes())
+            .map(|r| r.unique_partition())
+        {
+            let dst_has = dst
+                .db_unique
+                .get(entity, "email", value.as_bytes())
+                .is_some();
+            assert_eq!(dst_has, up == target, "db_unique for {entity}");
+        }
+
+        assert_eq!(
+            dst.db_schema.get(entity).is_some(),
+            src.db_schema.get(entity).unwrap().partition() == target,
+            "db_schema for {entity}"
+        );
+
+        let constraint_name = format!("uniq_{entity}");
+        assert_eq!(
+            dst.db_constraints.get(entity, &constraint_name).is_some(),
+            src.db_constraints
+                .get(entity, &constraint_name)
+                .unwrap()
+                .partition()
+                == target,
+            "db_constraints for {entity}"
+        );
+
+        let fk_id = format!("fk-{entity}");
+        assert_eq!(
+            dst.db_fk.get_request(&fk_id).is_some(),
+            src.db_fk.get_request(&fk_id).unwrap().target_partition() == target,
+            "db_fk for {entity}"
+        );
     }
 }

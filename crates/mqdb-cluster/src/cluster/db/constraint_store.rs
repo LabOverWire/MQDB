@@ -1,8 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::cluster::NodeId;
+use super::partition::schema_partition;
 use crate::cluster::protocol::Operation;
+use crate::cluster::{NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -177,6 +178,11 @@ impl ClusterConstraint {
     #[must_use]
     pub fn is_foreign_key(&self) -> bool {
         self.constraint_type() == ConstraintType::ForeignKey
+    }
+
+    #[must_use]
+    pub fn partition(&self) -> PartitionId {
+        schema_partition(self.entity_str())
     }
 }
 
@@ -419,6 +425,99 @@ impl ConstraintStore {
             return Self::constraint_key(entity, name);
         }
         id.to_string()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let constraints = self.constraints.read().unwrap();
+        let matching: Vec<_> = constraints
+            .iter()
+            .filter(|(_, c)| c.partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+
+        for (key, constraint) in matching {
+            let key_bytes = key.as_bytes();
+            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(key_bytes);
+
+            let data = Self::serialize(constraint);
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if a key or constraint cannot be deserialized.
+    pub fn import_constraints(&self, data: &[u8]) -> Result<usize, ConstraintStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| ConstraintStoreError::SerializationError)?;
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let constraint_bytes = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(constraint) = Self::deserialize(constraint_bytes) {
+                self.constraints
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), constraint);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut constraints = self.constraints.write().unwrap();
+        let before = constraints.len();
+        constraints.retain(|_, c| c.partition() != partition);
+        before - constraints.len()
     }
 }
 
@@ -808,5 +907,77 @@ mod tests {
         assert_eq!(parsed.field_str(), "email");
         assert!(parsed.target_entity_str().is_empty());
         assert!(parsed.target_field_str().is_empty());
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_partition() {
+        let src = ConstraintStore::new(node(1));
+        let dst = ConstraintStore::new(node(2));
+
+        let entities = ["alpha", "beta", "gamma", "delta"];
+        for entity in &entities {
+            src.add(ClusterConstraint::unique(
+                entity,
+                &format!("uniq_{entity}"),
+                "email",
+            ))
+            .unwrap();
+        }
+
+        let target = src.get("alpha", "uniq_alpha").unwrap().partition();
+        let target_count = entities
+            .iter()
+            .filter(|e| {
+                src.get(e, &format!("uniq_{e}"))
+                    .is_some_and(|c| c.partition() == target)
+            })
+            .count();
+        assert!(target_count >= 1);
+
+        let payload = src.export_for_partition(target);
+        let imported = dst.import_constraints(&payload).unwrap();
+        assert_eq!(imported, target_count);
+
+        for entity in &entities {
+            let name = format!("uniq_{entity}");
+            let src_c = src.get(entity, &name).unwrap();
+            let dst_c = dst.get(entity, &name);
+            if src_c.partition() == target {
+                let c = dst_c.expect("imported constraint");
+                assert_eq!(c.entity_str(), *entity);
+            } else {
+                assert!(
+                    dst_c.is_none(),
+                    "constraint from partition {} leaked into snapshot",
+                    src_c.partition().get()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_partition_removes_only_target() {
+        let store = ConstraintStore::new(node(1));
+        let entities = ["alpha", "beta", "gamma", "delta"];
+        for entity in &entities {
+            store
+                .add(ClusterConstraint::unique(
+                    entity,
+                    &format!("uniq_{entity}"),
+                    "email",
+                ))
+                .unwrap();
+        }
+
+        let target = store.get("alpha", "uniq_alpha").unwrap().partition();
+        let removed = store.clear_partition(target);
+        assert!(removed >= 1);
+
+        for entity in &entities {
+            let c = store.get(entity, &format!("uniq_{entity}"));
+            if let Some(c) = c {
+                assert_ne!(c.partition(), target);
+            }
+        }
     }
 }

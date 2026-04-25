@@ -266,6 +266,99 @@ impl FkValidationStore {
             }
         }
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let requests = self.pending_requests.read().unwrap();
+        let matching: Vec<_> = requests
+            .iter()
+            .filter(|(_, r)| r.target_partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+
+        for (key, request) in matching {
+            let key_bytes = key.as_bytes();
+            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(key_bytes);
+
+            let data = Self::serialize_request(request);
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if a key or request cannot be deserialized.
+    pub fn import_requests(&self, data: &[u8]) -> Result<usize, FkStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| FkStoreError::SerializationError)?;
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let req_bytes = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(request) = Self::deserialize_request(req_bytes) {
+                self.pending_requests
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), request);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut requests = self.pending_requests.write().unwrap();
+        let before = requests.len();
+        requests.retain(|_, r| r.target_partition() != partition);
+        before - requests.len()
+    }
 }
 
 impl std::fmt::Debug for FkValidationStore {
@@ -383,5 +476,79 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_partition() {
+        let src = FkValidationStore::new(node(1));
+        let dst = FkValidationStore::new(node(2));
+
+        let mut requests = Vec::new();
+        for i in 0..16 {
+            let req = FkValidationRequest::create(
+                "users",
+                &format!("u{i}"),
+                &format!("req-{i}"),
+                5000,
+                1000,
+            );
+            src.add_request(req.clone()).unwrap();
+            requests.push(req);
+        }
+
+        let target = requests[0].target_partition();
+        let target_count = requests
+            .iter()
+            .filter(|r| r.target_partition() == target)
+            .count();
+        assert!(target_count >= 1);
+
+        let payload = src.export_for_partition(target);
+        let imported = dst.import_requests(&payload).unwrap();
+        assert_eq!(imported, target_count);
+
+        for req in &requests {
+            let copy = dst.get_request(req.request_id_str());
+            if req.target_partition() == target {
+                let c = copy.expect("imported request");
+                assert_eq!(c.id_str(), req.id_str());
+            } else {
+                assert!(
+                    copy.is_none(),
+                    "request from partition {} leaked into snapshot",
+                    req.target_partition().get()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_partition_removes_only_target() {
+        let store = FkValidationStore::new(node(1));
+        let mut requests = Vec::new();
+        for i in 0..8 {
+            let req = FkValidationRequest::create(
+                "users",
+                &format!("u{i}"),
+                &format!("req-{i}"),
+                5000,
+                1000,
+            );
+            store.add_request(req.clone()).unwrap();
+            requests.push(req);
+        }
+
+        let target = requests[0].target_partition();
+        let removed = store.clear_partition(target);
+        assert!(removed >= 1);
+
+        for req in &requests {
+            let copy = store.get_request(req.request_id_str());
+            if req.target_partition() == target {
+                assert!(copy.is_none());
+            } else {
+                assert!(copy.is_some());
+            }
+        }
     }
 }

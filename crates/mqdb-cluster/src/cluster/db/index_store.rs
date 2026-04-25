@@ -278,6 +278,85 @@ impl IndexStore {
     fn suffix_key(data_partition: PartitionId, record_id: &str) -> String {
         format!("p{}/{record_id}", data_partition.get())
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let entries = self.entries.read().unwrap();
+        let matching: Vec<&IndexEntry> = entries
+            .values()
+            .flat_map(BTreeMap::values)
+            .filter(|e| e.index_partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+
+        for entry in matching {
+            let data = Self::serialize(entry);
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if an entry cannot be deserialized.
+    pub fn import_entries(&self, data: &[u8]) -> Result<usize, IndexStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let entry_bytes = &data[offset..offset + data_len];
+            offset += data_len;
+
+            let entry =
+                Self::deserialize(entry_bytes).ok_or(IndexStoreError::SerializationError)?;
+            self.add_entry(entry).ok();
+            imported += 1;
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut entries = self.entries.write().unwrap();
+        let mut removed = 0;
+        entries.retain(|_, inner| {
+            let before = inner.len();
+            inner.retain(|_, e| e.index_partition() != partition);
+            removed += before - inner.len();
+            !inner.is_empty()
+        });
+        removed
+    }
 }
 
 impl std::fmt::Debug for IndexStore {
@@ -456,5 +535,83 @@ mod tests {
 
         assert!(key.starts_with("gidx/users/email/"));
         assert!(key.contains("/p42/user789"));
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_partition() {
+        let src = IndexStore::new(node(1));
+        let dst = IndexStore::new(node(2));
+
+        let mut entries = Vec::new();
+        for i in 0_u16..16 {
+            let entry = IndexEntry::create(
+                "users",
+                "email",
+                format!("user{i}@example.com").as_bytes(),
+                partition(i),
+                &format!("u{i}"),
+            );
+            src.add_entry(entry.clone()).unwrap();
+            entries.push(entry);
+        }
+
+        let target = entries[0].index_partition();
+        let target_count = entries
+            .iter()
+            .filter(|e| e.index_partition() == target)
+            .count();
+        assert!(target_count >= 1);
+
+        let payload = src.export_for_partition(target);
+        let imported = dst.import_entries(&payload).unwrap();
+        assert_eq!(imported, target_count);
+
+        for entry in &entries {
+            let results = dst.lookup(entry.entity_str(), entry.field_str(), &entry.value);
+            if entry.index_partition() == target {
+                assert_eq!(
+                    results.len(),
+                    1,
+                    "expected entry for partition {} in destination",
+                    target.get()
+                );
+            } else {
+                assert!(
+                    results.is_empty(),
+                    "entry from partition {} leaked into snapshot",
+                    entry.index_partition().get()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_partition_removes_only_target() {
+        let store = IndexStore::new(node(1));
+        let mut entries = Vec::new();
+        for i in 0_u16..8 {
+            let entry = IndexEntry::create(
+                "users",
+                "email",
+                format!("u{i}").as_bytes(),
+                partition(i),
+                &format!("rec{i}"),
+            );
+            store.add_entry(entry.clone()).unwrap();
+            entries.push(entry);
+        }
+
+        let target = entries[0].index_partition();
+        let removed = store.clear_partition(target);
+        assert!(removed >= 1);
+
+        for entry in &entries {
+            let results = store.lookup(entry.entity_str(), entry.field_str(), &entry.value);
+            if entry.index_partition() == target {
+                assert!(results.is_empty());
+            } else {
+                assert_eq!(results.len(), 1);
+            }
+        }
     }
 }
