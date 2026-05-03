@@ -237,6 +237,99 @@ impl SchemaStore {
             .get(entity)
             .is_some_and(|s| s.state() == SchemaState::Active)
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let schemas = self.schemas.read().unwrap();
+        let matching: Vec<_> = schemas
+            .iter()
+            .filter(|(_, s)| s.partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+
+        for (key, schema) in matching {
+            let key_bytes = key.as_bytes();
+            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(key_bytes);
+
+            let data = Self::serialize(schema);
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if a key or schema cannot be deserialized.
+    pub fn import_schemas(&self, data: &[u8]) -> Result<usize, SchemaStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| SchemaStoreError::SerializationError)?;
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let schema_bytes = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(schema) = Self::deserialize(schema_bytes) {
+                self.schemas
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), schema);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut schemas = self.schemas.write().unwrap();
+        let before = schemas.len();
+        schemas.retain(|_, s| s.partition() != partition);
+        before - schemas.len()
+    }
 }
 
 impl std::fmt::Debug for SchemaStore {
@@ -343,5 +436,65 @@ mod tests {
             .unwrap();
 
         assert!(store.get("orders").is_some());
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_partition() {
+        let src = SchemaStore::new(node(1));
+        let dst = SchemaStore::new(node(2));
+
+        src.register("alpha", b"{}").unwrap();
+        src.register("beta", b"{}").unwrap();
+        src.register("gamma", b"{}").unwrap();
+
+        let target_partition = src.get("alpha").unwrap().partition();
+
+        let other_partition_count = src
+            .list()
+            .iter()
+            .filter(|s| s.partition() != target_partition)
+            .count();
+        assert!(
+            other_partition_count > 0,
+            "test prerequisite: schemas must span more than one partition"
+        );
+
+        let payload = src.export_for_partition(target_partition);
+        assert!(!payload.is_empty());
+
+        let imported = dst.import_schemas(&payload).unwrap();
+        assert!(imported >= 1);
+
+        for schema in src.list() {
+            if schema.partition() == target_partition {
+                let copy = dst.get(schema.entity_str()).expect("imported schema");
+                assert_eq!(copy.data, schema.data);
+            } else {
+                assert!(
+                    dst.get(schema.entity_str()).is_none(),
+                    "schema {:?} from a different partition leaked into snapshot",
+                    schema.entity_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_partition_removes_only_target() {
+        let store = SchemaStore::new(node(1));
+        store.register("alpha", b"{}").unwrap();
+        store.register("beta", b"{}").unwrap();
+        store.register("gamma", b"{}").unwrap();
+
+        let target = store.get("alpha").unwrap().partition();
+        let removed = store.clear_partition(target);
+
+        assert!(removed >= 1);
+        assert!(store.get("alpha").is_none());
+        for entity in ["beta", "gamma"] {
+            if let Some(s) = store.get(entity) {
+                assert_ne!(s.partition(), target);
+            }
+        }
     }
 }

@@ -354,6 +354,99 @@ impl UniqueStore {
         }
         format!("_unique/{entity}/{field}/{}", encode_hex(value))
     }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
+        let reservations = self.reservations.read().unwrap();
+        let matching: Vec<_> = reservations
+            .iter()
+            .filter(|(_, r)| r.unique_partition() == partition)
+            .collect();
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+
+        for (key, reservation) in matching {
+            let key_bytes = key.as_bytes();
+            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(key_bytes);
+
+            let data = Self::serialize(reservation);
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&data);
+        }
+
+        buf
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if a key or reservation cannot be deserialized.
+    pub fn import_reservations(&self, data: &[u8]) -> Result<usize, UniqueStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut imported = 0;
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| UniqueStoreError::SerializationError)?;
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if offset + data_len > data.len() {
+                break;
+            }
+            let res_bytes = &data[offset..offset + data_len];
+            offset += data_len;
+
+            if let Some(reservation) = Self::deserialize(res_bytes) {
+                self.reservations
+                    .write()
+                    .unwrap()
+                    .insert(key.to_string(), reservation);
+                imported += 1;
+            }
+        }
+
+        Ok(imported)
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear_partition(&self, partition: PartitionId) -> usize {
+        let mut reservations = self.reservations.write().unwrap();
+        let before = reservations.len();
+        reservations.retain(|_, r| r.unique_partition() != partition);
+        before - reservations.len()
+    }
 }
 
 impl std::fmt::Debug for UniqueStore {
@@ -813,5 +906,97 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn export_import_roundtrip_preserves_partition() {
+        let src = UniqueStore::new(node(1));
+        let dst = UniqueStore::new(node(2));
+
+        let mut reservations = Vec::new();
+        for i in 0_u16..16 {
+            let value = format!("user{i}@example.com");
+            src.reserve(
+                &UniqueReserveParams {
+                    entity: "users",
+                    field: "email",
+                    value: value.as_bytes(),
+                    record_id: &format!("u{i}"),
+                    request_id: &format!("req-{i}"),
+                    data_partition: partition(i),
+                    ttl_ms: 60_000,
+                },
+                1_000,
+            );
+            reservations.push(value);
+        }
+
+        let target = src
+            .get("users", "email", reservations[0].as_bytes())
+            .unwrap()
+            .unique_partition();
+        let target_count = reservations
+            .iter()
+            .filter(|v| {
+                src.get("users", "email", v.as_bytes())
+                    .is_some_and(|r| r.unique_partition() == target)
+            })
+            .count();
+        assert!(target_count >= 1);
+
+        let payload = src.export_for_partition(target);
+        let imported = dst.import_reservations(&payload).unwrap();
+        assert_eq!(imported, target_count);
+
+        for value in &reservations {
+            let src_res = src.get("users", "email", value.as_bytes()).unwrap();
+            let dst_res = dst.get("users", "email", value.as_bytes());
+            if src_res.unique_partition() == target {
+                let copy = dst_res.expect("imported reservation");
+                assert_eq!(copy.record_id_str(), src_res.record_id_str());
+            } else {
+                assert!(
+                    dst_res.is_none(),
+                    "reservation from partition {} leaked into snapshot",
+                    src_res.unique_partition().get()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_partition_removes_only_target() {
+        let store = UniqueStore::new(node(1));
+        let mut values = Vec::new();
+        for i in 0_u16..8 {
+            let value = format!("v{i}");
+            store.reserve(
+                &UniqueReserveParams {
+                    entity: "users",
+                    field: "email",
+                    value: value.as_bytes(),
+                    record_id: &format!("u{i}"),
+                    request_id: &format!("req-{i}"),
+                    data_partition: partition(i),
+                    ttl_ms: 60_000,
+                },
+                1_000,
+            );
+            values.push(value);
+        }
+
+        let target = store
+            .get("users", "email", values[0].as_bytes())
+            .unwrap()
+            .unique_partition();
+        let removed = store.clear_partition(target);
+        assert!(removed >= 1);
+
+        for value in &values {
+            let res = store.get("users", "email", value.as_bytes());
+            if let Some(r) = res {
+                assert_ne!(r.unique_partition(), target);
+            }
+        }
     }
 }

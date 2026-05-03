@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-04-25 — mqdb-cluster 0.3.2
+
+### Fixed
+
+- **Partition snapshot was missing five DB stores.** Following PR #50 (which added `db_data` to the snapshot), `SchemaStore`, `IndexStore`, `UniqueStore`, `FkValidationStore`, and `ConstraintStore` still had **no `export_for_partition` method at all**. A cluster carrying schemas, indexes, unique reservations, in-flight FK validations, or constraints would silently lose them on a rebalance-driven replica promotion — the new primary would have empty metadata and reject queries that depended on them.
+- Added `export_for_partition` / `import_*` / `clear_partition` to all five stores. Each filters by the partition function appropriate to that store: `schema_partition(entity)` for schemas and constraints, `index_partition(entity, field, value)` for index entries, `unique_partition(entity, field, value)` for unique reservations, and `data_partition(target_entity, target_id)` for FK validation requests. Wired all five into `StoreManager::export_partition` / `import_partition` / `clear_partition`.
+- Added `ClusterConstraint::partition()` helper returning `schema_partition(entity_str())`, since constraints are entity-scoped and live on the same partition as their entity's schema.
+- Per-store roundtrip + `clear_partition` tests, plus an integrated test in `partition_io.rs` populating all six DB stores with entries spanning multiple partitions and asserting that exporting one partition correctly partition-filters every store on the destination.
+
+### Known gaps not addressed here
+
+- `FkReverseIndex` (cluster-wide cache of child-to-parent FK references) is **not** included in partition snapshots. It's not partition-scoped — should be either rebuilt during import via the FK constraint discovery path or treated as a separate broadcast entity. Tracked as future work.
+
 ## 2026-04-25 — mqdb-cli 0.7.5
 
 ### Fixed
