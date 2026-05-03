@@ -269,7 +269,8 @@ impl SchemaStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if a key or schema cannot be deserialized.
+    /// Returns `SerializationError` if a key fails UTF-8 parsing or a schema
+    /// fails to deserialize.
     pub fn import_schemas(&self, data: &[u8]) -> Result<usize, SchemaStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -310,13 +311,13 @@ impl SchemaStore {
             let schema_bytes = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(schema) = Self::deserialize(schema_bytes) {
-                self.schemas
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), schema);
-                imported += 1;
-            }
+            let schema =
+                Self::deserialize(schema_bytes).ok_or(SchemaStoreError::SerializationError)?;
+            self.schemas
+                .write()
+                .unwrap()
+                .insert(key.to_string(), schema);
+            imported += 1;
         }
 
         Ok(imported)

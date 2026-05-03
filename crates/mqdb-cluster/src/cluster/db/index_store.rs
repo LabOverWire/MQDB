@@ -307,7 +307,9 @@ impl IndexStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if an entry cannot be deserialized.
+    /// Returns `SerializationError` if an entry fails to deserialize.
+    /// Entries that already exist on the destination are silently ignored
+    /// (idempotent snapshot replay) and not counted.
     pub fn import_entries(&self, data: &[u8]) -> Result<usize, IndexStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -337,8 +339,11 @@ impl IndexStore {
 
             let entry =
                 Self::deserialize(entry_bytes).ok_or(IndexStoreError::SerializationError)?;
-            self.add_entry(entry).ok();
-            imported += 1;
+            match self.add_entry(entry) {
+                Ok(()) => imported += 1,
+                Err(IndexStoreError::AlreadyExists) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(imported)
@@ -613,5 +618,43 @@ mod tests {
                 assert_eq!(results.len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn import_entries_is_idempotent_on_replay() {
+        let src = IndexStore::new(node(1));
+        let dst = IndexStore::new(node(2));
+
+        for i in 0_u16..4 {
+            src.add_entry(IndexEntry::create(
+                "users",
+                "email",
+                format!("u{i}@x.com").as_bytes(),
+                partition(i),
+                &format!("u{i}"),
+            ))
+            .unwrap();
+        }
+
+        let target = src
+            .lookup("users", "email", b"u0@x.com")
+            .first()
+            .map(IndexEntry::index_partition)
+            .unwrap();
+        let target_count = (0_u16..4)
+            .filter(|i| {
+                src.lookup("users", "email", format!("u{i}@x.com").as_bytes())
+                    .first()
+                    .map(IndexEntry::index_partition)
+                    == Some(target)
+            })
+            .count();
+
+        let payload = src.export_for_partition(target);
+        let first = dst.import_entries(&payload).unwrap();
+        let second = dst.import_entries(&payload).unwrap();
+
+        assert_eq!(first, target_count);
+        assert_eq!(second, 0);
     }
 }

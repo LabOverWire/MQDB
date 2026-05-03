@@ -458,7 +458,8 @@ impl ConstraintStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if a key or constraint cannot be deserialized.
+    /// Returns `SerializationError` if a key fails UTF-8 parsing or a
+    /// constraint fails to deserialize.
     pub fn import_constraints(&self, data: &[u8]) -> Result<usize, ConstraintStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -499,13 +500,13 @@ impl ConstraintStore {
             let constraint_bytes = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(constraint) = Self::deserialize(constraint_bytes) {
-                self.constraints
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), constraint);
-                imported += 1;
-            }
+            let constraint = Self::deserialize(constraint_bytes)
+                .ok_or(ConstraintStoreError::SerializationError)?;
+            self.constraints
+                .write()
+                .unwrap()
+                .insert(key.to_string(), constraint);
+            imported += 1;
         }
 
         Ok(imported)

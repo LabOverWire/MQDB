@@ -298,7 +298,8 @@ impl FkValidationStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if a key or request cannot be deserialized.
+    /// Returns `SerializationError` if a key fails UTF-8 parsing or a request
+    /// fails to deserialize.
     pub fn import_requests(&self, data: &[u8]) -> Result<usize, FkStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -339,13 +340,13 @@ impl FkValidationStore {
             let req_bytes = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(request) = Self::deserialize_request(req_bytes) {
-                self.pending_requests
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), request);
-                imported += 1;
-            }
+            let request =
+                Self::deserialize_request(req_bytes).ok_or(FkStoreError::SerializationError)?;
+            self.pending_requests
+                .write()
+                .unwrap()
+                .insert(key.to_string(), request);
+            imported += 1;
         }
 
         Ok(imported)
