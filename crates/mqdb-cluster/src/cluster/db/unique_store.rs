@@ -386,7 +386,8 @@ impl UniqueStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if a key or reservation cannot be deserialized.
+    /// Returns `SerializationError` if a key fails UTF-8 parsing or a
+    /// reservation fails to deserialize.
     pub fn import_reservations(&self, data: &[u8]) -> Result<usize, UniqueStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -427,13 +428,13 @@ impl UniqueStore {
             let res_bytes = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(reservation) = Self::deserialize(res_bytes) {
-                self.reservations
-                    .write()
-                    .unwrap()
-                    .insert(key.to_string(), reservation);
-                imported += 1;
-            }
+            let reservation =
+                Self::deserialize(res_bytes).ok_or(UniqueStoreError::SerializationError)?;
+            self.reservations
+                .write()
+                .unwrap()
+                .insert(key.to_string(), reservation);
+            imported += 1;
         }
 
         Ok(imported)

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-03 — mqdb-cluster 0.3.3
+
+### Fixed
+
+- Unified `import_*` error handling across all six DB stores. Previously `IndexStore::import_entries` propagated `SerializationError` on a malformed entry while the other five (`DbDataStore`, `SchemaStore`, `ConstraintStore`, `UniqueStore`, `FkValidationStore`) silently skipped — a corrupt snapshot stream would either truncate or abort depending on which store hit the bad bytes first. All six now propagate `SerializationError` on deserialize failure.
+- Fixed `IndexStore::import_entries` counter accuracy. It previously incremented `imported` even when `add_entry` returned `AlreadyExists`, inflating the count on idempotent snapshot replay. Now only successful inserts are counted; `AlreadyExists` is treated as benign replay and silently swallowed.
+
 ## 2026-04-25 — mqdb-cluster 0.3.2
 
 ### Fixed

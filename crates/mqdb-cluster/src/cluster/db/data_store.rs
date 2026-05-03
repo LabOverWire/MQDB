@@ -412,7 +412,8 @@ impl DbDataStore {
     /// Panics if the internal lock is poisoned.
     ///
     /// # Errors
-    /// Returns `SerializationError` if UTF-8 parsing fails.
+    /// Returns `SerializationError` if a key fails UTF-8 parsing or an entity
+    /// fails to deserialize.
     pub fn import_entities(&self, data: &[u8]) -> Result<usize, DbDataStoreError> {
         if data.len() < 4 {
             return Ok(0);
@@ -453,10 +454,10 @@ impl DbDataStore {
             let entity_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(entity) = Self::deserialize(entity_data) {
-                self.write_entities().insert(key.to_string(), entity);
-                imported += 1;
-            }
+            let entity =
+                Self::deserialize(entity_data).ok_or(DbDataStoreError::SerializationError)?;
+            self.write_entities().insert(key.to_string(), entity);
+            imported += 1;
         }
 
         Ok(imported)
