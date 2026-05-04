@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-03 — mqdb-cluster 0.3.4
+
+### Fixed
+
+- **Partition snapshot import did not populate `FkReverseIndex`.** This was the "Known gap" called out in the 0.3.2 entry. After a rebalance-driven replica promotion, the new primary held the imported `db_data` records and FK constraints but its in-memory reverse-index cache (`(target_entity, target_id, source_entity, source_field) → {source_id, …}`) was empty for those records. `start_fk_reverse_lookup` and `handle_fk_reverse_lookup_request` would return empty for any record sitting on a newly-imported partition, causing ON DELETE CASCADE to miss children that the new primary owned and ON DELETE RESTRICT to silently allow deletes that should have been blocked.
+- `StoreManager::import_partition` now calls a new private `rebuild_fk_indexes_after_import` step at the end of the import. It iterates every registered FK constraint and calls the existing `rebuild_fk_index_for_constraint` helper, which walks `db_data.list(source_entity)` (now populated with the just-imported records) and seeds the reverse index. Mirrors the existing pattern at `apply.rs:215` where constraint Insert via Raft replication triggers the same rebuild.
+- Test coverage: 12 new tests (466 → 478 in the cluster lib). Direct `FkReverseIndex` unit tests in `data_store.rs` (insert/lookup/remove, idempotent inserts, removing unknown source ids, field-scoped keys), `update_fk_reverse_index` and `rebuild_fk_index_for_constraint` unit tests in `constraint_ops.rs` (Insert/Update/Delete paths, no-op when no constraints, malformed JSON, non-FK constraint), and a regression test `import_partition_rebuilds_fk_reverse_index` in `partition_io.rs` that confirmed by fail-on-disable / pass-on-restore that the rebuild call is what makes the assertion pass.
+- E2E in `examples/cluster-rebalance-stores/run.sh` now creates 20 extra child comments (2 per parent) spread across all 10 parents and adds a cascade-via-node-4 observation: deletes every parent through node 4 after rebalance, then prints how many of the eligible children were cascade-removed. Surfaced as an observation rather than a hard assertion because cascade outcomes through any specific node depend on whether that node has the FK constraint locally, which is governed by schema/constraint replication topology (separate concern; see below).
+
+### Discovered while running the new E2E (separate follow-up)
+
+- **Constraints don't reach all nodes uniformly.** Across runs of the new E2E, only the leader (node 1) consistently held both the unique and FK constraints locally; nodes 2/3 sometimes had a subset, and a freshly-joined node 4 had none. Because constraints route through `schema_partition(entity)`, any node that doesn't own that partition reaches the constraint only via forwarding — not in its local `db_constraints` store. The FkReverseIndex rebuild this PR adds is correct in its scope (it rebuilds for whatever constraints the importing node has locally), but a fully-correct cascade through every node requires constraints to be cluster-wide broadcast state. Tracked as future work alongside the schema replication topology issue first noted in the 0.3.2 CHANGELOG entry.
+
 ## 2026-05-03 — mqdb-cluster 0.3.3
 
 ### Fixed

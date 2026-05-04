@@ -802,4 +802,83 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id_str(), "alice");
     }
+
+    #[test]
+    fn fk_reverse_index_insert_lookup_remove() {
+        let idx = FkReverseIndex::new();
+        idx.insert("posts", "p1", "comments", "post_id", "c1");
+        idx.insert("posts", "p1", "comments", "post_id", "c2");
+        idx.insert("posts", "p2", "comments", "post_id", "c3");
+
+        let mut p1_refs = idx.lookup("posts", "p1", "comments", "post_id");
+        p1_refs.sort();
+        assert_eq!(p1_refs, vec!["c1".to_string(), "c2".to_string()]);
+
+        assert_eq!(
+            idx.lookup("posts", "p2", "comments", "post_id"),
+            vec!["c3".to_string()],
+        );
+
+        assert!(
+            idx.lookup("posts", "missing", "comments", "post_id")
+                .is_empty(),
+            "lookup for unknown target must be empty",
+        );
+
+        idx.remove("posts", "p1", "comments", "post_id", "c1");
+        assert_eq!(
+            idx.lookup("posts", "p1", "comments", "post_id"),
+            vec!["c2".to_string()],
+        );
+
+        idx.remove("posts", "p1", "comments", "post_id", "c2");
+        assert!(
+            idx.lookup("posts", "p1", "comments", "post_id").is_empty(),
+            "removing the last source_id must leave the lookup empty",
+        );
+    }
+
+    #[test]
+    fn fk_reverse_index_insert_is_idempotent_per_source_id() {
+        let idx = FkReverseIndex::new();
+        idx.insert("posts", "p1", "comments", "post_id", "c1");
+        idx.insert("posts", "p1", "comments", "post_id", "c1");
+
+        assert_eq!(
+            idx.lookup("posts", "p1", "comments", "post_id"),
+            vec!["c1".to_string()],
+            "duplicate inserts of the same source_id must collapse",
+        );
+    }
+
+    #[test]
+    fn fk_reverse_index_remove_unknown_is_noop() {
+        let idx = FkReverseIndex::new();
+        idx.remove("posts", "p1", "comments", "post_id", "c1");
+        assert!(idx.lookup("posts", "p1", "comments", "post_id").is_empty());
+
+        idx.insert("posts", "p1", "comments", "post_id", "c1");
+        idx.remove("posts", "p1", "comments", "post_id", "c-other");
+        assert_eq!(
+            idx.lookup("posts", "p1", "comments", "post_id"),
+            vec!["c1".to_string()],
+            "removing a non-matching source_id must not affect existing entries",
+        );
+    }
+
+    #[test]
+    fn fk_reverse_index_keys_are_field_scoped() {
+        let idx = FkReverseIndex::new();
+        idx.insert("users", "u1", "posts", "author_id", "p1");
+        idx.insert("users", "u1", "posts", "editor_id", "p2");
+
+        assert_eq!(
+            idx.lookup("users", "u1", "posts", "author_id"),
+            vec!["p1".to_string()],
+        );
+        assert_eq!(
+            idx.lookup("users", "u1", "posts", "editor_id"),
+            vec!["p2".to_string()],
+        );
+    }
 }
