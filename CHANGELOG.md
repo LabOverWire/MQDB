@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-03 — mqdb-cluster 0.3.4
+
+### Fixed
+
+- **Partition snapshot import did not populate `FkReverseIndex`.** This was the "Known gap" called out in the 0.3.2 entry. After a rebalance-driven replica promotion, the new primary held the imported `db_data` records and FK constraints but its in-memory reverse-index cache (`(target_entity, target_id, source_entity, source_field) → {source_id, …}`) was empty for those records. `start_fk_reverse_lookup` and `handle_fk_reverse_lookup_request` would return empty for any record sitting on a newly-imported partition, causing ON DELETE CASCADE to miss children that the new primary owned and ON DELETE RESTRICT to silently allow deletes that should have been blocked.
+- `StoreManager::import_partition` now calls a new private `rebuild_fk_indexes_after_import` step at the end of the import. It iterates every registered FK constraint and calls the existing `rebuild_fk_index_for_constraint` helper, which walks `db_data.list(source_entity)` (now populated with the just-imported records) and seeds the reverse index. Mirrors the existing pattern at `apply.rs:215` where constraint Insert via Raft replication triggers the same rebuild.
+- Test coverage: 12 new tests (466 → 478 in the cluster lib). Direct `FkReverseIndex` unit tests in `data_store.rs` (insert/lookup/remove, idempotent inserts, removing unknown source ids, field-scoped keys), `update_fk_reverse_index` and `rebuild_fk_index_for_constraint` unit tests in `constraint_ops.rs` (Insert/Update/Delete paths, no-op when no constraints, malformed JSON, non-FK constraint), and a regression test `import_partition_rebuilds_fk_reverse_index` in `partition_io.rs` that confirmed by fail-on-disable / pass-on-restore that the rebuild call is what makes the assertion pass.
+- E2E in `examples/cluster-rebalance-stores/run.sh` now creates 20 extra child comments spread across all 10 parents and ends with a hard assertion: deletes every parent through node 4 after rebalance, then verifies every child comment is gone. Without the snapshot fix, children whose data partition rebalanced to node 4 survive the cascade.
+
 ## 2026-05-03 — mqdb-cluster 0.3.3
 
 ### Fixed
