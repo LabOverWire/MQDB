@@ -13,7 +13,7 @@ Each entry lists the date and the crate versions that were released.
 - Routed every CLI bench/dev_bench connect through the new helper to close the same bug class for `mqdb bench db` (sync + async + cascade + unique + changefeed), `mqdb bench pubsub`, `mqdb dev bench` (db/pubsub/sub-pub), and the broker-readiness probes in both `bench/common.rs::wait_for_broker_ready` and `dev_bench/helpers.rs::wait_for_broker_ready`. Removed two now-redundant local `connect_client` helpers in `db_cascade.rs` and `db_changefeed.rs`. The `pubsub.rs` paths use custom `ConnectOptions` (clean-start, custom keep-alive) so their connect calls are wrapped inline with the same timeout pattern rather than going through the helper.
 - Regression test `test_cli_connect_timeout_against_silent_listener` in `crates/mqdb-cli/tests/cli_test.rs` spawns a TCP listener that accepts the connection without speaking MQTT and asserts `mqdb list ... --timeout 2` exits within 5 seconds with a "timed out" error. Verified to fail on main (pre-fix exits at ~6s with "Connection reset by peer") and pass with the fix in place.
 
-## 2026-05-03 — mqdb-cluster 0.3.4
+## 2026-05-06 — mqdb-cluster 0.3.4
 
 ### Fixed
 
@@ -44,7 +44,7 @@ Each entry lists the date and the crate versions that were released.
 
 ### Known gaps not addressed here
 
-- `FkReverseIndex` (cluster-wide cache of child-to-parent FK references) is **not** included in partition snapshots. It's not partition-scoped — should be either rebuilt during import via the FK constraint discovery path or treated as a separate broadcast entity. Tracked as future work.
+- `FkReverseIndex` (cluster-wide cache of child-to-parent FK references) is **not** included in partition snapshots. It's not partition-scoped — should be either rebuilt during import via the FK constraint discovery path or treated as a separate broadcast entity. Tracked as future work. _Closed in 0.3.4 via the rebuild-during-import approach._
 
 ## 2026-04-25 — mqdb-cli 0.7.5
 

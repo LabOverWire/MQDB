@@ -2270,6 +2270,16 @@ constraint is added after data exists, `rebuild_fk_index_for_constraint` backfil
 the index by scanning existing records. This replaces the earlier O(n) full-table
 scan with O(1) lookups per reverse query.
 
+The reverse index is also rebuilt after partition snapshot import (rebalance-driven
+replica promotion). `StoreManager::import_partition` ends with
+`rebuild_fk_indexes_after_import`, which iterates every locally-known FK constraint
+and reuses `rebuild_fk_index_for_constraint` so the just-imported records are
+immediately reachable from cascade and RESTRICT enforcement on the new primary.
+The reverse index is intentionally not part of the snapshot wire format — it's
+derivable from the imported data plus constraint definitions, so deriving it on
+import avoids cross-cutting partition concerns (a single reverse-index entry maps
+to no single partition).
+
 ### Cascade and Set-Null on Delete
 
 When a record is deleted, the node performs a reverse FK lookup via the in-memory
