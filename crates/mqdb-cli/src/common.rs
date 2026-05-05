@@ -13,12 +13,26 @@ pub(crate) async fn connect_client(
     let client_id = format!("mqdb-cli-{}", uuid::Uuid::new_v4());
     let client = MqttClient::new(&client_id);
 
-    if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-        let options = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
-        Box::pin(client.connect_with_options(&conn.broker, options)).await?;
-    } else {
-        client.connect(&conn.broker).await?;
-    }
+    let connect_timeout = Duration::from_secs(conn.timeout);
+    let connect_future = async {
+        if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
+            let options =
+                ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+            Box::pin(client.connect_with_options(&conn.broker, options))
+                .await
+                .map(|_| ())
+        } else {
+            client.connect(&conn.broker).await
+        }
+    };
+    tokio::time::timeout(connect_timeout, connect_future)
+        .await
+        .map_err(|_| {
+            format!(
+                "connect to {} timed out after {}s",
+                conn.broker, conn.timeout
+            )
+        })??;
 
     Ok(client)
 }

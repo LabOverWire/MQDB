@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-05 — mqdb-cli 0.7.6
+
+### Fixed
+
+- `--timeout` did not apply during the MQTT CONNECT handshake. `connect_client` in `crates/mqdb-cli/src/common.rs` only wrapped the request/response wait in `tokio::time::timeout`; the `MqttClient::connect[_with_options]` calls themselves had no timeout, so any command (`mqdb list`, `read`, `create`, `update`, `delete`, etc.) would hang indefinitely against a TCP listener that accepts the connection but never sends CONNACK (silent broker, half-open NAT, firewall drop after SYN-ACK). The connect future is now wrapped in `tokio::time::timeout(Duration::from_secs(conn.timeout), …)` and surfaces `connect to {broker} timed out after {N}s` on expiry.
+- Regression test `test_cli_connect_timeout_against_silent_listener` in `crates/mqdb-cli/tests/cli_test.rs` spawns a TCP listener that accepts the connection without speaking MQTT and asserts `mqdb list ... --timeout 2` exits within 5 seconds with a "timed out" error. Verified to fail on main (pre-fix exits at ~6s with "Connection reset by peer") and pass with the fix in place.
+
 ## 2026-05-03 — mqdb-cluster 0.3.3
 
 ### Fixed
