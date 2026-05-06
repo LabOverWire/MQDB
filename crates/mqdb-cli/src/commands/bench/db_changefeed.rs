@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::ConnectOptions;
 use serde_json::{Value, json};
 
 use super::common::{BenchDbArgs, generate_record, wait_for_broker_ready};
 use crate::cli_types::OutputFormat;
+use crate::common::connect_with_timeout;
 
 #[allow(
     clippy::too_many_lines,
@@ -33,11 +33,11 @@ pub(crate) async fn cmd_bench_db_changefeed(
 
     let sub_client_name = format!("bench-changefeed-sub-{}", uuid::Uuid::new_v4());
     let sub_client = MqttClient::new(sub_client_name.clone());
-    connect_client(&sub_client, &sub_client_name, &args).await?;
+    connect_with_timeout(&sub_client, &sub_client_name, &args.conn).await?;
 
     let pub_client_name = format!("bench-changefeed-pub-{}", uuid::Uuid::new_v4());
     let pub_client = MqttClient::new(pub_client_name.clone());
-    connect_client(&pub_client, &pub_client_name, &args).await?;
+    connect_with_timeout(&pub_client, &pub_client_name, &args.conn).await?;
 
     let write_sent_ns: Arc<std::sync::Mutex<HashMap<String, u64>>> =
         Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -179,23 +179,6 @@ pub(crate) async fn cmd_bench_db_changefeed(
         println!("└───────────────────────────────────────────┘");
     }
 
-    Ok(())
-}
-
-async fn connect_client(
-    client: &MqttClient,
-    client_id: &str,
-    args: &BenchDbArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if args.conn.insecure {
-        client.set_insecure_tls(true).await;
-    }
-    if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-        let opts = ConnectOptions::new(client_id).with_credentials(user.clone(), pass.clone());
-        Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
-    } else {
-        client.connect(&args.conn.broker).await?;
-    }
     Ok(())
 }
 

@@ -7,12 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, Message, PublishOptions, PublishProperties};
+use mqtt5::types::{Message, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use super::common::{BenchDbArgs, DbBenchMetrics, DbOp, generate_record, wait_for_broker_ready};
 use super::db_async::cmd_bench_db_async;
 use crate::cli_types::OutputFormat;
+use crate::common::connect_with_timeout;
 
 type PendingMap = Arc<std::sync::Mutex<HashMap<u64, flume::Sender<Option<String>>>>>;
 
@@ -148,13 +149,7 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
         println!("Seeding {} records...", args.seed);
         let seeder_id = "bench-db-seeder".to_string();
         let client = MqttClient::new(seeder_id.clone());
-        if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-            let opts =
-                ConnectOptions::new(seeder_id.clone()).with_credentials(user.clone(), pass.clone());
-            Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
-        } else {
-            client.connect(&args.conn.broker).await?;
-        }
+        connect_with_timeout(&client, &seeder_id, &args.conn).await?;
 
         let router = ResponseRouter::new(&seeder_id);
         client
@@ -209,14 +204,7 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
             let client_name = format!("bench-db-{client_id}");
             let client = MqttClient::new(client_name.clone());
 
-            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts = ConnectOptions::new(client_name.clone())
-                    .with_credentials(user.clone(), pass.clone());
-                if let Err(e) = Box::pin(client.connect_with_options(&conn.broker, opts)).await {
-                    eprintln!("Client {client_id} connect failed: {e}");
-                    return;
-                }
-            } else if let Err(e) = client.connect(&conn.broker).await {
+            if let Err(e) = connect_with_timeout(&client, &client_name, &conn).await {
                 eprintln!("Client {client_id} connect failed: {e}");
                 return;
             }
@@ -401,15 +389,9 @@ pub(crate) async fn cmd_bench_db(args: BenchDbArgs) -> Result<(), Box<dyn std::e
         if !ids_to_cleanup.is_empty() {
             let cleanup_id = "bench-cleanup".to_string();
             let client = MqttClient::new(cleanup_id.clone());
-            let connected = if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-                let opts =
-                    ConnectOptions::new(cleanup_id).with_credentials(user.clone(), pass.clone());
-                Box::pin(client.connect_with_options(&args.conn.broker, opts))
-                    .await
-                    .is_ok()
-            } else {
-                client.connect(&args.conn.broker).await.is_ok()
-            };
+            let connected = connect_with_timeout(&client, &cleanup_id, &args.conn)
+                .await
+                .is_ok();
             if connected {
                 for id in &ids_to_cleanup {
                     let topic = format!("$DB/{}/{id}/delete", args.entity);

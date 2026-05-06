@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use mqtt5::QoS;
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use crate::cli_types::OutputFormat;
+use crate::common::connect_with_timeout;
 
 use super::common::{BenchDbArgs, DbOp, generate_record};
 
@@ -54,15 +55,7 @@ pub(super) async fn cmd_bench_db_async(
 
     let client_id = format!("bench-db-async-{}", uuid::Uuid::new_v4());
     let client = MqttClient::new(client_id.clone());
-    if args.conn.insecure {
-        client.set_insecure_tls(true).await;
-    }
-    if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-        let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
-        Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
-    } else {
-        client.connect(&args.conn.broker).await?;
-    }
+    connect_with_timeout(&client, &client_id, &args.conn).await?;
 
     let seeded_ids: Arc<Vec<String>> = if matches!(op, DbOp::Get | DbOp::Update | DbOp::Delete) {
         let seed_count = args.seed.max(1000);

@@ -213,6 +213,52 @@ async fn test_cli_update_and_delete() {
 }
 
 #[tokio::test]
+async fn test_cli_connect_timeout_against_silent_listener() {
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
+    let port = listener.local_addr().unwrap().port();
+
+    let _detached = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_secs(6));
+            drop(stream);
+        }
+    });
+
+    let start = Instant::now();
+    let (success, stdout, stderr) = run_mqdb(&[
+        "list",
+        "users",
+        "--broker",
+        &format!("127.0.0.1:{port}"),
+        "--user",
+        "x",
+        "--pass",
+        "y",
+        "--timeout",
+        "2",
+    ])
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        !success,
+        "command must fail when broker never sends CONNACK: stdout={stdout}, stderr={stderr}",
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("timed out"),
+        "error message must mention timeout: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        elapsed.as_secs_f64() < 5.0,
+        "must exit within timeout window, took {elapsed:?}",
+    );
+}
+
+#[tokio::test]
 async fn test_cli_bench_db() {
     let port = next_test_port();
     let (_tmp, handle) = start_agent_background(port).await;

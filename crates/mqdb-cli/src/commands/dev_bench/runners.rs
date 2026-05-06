@@ -11,6 +11,7 @@ use mqtt5::types::{PublishOptions, PublishProperties};
 use super::DevBenchResult;
 use super::helpers::{BenchMetrics, chrono_timestamp};
 use crate::cli_types::{ConnectionArgs, DevBenchScenario};
+use crate::common::connect_with_timeout;
 
 #[allow(
     clippy::cast_precision_loss,
@@ -44,7 +45,10 @@ pub(super) async fn run_pubsub_benchmark(
         let handle = tokio::spawn(async move {
             let client_id = format!("dev-bench-sub-{sub_id}");
             let client = MqttClient::new(&client_id);
-            if client.connect(&conn.broker).await.is_err() {
+            if connect_with_timeout(&client, &client_id, &conn)
+                .await
+                .is_err()
+            {
                 return;
             }
 
@@ -92,7 +96,10 @@ pub(super) async fn run_pubsub_benchmark(
         let handle = tokio::spawn(async move {
             let client_id = format!("dev-bench-pub-{pub_id}");
             let client = MqttClient::new(&client_id);
-            if client.connect(&conn.broker).await.is_err() {
+            if connect_with_timeout(&client, &client_id, &conn)
+                .await
+                .is_err()
+            {
                 return;
             }
 
@@ -174,7 +181,10 @@ pub(super) async fn run_db_benchmark(
         let handle = tokio::spawn(async move {
             let client_id = format!("dev-bench-db-{client_id_num}");
             let client = MqttClient::new(&client_id);
-            if client.connect(&conn.broker).await.is_err() {
+            if connect_with_timeout(&client, &client_id, &conn)
+                .await
+                .is_err()
+            {
                 return;
             }
 

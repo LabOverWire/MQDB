@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use super::common::{BenchDbArgs, wait_for_broker_ready};
 use crate::cli_types::OutputFormat;
+use crate::common::connect_with_timeout;
 
 const UNIQUE_FIELD_NAME: &str = "bench_unique_field";
 const UNIQUE_FIELD_VALUE: &str = "contested-value";
@@ -57,19 +58,10 @@ pub(crate) async fn cmd_bench_db_unique(
         let handle = tokio::spawn(async move {
             let client_id = format!("bench-unique-{client_idx}-{}", uuid::Uuid::new_v4());
             let client = MqttClient::new(client_id.clone());
-            if conn.insecure {
-                client.set_insecure_tls(true).await;
-            }
-            if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-                let opts = ConnectOptions::new(client_id.clone())
-                    .with_credentials(user.clone(), pass.clone());
-                if Box::pin(client.connect_with_options(&conn.broker, opts))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            } else if client.connect(&conn.broker).await.is_err() {
+            if connect_with_timeout(&client, &client_id, &conn)
+                .await
+                .is_err()
+            {
                 return;
             }
 
@@ -208,15 +200,7 @@ pub(crate) async fn cmd_bench_db_unique(
 async fn register_unique_constraint(args: &BenchDbArgs) -> Result<(), Box<dyn std::error::Error>> {
     let client_id = format!("bench-unique-admin-{}", uuid::Uuid::new_v4());
     let client = MqttClient::new(client_id.clone());
-    if args.conn.insecure {
-        client.set_insecure_tls(true).await;
-    }
-    if let (Some(user), Some(pass)) = (&args.conn.user, &args.conn.pass) {
-        let opts = ConnectOptions::new(client_id).with_credentials(user.clone(), pass.clone());
-        Box::pin(client.connect_with_options(&args.conn.broker, opts)).await?;
-    } else {
-        client.connect(&args.conn.broker).await?;
-    }
+    connect_with_timeout(&client, &client_id, &args.conn).await?;
 
     let response_topic = format!("bench-unique-admin/resp/{}", uuid::Uuid::new_v4());
     let (tx, rx) = flume::bounded::<Vec<u8>>(1);

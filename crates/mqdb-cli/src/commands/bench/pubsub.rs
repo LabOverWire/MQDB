@@ -159,9 +159,25 @@ pub(crate) async fn cmd_bench_pubsub(
                 opts
             };
 
-            if let Err(e) = Box::pin(client.connect_with_options(&broker, opts)).await {
-                eprintln!("Subscriber {sub_id} connect failed: {e}");
-                return;
+            let connect_timeout = Duration::from_secs(conn.timeout);
+            match tokio::time::timeout(
+                connect_timeout,
+                Box::pin(client.connect_with_options(&broker, opts)),
+            )
+            .await
+            {
+                Err(_) => {
+                    eprintln!(
+                        "Subscriber {sub_id} connect to {broker} timed out after {}s",
+                        conn.timeout
+                    );
+                    return;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Subscriber {sub_id} connect failed: {e}");
+                    return;
+                }
+                Ok(Ok(_)) => {}
             }
 
             if use_wildcard && topic_count > 1 {
@@ -246,9 +262,25 @@ pub(crate) async fn cmd_bench_pubsub(
                 opts
             };
 
-            if let Err(e) = Box::pin(client.connect_with_options(&broker, opts)).await {
-                eprintln!("Publisher {pub_id} connect failed: {e}");
-                return;
+            let connect_timeout = Duration::from_secs(conn.timeout);
+            match tokio::time::timeout(
+                connect_timeout,
+                Box::pin(client.connect_with_options(&broker, opts)),
+            )
+            .await
+            {
+                Err(_) => {
+                    eprintln!(
+                        "Publisher {pub_id} connect to {broker} timed out after {}s",
+                        conn.timeout
+                    );
+                    return;
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Publisher {pub_id} connect failed: {e}");
+                    return;
+                }
+                Ok(Ok(_)) => {}
             }
 
             let mut topic_idx: usize = 0;
