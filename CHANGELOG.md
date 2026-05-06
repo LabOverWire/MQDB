@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-05-05 — mqdb-cli 0.7.6
+## 2026-05-06 — mqdb-cli 0.7.6
 
 ### Fixed
 
