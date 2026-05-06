@@ -5,9 +5,10 @@ use std::process::Command;
 use std::time::Duration;
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::types::{PublishOptions, PublishProperties};
 
 use crate::cli_types::ConnectionArgs;
+use crate::common::connect_with_timeout;
 
 pub(super) fn is_agent_running() -> bool {
     Command::new("pgrep")
@@ -65,17 +66,9 @@ pub(super) async fn wait_for_broker_ready(
 
         let client_id = format!("bench-ready-{}", uuid::Uuid::new_v4());
         let client = MqttClient::new(&client_id);
-        if conn.insecure {
-            client.set_insecure_tls(true).await;
-        }
-        let connected = if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-            let opts = ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
-            Box::pin(client.connect_with_options(&conn.broker, opts))
-                .await
-                .is_ok()
-        } else {
-            client.connect(&conn.broker).await.is_ok()
-        };
+        let connected = connect_with_timeout(&client, &client_id, conn)
+            .await
+            .is_ok();
 
         if connected {
             let response_topic = format!("bench-ready/{}", uuid::Uuid::new_v4());

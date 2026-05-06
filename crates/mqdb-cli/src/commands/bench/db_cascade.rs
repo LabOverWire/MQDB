@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mqtt5::client::MqttClient;
-use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use mqtt5::types::{PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 
 use super::common::{BenchDbArgs, wait_for_broker_ready};
 use crate::cli_types::{ConnectionArgs, OutputFormat};
+use crate::common::connect_with_timeout;
 
 #[allow(
     clippy::too_many_lines,
@@ -36,7 +37,7 @@ pub(crate) async fn cmd_bench_db_cascade(
 
     let setup_client_id = format!("bench-cascade-setup-{}", uuid::Uuid::new_v4());
     let setup_client = MqttClient::new(setup_client_id.clone());
-    connect_client(&setup_client, &setup_client_id, &args.conn).await?;
+    connect_with_timeout(&setup_client, &setup_client_id, &args.conn).await?;
 
     let delete_latencies_ns: Vec<u64> = Vec::new();
     let propagation_latencies_ns: Vec<u64> = Vec::new();
@@ -72,7 +73,7 @@ pub(crate) async fn cmd_bench_db_cascade(
 
         let sub_client_id = format!("bench-cascade-sub-{run}-{}", uuid::Uuid::new_v4());
         let sub_client = MqttClient::new(sub_client_id.clone());
-        connect_client(&sub_client, &sub_client_id, &args.conn).await?;
+        connect_with_timeout(&sub_client, &sub_client_id, &args.conn).await?;
 
         let events_topic = format!("$DB/{child_entity}/events/#");
         let pending_children: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -213,23 +214,6 @@ pub(crate) async fn cmd_bench_db_cascade(
     Ok(())
 }
 
-async fn connect_client(
-    client: &MqttClient,
-    client_id: &str,
-    conn: &ConnectionArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if conn.insecure {
-        client.set_insecure_tls(true).await;
-    }
-    if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
-        let opts = ConnectOptions::new(client_id).with_credentials(user.clone(), pass.clone());
-        Box::pin(client.connect_with_options(&conn.broker, opts)).await?;
-    } else {
-        client.connect(&conn.broker).await?;
-    }
-    Ok(())
-}
-
 async fn register_fk_cascade(
     conn: &ConnectionArgs,
     parent_entity: &str,
@@ -237,7 +221,7 @@ async fn register_fk_cascade(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client_id = format!("bench-cascade-admin-{}", uuid::Uuid::new_v4());
     let client = MqttClient::new(client_id.clone());
-    connect_client(&client, &client_id, conn).await?;
+    connect_with_timeout(&client, &client_id, conn).await?;
 
     let response_topic = format!("bench-cascade-admin/resp/{}", uuid::Uuid::new_v4());
     let (tx, rx) = flume::bounded::<Vec<u8>>(4);

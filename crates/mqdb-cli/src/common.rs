@@ -7,17 +7,20 @@ use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub(crate) async fn connect_client(
+pub(crate) async fn connect_with_timeout(
+    client: &MqttClient,
+    client_id: &str,
     conn: &ConnectionArgs,
-) -> Result<MqttClient, Box<dyn std::error::Error>> {
-    let client_id = format!("mqdb-cli-{}", uuid::Uuid::new_v4());
-    let client = MqttClient::new(&client_id);
+) -> Result<(), Box<dyn std::error::Error>> {
+    if conn.insecure {
+        client.set_insecure_tls(true).await;
+    }
 
     let connect_timeout = Duration::from_secs(conn.timeout);
     let connect_future = async {
         if let (Some(user), Some(pass)) = (&conn.user, &conn.pass) {
             let options =
-                ConnectOptions::new(&client_id).with_credentials(user.clone(), pass.clone());
+                ConnectOptions::new(client_id).with_credentials(user.clone(), pass.clone());
             Box::pin(client.connect_with_options(&conn.broker, options))
                 .await
                 .map(|_| ())
@@ -34,6 +37,15 @@ pub(crate) async fn connect_client(
             )
         })??;
 
+    Ok(())
+}
+
+pub(crate) async fn connect_client(
+    conn: &ConnectionArgs,
+) -> Result<MqttClient, Box<dyn std::error::Error>> {
+    let client_id = format!("mqdb-cli-{}", uuid::Uuid::new_v4());
+    let client = MqttClient::new(&client_id);
+    connect_with_timeout(&client, &client_id, conn).await?;
     Ok(client)
 }
 
