@@ -1,16 +1,20 @@
 # cluster-rebalance-stores E2E
 
-Diagnostic end-to-end test that exercises the partition-snapshot path added
-in `crates/mqdb-cluster/src/cluster/store_manager/partition_io.rs` for the
-five DB stores beyond `db_data`.
+Diagnostic end-to-end test that exercises the partition-snapshot path in
+`crates/mqdb-cluster/src/cluster/store_manager/partition_io.rs` — both the
+five DB stores beyond `db_data` (PR #54) and the FK reverse-index rebuild
+that runs after import (PR #56).
 
 ## What it does
 
 1. Starts a 3-node cluster (QUIC transport, mTLS).
-2. Registers schemas, a unique constraint, and a foreign-key constraint.
-3. Populates posts + a child comment.
+2. Registers schemas, a unique constraint, and a foreign-key constraint
+   (`comments.post_id → posts.id` with `on_delete: cascade`).
+3. Populates 10 posts and 21 child comments (the canonical first child plus
+   2 extras per parent, so every parent owns multiple children).
 4. Joins a 4th node, which forces partitions to rebalance onto it.
-5. After rebalance, queries each store via node 4 and asserts behavior.
+5. After rebalance, queries each store via node 4 and asserts behavior,
+   ending with a cascade-delete sweep of every parent through node 4.
 
 The 4th-node join is what triggers replica promotion via partition snapshots.
 Whatever node 4 ends up serving has to come from the snapshot stream.
@@ -38,17 +42,24 @@ script invokes `target/release/mqdb` directly.
 
 **Observations** (printed but do not affect exit code):
 
-- `SchemaStore`, `ConstraintStore`: schemas and constraints are replicated
-  through `PartitionId::ZERO` today (see `node_controller/db_ops.rs` and
-  `store_manager/constraint_ops.rs`). The current snapshot fix adds them
-  to the export wire stream, but whether a given schema/constraint arrives
-  on node 4 depends on whether the partition matching `schema_partition()`
-  of the entity actually rebalanced to node 4. This is a cluster design
-  issue (schemas should arguably be cluster-wide broadcast state, not
-  partition-scoped) that is broader than the snapshot fix.
+- `SchemaStore`, `ConstraintStore`: even though both are listed as broadcast
+  entities at `node_controller/replication_ops.rs:81-85`, empirical runs of
+  this script show they don't reach every node uniformly. A given
+  schema/constraint arrives on node 4 only if either the broadcast was
+  delivered while node 4 was alive, or the partition matching
+  `schema_partition()` of the entity rebalanced to node 4. Tracked as
+  separate follow-ups in issues #57 (constraints) and #58 (schemas).
 - `UniqueStore`: duplicates are mostly rejected via node 4, but transient
   acceptances can occur immediately after promotion while 2-phase forwards
   settle. The script retries each duplicate before counting it as accepted.
+- **`FkReverseIndex` cascade via node 4**: deletes every parent through
+  node 4 and counts how many of the eligible child comments were
+  cascade-removed. The reverse-index rebuild added in PR #56 ensures node
+  4's local index is populated for whatever FK constraints node 4 holds
+  locally; the cascade is then complete *if* the cascade-initiating
+  primary also holds the FK constraint locally. Otherwise the cascade is
+  partial — gated by the upstream constraint-replication issue #57, not
+  by the snapshot fix.
 
 **Stores not exercised here** (covered by unit roundtrip tests instead):
 

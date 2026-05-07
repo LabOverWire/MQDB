@@ -190,7 +190,17 @@ impl StoreManager {
             total_imported += imported;
         }
 
+        self.rebuild_fk_indexes_after_import();
+
         Ok(total_imported)
+    }
+
+    fn rebuild_fk_indexes_after_import(&self) {
+        for constraint in self.db_constraints.list_all() {
+            if constraint.is_foreign_key() {
+                self.rebuild_fk_index_for_constraint(&constraint);
+            }
+        }
     }
 
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
@@ -394,6 +404,69 @@ mod tests {
             dst.db_fk.get_request(&fk_id).is_some(),
             src.db_fk.get_request(&fk_id).unwrap().target_partition() == target,
             "db_fk for {entity}"
+        );
+    }
+
+    #[test]
+    fn import_partition_rebuilds_fk_reverse_index() {
+        use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new(node(2));
+
+        let fk = ClusterConstraint::foreign_key(
+            "comments",
+            "fk_comment_post",
+            "post_id",
+            "posts",
+            "id",
+            OnDeleteAction::Cascade,
+        );
+        src.db_constraints.add(fk.clone()).unwrap();
+        dst.db_constraints.add(fk).unwrap();
+
+        src.db_data
+            .create("posts", "p1", b"{\"title\":\"hello\"}", 1_000)
+            .unwrap();
+        src.db_data
+            .create(
+                "comments",
+                "c1",
+                b"{\"post_id\":\"p1\",\"text\":\"first\"}",
+                1_000,
+            )
+            .unwrap();
+        src.update_fk_reverse_index(
+            crate::cluster::protocol::Operation::Insert,
+            "comments",
+            "c1",
+            Some(b"{\"post_id\":\"p1\",\"text\":\"first\"}"),
+            None,
+        );
+
+        assert_eq!(
+            src.fk_reverse_lookup("posts", "p1", "comments", "post_id"),
+            vec!["c1".to_string()],
+            "src reverse index must hold c1 → p1 before export",
+        );
+
+        let child_partition = src.db_data.get("comments", "c1").unwrap().partition();
+
+        let payload = src.export_partition(child_partition);
+        assert!(!payload.is_empty(), "snapshot payload must not be empty");
+        let imported = dst.import_partition(&payload).expect("import");
+        assert!(imported >= 1, "child record must survive import");
+
+        assert!(
+            dst.db_data.get("comments", "c1").is_some(),
+            "child must be present on destination after import",
+        );
+
+        let refs = dst.fk_reverse_lookup("posts", "p1", "comments", "post_id");
+        assert_eq!(
+            refs,
+            vec!["c1".to_string()],
+            "destination reverse index must hold c1 after import — without the rebuild step this would be empty",
         );
     }
 }
