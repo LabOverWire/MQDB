@@ -194,7 +194,39 @@ jobs:
         id: changelog
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          BODY=$(awk "/^## \[$TAG\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
+          BODY=$(python3 - "$TAG" <<'PY'
+          import re, sys
+          tag = sys.argv[1]
+          lines = open("CHANGELOG.md").read().splitlines()
+          # Headings look like: ## YYYY-MM-DD — mqdb-<crate> <version>[, mqdb-... <version>]*
+          heading = re.compile(r"^## (\d{4}-\d{2}-\d{2}) — (.*)$")
+          # Find the heading that lists mqdb-cli <tag>; that anchors the release date.
+          anchor_date = None
+          for line in lines:
+              m = heading.match(line)
+              if m and re.search(rf"\bmqdb-cli\s+{re.escape(tag)}\b", m.group(2)):
+                  anchor_date = m.group(1)
+                  break
+          if anchor_date is None:
+              # No matching heading — emit empty body so the release still publishes.
+              sys.exit(0)
+          # Collect every section dated anchor_date (covers parallel crate bumps).
+          out, capturing = [], False
+          for line in lines:
+              m = heading.match(line)
+              if m:
+                  capturing = (m.group(1) == anchor_date)
+                  if capturing:
+                      out.append(line)
+                  continue
+              if capturing:
+                  out.append(line)
+          # Trim trailing blank lines.
+          while out and out[-1].strip() == "":
+              out.pop()
+          print("\n".join(out))
+          PY
+          )
           {
             echo "body<<CHANGELOG_EOF"
             echo "$BODY"
