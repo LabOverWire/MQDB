@@ -429,19 +429,41 @@ impl ConstraintStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let constraints = self.constraints.read().unwrap();
-        let matching: Vec<_> = constraints
+        let iter = constraints
             .iter()
-            .filter(|(_, c)| c.partition() == partition)
-            .collect();
+            .filter(|(_, c)| c.partition() == partition);
+        Self::serialize_entries(iter)
+    }
 
+    /// Exports every constraint regardless of partition.
+    ///
+    /// Constraints are cluster-wide broadcast state — every node needs the full
+    /// catalog so cascade, RESTRICT, and unique enforcement work uniformly. Per-
+    /// partition snapshots use this so a joining node receives the complete
+    /// constraint set rather than only the constraints whose
+    /// `schema_partition(entity)` happens to land on a partition it owns.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn export_all(&self) -> Vec<u8> {
+        let constraints = self.constraints.read().unwrap();
+        Self::serialize_entries(constraints.iter())
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn serialize_entries<'a, I>(iter: I) -> Vec<u8>
+    where
+        I: Iterator<Item = (&'a String, &'a ClusterConstraint)>,
+    {
+        let entries: Vec<_> = iter.collect();
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
 
-        for (key, constraint) in matching {
+        for (key, constraint) in entries {
             let key_bytes = key.as_bytes();
             buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(key_bytes);
@@ -979,6 +1001,44 @@ mod tests {
             if let Some(c) = c {
                 assert_ne!(c.partition(), target);
             }
+        }
+    }
+
+    #[test]
+    fn export_all_carries_every_constraint_regardless_of_partition() {
+        let src = ConstraintStore::new(node(1));
+        let dst = ConstraintStore::new(node(2));
+
+        let entities = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        for entity in &entities {
+            src.add(ClusterConstraint::unique(
+                entity,
+                &format!("uniq_{entity}"),
+                "email",
+            ))
+            .unwrap();
+        }
+
+        let partitions: std::collections::HashSet<_> = src
+            .list_all()
+            .iter()
+            .map(ClusterConstraint::partition)
+            .collect();
+        assert!(
+            partitions.len() > 1,
+            "test prerequisite: constraints must span more than one partition"
+        );
+
+        let payload = src.export_all();
+        let imported = dst.import_constraints(&payload).unwrap();
+        assert_eq!(imported, entities.len());
+
+        for entity in &entities {
+            let name = format!("uniq_{entity}");
+            assert!(
+                dst.get(entity, &name).is_some(),
+                "every constraint must arrive via export_all, regardless of partition: {entity}:{name}"
+            );
         }
     }
 }
