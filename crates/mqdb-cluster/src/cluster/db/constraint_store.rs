@@ -205,6 +205,12 @@ impl std::fmt::Display for ConstraintStoreError {
 
 impl std::error::Error for ConstraintStoreError {}
 
+/// Cluster-wide constraint catalog (unique + foreign-key definitions).
+///
+/// Constraints are broadcast state: every node holds the full catalog and
+/// every partition snapshot ships all entries. There is intentionally no
+/// per-partition clearing API — a partition wipe must not drop catalog
+/// entries that every node is supposed to hold.
 pub struct ConstraintStore {
     node_id: NodeId,
     constraints: RwLock<HashMap<String, ClusterConstraint>>,
