@@ -341,15 +341,6 @@ impl SchemaStore {
 
         Ok(imported)
     }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        let mut schemas = self.schemas.write().unwrap();
-        let before = schemas.len();
-        schemas.retain(|_, s| s.partition() != partition);
-        before - schemas.len()
-    }
 }
 
 impl std::fmt::Debug for SchemaStore {
@@ -495,25 +486,6 @@ mod tests {
                     "schema {:?} from a different partition leaked into snapshot",
                     schema.entity_str()
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn clear_partition_removes_only_target() {
-        let store = SchemaStore::new(node(1));
-        store.register("alpha", b"{}").unwrap();
-        store.register("beta", b"{}").unwrap();
-        store.register("gamma", b"{}").unwrap();
-
-        let target = store.get("alpha").unwrap().partition();
-        let removed = store.clear_partition(target);
-
-        assert!(removed >= 1);
-        assert!(store.get("alpha").is_none());
-        for entity in ["beta", "gamma"] {
-            if let Some(s) = store.get(entity) {
-                assert_ne!(s.partition(), target);
             }
         }
     }

@@ -533,15 +533,6 @@ impl ConstraintStore {
 
         Ok(imported)
     }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        let mut constraints = self.constraints.write().unwrap();
-        let before = constraints.len();
-        constraints.retain(|_, c| c.partition() != partition);
-        before - constraints.len()
-    }
 }
 
 impl std::fmt::Debug for ConstraintStore {
@@ -974,32 +965,6 @@ mod tests {
                     "constraint from partition {} leaked into snapshot",
                     src_c.partition().get()
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn clear_partition_removes_only_target() {
-        let store = ConstraintStore::new(node(1));
-        let entities = ["alpha", "beta", "gamma", "delta"];
-        for entity in &entities {
-            store
-                .add(ClusterConstraint::unique(
-                    entity,
-                    &format!("uniq_{entity}"),
-                    "email",
-                ))
-                .unwrap();
-        }
-
-        let target = store.get("alpha", "uniq_alpha").unwrap().partition();
-        let removed = store.clear_partition(target);
-        assert!(removed >= 1);
-
-        for entity in &entities {
-            let c = store.get(entity, &format!("uniq_{entity}"));
-            if let Some(c) = c {
-                assert_ne!(c.partition(), target);
             }
         }
     }
