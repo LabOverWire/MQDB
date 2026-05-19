@@ -196,26 +196,6 @@ impl StoreManager {
             }
         }
     }
-
-    pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        let mut total_cleared = 0;
-        total_cleared += self.sessions.clear_partition(partition);
-        total_cleared += self.qos2.clear_partition(partition);
-        total_cleared += self.subscriptions.clear_partition(partition);
-        total_cleared += self.retained.clear_partition(partition);
-        total_cleared += self.topics.clear_partition(partition);
-        total_cleared += self.wildcards.clear_partition(partition);
-        total_cleared += self.inflight.clear_partition(partition);
-        total_cleared += self.offsets.clear_partition(partition);
-        total_cleared += self.idempotency.clear_partition(partition);
-        total_cleared += self.db_data.clear_partition(partition);
-        total_cleared += self.db_schema.clear_partition(partition);
-        total_cleared += self.db_index.clear_partition(partition);
-        total_cleared += self.db_unique.clear_partition(partition);
-        total_cleared += self.db_fk.clear_partition(partition);
-        total_cleared += self.db_constraints.clear_partition(partition);
-        total_cleared
-    }
 }
 
 #[cfg(test)]
