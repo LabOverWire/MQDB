@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-19 — mqdb-cluster 0.3.5
+
+### Removed
+
+- `StoreManager::clear_partition` (the 15-line aggregator at `partition_io.rs:206`). It had **no callers anywhere in the codebase** — production, tests, or otherwise — and aggregated per-partition wipes across stores that included the broadcast catalog (schemas, constraints). With schemas and constraints now treated as broadcast state on the export side (every partition snapshot ships the full catalog, per the 0.3.2 / 0.3.4 work), the aggregator was wrong-by-construction: a partition wipe must not drop catalog entries that every node is supposed to hold.
+- `SchemaStore::clear_partition` and its `clear_partition_removes_only_target` unit test. The method was referenced only by its own test; nothing in the migration, rebalance, or snapshot paths called it.
+- `ConstraintStore::clear_partition` and its `clear_partition_removes_only_target` unit test. Same dead-code-with-self-test status as above.
+- Per-partition `clear_partition` on `DbDataStore`, `IndexStore`, `UniqueStore`, `FkValidationStore`, and the MQTT-side stores (sessions, retained, topics, wildcards, inflight, offsets, idempotency, qos2) is intentionally preserved — those stores are genuinely partition-scoped.
+
+### Changed
+
+- Added struct-level doc comments on `SchemaStore` and `ConstraintStore` documenting the broadcast-catalog invariant: every node holds the full catalog, every partition snapshot ships all entries, and there is intentionally no per-partition clearing API. Makes the invariant explicit at the point where a future contributor would otherwise consider adding a clearing method.
+
+### Notes
+
+- Follow-up to the broadcast-catalog model established by PR #61 (the export-side counterpart). 83 deletions across `partition_io.rs`, `schema_store.rs`, and `constraint_store.rs`; 12 lines of documentation added.
+
 ## 2026-05-06 — mqdb-cli 0.7.6
 
 ### Fixed
