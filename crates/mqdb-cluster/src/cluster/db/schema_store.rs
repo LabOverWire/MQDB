@@ -240,19 +240,38 @@ impl SchemaStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let schemas = self.schemas.read().unwrap();
-        let matching: Vec<_> = schemas
-            .iter()
-            .filter(|(_, s)| s.partition() == partition)
-            .collect();
+        let iter = schemas.iter().filter(|(_, s)| s.partition() == partition);
+        Self::serialize_entries(iter)
+    }
 
+    /// Exports every schema regardless of partition.
+    ///
+    /// Schemas are cluster-wide broadcast state — every node needs the full
+    /// catalog to validate writes locally. Per-partition snapshots use this so
+    /// a joining node receives the complete schema set, not only the schemas
+    /// whose `schema_partition(entity)` happens to land on a partition it owns.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn export_all(&self) -> Vec<u8> {
+        let schemas = self.schemas.read().unwrap();
+        Self::serialize_entries(schemas.iter())
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn serialize_entries<'a, I>(iter: I) -> Vec<u8>
+    where
+        I: Iterator<Item = (&'a String, &'a ClusterSchema)>,
+    {
+        let entries: Vec<_> = iter.collect();
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
 
-        for (key, schema) in matching {
+        for (key, schema) in entries {
             let key_bytes = key.as_bytes();
             buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(key_bytes);
@@ -496,6 +515,35 @@ mod tests {
             if let Some(s) = store.get(entity) {
                 assert_ne!(s.partition(), target);
             }
+        }
+    }
+
+    #[test]
+    fn export_all_carries_every_schema_regardless_of_partition() {
+        let src = SchemaStore::new(node(1));
+        let dst = SchemaStore::new(node(2));
+
+        let entities = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        for entity in &entities {
+            src.register(entity, b"{}").unwrap();
+        }
+
+        let partitions: std::collections::HashSet<_> =
+            src.list().iter().map(ClusterSchema::partition).collect();
+        assert!(
+            partitions.len() > 1,
+            "test prerequisite: schemas must span more than one partition"
+        );
+
+        let payload = src.export_all();
+        let imported = dst.import_schemas(&payload).unwrap();
+        assert_eq!(imported, entities.len());
+
+        for entity in &entities {
+            assert!(
+                dst.get(entity).is_some(),
+                "every schema must arrive via export_all, regardless of partition: {entity}"
+            );
         }
     }
 }
