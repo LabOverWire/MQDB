@@ -48,10 +48,7 @@ impl StoreManager {
                 entity::DB_DATA,
                 self.db_data.export_for_partition(partition),
             ),
-            (
-                entity::DB_SCHEMA,
-                self.db_schema.export_for_partition(partition),
-            ),
+            (entity::DB_SCHEMA, self.db_schema.export_all()),
             (
                 entity::DB_INDEX,
                 self.db_index.export_for_partition(partition),
@@ -61,10 +58,7 @@ impl StoreManager {
                 self.db_unique.export_for_partition(partition),
             ),
             (entity::DB_FK, self.db_fk.export_for_partition(partition)),
-            (
-                entity::DB_CONSTRAINT,
-                self.db_constraints.export_for_partition(partition),
-            ),
+            (entity::DB_CONSTRAINT, self.db_constraints.export_all()),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -382,21 +376,18 @@ mod tests {
             assert_eq!(dst_has, up == target, "db_unique for {entity}");
         }
 
-        assert_eq!(
+        assert!(
             dst.db_schema.get(entity).is_some(),
-            src.db_schema.get(entity).unwrap().partition() == target,
-            "db_schema for {entity}"
+            "db_schema for {entity} must arrive via any partition snapshot \
+             — schemas are broadcast state and need to be uniform on every node"
         );
 
         let constraint_name = format!("uniq_{entity}");
-        assert_eq!(
+        assert!(
             dst.db_constraints.get(entity, &constraint_name).is_some(),
-            src.db_constraints
-                .get(entity, &constraint_name)
-                .unwrap()
-                .partition()
-                == target,
-            "db_constraints for {entity}"
+            "db_constraints {entity}:{constraint_name} must arrive via any \
+             partition snapshot — constraints are broadcast state and need to \
+             be uniform on every node"
         );
 
         let fk_id = format!("fk-{entity}");
@@ -467,6 +458,91 @@ mod tests {
             refs,
             vec!["c1".to_string()],
             "destination reverse index must hold c1 after import — without the rebuild step this would be empty",
+        );
+    }
+
+    #[test]
+    fn partition_snapshot_carries_full_schema_and_constraint_catalog() {
+        use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new(node(2));
+
+        let entities = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+        for entity in &entities {
+            src.db_schema.register(entity, b"{\"fields\":[]}").unwrap();
+            src.db_constraints
+                .add(ClusterConstraint::unique(
+                    entity,
+                    &format!("uniq_{entity}"),
+                    "email",
+                ))
+                .unwrap();
+            src.db_constraints
+                .add(ClusterConstraint::foreign_key(
+                    entity,
+                    &format!("fk_{entity}"),
+                    "parent_id",
+                    "alpha",
+                    "id",
+                    OnDeleteAction::Cascade,
+                ))
+                .unwrap();
+        }
+
+        src.db_data.create("alpha", "rec-1", b"{}", 1_000).unwrap();
+        let any_partition = src.db_data.get("alpha", "rec-1").unwrap().partition();
+
+        let schema_partitions: std::collections::HashSet<_> = src
+            .db_schema
+            .list()
+            .iter()
+            .map(crate::cluster::db::ClusterSchema::partition)
+            .collect();
+        let constraint_partitions: std::collections::HashSet<_> = src
+            .db_constraints
+            .list_all()
+            .iter()
+            .map(ClusterConstraint::partition)
+            .collect();
+        assert!(
+            schema_partitions.len() > 1,
+            "test prerequisite: schemas must span more than one partition"
+        );
+        assert!(
+            constraint_partitions.len() > 1,
+            "test prerequisite: constraints must span more than one partition"
+        );
+
+        let payload = src.export_partition(any_partition);
+        dst.import_partition(&payload).expect("import");
+
+        for entity in &entities {
+            assert!(
+                dst.db_schema.get(entity).is_some(),
+                "every schema must arrive via any partition snapshot, regardless of partition: {entity}"
+            );
+            let uniq_name = format!("uniq_{entity}");
+            assert!(
+                dst.db_constraints.get(entity, &uniq_name).is_some(),
+                "every unique constraint must arrive via any partition snapshot: {entity}:{uniq_name}"
+            );
+            let fk_name = format!("fk_{entity}");
+            assert!(
+                dst.db_constraints.get(entity, &fk_name).is_some(),
+                "every fk constraint must arrive via any partition snapshot: {entity}:{fk_name}"
+            );
+        }
+
+        assert_eq!(
+            dst.db_schema.list().len(),
+            entities.len(),
+            "destination schema catalog count must match source"
+        );
+        assert_eq!(
+            dst.db_constraints.list_all().len(),
+            entities.len() * 2,
+            "destination constraint catalog count must match source"
         );
     }
 }
