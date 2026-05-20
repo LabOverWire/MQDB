@@ -182,6 +182,12 @@ struct CrossOwnedRef {
     owner: String,
 }
 
+enum CascadeChild {
+    Skip,
+    Missing,
+    Recurse(Entity),
+}
+
 pub struct ConstraintManager {
     constraints: HashMap<String, Vec<Constraint>>,
 }
@@ -326,7 +332,7 @@ impl ConstraintManager {
                             &entity.id,
                         )?;
                         for id in referencing {
-                            if Self::is_cross_owned(
+                            match Self::classify_cascade_child(
                                 storage,
                                 &fk.source_entity,
                                 &fk.source_field,
@@ -334,24 +340,18 @@ impl ConstraintManager {
                                 ownership_ctx,
                                 cross_owned,
                             )? {
-                                continue;
-                            }
-
-                            let cascade_key = keys::encode_data_key(&fk.source_entity, &id);
-                            if let Some(cascade_data) = storage.get(&cascade_key)? {
-                                let cascade_entity = Entity::deserialize(
-                                    fk.source_entity.clone(),
-                                    id.clone(),
-                                    &cascade_data,
-                                )?;
-                                self.collect_delete_operations(
-                                    &cascade_entity,
-                                    storage,
-                                    all_operations,
-                                    visited,
-                                    cross_owned,
-                                    ownership_ctx,
-                                )?;
+                                CascadeChild::Skip => continue,
+                                CascadeChild::Missing => {}
+                                CascadeChild::Recurse(child_entity) => {
+                                    self.collect_delete_operations(
+                                        &child_entity,
+                                        storage,
+                                        all_operations,
+                                        visited,
+                                        cross_owned,
+                                        ownership_ctx,
+                                    )?;
+                                }
                             }
                             all_operations.push(DeleteOperation::Cascade(CascadeOperation {
                                 entity: fk.source_entity.clone(),
@@ -381,31 +381,30 @@ impl ConstraintManager {
         Ok(())
     }
 
-    fn is_cross_owned(
+    fn classify_cascade_child(
         storage: &Storage,
         source_entity: &str,
         source_field: &str,
         ref_id: &str,
         ownership_ctx: Option<&OwnershipContext<'_>>,
         cross_owned: &mut Vec<CrossOwnedRef>,
-    ) -> Result<bool> {
-        let Some(ctx) = ownership_ctx else {
-            return Ok(false);
-        };
-
-        if ctx.ownership.is_admin(ctx.sender) {
-            return Ok(false);
-        }
-
-        let Some(owner_field) = ctx.ownership.owner_field(source_entity) else {
-            return Ok(false);
-        };
-
+    ) -> Result<CascadeChild> {
         let key = keys::encode_data_key(source_entity, ref_id);
         let Some(data) = storage.get(&key)? else {
-            return Ok(false);
+            return Ok(CascadeChild::Missing);
         };
         let entity = Entity::deserialize(source_entity.to_string(), ref_id.to_string(), &data)?;
+
+        let Some(ctx) = ownership_ctx else {
+            return Ok(CascadeChild::Recurse(entity));
+        };
+        if ctx.ownership.is_admin(ctx.sender) {
+            return Ok(CascadeChild::Recurse(entity));
+        }
+        let Some(owner_field) = ctx.ownership.owner_field(source_entity) else {
+            return Ok(CascadeChild::Recurse(entity));
+        };
+
         let owner = entity
             .data
             .get(owner_field)
@@ -413,7 +412,7 @@ impl ConstraintManager {
             .unwrap_or("");
 
         if owner == ctx.sender {
-            return Ok(false);
+            return Ok(CascadeChild::Recurse(entity));
         }
 
         cross_owned.push(CrossOwnedRef {
@@ -422,7 +421,7 @@ impl ConstraintManager {
             field: source_field.to_string(),
             owner: owner.to_string(),
         });
-        Ok(true)
+        Ok(CascadeChild::Skip)
     }
 
     fn classify_cross_owned_danglers(
