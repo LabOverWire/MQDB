@@ -46,14 +46,14 @@ pub trait DbAccess: Send + Sync {
         &'a self,
         entity: &'a str,
         id: &'a str,
-    ) -> VaultFuture<'a, Option<serde_json::Value>>;
+    ) -> VaultFuture<'a, Result<Option<serde_json::Value>, mqdb_core::error::Error>>;
 
     fn update_entity<'a>(
         &'a self,
         entity: &'a str,
         id: &'a str,
         data: serde_json::Value,
-    ) -> VaultFuture<'a, bool>;
+    ) -> VaultFuture<'a, Result<serde_json::Value, mqdb_core::error::Error>>;
 
     fn list_entities<'a>(
         &'a self,
@@ -148,16 +148,21 @@ impl DbAccess for NoopDbAccess {
         &'a self,
         _entity: &'a str,
         _id: &'a str,
-    ) -> VaultFuture<'a, Option<serde_json::Value>> {
-        Box::pin(async { None })
+    ) -> VaultFuture<'a, Result<Option<serde_json::Value>, mqdb_core::error::Error>> {
+        Box::pin(async { Ok(None) })
     }
     fn update_entity<'a>(
         &'a self,
-        _entity: &'a str,
-        _id: &'a str,
+        entity: &'a str,
+        id: &'a str,
         _data: serde_json::Value,
-    ) -> VaultFuture<'a, bool> {
-        Box::pin(async { false })
+    ) -> VaultFuture<'a, Result<serde_json::Value, mqdb_core::error::Error>> {
+        Box::pin(async move {
+            Err(mqdb_core::error::Error::NotFound {
+                entity: entity.to_string(),
+                id: id.to_string(),
+            })
+        })
     }
     fn list_entities<'a>(
         &'a self,
