@@ -54,23 +54,7 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
-        pattern: "$DB/_admin/#",
-        tier: ProtectionTier::AdminRequired,
-    },
-    TopicRule {
         pattern: "$DB/_verify/#",
-        tier: ProtectionTier::AdminRequired,
-    },
-    TopicRule {
-        pattern: "$DB/_oauth_tokens/#",
-        tier: ProtectionTier::AdminRequired,
-    },
-    TopicRule {
-        pattern: "$DB/_identities/#",
-        tier: ProtectionTier::AdminRequired,
-    },
-    TopicRule {
-        pattern: "$DB/_identity_links/#",
         tier: ProtectionTier::AdminRequired,
     },
 ];
@@ -202,22 +186,6 @@ pub fn check_topic_access(
     Ok(())
 }
 
-#[must_use]
-pub fn is_internal_entity(entity: &str) -> bool {
-    entity.starts_with('_')
-}
-
-/// # Errors
-///
-/// Returns `Err(BlockReason::InternalEntityAccess)` if the entity is internal and user is not admin.
-pub fn check_entity_access(entity: &str, is_admin: bool) -> Result<(), BlockReason> {
-    if is_internal_entity(entity) && !is_admin {
-        Err(BlockReason::InternalEntityAccess)
-    } else {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,24 +305,24 @@ mod tests {
     }
 
     #[test]
-    fn check_access_admin_required() {
+    fn check_access_admin_topics_block_non_admin() {
         assert_eq!(
             check_topic_access("$DB/_admin/backup", true, false),
-            Err(BlockReason::AdminRequired)
+            Err(BlockReason::InternalEntityAccess)
         );
         assert_eq!(
             check_topic_access("$DB/_admin/backup", false, false),
-            Err(BlockReason::AdminRequired)
+            Err(BlockReason::InternalEntityAccess)
         );
         assert_eq!(check_topic_access("$DB/_admin/backup", true, true), Ok(()));
         assert_eq!(check_topic_access("$DB/_admin/backup", false, true), Ok(()));
     }
 
     #[test]
-    fn check_access_oauth_tokens_admin_required() {
+    fn check_access_oauth_tokens_block_non_admin() {
         assert_eq!(
             check_topic_access("$DB/_oauth_tokens/list", true, false),
-            Err(BlockReason::AdminRequired)
+            Err(BlockReason::InternalEntityAccess)
         );
         assert_eq!(
             check_topic_access("$DB/_oauth_tokens/abc123", true, true),
@@ -363,10 +331,10 @@ mod tests {
     }
 
     #[test]
-    fn check_access_identities_admin_required() {
+    fn check_access_identities_block_non_admin() {
         assert_eq!(
             check_topic_access("$DB/_identities/list", true, false),
-            Err(BlockReason::AdminRequired)
+            Err(BlockReason::InternalEntityAccess)
         );
         assert_eq!(
             check_topic_access("$DB/_identities/create", true, true),
@@ -375,10 +343,10 @@ mod tests {
     }
 
     #[test]
-    fn check_access_identity_links_admin_required() {
+    fn check_access_identity_links_block_non_admin() {
         assert_eq!(
             check_topic_access("$DB/_identity_links/list", true, false),
-            Err(BlockReason::AdminRequired)
+            Err(BlockReason::InternalEntityAccess)
         );
         assert_eq!(
             check_topic_access("$DB/_identity_links/google:123", true, true),
@@ -418,35 +386,6 @@ mod tests {
             check_topic_access("app/notifications", false, false),
             Ok(())
         );
-    }
-
-    #[test]
-    fn check_entity_access_internal_blocked() {
-        assert_eq!(
-            check_entity_access("_sessions", false),
-            Err(BlockReason::InternalEntityAccess)
-        );
-        assert_eq!(
-            check_entity_access("_mqtt_subs", false),
-            Err(BlockReason::InternalEntityAccess)
-        );
-        assert_eq!(
-            check_entity_access("_topic_index", false),
-            Err(BlockReason::InternalEntityAccess)
-        );
-    }
-
-    #[test]
-    fn check_entity_access_admin_allowed() {
-        assert_eq!(check_entity_access("_sessions", true), Ok(()));
-        assert_eq!(check_entity_access("_mqtt_subs", true), Ok(()));
-    }
-
-    #[test]
-    fn check_entity_access_regular_allowed() {
-        assert_eq!(check_entity_access("users", false), Ok(()));
-        assert_eq!(check_entity_access("posts", false), Ok(()));
-        assert_eq!(check_entity_access("orders", true), Ok(()));
     }
 
     #[test]
