@@ -21,7 +21,7 @@ use mqdb_core::transport::{Request, Response, VaultConstraintData};
 use mqdb_core::types::{OwnershipConfig, OwnershipDecision};
 use serde_json::{Value, json};
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 pub struct VaultBackendImpl {
     key_store: Arc<VaultKeyStore>,
@@ -271,8 +271,15 @@ impl VaultBackend for VaultBackendImpl {
             }
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
-                return Err(VaultError::NotFound("identity not found".into()));
+            let identity = match db.read_entity("_identities", canonical_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(VaultError::NotFound("identity not found".into())),
+                Err(e) => {
+                    warn!("admin_enable: failed to read identity {canonical_id}: {e}");
+                    return Err(VaultError::Internal(format!(
+                        "failed to read identity: {e}"
+                    )));
+                }
             };
             if identity
                 .get("vault_enabled")
@@ -300,8 +307,15 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "pending",
                 "vault_migration_mode": "encrypt",
             });
-            db.update_entity("_identities", canonical_id, migration_start)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, migration_start)
+                .await
+            {
+                warn!("admin_enable: failed to mark identity {canonical_id} migration_start: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to update identity: {e}"
+                )));
+            }
 
             let batch = ops::batch_vault_operation(
                 db,
@@ -313,8 +327,15 @@ impl VaultBackend for VaultBackendImpl {
             .await;
 
             let migration_done = json!({"vault_migration_status": "complete"});
-            db.update_entity("_identities", canonical_id, migration_done)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, migration_done)
+                .await
+            {
+                warn!("admin_enable: failed to mark identity {canonical_id} migration_done: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to finalize identity: {e}"
+                )));
+            }
 
             let mut body = json!({"status": "enabled", "records_encrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -338,8 +359,15 @@ impl VaultBackend for VaultBackendImpl {
         Box::pin(async move {
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
-                return Err(VaultError::NotFound("identity not found".into()));
+            let identity = match db.read_entity("_identities", canonical_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(VaultError::NotFound("identity not found".into())),
+                Err(e) => {
+                    warn!("admin_unlock: failed to read identity {canonical_id}: {e}");
+                    return Err(VaultError::Internal(format!(
+                        "failed to read identity: {e}"
+                    )));
+                }
             };
             if !identity
                 .get("vault_enabled")
@@ -421,8 +449,15 @@ impl VaultBackend for VaultBackendImpl {
         Box::pin(async move {
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
-                return Err(VaultError::NotFound("identity not found".into()));
+            let identity = match db.read_entity("_identities", canonical_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(VaultError::NotFound("identity not found".into())),
+                Err(e) => {
+                    warn!("admin_disable: failed to read identity {canonical_id}: {e}");
+                    return Err(VaultError::Internal(format!(
+                        "failed to read identity: {e}"
+                    )));
+                }
             };
             if !identity
                 .get("vault_enabled")
@@ -454,8 +489,15 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "pending",
                 "vault_migration_mode": "decrypt",
             });
-            db.update_entity("_identities", canonical_id, migration_start)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, migration_start)
+                .await
+            {
+                warn!("admin_disable: failed to mark identity {canonical_id} migration_start: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to update identity: {e}"
+                )));
+            }
 
             let batch = ops::batch_vault_operation(
                 db,
@@ -473,8 +515,15 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_migration_status": "complete",
                 "vault_migration_mode": null,
             });
-            db.update_entity("_identities", canonical_id, identity_update)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, identity_update)
+                .await
+            {
+                warn!("admin_disable: failed to finalize identity {canonical_id}: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to finalize identity: {e}"
+                )));
+            }
 
             let mut body = json!({"status": "disabled", "records_decrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -502,8 +551,15 @@ impl VaultBackend for VaultBackendImpl {
             }
             self.check_rate_limit(canonical_id)?;
 
-            let Some(identity) = db.read_entity("_identities", canonical_id).await else {
-                return Err(VaultError::NotFound("identity not found".into()));
+            let identity = match db.read_entity("_identities", canonical_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Err(VaultError::NotFound("identity not found".into())),
+                Err(e) => {
+                    warn!("admin_change: failed to read identity {canonical_id}: {e}");
+                    return Err(VaultError::Internal(format!(
+                        "failed to read identity: {e}"
+                    )));
+                }
             };
             if !identity
                 .get("vault_enabled")
@@ -549,8 +605,15 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_old_check": check_token,
                 "vault_old_salt": old_salt_b64_encoded,
             });
-            db.update_entity("_identities", canonical_id, migration_start)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, migration_start)
+                .await
+            {
+                warn!("admin_change: failed to mark identity {canonical_id} migration_start: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to update identity: {e}"
+                )));
+            }
 
             let batch =
                 ops::batch_vault_re_encrypt(db, ownership, canonical_id, &old_crypto, &new_crypto)
@@ -562,8 +625,15 @@ impl VaultBackend for VaultBackendImpl {
                 "vault_old_check": null,
                 "vault_old_salt": null,
             });
-            db.update_entity("_identities", canonical_id, migration_done)
-                .await;
+            if let Err(e) = db
+                .update_entity("_identities", canonical_id, migration_done)
+                .await
+            {
+                warn!("admin_change: failed to finalize identity {canonical_id}: {e}");
+                return Err(VaultError::Internal(format!(
+                    "failed to finalize identity: {e}"
+                )));
+            }
 
             let mut body = json!({"status": "changed", "records_re_encrypted": batch.succeeded});
             if batch.failed > 0 || !batch.entities_skipped.is_empty() {
@@ -583,7 +653,15 @@ impl VaultBackend for VaultBackendImpl {
         canonical_id: &'a str,
     ) -> VaultFuture<'a, VaultResult<VaultAdminOutcome>> {
         Box::pin(async move {
-            let identity = db.read_entity("_identities", canonical_id).await;
+            let identity = match db.read_entity("_identities", canonical_id).await {
+                Ok(opt) => opt,
+                Err(e) => {
+                    warn!("admin_status: failed to read identity {canonical_id}: {e}");
+                    return Err(VaultError::Internal(format!(
+                        "failed to read identity: {e}"
+                    )));
+                }
+            };
             let vault_enabled = identity
                 .as_ref()
                 .and_then(|i| i.get("vault_enabled"))

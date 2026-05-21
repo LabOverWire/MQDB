@@ -55,9 +55,13 @@ pub async fn batch_vault_operation(
     };
     for (entity, owner_field) in &ownership.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = db.list_entities(entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
+        let records = match db.list_entities(entity, &filter).await {
+            Ok(records) => records,
+            Err(e) => {
+                warn!("vault migration: failed to list {entity} for {canonical_id}: {e}");
+                result.entities_skipped.push(entity.clone());
+                continue;
+            }
         };
         for record in records {
             let Some(id) = record.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -69,10 +73,12 @@ pub async fn batch_vault_operation(
                 VaultMode::Encrypt => crypto.encrypt_record(entity, &id, &mut data, &skip),
                 VaultMode::Decrypt => crypto.decrypt_record(entity, &id, &mut data, &skip),
             }
-            if db.update_entity(entity, &id, data).await {
-                result.succeeded += 1;
-            } else {
-                result.failed += 1;
+            match db.update_entity(entity, &id, data).await {
+                Ok(_) => result.succeeded += 1,
+                Err(e) => {
+                    warn!("vault migration update failed for {entity}/{id}: {e}");
+                    result.failed += 1;
+                }
             }
         }
     }
@@ -93,9 +99,13 @@ pub async fn batch_vault_re_encrypt(
     };
     for (entity, owner_field) in &ownership.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = db.list_entities(entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
+        let records = match db.list_entities(entity, &filter).await {
+            Ok(records) => records,
+            Err(e) => {
+                warn!("vault re-encrypt: failed to list {entity} for {canonical_id}: {e}");
+                result.entities_skipped.push(entity.clone());
+                continue;
+            }
         };
         for record in records {
             let Some(id) = record.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -105,10 +115,12 @@ pub async fn batch_vault_re_encrypt(
             let skip: Vec<&str> = vec![owner_field.as_str()];
             old_crypto.decrypt_record(entity, &id, &mut data, &skip);
             new_crypto.encrypt_record(entity, &id, &mut data, &skip);
-            if db.update_entity(entity, &id, data).await {
-                result.succeeded += 1;
-            } else {
-                result.failed += 1;
+            match db.update_entity(entity, &id, data).await {
+                Ok(_) => result.succeeded += 1,
+                Err(e) => {
+                    warn!("vault migration update failed for {entity}/{id}: {e}");
+                    result.failed += 1;
+                }
             }
         }
     }
@@ -162,8 +174,12 @@ pub async fn resume_pending_migration(
         "vault_old_check": null,
         "vault_old_salt": null,
     });
-    db.update_entity("_identities", canonical_id, migration_done)
-        .await;
+    if let Err(e) = db
+        .update_entity("_identities", canonical_id, migration_done)
+        .await
+    {
+        warn!("vault migration: failed to mark identity {canonical_id} migration_done: {e}");
+    }
 
     if mode == "decrypt" {
         let disable_vault = json!({
@@ -171,8 +187,12 @@ pub async fn resume_pending_migration(
             "vault_salt": null,
             "vault_check": null,
         });
-        db.update_entity("_identities", canonical_id, disable_vault)
-            .await;
+        if let Err(e) = db
+            .update_entity("_identities", canonical_id, disable_vault)
+            .await
+        {
+            warn!("vault migration: failed to disable vault on identity {canonical_id}: {e}");
+        }
         vault_key_store.remove(canonical_id);
     }
 
