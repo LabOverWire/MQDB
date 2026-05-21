@@ -1269,32 +1269,37 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         email,
     );
 
-    if let Some(challenges) = crate::db_helpers::list_entities_db(
+    match crate::db_helpers::list_entities_db(
         ctx.db,
         "_verification_challenges",
         &format!("target_hash={target_hash}"),
     )
     .await
     {
-        for challenge in challenges {
-            let status = challenge
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if status != "pending" && status != "delivered" {
-                continue;
+        Ok(challenges) => {
+            for challenge in challenges {
+                let status = challenge
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if status != "pending" && status != "delivered" {
+                    continue;
+                }
+                if let Some(id) = challenge.get("id").and_then(|v| v.as_str())
+                    && let Err(e) = crate::db_helpers::update_entity_db(
+                        ctx.db,
+                        "_verification_challenges",
+                        id,
+                        &json!({"status": "expired"}),
+                    )
+                    .await
+                {
+                    warn!("password reset start: failed to expire stale challenge {id}: {e}");
+                }
             }
-            if let Some(id) = challenge.get("id").and_then(|v| v.as_str())
-                && let Err(e) = crate::db_helpers::update_entity_db(
-                    ctx.db,
-                    "_verification_challenges",
-                    id,
-                    &json!({"status": "expired"}),
-                )
-                .await
-            {
-                warn!("password reset start: failed to expire stale challenge {id}: {e}");
-            }
+        }
+        Err(e) => {
+            warn!("password reset start: failed to list existing challenges: {e}");
         }
     }
 
@@ -1321,9 +1326,11 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         "expires_at": expires_at.to_string(),
     });
 
-    if !crate::db_helpers::create_entity_db(ctx.db, "_verification_challenges", &challenge_data)
-        .await
+    if let Err(e) =
+        crate::db_helpers::create_entity_db(ctx.db, "_verification_challenges", &challenge_data)
+            .await
     {
+        error!("password reset start: failed to create reset challenge for {canonical_id}: {e}");
         return Response::error(
             mqdb_core::ErrorCode::Internal,
             "failed to create reset challenge",
@@ -1552,7 +1559,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
             error!("password reset submit: failed to update credentials for {canonical_id}: {e}");
             return Response::error(mqdb_core::ErrorCode::Internal, "failed to update password");
         }
-    } else if !crate::db_helpers::create_entity_db(
+    } else if let Err(e) = crate::db_helpers::create_entity_db(
         ctx.db,
         "_credentials",
         &json!({
@@ -1563,7 +1570,7 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     )
     .await
     {
-        error!("password reset submit: failed to create credentials for {canonical_id}");
+        error!("password reset submit: failed to create credentials for {canonical_id}: {e}");
         return Response::error(
             mqdb_core::ErrorCode::Internal,
             "failed to create credentials",

@@ -12,11 +12,12 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-pub async fn create_entity_db(db: &Database, entity: &str, data: &Value) -> bool {
+/// # Errors
+/// Returns any storage, validation, or constraint error from the underlying create.
+pub async fn create_entity_db(db: &Database, entity: &str, data: &Value) -> Result<Value, Error> {
     let scope = ScopeConfig::default();
     db.create(entity.to_string(), data.clone(), None, None, None, &scope)
         .await
-        .is_ok()
 }
 
 /// # Errors
@@ -56,7 +57,13 @@ pub async fn update_entity_db(
     .await
 }
 
-pub async fn list_entities_db(db: &Database, entity: &str, filter: &str) -> Option<Vec<Value>> {
+/// # Errors
+/// Returns any storage error from the underlying list. An empty result is `Ok(vec![])`, not an error.
+pub async fn list_entities_db(
+    db: &Database,
+    entity: &str,
+    filter: &str,
+) -> Result<Vec<Value>, Error> {
     let filters = if let Some((field, value)) = filter.split_once('=') {
         vec![Filter::new(
             field.to_string(),
@@ -68,7 +75,6 @@ pub async fn list_entities_db(db: &Database, entity: &str, filter: &str) -> Opti
     };
     db.list(entity.to_string(), filters, vec![], None, vec![], None)
         .await
-        .ok()
 }
 
 fn resp_topic() -> String {
@@ -125,17 +131,39 @@ async fn mqtt_rr(
     result.ok()?.ok()
 }
 
-pub async fn create_entity_mqtt(client: &MqttClient, entity: &str, data: &Value) -> bool {
+/// # Errors
+/// Returns `Error::Internal` when the MQTT round-trip fails or the broker returns a non-ok status.
+pub async fn create_entity_mqtt(
+    client: &MqttClient,
+    entity: &str,
+    data: &Value,
+) -> Result<Value, Error> {
     let topic = format!("$DB/{entity}/create");
     let payload = serde_json::to_vec(data).unwrap_or_default();
     let Some(resp) = mqtt_rr(client, &topic, payload, std::time::Duration::from_secs(5)).await
     else {
-        return false;
+        return Err(Error::Internal(format!(
+            "mqtt create failed: no response for {entity}"
+        )));
     };
-    serde_json::from_slice::<Value>(&resp)
-        .ok()
-        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(|s| s == "ok"))
-        .unwrap_or(false)
+    let response: Value = serde_json::from_slice(&resp)
+        .map_err(|e| Error::Internal(format!("mqtt create response decode failed: {e}")))?;
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status == "ok" {
+        Ok(response.get("data").cloned().unwrap_or(Value::Null))
+    } else {
+        let message = response
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("mqtt create returned non-ok status");
+        Err(Error::Internal(format!(
+            "mqtt create failed for {entity}: {message}"
+        )))
+    }
 }
 
 /// # Errors
@@ -229,11 +257,13 @@ pub async fn update_entity_mqtt(
     }
 }
 
+/// # Errors
+/// Returns `Error::Internal` when the MQTT round-trip fails, the response is undecodable, or the broker returns a non-ok status.
 pub async fn list_entities_mqtt(
     client: &MqttClient,
     entity: &str,
     filter: &str,
-) -> Option<Vec<Value>> {
+) -> Result<Vec<Value>, Error> {
     let topic = format!("$DB/{entity}/list");
     let list_payload = if let Some((field, value)) = filter.split_once('=') {
         serde_json::to_vec(&json!({
@@ -243,15 +273,40 @@ pub async fn list_entities_mqtt(
     } else {
         vec![]
     };
-    let payload = mqtt_rr(
+    let Some(payload) = mqtt_rr(
         client,
         &topic,
         list_payload,
         std::time::Duration::from_secs(10),
     )
-    .await?;
-    let response: Value = serde_json::from_slice(&payload).ok()?;
-    response.get("data").and_then(|v| v.as_array()).cloned()
+    .await
+    else {
+        return Err(Error::Internal(format!(
+            "mqtt list failed: no response for {entity}"
+        )));
+    };
+    let response: Value = serde_json::from_slice(&payload)
+        .map_err(|e| Error::Internal(format!("mqtt list response decode failed: {e}")))?;
+    let status = response
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if status == "ok" {
+        Ok(response
+            .get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    } else {
+        let message = response
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("mqtt list returned non-ok status");
+        Err(Error::Internal(format!(
+            "mqtt list failed for {entity}: {message}"
+        )))
+    }
 }
 
 impl DbAccess for Database {
@@ -274,10 +329,14 @@ impl DbAccess for Database {
         &'a self,
         entity: &'a str,
         filter: &'a str,
-    ) -> VaultFuture<'a, Option<Vec<Value>>> {
+    ) -> VaultFuture<'a, Result<Vec<Value>, Error>> {
         Box::pin(list_entities_db(self, entity, filter))
     }
-    fn create_entity<'a>(&'a self, entity: &'a str, data: Value) -> VaultFuture<'a, bool> {
+    fn create_entity<'a>(
+        &'a self,
+        entity: &'a str,
+        data: Value,
+    ) -> VaultFuture<'a, Result<Value, Error>> {
         Box::pin(async move { create_entity_db(self, entity, &data).await })
     }
 }
@@ -313,10 +372,14 @@ impl DbAccess for MqttDbAccess {
         &'a self,
         entity: &'a str,
         filter: &'a str,
-    ) -> VaultFuture<'a, Option<Vec<Value>>> {
+    ) -> VaultFuture<'a, Result<Vec<Value>, Error>> {
         Box::pin(async move { list_entities_mqtt(&self.client, entity, filter).await })
     }
-    fn create_entity<'a>(&'a self, entity: &'a str, data: Value) -> VaultFuture<'a, bool> {
+    fn create_entity<'a>(
+        &'a self,
+        entity: &'a str,
+        data: Value,
+    ) -> VaultFuture<'a, Result<Value, Error>> {
         Box::pin(async move { create_entity_mqtt(&self.client, entity, &data).await })
     }
 }

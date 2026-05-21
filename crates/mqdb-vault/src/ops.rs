@@ -55,9 +55,13 @@ pub async fn batch_vault_operation(
     };
     for (entity, owner_field) in &ownership.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = db.list_entities(entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
+        let records = match db.list_entities(entity, &filter).await {
+            Ok(records) => records,
+            Err(e) => {
+                warn!("vault migration: failed to list {entity} for {canonical_id}: {e}");
+                result.entities_skipped.push(entity.clone());
+                continue;
+            }
         };
         for record in records {
             let Some(id) = record.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -95,9 +99,13 @@ pub async fn batch_vault_re_encrypt(
     };
     for (entity, owner_field) in &ownership.entity_owner_fields {
         let filter = format!("{owner_field}={canonical_id}");
-        let Some(records) = db.list_entities(entity, &filter).await else {
-            result.entities_skipped.push(entity.clone());
-            continue;
+        let records = match db.list_entities(entity, &filter).await {
+            Ok(records) => records,
+            Err(e) => {
+                warn!("vault re-encrypt: failed to list {entity} for {canonical_id}: {e}");
+                result.entities_skipped.push(entity.clone());
+                continue;
+            }
         };
         for record in records {
             let Some(id) = record.get("id").and_then(|v| v.as_str()).map(String::from) else {
