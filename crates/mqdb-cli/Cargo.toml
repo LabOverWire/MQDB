@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-cli"
-version = "0.7.6"
+version = "0.7.7"
 publish = false
 edition.workspace = true
 license = "AGPL-3.0-only"
@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 mqdb-core = { path = "../mqdb-core", features = ["fjall-backend"] }
-mqdb-agent = { path = "../mqdb-agent" }
+mqdb-agent = { path = "../mqdb-agent", default-features = false }
 mqdb-cluster = { path = "../mqdb-cluster", optional = true }
 
 serde.workspace = true
@@ -39,7 +39,7 @@ mqdb-vault = { version = "0.1.0", path = "../mqdb-vault" }
 [features]
 default = ["cluster", "http-api"]
 cluster = ["dep:mqdb-cluster", "dep:rustls"]
-http-api = ["mqdb-agent/http-api"]
+http-api = ["mqdb-agent/http-api", "mqdb-cluster?/http-api"]
 dev-insecure = ["mqdb-agent/dev-insecure", "mqdb-cluster?/dev-insecure"]
 opentelemetry = ["mqdb-agent/opentelemetry"]
 

@@ -755,7 +755,7 @@ cargo build --release --bin mqdb --no-default-features
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `cluster` | yes | Enables `mqdb cluster *` commands and the distributed runtime. |
-| `http-api` | yes | Enables the HTTP server used for OAuth, email/password auth, and the vault HTTP API. Without it, the `--http-bind` flag has no effect. |
+| `http-api` | yes | Enables the HTTP server used for OAuth, email/password auth, and the vault HTTP API. Without it, the HTTP server is not compiled in; `--http-bind` logs a warning and is ignored. |
 | `opentelemetry` | no | Enables OTLP trace export (see [Observability](#observability)). |
 | `dev-insecure` | no | Test-only shortcuts (anonymous mode, dev-login bypass). Never enable in production. |
 

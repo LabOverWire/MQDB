@@ -10,7 +10,7 @@ description = "Vault transparent encryption for MQDB (AGPL, Pro/Enterprise featu
 
 [dependencies]
 base64.workspace = true
-mqdb-agent = { version = "0.8.0", path = "../mqdb-agent" }
+mqdb-agent = { version = "0.8.0", path = "../mqdb-agent", default-features = false }
 mqdb-core = { version = "0.7.0", path = "../mqdb-core" }
 mqtt5.workspace = true
 ring.workspace = true

@@ -118,6 +118,7 @@ pub struct ClusterConfig {
     pub quic: QuicConfig,
     pub bridge_out_only: bool,
     pub ws_bind_address: Option<SocketAddr>,
+    #[cfg(feature = "http-api")]
     pub http_config: Option<mqdb_agent::http::HttpServerConfig>,
     pub ownership: mqdb_core::types::OwnershipConfig,
     pub scope_config: mqdb_core::types::ScopeConfig,
@@ -158,6 +159,7 @@ pub struct ClusteredAgent {
     rx_main_queue: Option<flume::Receiver<InboundMessage>>,
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
     ws_bind_address: Option<SocketAddr>,
+    #[cfg(feature = "http-api")]
     http_config: Option<mqdb_agent::http::HttpServerConfig>,
     ownership: Arc<mqdb_core::types::OwnershipConfig>,
     scope_config: Arc<mqdb_core::types::ScopeConfig>,

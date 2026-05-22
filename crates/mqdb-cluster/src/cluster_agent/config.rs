@@ -33,6 +33,7 @@ impl ClusterConfig {
             },
             bridge_out_only: false,
             ws_bind_address: None,
+            #[cfg(feature = "http-api")]
             http_config: None,
             ownership: mqdb_core::types::OwnershipConfig::default(),
             scope_config: mqdb_core::types::ScopeConfig::default(),
@@ -180,6 +181,7 @@ impl ClusterConfig {
         self
     }
 
+    #[cfg(feature = "http-api")]
     #[must_use]
     pub fn with_http_config(mut self, config: mqdb_agent::http::HttpServerConfig) -> Self {
         self.http_config = Some(config);

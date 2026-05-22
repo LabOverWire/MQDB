@@ -129,6 +129,7 @@ impl ClusteredAgent {
 
     /// # Errors
     /// If node initialization fails: invalid node ID, storage backend, or Raft setup.
+    #[allow(clippy::too_many_lines)]
     pub fn new(config: ClusterConfig) -> Result<Self, ClusterInitError> {
         let node_id = NodeId::validated(config.node_id)
             .ok_or(ClusterInitError::InvalidNodeId(config.node_id))?;
@@ -231,6 +232,7 @@ impl ClusteredAgent {
             rx_main_queue: Some(rx_main_queue),
             rx_batch: Some(rx_batch),
             ws_bind_address: config.ws_bind_address,
+            #[cfg(feature = "http-api")]
             http_config: config.http_config,
             ownership: ownership_arc,
             scope_config: Arc::new(config.scope_config),
@@ -303,6 +305,7 @@ impl ClusteredAgent {
         Ok(())
     }
 
+    #[cfg(feature = "http-api")]
     pub(super) fn spawn_http_task(
         &mut self,
         service_username: Option<&String>,

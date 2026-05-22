@@ -97,7 +97,7 @@ args = ["install", "--path", "crates/mqdb-cli"]
 
 [tasks.clippy]
 description = "Lint all crates with pedantic warnings"
-dependencies = ["clippy-native", "clippy-wasm"]
+dependencies = ["clippy-native", "clippy-no-default", "clippy-wasm"]
 
 [tasks.clippy-native]
 description = "Lint native crate"
@@ -108,6 +108,18 @@ args = [
     "--all-features",
     "--",
     "-W", "clippy::pedantic",
+]
+
+[tasks.clippy-no-default]
+description = "Lint workspace with no default features (catches feature-gating regressions)"
+command = "cargo"
+args = [
+    "clippy",
+    "--workspace",
+    "--no-default-features",
+    "--all-targets",
+    "--",
+    "-D", "warnings",
 ]
 
 [tasks.clippy-wasm]

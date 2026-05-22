@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, oneshot, watch};
 use tracing::info;
 
 #[cfg(feature = "http-api")]
-use crate::http::rate_limiter::RateLimiter;
+use crate::rate_limiter::RateLimiter;
 
 pub use mqdb_core::protocol::{
     AdminOperation, DbOperation, build_request, parse_admin_topic, parse_db_topic,
