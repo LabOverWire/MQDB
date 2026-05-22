@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-22 — mqdb-agent 0.8.1
+
+### Fixed
+
+- `http-api` feature flag was effectively a lie: declared in `Cargo.toml` with `default = ["http-api"]`, but three pieces of `MqdbAgent` referenced `crate::http::*` unconditionally — the `http_config` field, the `with_http_config` builder, and the two call sites of `spawn_http_task` in `run` / `start`. `cargo check -p mqdb-agent --no-default-features` failed with five compile errors (`E0433` on the missing `crate::http`, `E0609` on the gated `identity_crypto` field, and an `E0282` inference failure cascading from those). Gated all three behind `#[cfg(feature = "http-api")]` so the flag now actually opts the HTTP server in or out. Default-feature consumers see no change.
+
+### Docs
+
+- Corrected stale feature-flag names in user-facing docs. `README.md`, `docs/distributed-design.md`, and `docs/testing/01-setup.md` all referenced `--features agent-only` and a `native` feature flag, neither of which exist in any `Cargo.toml`. The actual `mqdb` CLI features are `cluster` (default), `http-api` (default), `opentelemetry`, and `dev-insecure`; agent-only builds use `--no-default-features` (optionally adding `--features http-api`). Added a feature-flag reference table in `README.md` under "CLI Tool → Installation" documenting all four flags and their defaults — the `http-api` flag was previously undocumented anywhere outside its `Cargo.toml` declaration.
+
 ## 2026-05-19 — mqdb-cluster 0.3.5
 
 ### Removed

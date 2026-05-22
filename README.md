@@ -627,7 +627,7 @@ Any OTLP-compatible collector works: Jaeger, Grafana Tempo, Datadog, Honeycomb, 
 
 ## Distributed Clustering (Native Edition)
 
-> Clustering requires the `native` feature (commercial license). Agent-only builds (`--features agent-only`) do not include cluster code.
+> Clustering requires the `cluster` feature on the `mqdb` CLI (enabled by default). To build without cluster code, use `--no-default-features` (and add `--features http-api` to keep the HTTP server).
 
 MQDB supports distributed clustering with automatic failover and partition rebalancing. The cluster distributes data across 256 fixed partitions with a configurable replication factor (RF=2 by default). Raft consensus manages cluster topology and partition ownership. All inter-node communication flows over QUIC streams with mTLS mutual authentication.
 
@@ -740,12 +740,24 @@ The `mqdb` CLI provides command-line access to a running MQDB agent.
 ### Installation
 
 ```bash
-# Agent-only (open-source edition)
-cargo build --release --bin mqdb --features agent-only
-
-# Full build with clustering (commercial edition, default)
+# Full build with clustering and HTTP API (default)
 cargo build --release --bin mqdb
+
+# Agent-only with HTTP API (no cluster code)
+cargo build --release --bin mqdb --no-default-features --features http-api
+
+# Minimal agent (no cluster, no HTTP server)
+cargo build --release --bin mqdb --no-default-features
 ```
+
+**CLI feature flags** (defined in `crates/mqdb-cli/Cargo.toml`):
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `cluster` | yes | Enables `mqdb cluster *` commands and the distributed runtime. |
+| `http-api` | yes | Enables the HTTP server used for OAuth, email/password auth, and the vault HTTP API. Without it, the `--http-bind` flag has no effect. |
+| `opentelemetry` | no | Enables OTLP trace export (see [Observability](#observability)). |
+| `dev-insecure` | no | Test-only shortcuts (anonymous mode, dev-login bypass). Never enable in production. |
 
 ### Environment Variables
 
@@ -994,11 +1006,11 @@ Via MQTT, include `"projection"` in the request payload:
 ## Testing
 
 ```bash
-# Run all tests (default features = native)
+# Run all tests (default features: cluster + http-api)
 cargo test
 
 # Run agent-only tests (no cluster tests)
-cargo test --features agent-only
+cargo test --no-default-features --features http-api
 
 cargo test --test integration_test
 ```

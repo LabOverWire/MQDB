@@ -34,6 +34,7 @@ pub struct MqdbAgent {
     pub(super) quic_cert_file: Option<PathBuf>,
     pub(super) quic_key_file: Option<PathBuf>,
     pub(super) ws_bind_address: Option<SocketAddr>,
+    #[cfg(feature = "http-api")]
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
@@ -65,6 +66,7 @@ impl MqdbAgent {
             quic_cert_file: None,
             quic_key_file: None,
             ws_bind_address: None,
+            #[cfg(feature = "http-api")]
             http_config: std::sync::Mutex::new(None),
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
@@ -218,6 +220,7 @@ impl MqdbAgent {
         Arc::clone(&self.vault_backend)
     }
 
+    #[cfg(feature = "http-api")]
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
@@ -264,11 +267,20 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
         );
-        let http_task = self.spawn_http_task(
-            bind_addr,
-            service_username.as_ref(),
-            service_password.as_ref(),
-        );
+        let http_task: Option<tokio::task::JoinHandle<()>> = {
+            #[cfg(feature = "http-api")]
+            {
+                self.spawn_http_task(
+                    bind_addr,
+                    service_username.as_ref(),
+                    service_password.as_ref(),
+                )
+            }
+            #[cfg(not(feature = "http-api"))]
+            {
+                None
+            }
+        };
         let license_task = self.spawn_license_check_task();
 
         broker.run().await?;
@@ -339,11 +351,20 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
         );
-        let http_task = self.spawn_http_task(
-            bind_addr,
-            service_username.as_ref(),
-            service_password.as_ref(),
-        );
+        let http_task: Option<tokio::task::JoinHandle<()>> = {
+            #[cfg(feature = "http-api")]
+            {
+                self.spawn_http_task(
+                    bind_addr,
+                    service_username.as_ref(),
+                    service_password.as_ref(),
+                )
+            }
+            #[cfg(not(feature = "http-api"))]
+            {
+                None
+            }
+        };
         let license_task = self.spawn_license_check_task();
 
         tokio::spawn(async move {
