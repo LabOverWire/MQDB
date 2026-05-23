@@ -2308,7 +2308,53 @@ fn revoke_jwt_jtis(state: &ServerState, jwts: &[String]) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+async fn verify_stored_password(
+    state: &ServerState,
+    canonical_id: &str,
+    current_password: &str,
+    cors: Option<&str>,
+) -> Result<(), HttpResponse> {
+    let identity = read_entity(&state.mqtt_client, "_identities", canonical_id).await;
+    let email_verified = identity
+        .as_ref()
+        .and_then(|i| i.get("email_verified"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !email_verified {
+        return Err(json_response_with_credentials(
+            403,
+            &json!({"error": "email must be verified before changing password"}),
+            cors,
+        ));
+    }
+
+    let Some(cred) = read_entity(&state.mqtt_client, "_credentials", canonical_id).await else {
+        return Err(json_response_with_credentials(
+            404,
+            &json!({"error": "no credentials found (OAuth-only account)"}),
+            cors,
+        ));
+    };
+
+    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
+        return Err(json_response_with_credentials(
+            500,
+            &json!({"error": "credential record is corrupt"}),
+            cors,
+        ));
+    };
+
+    if !credentials::verify_password(stored_hash, current_password) {
+        return Err(json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect current password"}),
+            cors,
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn handle_password_change(
     state: &ServerState,
     headers: &HeaderMap,
@@ -2366,42 +2412,8 @@ pub async fn handle_password_change(
         );
     }
 
-    let identity = read_entity(&state.mqtt_client, "_identities", &canonical_id).await;
-    let email_verified = identity
-        .as_ref()
-        .and_then(|i| i.get("email_verified"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    if !email_verified {
-        return json_response_with_credentials(
-            403,
-            &json!({"error": "email must be verified before changing password"}),
-            cors,
-        );
-    }
-
-    let Some(cred) = read_entity(&state.mqtt_client, "_credentials", &canonical_id).await else {
-        return json_response_with_credentials(
-            404,
-            &json!({"error": "no credentials found (OAuth-only account)"}),
-            cors,
-        );
-    };
-
-    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
-        return json_response_with_credentials(
-            500,
-            &json!({"error": "credential record is corrupt"}),
-            cors,
-        );
-    };
-
-    if !credentials::verify_password(stored_hash, current_password) {
-        return json_response_with_credentials(
-            401,
-            &json!({"error": "incorrect current password"}),
-            cors,
-        );
+    if let Err(resp) = verify_stored_password(state, &canonical_id, current_password, cors).await {
+        return resp;
     }
 
     let new_hash = match credentials::hash_password(new_password) {
