@@ -2298,6 +2298,17 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
     )
 }
 
+fn revoke_jwt_jtis(state: &ServerState, jwts: &[String]) {
+    for jwt in jwts {
+        if let Some(payload) = verify_jwt_ignore_expiry(jwt, &state.jwt_config)
+            && let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
+        {
+            state.jti_revocation.revoke(jti);
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 pub async fn handle_password_change(
     state: &ServerState,
     headers: &HeaderMap,
@@ -2309,12 +2320,13 @@ pub async fn handle_password_change(
         return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
-    let (_, session) = match require_session(state, headers) {
+    let (current_session_id, session) = match require_session(state, headers) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
 
     let canonical_id = session.canonical_id.clone();
+    let current_session_id = current_session_id.to_string();
 
     let body_value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -2414,6 +2426,11 @@ pub async fn handle_password_change(
             cors,
         );
     }
+
+    let revoked_jwts = state
+        .session_store
+        .destroy_others_by_canonical_id(&canonical_id, Some(&current_session_id));
+    revoke_jwt_jtis(state, &revoked_jwts);
 
     json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
 }
@@ -2762,6 +2779,11 @@ pub async fn handle_password_reset_submit(
         &json!({"email_verified": true}),
     )
     .await;
+
+    let revoked_jwts = state
+        .session_store
+        .destroy_others_by_canonical_id(canonical_id, None);
+    revoke_jwt_jtis(state, &revoked_jwts);
 
     json_response_with_credentials(200, &json!({"status": "password_reset"}), cors)
 }
