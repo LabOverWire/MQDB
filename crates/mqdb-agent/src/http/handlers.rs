@@ -2372,7 +2372,6 @@ pub async fn handle_password_change(
     };
 
     let canonical_id = session.canonical_id.clone();
-    let current_session_id = current_session_id.to_string();
 
     let body_value: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -2441,7 +2440,7 @@ pub async fn handle_password_change(
 
     let revoked_jwts = state
         .session_store
-        .destroy_others_by_canonical_id(&canonical_id, Some(&current_session_id));
+        .destroy_others_by_canonical_id(&canonical_id, Some(current_session_id));
     revoke_jwt_jtis(state, &revoked_jwts);
 
     json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
