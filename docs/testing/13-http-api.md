@@ -383,7 +383,9 @@ Expected: successful login with session cookie.
 - [ ] Caller's session cookie still works after the change (other sessions for the same user are destroyed, caller's is kept)
 - [ ] A second HTTP session for the same user logged in before the change returns 401 on any authenticated endpoint after the change
 - [ ] An MQTT ticket bound to a destroyed session's JWT is rejected (`jti` is in `JtiRevocationStore`)
-- [ ] MQTT `$DB/_auth/password/change` works with same logic (note: MQTT path does NOT yet invalidate HTTP sessions — tracked in issue #69)
+- [ ] MQTT `$DB/_auth/password/change` works with same logic
+- [ ] An HTTP session for the same user logged in before an MQTT password change returns 401 on any authenticated endpoint after the change (MQTT path now destroys HTTP sessions too)
+- [ ] An MQTT ticket bound to a destroyed session's JWT is rejected after an MQTT password change
 - [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
 
 ---
@@ -525,7 +527,9 @@ MQTT: shares the vault unlock rate limiter.
 - [ ] An MQTT ticket bound to a destroyed session's JWT is rejected after the reset
 - [ ] Rate limited after 3 attempts per minute (HTTP)
 - [ ] MQTT `$DB/_auth/password/reset/start` works with same logic
-- [ ] MQTT `$DB/_auth/password/reset/submit` works with same logic (note: MQTT path does NOT yet invalidate HTTP sessions — tracked in issue #69)
+- [ ] MQTT `$DB/_auth/password/reset/submit` works with same logic
+- [ ] An HTTP session for the target user that existed before an MQTT reset submit returns 401 on any authenticated endpoint after the reset
+- [ ] An MQTT ticket bound to a destroyed session's JWT is rejected after an MQTT reset submit
 - [ ] MQTT handler verifies email matches authenticated user's identity
 - [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
 

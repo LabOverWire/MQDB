@@ -61,6 +61,10 @@ impl MqdbAgent {
         let auth_rate_limiter = Arc::clone(&self.auth_rate_limiter);
         #[cfg(feature = "http-api")]
         let identity_crypto = self.identity_crypto.clone();
+        #[cfg(feature = "http-api")]
+        let session_store = self.session_store.clone();
+        #[cfg(feature = "http-api")]
+        let jti_revocation = self.jti_revocation.clone();
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -131,6 +135,10 @@ impl MqdbAgent {
                                 auth_rate_limiter: &auth_rate_limiter,
                                 #[cfg(feature = "http-api")]
                                 identity_crypto: identity_crypto.as_ref(),
+                                #[cfg(feature = "http-api")]
+                                session_store: session_store.as_ref(),
+                                #[cfg(feature = "http-api")]
+                                jti_revocation: jti_revocation.as_ref(),
                             };
                             handle_message(&ctx, message).await;
                         } else {

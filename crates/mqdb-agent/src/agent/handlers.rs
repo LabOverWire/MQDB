@@ -61,6 +61,10 @@ pub(super) struct MessageContext<'a> {
     pub auth_rate_limiter: &'a RateLimiter,
     #[cfg(feature = "http-api")]
     pub identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
+    #[cfg(feature = "http-api")]
+    pub session_store: Option<&'a Arc<crate::http::SessionStore>>,
+    #[cfg(feature = "http-api")]
+    pub jti_revocation: Option<&'a Arc<crate::http::JtiRevocationStore>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -90,6 +94,10 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             auth_rate_limiter: ctx.auth_rate_limiter,
             #[cfg(feature = "http-api")]
             identity_crypto: ctx.identity_crypto,
+            #[cfg(feature = "http-api")]
+            session_store: ctx.session_store,
+            #[cfg(feature = "http-api")]
+            jti_revocation: ctx.jti_revocation,
         };
         handle_admin_operation(&admin_ctx, admin_op).await;
         return;
@@ -277,6 +285,10 @@ struct AdminContext<'a> {
     auth_rate_limiter: &'a RateLimiter,
     #[cfg(feature = "http-api")]
     identity_crypto: Option<&'a Arc<crate::http::IdentityCrypto>>,
+    #[cfg(feature = "http-api")]
+    session_store: Option<&'a Arc<crate::http::SessionStore>>,
+    #[cfg(feature = "http-api")]
+    jti_revocation: Option<&'a Arc<crate::http::JtiRevocationStore>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1106,6 +1118,15 @@ async fn dispatch_vault_admin_mqtt(
 }
 
 #[cfg(feature = "http-api")]
+fn invalidate_http_sessions(ctx: &AdminContext<'_>, canonical_id: &str) {
+    let (Some(sessions), Some(jtis)) = (ctx.session_store, ctx.jti_revocation) else {
+        return;
+    };
+    let revoked = sessions.destroy_others_by_canonical_id(canonical_id, None);
+    jtis.revoke_many(&revoked);
+}
+
+#[cfg(feature = "http-api")]
 async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
     use serde_json::json;
 
@@ -1208,6 +1229,8 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
         error!("password change: failed to update credentials for {canonical_id}: {e}");
         return Response::error(mqdb_core::ErrorCode::Internal, "failed to update password");
     }
+
+    invalidate_http_sessions(ctx, canonical_id);
 
     Response::ok(json!({"status": "password changed"}))
 }
@@ -1591,6 +1614,8 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
             "failed to mark email verified",
         );
     }
+
+    invalidate_http_sessions(ctx, canonical_id);
 
     Response::ok(json!({"status": "password_reset"}))
 }
