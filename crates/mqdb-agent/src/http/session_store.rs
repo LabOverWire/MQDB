@@ -5,6 +5,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
+use tracing::warn;
 
 const SESSION_ID_BYTES: usize = 32;
 const SESSION_TTL_SECS: u64 = 86400;
@@ -112,6 +113,10 @@ impl SessionStore {
         keep_session_id: Option<&str>,
     ) -> Vec<String> {
         let Ok(mut sessions) = self.sessions.write() else {
+            warn!(
+                canonical_id,
+                "session store lock poisoned; password-change session invalidation skipped"
+            );
             return Vec::new();
         };
         let mut removed_jwts = Vec::new();

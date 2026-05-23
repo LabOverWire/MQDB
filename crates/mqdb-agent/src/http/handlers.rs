@@ -2300,11 +2300,15 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
 
 fn revoke_jwt_jtis(state: &ServerState, jwts: &[String]) {
     for jwt in jwts {
-        if let Some(payload) = verify_jwt_ignore_expiry(jwt, &state.jwt_config)
-            && let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
-        {
-            state.jti_revocation.revoke(jti);
-        }
+        let Some(payload) = verify_jwt_ignore_expiry(jwt, &state.jwt_config) else {
+            warn!("failed to decode destroyed session JWT; JTI not revoked");
+            continue;
+        };
+        let Some(jti) = payload.get("jti").and_then(|v| v.as_str()) else {
+            warn!("destroyed session JWT missing jti claim; not revoked");
+            continue;
+        };
+        state.jti_revocation.revoke(jti);
     }
 }
 
@@ -2743,10 +2747,13 @@ pub async fn handle_password_reset_submit(
     )
     .await;
 
-    let canonical_id = challenge
-        .get("canonical_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let Some(canonical_id) = challenge.get("canonical_id").and_then(|v| v.as_str()) else {
+        error!(
+            challenge_id,
+            "password reset challenge missing canonical_id"
+        );
+        return json_response_with_credentials(500, &json!({"error": "internal error"}), cors);
+    };
 
     let new_hash = match credentials::hash_password(new_password) {
         Ok(h) => h,

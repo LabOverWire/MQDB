@@ -521,9 +521,11 @@ When `--http-bind` is set, the following HTTP endpoints are available:
 
 All auth endpoints use cookie-based sessions. The `/auth/ticket` endpoint exchanges a valid session for a JWT that can be used to authenticate MQTT connections.
 
+A successful `POST /auth/password/change` keeps the caller's session and destroys every other HTTP session for the same user; their JWTs' `jti` claims are added to the revocation store so any reissued MQTT ticket is rejected. `POST /auth/password/reset/submit` does the same for every session of the target user (no caller session at reset time).
+
 ### Password Change & Reset MQTT API
 
-Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users:
+Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users. The MQTT path currently updates `_credentials` but does not invalidate HTTP sessions for the same user — tracked in issue #69.
 
 | Topic | Payload | Description |
 |-------|---------|-------------|
