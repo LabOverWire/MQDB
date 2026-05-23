@@ -5,6 +5,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
+use tracing::warn;
 
 const SESSION_ID_BYTES: usize = 32;
 const SESSION_TTL_SECS: u64 = 86400;
@@ -101,6 +102,35 @@ impl SessionStore {
             return false;
         };
         sessions.remove(session_id).is_some()
+    }
+
+    /// Destroys every session whose `canonical_id` matches, except `keep_session_id`
+    /// (pass `None` to destroy all). Returns the JWTs of destroyed sessions so the
+    /// caller can decode and revoke their JTIs.
+    pub fn destroy_others_by_canonical_id(
+        &self,
+        canonical_id: &str,
+        keep_session_id: Option<&str>,
+    ) -> Vec<String> {
+        let Ok(mut sessions) = self.sessions.write() else {
+            warn!(
+                canonical_id,
+                "session store lock poisoned; password-change session invalidation skipped"
+            );
+            return Vec::new();
+        };
+        let mut removed_jwts = Vec::new();
+        sessions.retain(|sid, session| {
+            let same_user = session.canonical_id == canonical_id;
+            let is_kept = keep_session_id.is_some_and(|keep| sid.as_str() == keep);
+            if same_user && !is_kept {
+                removed_jwts.push(session.jwt.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed_jwts
     }
 
     pub fn set_vault_unlocked(&self, session_id: &str, unlocked: bool) -> bool {
@@ -277,5 +307,62 @@ mod tests {
     fn test_invalid_session_id() {
         let store = SessionStore::new();
         assert!(store.get("nonexistent").is_none());
+    }
+
+    fn make_session(store: &SessionStore, canonical_id: &str, jwt: &str) -> String {
+        store
+            .create(NewSession {
+                jwt: jwt.into(),
+                canonical_id: canonical_id.into(),
+                provider: "email".into(),
+                provider_sub: canonical_id.into(),
+                email: None,
+                name: None,
+                picture: None,
+            })
+            .expect("create should succeed")
+    }
+
+    #[test]
+    fn destroy_others_keeps_target_session_and_returns_other_jwts() {
+        let store = SessionStore::new();
+        let keep = make_session(&store, "user-a", "jwt-keep");
+        let other_a = make_session(&store, "user-a", "jwt-a1");
+        let other_b = make_session(&store, "user-a", "jwt-a2");
+        let untouched = make_session(&store, "user-b", "jwt-b");
+
+        let removed = store.destroy_others_by_canonical_id("user-a", Some(&keep));
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"jwt-a1".to_string()));
+        assert!(removed.contains(&"jwt-a2".to_string()));
+
+        assert!(store.get(&keep).is_some());
+        assert!(store.get(&other_a).is_none());
+        assert!(store.get(&other_b).is_none());
+        assert!(store.get(&untouched).is_some());
+    }
+
+    #[test]
+    fn destroy_others_with_none_destroys_all_sessions_for_user() {
+        let store = SessionStore::new();
+        let a1 = make_session(&store, "user-a", "jwt-a1");
+        let a2 = make_session(&store, "user-a", "jwt-a2");
+        let b = make_session(&store, "user-b", "jwt-b");
+
+        let removed = store.destroy_others_by_canonical_id("user-a", None);
+        assert_eq!(removed.len(), 2);
+
+        assert!(store.get(&a1).is_none());
+        assert!(store.get(&a2).is_none());
+        assert!(store.get(&b).is_some());
+    }
+
+    #[test]
+    fn destroy_others_with_unknown_user_returns_empty() {
+        let store = SessionStore::new();
+        make_session(&store, "user-a", "jwt-a");
+
+        let removed = store.destroy_others_by_canonical_id("user-x", None);
+        assert!(removed.is_empty());
     }
 }

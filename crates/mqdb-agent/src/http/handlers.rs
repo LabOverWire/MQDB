@@ -2298,6 +2298,67 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
     )
 }
 
+fn revoke_jwt_jtis(state: &ServerState, jwts: &[String]) {
+    for jwt in jwts {
+        let Some(payload) = verify_jwt_ignore_expiry(jwt, &state.jwt_config) else {
+            warn!("failed to decode destroyed session JWT; JTI not revoked");
+            continue;
+        };
+        let Some(jti) = payload.get("jti").and_then(|v| v.as_str()) else {
+            warn!("destroyed session JWT missing jti claim; not revoked");
+            continue;
+        };
+        state.jti_revocation.revoke(jti);
+    }
+}
+
+async fn verify_stored_password(
+    state: &ServerState,
+    canonical_id: &str,
+    current_password: &str,
+    cors: Option<&str>,
+) -> Result<(), HttpResponse> {
+    let identity = read_entity(&state.mqtt_client, "_identities", canonical_id).await;
+    let email_verified = identity
+        .as_ref()
+        .and_then(|i| i.get("email_verified"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !email_verified {
+        return Err(json_response_with_credentials(
+            403,
+            &json!({"error": "email must be verified before changing password"}),
+            cors,
+        ));
+    }
+
+    let Some(cred) = read_entity(&state.mqtt_client, "_credentials", canonical_id).await else {
+        return Err(json_response_with_credentials(
+            404,
+            &json!({"error": "no credentials found (OAuth-only account)"}),
+            cors,
+        ));
+    };
+
+    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
+        return Err(json_response_with_credentials(
+            500,
+            &json!({"error": "credential record is corrupt"}),
+            cors,
+        ));
+    };
+
+    if !credentials::verify_password(stored_hash, current_password) {
+        return Err(json_response_with_credentials(
+            401,
+            &json!({"error": "incorrect current password"}),
+            cors,
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn handle_password_change(
     state: &ServerState,
     headers: &HeaderMap,
@@ -2309,7 +2370,7 @@ pub async fn handle_password_change(
         return json_response_with_credentials(404, &json!({"error": "not found"}), cors);
     }
 
-    let (_, session) = match require_session(state, headers) {
+    let (current_session_id, session) = match require_session(state, headers) {
         Ok(r) => r,
         Err(resp) => return *resp,
     };
@@ -2354,42 +2415,8 @@ pub async fn handle_password_change(
         );
     }
 
-    let identity = read_entity(&state.mqtt_client, "_identities", &canonical_id).await;
-    let email_verified = identity
-        .as_ref()
-        .and_then(|i| i.get("email_verified"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    if !email_verified {
-        return json_response_with_credentials(
-            403,
-            &json!({"error": "email must be verified before changing password"}),
-            cors,
-        );
-    }
-
-    let Some(cred) = read_entity(&state.mqtt_client, "_credentials", &canonical_id).await else {
-        return json_response_with_credentials(
-            404,
-            &json!({"error": "no credentials found (OAuth-only account)"}),
-            cors,
-        );
-    };
-
-    let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
-        return json_response_with_credentials(
-            500,
-            &json!({"error": "credential record is corrupt"}),
-            cors,
-        );
-    };
-
-    if !credentials::verify_password(stored_hash, current_password) {
-        return json_response_with_credentials(
-            401,
-            &json!({"error": "incorrect current password"}),
-            cors,
-        );
+    if let Err(resp) = verify_stored_password(state, &canonical_id, current_password, cors).await {
+        return resp;
     }
 
     let new_hash = match credentials::hash_password(new_password) {
@@ -2414,6 +2441,11 @@ pub async fn handle_password_change(
             cors,
         );
     }
+
+    let revoked_jwts = state
+        .session_store
+        .destroy_others_by_canonical_id(&canonical_id, Some(current_session_id));
+    revoke_jwt_jtis(state, &revoked_jwts);
 
     json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
 }
@@ -2715,10 +2747,13 @@ pub async fn handle_password_reset_submit(
     )
     .await;
 
-    let canonical_id = challenge
-        .get("canonical_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let Some(canonical_id) = challenge.get("canonical_id").and_then(|v| v.as_str()) else {
+        error!(
+            challenge_id,
+            "password reset challenge missing canonical_id"
+        );
+        return json_response_with_credentials(500, &json!({"error": "internal error"}), cors);
+    };
 
     let new_hash = match credentials::hash_password(new_password) {
         Ok(h) => h,
@@ -2762,6 +2797,11 @@ pub async fn handle_password_reset_submit(
         &json!({"email_verified": true}),
     )
     .await;
+
+    let revoked_jwts = state
+        .session_store
+        .destroy_others_by_canonical_id(canonical_id, None);
+    revoke_jwt_jtis(state, &revoked_jwts);
 
     json_response_with_credentials(200, &json!({"status": "password_reset"}), cors)
 }

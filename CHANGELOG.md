@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-23 — mqdb-agent 0.8.2
+
+### Fixed
+
+- Password changes left every other HTTP session for the same user valid until the 24h TTL expired (`SessionStore` only exposed `destroy(session_id)`, so `POST /auth/password/change` updated `_credentials` and returned 200 with the attacker's session still live). Added `SessionStore::destroy_others_by_canonical_id(canonical_id, keep_session_id)` returning the JWTs of removed sessions so the caller can revoke their JTIs. `handle_password_change` now keeps the caller's session and destroys the rest; `handle_password_reset_submit` destroys all sessions for the target canonical_id (the user has no live session at reset time). Each destroyed session's JWT is decoded with `verify_jwt_ignore_expiry` and its `jti` added to `JtiRevocationStore`, matching the pattern already used by `handle_logout` so reissued MQTT tickets bound to those JWTs are rejected. The MQTT password-change path (`$DB/_auth/password/change`) intentionally still does not invalidate HTTP sessions — `AdminContext` has no reference to `SessionStore`; tracked as follow-up to issue #37.
+- Test coverage: 3 unit tests for `destroy_others_by_canonical_id` covering keep-current-session, destroy-all (`None` keep), and unknown-user (empty result).
+- Observability for security-sensitive silent failures along the new path: `destroy_others_by_canonical_id` now `warn!`s on a poisoned `SessionStore` lock (was a silent empty return); `revoke_jwt_jtis` `warn!`s when a destroyed session's JWT fails to decode or is missing the `jti` claim (was a silent skip); `handle_password_reset_submit` now `error!`s and returns 500 when the verified challenge record is missing `canonical_id` (was `.unwrap_or("")` → silent no-op on `destroy_others_by_canonical_id`).
+
 ## 2026-05-22 — mqdb-agent 0.8.1, mqdb-cluster 0.3.6, mqdb-cli 0.7.7
 
 ### Fixed

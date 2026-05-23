@@ -380,7 +380,10 @@ Expected: successful login with session cookie.
 - [ ] Rate limited after 5 attempts per minute
 - [ ] Login works with new password after change
 - [ ] Login fails with old password after change
-- [ ] MQTT `$DB/_auth/password/change` works with same logic
+- [ ] Caller's session cookie still works after the change (other sessions for the same user are destroyed, caller's is kept)
+- [ ] A second HTTP session for the same user logged in before the change returns 401 on any authenticated endpoint after the change
+- [ ] An MQTT ticket bound to a destroyed session's JWT is rejected (`jti` is in `JtiRevocationStore`)
+- [ ] MQTT `$DB/_auth/password/change` works with same logic (note: MQTT path does NOT yet invalidate HTTP sessions — tracked in issue #69)
 - [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
 
 ---
@@ -518,9 +521,11 @@ MQTT: shares the vault unlock rate limiter.
 - [ ] `email_verified` set to `true` after successful reset
 - [ ] Login works with new password after reset
 - [ ] Login fails with old password after reset
+- [ ] Any HTTP session for the target user that existed before the reset returns 401 on any authenticated endpoint after the reset
+- [ ] An MQTT ticket bound to a destroyed session's JWT is rejected after the reset
 - [ ] Rate limited after 3 attempts per minute (HTTP)
 - [ ] MQTT `$DB/_auth/password/reset/start` works with same logic
-- [ ] MQTT `$DB/_auth/password/reset/submit` works with same logic
+- [ ] MQTT `$DB/_auth/password/reset/submit` works with same logic (note: MQTT path does NOT yet invalidate HTTP sessions — tracked in issue #69)
 - [ ] MQTT handler verifies email matches authenticated user's identity
 - [ ] Cluster mode rejects with "auth endpoints not supported in cluster mode"
 
