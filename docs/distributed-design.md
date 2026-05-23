@@ -4,7 +4,7 @@
 > Every claim has file:line references. When in doubt, verify against code.
 > Last verified: January 2026 (all milestones M1-M10 complete, Direct QUIC transport added)
 >
-> **Note:** Clustering requires the `native` feature flag (commercial license). Agent-only builds (`--features agent-only`) exclude all cluster code. Shared types (partitions, IDs) live in `crates/mqdb-core/src/partition/` and compile unconditionally.
+> **Note:** Clustering requires the `cluster` feature on the `mqdb` CLI (enabled by default; see `crates/mqdb-cli/Cargo.toml`). Builds with `--no-default-features` exclude all cluster code. Shared types (partitions, IDs) live in `crates/mqdb-core/src/partition/` and compile unconditionally.
 
 ## Overview
 

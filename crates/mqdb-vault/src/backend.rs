@@ -11,7 +11,7 @@ use crate::transform::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mqdb_agent::Database;
-use mqdb_agent::http::rate_limiter::RateLimiter;
+use mqdb_agent::rate_limiter::RateLimiter;
 use mqdb_agent::vault_backend::{
     DbAccess, EncryptRequestOutput, VaultAdminOutcome, VaultBackend, VaultError, VaultFuture,
     VaultResult,

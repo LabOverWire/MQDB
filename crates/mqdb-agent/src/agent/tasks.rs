@@ -223,6 +223,7 @@ impl MqdbAgent {
         })
     }
 
+    #[cfg(feature = "http-api")]
     pub(super) fn spawn_http_task(
         &self,
         bind_addr: SocketAddr,

@@ -11,6 +11,7 @@ pub mod db_helpers;
 pub mod dedup;
 pub mod dispatcher;
 pub mod outbox_processor;
+pub mod rate_limiter;
 pub mod runtime;
 pub mod session;
 pub mod subscription_registry;

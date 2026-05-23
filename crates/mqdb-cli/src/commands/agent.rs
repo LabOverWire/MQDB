@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "http-api")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mqdb_agent::{Database, MqdbAgent};
@@ -164,21 +166,31 @@ pub(crate) async fn cmd_agent_start(
     }
 
     if let Some(http_bind) = args.oauth.http_bind {
-        let ownership_for_http = agent.ownership_config_arc();
-        let http_config = build_http_config(
-            http_bind,
-            &args.auth,
-            &args.oauth,
-            federated_content.as_deref(),
-            ownership_for_http,
-            &args.db_path,
-        )?;
-        if !http_config.cookie_secure {
+        #[cfg(feature = "http-api")]
+        {
+            let ownership_for_http = agent.ownership_config_arc();
+            let http_config = build_http_config(
+                http_bind,
+                &args.auth,
+                &args.oauth,
+                federated_content.as_deref(),
+                ownership_for_http,
+                &args.db_path,
+            )?;
+            if !http_config.cookie_secure {
+                tracing::warn!(
+                    "session cookies will be sent without Secure flag — use --cookie-secure in production"
+                );
+            }
+            agent = agent.with_http_config(http_config);
+        }
+        #[cfg(not(feature = "http-api"))]
+        {
+            let _ = http_bind;
             tracing::warn!(
-                "session cookies will be sent without Secure flag — use --cookie-secure in production"
+                "--http-bind ignored: build with --features http-api to enable the HTTP server"
             );
         }
-        agent = agent.with_http_config(http_config);
     }
 
     let agent = Arc::new(agent);
@@ -302,6 +314,7 @@ pub(crate) fn build_auth_setup_config(
     })
 }
 
+#[cfg(feature = "http-api")]
 pub(crate) fn build_http_config(
     http_bind: SocketAddr,
     auth: &AuthArgs,
@@ -410,6 +423,7 @@ pub(crate) fn build_http_config(
     })
 }
 
+#[cfg(feature = "http-api")]
 fn build_identity_crypto(
     oauth: &OAuthArgs,
     db_path: &Path,
@@ -499,6 +513,7 @@ fn verify_and_log_license(
     }
 }
 
+#[cfg(feature = "http-api")]
 fn serialize_key_material(salt: &[u8], wrapped_key: &[u8]) -> Vec<u8> {
     let salt_len: u32 = salt.len().try_into().expect("salt length fits in u32");
     let mut out = Vec::with_capacity(4 + salt.len() + wrapped_key.len());
@@ -508,6 +523,7 @@ fn serialize_key_material(salt: &[u8], wrapped_key: &[u8]) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "http-api")]
 fn deserialize_key_material(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
     if data.len() < 4 {
         return Err("identity key file too short".into());

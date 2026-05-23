@@ -9,11 +9,14 @@
 ```bash
 cd /path/to/mqdb
 
-# Agent-only (open-source edition — no cluster commands)
-cargo build --release --bin mqdb --features agent-only
-
-# Full build with clustering (commercial edition, default)
+# Full build with clustering and HTTP API (default)
 cargo build --release
+
+# Agent-only with HTTP API (no cluster code)
+cargo build --release --bin mqdb --no-default-features --features http-api
+
+# Minimal agent (no cluster, no HTTP server)
+cargo build --release --bin mqdb --no-default-features
 ```
 
 Binary location: `target/release/mqdb`

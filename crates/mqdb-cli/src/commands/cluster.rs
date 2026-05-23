@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use mqdb_cluster::{ClusterConfig, ClusteredAgent, PeerConfig};
 use serde_json::json;
 
-use super::agent::{build_auth_setup_config, build_http_config};
+use super::agent::build_auth_setup_config;
+#[cfg(feature = "http-api")]
+use super::agent::build_http_config;
 use crate::cli_types::{AuthArgs, ConnectionArgs, DurabilityArg, OAuthArgs, OutputFormat};
 use crate::commands::env_secret::{
     resolve_federated_jwt_content, resolve_passphrase, resolve_path_or_data,
@@ -176,15 +178,25 @@ pub(crate) async fn cmd_cluster_start(
         std::sync::Arc::new(mqdb_core::types::OwnershipConfig::default())
     };
     if let Some(http_bind) = args.oauth.http_bind {
-        let http_config = build_http_config(
-            http_bind,
-            &args.auth,
-            &args.oauth,
-            federated_content.as_deref(),
-            ownership_arc.clone(),
-            &db_path,
-        )?;
-        config = config.with_http_config(http_config);
+        #[cfg(feature = "http-api")]
+        {
+            let http_config = build_http_config(
+                http_bind,
+                &args.auth,
+                &args.oauth,
+                federated_content.as_deref(),
+                ownership_arc.clone(),
+                &db_path,
+            )?;
+            config = config.with_http_config(http_config);
+        }
+        #[cfg(not(feature = "http-api"))]
+        {
+            let _ = http_bind;
+            tracing::warn!(
+                "--http-bind ignored: build with --features http-api to enable the HTTP server"
+            );
+        }
     }
     if args.ownership.is_some() {
         config = config.with_ownership((*ownership_arc).clone());

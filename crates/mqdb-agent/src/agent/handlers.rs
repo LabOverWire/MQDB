@@ -19,7 +19,7 @@ use std::path::Path;
 use tracing::{error, info_span, warn};
 
 #[cfg(feature = "http-api")]
-use crate::http::rate_limiter::RateLimiter;
+use crate::rate_limiter::RateLimiter;
 
 #[cfg(feature = "opentelemetry")]
 use mqtt5::telemetry::propagation;

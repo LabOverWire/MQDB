@@ -108,7 +108,10 @@ impl ClusteredAgent {
             None
         };
 
+        #[cfg(feature = "http-api")]
         let _http_task = self.spawn_http_task(service_username, service_password);
+        #[cfg(not(feature = "http-api"))]
+        let _ = (service_username, service_password);
 
         self.recover_pending_lwts().await;
         self.recover_pending_outbox().await;
