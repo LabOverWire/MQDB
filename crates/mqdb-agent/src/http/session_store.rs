@@ -11,7 +11,6 @@ const SESSION_ID_BYTES: usize = 32;
 const SESSION_TTL_SECS: u64 = 86400;
 
 pub struct Session {
-    pub jwt: String,
     pub jti: String,
     pub canonical_id: String,
     pub provider: String,
@@ -24,7 +23,6 @@ pub struct Session {
 }
 
 pub struct NewSession {
-    pub jwt: String,
     pub jti: String,
     pub canonical_id: String,
     pub provider: String,
@@ -61,7 +59,6 @@ impl SessionStore {
 
         let session_id = hex_encode(&bytes);
         let session = Session {
-            jwt: new.jwt,
             jti: new.jti,
             canonical_id: new.canonical_id,
             provider: new.provider,
@@ -89,7 +86,6 @@ impl SessionStore {
         }
 
         Some(SessionRef {
-            jwt: session.jwt.clone(),
             jti: session.jti.clone(),
             canonical_id: session.canonical_id.clone(),
             provider: session.provider.clone(),
@@ -170,7 +166,6 @@ impl SessionStore {
 }
 
 pub struct SessionRef {
-    pub jwt: String,
     pub jti: String,
     pub canonical_id: String,
     pub provider: String,
@@ -283,7 +278,6 @@ mod tests {
         let store = SessionStore::new();
         let session_id = store
             .create(NewSession {
-                jwt: "jwt123".into(),
                 jti: "jti-abc".into(),
                 canonical_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 provider: "google".into(),
@@ -297,7 +291,6 @@ mod tests {
         assert_eq!(session_id.len(), 64);
 
         let session = store.get(&session_id).expect("get should succeed");
-        assert_eq!(session.jwt, "jwt123");
         assert_eq!(session.jti, "jti-abc");
         assert_eq!(session.canonical_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(session.provider, "google");
@@ -310,7 +303,6 @@ mod tests {
         let store = SessionStore::new();
         let session_id = store
             .create(NewSession {
-                jwt: "jwt".into(),
                 jti: "jti".into(),
                 canonical_id: "canonical-1".into(),
                 provider: "google".into(),
@@ -335,7 +327,6 @@ mod tests {
     fn make_session(store: &SessionStore, canonical_id: &str, jti: &str) -> String {
         store
             .create(NewSession {
-                jwt: format!("jwt-for-{jti}"),
                 jti: jti.into(),
                 canonical_id: canonical_id.into(),
                 provider: "email".into(),
@@ -395,7 +386,6 @@ mod tests {
         let store = SessionStore::new();
         let dev_session = store
             .create(NewSession {
-                jwt: String::new(),
                 jti: String::new(),
                 canonical_id: "user-a".into(),
                 provider: "dev".into(),
