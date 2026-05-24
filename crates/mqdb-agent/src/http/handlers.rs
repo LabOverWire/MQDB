@@ -266,11 +266,8 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         persist_oauth_tokens(state, &link_key, &canonical_id, refresh_token, &identity).await;
     }
 
-    let (jwt, jti) = mint_callback_jwt(state, &canonical_id, &identity);
-
     let Some(session_id) = state.session_store.create(NewSession {
-        jwt,
-        jti,
+        jti: JtiRevocationStore::generate_jti(),
         canonical_id,
         provider: provider.to_string(),
         provider_sub: identity.provider_sub.clone(),
@@ -616,33 +613,6 @@ async fn persist_oauth_tokens(
             warn!(error = %e, "failed to store OAuth tokens");
         }
     }
-}
-
-fn mint_callback_jwt(
-    state: &ServerState,
-    canonical_id: &str,
-    identity: &ProviderIdentity,
-) -> (String, String) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-
-    let jti = JtiRevocationStore::generate_jti();
-    let claims = json!({
-        "sub": canonical_id,
-        "iss": state.jwt_config.issuer,
-        "aud": state.jwt_config.audience,
-        "exp": now + state.jwt_config.expiry_secs,
-        "iat": now,
-        "jti": jti,
-        "email": identity.email,
-        "name": identity.name,
-        "picture": identity.picture,
-        "provider": identity.provider,
-        "provider_sub": identity.provider_sub,
-    });
-
-    (sign_jwt(&claims, &state.jwt_config), jti)
 }
 
 pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
@@ -1741,10 +1711,8 @@ pub async fn handle_register(state: &ServerState, body: &[u8], client_ip: &str) 
         return json_response_with_credentials(500, &json!({"error": "registration failed"}), cors);
     }
 
-    let (jwt, jti) = mint_callback_jwt(state, &canonical_id, &identity);
     let Some(session_id) = state.session_store.create(NewSession {
-        jwt,
-        jti,
+        jti: JtiRevocationStore::generate_jti(),
         canonical_id: canonical_id.clone(),
         provider: "email".to_string(),
         provider_sub,
@@ -1832,7 +1800,7 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         return json_response_with_credentials(500, &json!({"error": "login failed"}), cors);
     };
 
-    let (display_name, display_email, verified) = if let Some(mut ident) =
+    let (display_name, display_email) = if let Some(mut ident) =
         read_entity(&state.mqtt_client, "_identities", canonical_id).await
     {
         if let Some(ref crypto) = state.identity_crypto {
@@ -1850,30 +1818,15 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
             .get("primary_email")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let ev = ident
-            .get("email_verified")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        (n, e, ev)
+        (n, e)
     } else {
-        (None, Some(email.to_string()), false)
+        (None, Some(email.to_string()))
     };
 
     let picture = fetch_picture_from_links(state, canonical_id).await;
 
-    let identity = ProviderIdentity {
-        provider: "email",
-        provider_sub: canonical_id.to_string(),
-        email: display_email.clone(),
-        name: display_name.clone(),
-        picture: picture.clone(),
-        email_verified: verified,
-    };
-    let (jwt, jti) = mint_callback_jwt(state, canonical_id, &identity);
-
     let Some(session_id) = state.session_store.create(NewSession {
-        jwt,
-        jti,
+        jti: JtiRevocationStore::generate_jti(),
         canonical_id: canonical_id.to_string(),
         provider: "email".to_string(),
         provider_sub: canonical_id.to_string(),
@@ -2833,7 +2786,6 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
     }
 
     let Some(session_id) = state.session_store.create(NewSession {
-        jwt: String::new(),
         jti: String::new(),
         canonical_id: canonical_id.clone(),
         provider: "dev".to_string(),

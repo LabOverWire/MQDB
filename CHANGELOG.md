@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-24 — mqdb-agent 0.8.4
+
+### Removed
+
+- Dead `jwt: String` field on `Session`, `NewSession`, and `SessionRef`. After 0.8.3 wired the JTI directly into the session, no code path read the stored JWT anymore: `handle_logout` uses `session.jti`, `destroy_others_by_canonical_id` returns JTIs, and `handle_ticket` mints fresh ticket JWTs from session claims rather than the stored one. The session-time JWT was never returned to the client either — callback, register, and login all set just the session-id cookie plus a user-info JSON body. Dropped the field and removed `mint_callback_jwt` entirely; its three callers now generate a JTI inline via `JtiRevocationStore::generate_jti()`. `handle_login` no longer needs to construct a `ProviderIdentity` or destructure `email_verified`. No behavior change; the affected types are crate-private.
+
 ## 2026-05-23 — mqdb-agent 0.8.3
 
 ### Fixed
