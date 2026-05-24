@@ -17,4 +17,4 @@ pub use jwt_signer::{JwtSigningAlgorithm, JwtSigningConfig};
 pub use providers::google::GoogleProvider;
 pub use providers::{Provider, ProviderConfig, ProviderRegistry};
 pub use server::{HttpServer, HttpServerConfig};
-pub use session_store::SessionStore;
+pub use session_store::{JtiRevocationStore, SessionStore};

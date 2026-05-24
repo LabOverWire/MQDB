@@ -12,6 +12,7 @@ const SESSION_TTL_SECS: u64 = 86400;
 
 pub struct Session {
     pub jwt: String,
+    pub jti: String,
     pub canonical_id: String,
     pub provider: String,
     pub provider_sub: String,
@@ -24,6 +25,7 @@ pub struct Session {
 
 pub struct NewSession {
     pub jwt: String,
+    pub jti: String,
     pub canonical_id: String,
     pub provider: String,
     pub provider_sub: String,
@@ -60,6 +62,7 @@ impl SessionStore {
         let session_id = hex_encode(&bytes);
         let session = Session {
             jwt: new.jwt,
+            jti: new.jti,
             canonical_id: new.canonical_id,
             provider: new.provider,
             provider_sub: new.provider_sub,
@@ -87,6 +90,7 @@ impl SessionStore {
 
         Some(SessionRef {
             jwt: session.jwt.clone(),
+            jti: session.jti.clone(),
             canonical_id: session.canonical_id.clone(),
             provider: session.provider.clone(),
             provider_sub: session.provider_sub.clone(),
@@ -105,8 +109,9 @@ impl SessionStore {
     }
 
     /// Destroys every session whose `canonical_id` matches, except `keep_session_id`
-    /// (pass `None` to destroy all). Returns the JWTs of destroyed sessions so the
-    /// caller can decode and revoke their JTIs.
+    /// (pass `None` to destroy all). Returns the JTIs of destroyed sessions so the
+    /// caller can add them to the revocation store. Empty JTIs (e.g. dev-login
+    /// sessions with no real JWT) are filtered out.
     pub fn destroy_others_by_canonical_id(
         &self,
         canonical_id: &str,
@@ -119,18 +124,20 @@ impl SessionStore {
             );
             return Vec::new();
         };
-        let mut removed_jwts = Vec::new();
+        let mut removed_jtis = Vec::new();
         sessions.retain(|sid, session| {
             let same_user = session.canonical_id == canonical_id;
             let is_kept = keep_session_id.is_some_and(|keep| sid.as_str() == keep);
             if same_user && !is_kept {
-                removed_jwts.push(session.jwt.clone());
+                if !session.jti.is_empty() {
+                    removed_jtis.push(session.jti.clone());
+                }
                 false
             } else {
                 true
             }
         });
-        removed_jwts
+        removed_jtis
     }
 
     pub fn set_vault_unlocked(&self, session_id: &str, unlocked: bool) -> bool {
@@ -164,6 +171,7 @@ impl SessionStore {
 
 pub struct SessionRef {
     pub jwt: String,
+    pub jti: String,
     pub canonical_id: String,
     pub provider: String,
     pub provider_sub: String,
@@ -196,11 +204,23 @@ impl JtiRevocationStore {
 
     pub fn revoke(&self, jti: &str) {
         let Ok(mut store) = self.revoked.write() else {
+            warn!("jti revocation store lock poisoned; jti not revoked");
             return;
         };
         cleanup_revoked(&mut store);
         if store.len() < MAX_REVOKED_JTIS {
             store.insert(jti.to_string(), SystemTime::now());
+        } else {
+            warn!(
+                cap = MAX_REVOKED_JTIS,
+                "jti revocation store full; jti dropped (revoked sessions may stay valid until natural expiry)"
+            );
+        }
+    }
+
+    pub fn revoke_many(&self, jtis: &[String]) {
+        for jti in jtis {
+            self.revoke(jti);
         }
     }
 
@@ -264,6 +284,7 @@ mod tests {
         let session_id = store
             .create(NewSession {
                 jwt: "jwt123".into(),
+                jti: "jti-abc".into(),
                 canonical_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 provider: "google".into(),
                 provider_sub: "112233445566".into(),
@@ -277,6 +298,7 @@ mod tests {
 
         let session = store.get(&session_id).expect("get should succeed");
         assert_eq!(session.jwt, "jwt123");
+        assert_eq!(session.jti, "jti-abc");
         assert_eq!(session.canonical_id, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(session.provider, "google");
         assert_eq!(session.provider_sub, "112233445566");
@@ -289,6 +311,7 @@ mod tests {
         let session_id = store
             .create(NewSession {
                 jwt: "jwt".into(),
+                jti: "jti".into(),
                 canonical_id: "canonical-1".into(),
                 provider: "google".into(),
                 provider_sub: "sub-1".into(),
@@ -309,10 +332,11 @@ mod tests {
         assert!(store.get("nonexistent").is_none());
     }
 
-    fn make_session(store: &SessionStore, canonical_id: &str, jwt: &str) -> String {
+    fn make_session(store: &SessionStore, canonical_id: &str, jti: &str) -> String {
         store
             .create(NewSession {
-                jwt: jwt.into(),
+                jwt: format!("jwt-for-{jti}"),
+                jti: jti.into(),
                 canonical_id: canonical_id.into(),
                 provider: "email".into(),
                 provider_sub: canonical_id.into(),
@@ -324,17 +348,17 @@ mod tests {
     }
 
     #[test]
-    fn destroy_others_keeps_target_session_and_returns_other_jwts() {
+    fn destroy_others_keeps_target_session_and_returns_other_jtis() {
         let store = SessionStore::new();
-        let keep = make_session(&store, "user-a", "jwt-keep");
-        let other_a = make_session(&store, "user-a", "jwt-a1");
-        let other_b = make_session(&store, "user-a", "jwt-a2");
-        let untouched = make_session(&store, "user-b", "jwt-b");
+        let keep = make_session(&store, "user-a", "jti-keep");
+        let other_a = make_session(&store, "user-a", "jti-a1");
+        let other_b = make_session(&store, "user-a", "jti-a2");
+        let untouched = make_session(&store, "user-b", "jti-b");
 
         let removed = store.destroy_others_by_canonical_id("user-a", Some(&keep));
         assert_eq!(removed.len(), 2);
-        assert!(removed.contains(&"jwt-a1".to_string()));
-        assert!(removed.contains(&"jwt-a2".to_string()));
+        assert!(removed.contains(&"jti-a1".to_string()));
+        assert!(removed.contains(&"jti-a2".to_string()));
 
         assert!(store.get(&keep).is_some());
         assert!(store.get(&other_a).is_none());
@@ -345,9 +369,9 @@ mod tests {
     #[test]
     fn destroy_others_with_none_destroys_all_sessions_for_user() {
         let store = SessionStore::new();
-        let a1 = make_session(&store, "user-a", "jwt-a1");
-        let a2 = make_session(&store, "user-a", "jwt-a2");
-        let b = make_session(&store, "user-b", "jwt-b");
+        let a1 = make_session(&store, "user-a", "jti-a1");
+        let a2 = make_session(&store, "user-a", "jti-a2");
+        let b = make_session(&store, "user-b", "jti-b");
 
         let removed = store.destroy_others_by_canonical_id("user-a", None);
         assert_eq!(removed.len(), 2);
@@ -360,9 +384,42 @@ mod tests {
     #[test]
     fn destroy_others_with_unknown_user_returns_empty() {
         let store = SessionStore::new();
-        make_session(&store, "user-a", "jwt-a");
+        make_session(&store, "user-a", "jti-a");
 
         let removed = store.destroy_others_by_canonical_id("user-x", None);
         assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn destroy_others_skips_empty_jti_sessions() {
+        let store = SessionStore::new();
+        let dev_session = store
+            .create(NewSession {
+                jwt: String::new(),
+                jti: String::new(),
+                canonical_id: "user-a".into(),
+                provider: "dev".into(),
+                provider_sub: "dev-local".into(),
+                email: None,
+                name: None,
+                picture: None,
+            })
+            .expect("create should succeed");
+        let real_session = make_session(&store, "user-a", "jti-real");
+
+        let removed = store.destroy_others_by_canonical_id("user-a", None);
+        assert_eq!(removed, vec!["jti-real".to_string()]);
+        assert!(store.get(&dev_session).is_none());
+        assert!(store.get(&real_session).is_none());
+    }
+
+    #[test]
+    fn revoke_many_revokes_all_jtis() {
+        let store = JtiRevocationStore::new();
+        store.revoke_many(&["a".into(), "b".into(), "c".into()]);
+        assert!(store.is_revoked("a"));
+        assert!(store.is_revoked("b"));
+        assert!(store.is_revoked("c"));
+        assert!(!store.is_revoked("d"));
     }
 }

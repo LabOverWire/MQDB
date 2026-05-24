@@ -525,7 +525,7 @@ A successful `POST /auth/password/change` keeps the caller's session and destroy
 
 ### Password Change & Reset MQTT API
 
-Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users. The MQTT path currently updates `_credentials` but does not invalidate HTTP sessions for the same user — tracked in issue #69.
+Password change and reset are also available over MQTT 5.0 request-response for JWT-authenticated users. The MQTT path destroys every HTTP session for the affected user and revokes their JTIs, matching the HTTP-path behavior.
 
 | Topic | Payload | Description |
 |-------|---------|-------------|

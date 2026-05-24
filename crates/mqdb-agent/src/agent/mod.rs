@@ -43,6 +43,10 @@ pub struct MqdbAgent {
     pub(super) auth_rate_limiter: Arc<RateLimiter>,
     #[cfg(feature = "http-api")]
     pub(super) identity_crypto: Option<Arc<crate::http::IdentityCrypto>>,
+    #[cfg(feature = "http-api")]
+    pub(super) session_store: Option<Arc<crate::http::SessionStore>>,
+    #[cfg(feature = "http-api")]
+    pub(super) jti_revocation: Option<Arc<crate::http::JtiRevocationStore>>,
     pub(super) license_expires_at: Option<u64>,
     #[cfg(feature = "opentelemetry")]
     pub(super) telemetry_config: Option<mqtt5::telemetry::TelemetryConfig>,
@@ -75,6 +79,10 @@ impl MqdbAgent {
             auth_rate_limiter: Arc::new(RateLimiter::new(10)),
             #[cfg(feature = "http-api")]
             identity_crypto: None,
+            #[cfg(feature = "http-api")]
+            session_store: None,
+            #[cfg(feature = "http-api")]
+            jti_revocation: None,
             license_expires_at: None,
             #[cfg(feature = "opentelemetry")]
             telemetry_config: None,
@@ -225,6 +233,8 @@ impl MqdbAgent {
     #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
         self.identity_crypto.clone_from(&config.identity_crypto);
+        self.session_store = Some(Arc::clone(&config.session_store));
+        self.jti_revocation = Some(Arc::clone(&config.jti_revocation));
         *self.http_config.lock().expect("http_config lock") = Some(config);
         self
     }

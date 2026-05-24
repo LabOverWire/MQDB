@@ -53,14 +53,14 @@ pub struct ServerState {
     pub mqtt_client: Arc<MqttClient>,
     pub db_access: Arc<dyn DbAccess>,
     pub frontend_redirect_uri: Option<String>,
-    pub session_store: SessionStore,
+    pub session_store: Arc<SessionStore>,
     pub ticket_expiry_secs: u64,
     pub cookie_secure: bool,
     pub cors_origin: Option<String>,
     pub ticket_rate_limiter: RateLimiter,
     pub login_rate_limiter: RateLimiter,
     pub register_rate_limiter: RateLimiter,
-    pub jti_revocation: JtiRevocationStore,
+    pub jti_revocation: Arc<JtiRevocationStore>,
     pub trust_proxy: bool,
     pub identity_crypto: Option<Arc<IdentityCrypto>>,
     pub ownership_config: Arc<OwnershipConfig>,
@@ -266,10 +266,11 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
         persist_oauth_tokens(state, &link_key, &canonical_id, refresh_token, &identity).await;
     }
 
-    let jwt = mint_callback_jwt(state, &canonical_id, &identity);
+    let (jwt, jti) = mint_callback_jwt(state, &canonical_id, &identity);
 
     let Some(session_id) = state.session_store.create(NewSession {
         jwt,
+        jti,
         canonical_id,
         provider: provider.to_string(),
         provider_sub: identity.provider_sub.clone(),
@@ -621,18 +622,19 @@ fn mint_callback_jwt(
     state: &ServerState,
     canonical_id: &str,
     identity: &ProviderIdentity,
-) -> String {
+) -> (String, String) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
 
+    let jti = JtiRevocationStore::generate_jti();
     let claims = json!({
         "sub": canonical_id,
         "iss": state.jwt_config.issuer,
         "aud": state.jwt_config.audience,
         "exp": now + state.jwt_config.expiry_secs,
         "iat": now,
-        "jti": JtiRevocationStore::generate_jti(),
+        "jti": jti,
         "email": identity.email,
         "name": identity.name,
         "picture": identity.picture,
@@ -640,7 +642,7 @@ fn mint_callback_jwt(
         "provider_sub": identity.provider_sub,
     });
 
-    sign_jwt(&claims, &state.jwt_config)
+    (sign_jwt(&claims, &state.jwt_config), jti)
 }
 
 pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
@@ -957,10 +959,9 @@ pub fn handle_logout(state: &ServerState, headers: &HeaderMap) -> HttpResponse {
 
     if let Some(session_id) = parse_session_id(cookie_header) {
         if let Some(session) = state.session_store.get(session_id)
-            && let Some(payload) = verify_jwt_ignore_expiry(&session.jwt, &state.jwt_config)
-            && let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
+            && !session.jti.is_empty()
         {
-            state.jti_revocation.revoke(jti);
+            state.jti_revocation.revoke(&session.jti);
         }
         state.session_store.destroy(session_id);
     }
@@ -1740,9 +1741,10 @@ pub async fn handle_register(state: &ServerState, body: &[u8], client_ip: &str) 
         return json_response_with_credentials(500, &json!({"error": "registration failed"}), cors);
     }
 
-    let jwt = mint_callback_jwt(state, &canonical_id, &identity);
+    let (jwt, jti) = mint_callback_jwt(state, &canonical_id, &identity);
     let Some(session_id) = state.session_store.create(NewSession {
         jwt,
+        jti,
         canonical_id: canonical_id.clone(),
         provider: "email".to_string(),
         provider_sub,
@@ -1867,10 +1869,11 @@ pub async fn handle_login(state: &ServerState, body: &[u8], client_ip: &str) -> 
         picture: picture.clone(),
         email_verified: verified,
     };
-    let jwt = mint_callback_jwt(state, canonical_id, &identity);
+    let (jwt, jti) = mint_callback_jwt(state, canonical_id, &identity);
 
     let Some(session_id) = state.session_store.create(NewSession {
         jwt,
+        jti,
         canonical_id: canonical_id.to_string(),
         provider: "email".to_string(),
         provider_sub: canonical_id.to_string(),
@@ -2298,20 +2301,6 @@ pub async fn handle_verify_status(state: &ServerState, headers: &HeaderMap) -> H
     )
 }
 
-fn revoke_jwt_jtis(state: &ServerState, jwts: &[String]) {
-    for jwt in jwts {
-        let Some(payload) = verify_jwt_ignore_expiry(jwt, &state.jwt_config) else {
-            warn!("failed to decode destroyed session JWT; JTI not revoked");
-            continue;
-        };
-        let Some(jti) = payload.get("jti").and_then(|v| v.as_str()) else {
-            warn!("destroyed session JWT missing jti claim; not revoked");
-            continue;
-        };
-        state.jti_revocation.revoke(jti);
-    }
-}
-
 async fn verify_stored_password(
     state: &ServerState,
     canonical_id: &str,
@@ -2442,10 +2431,10 @@ pub async fn handle_password_change(
         );
     }
 
-    let revoked_jwts = state
+    let revoked_jtis = state
         .session_store
         .destroy_others_by_canonical_id(&canonical_id, Some(current_session_id));
-    revoke_jwt_jtis(state, &revoked_jwts);
+    state.jti_revocation.revoke_many(&revoked_jtis);
 
     json_response_with_credentials(200, &json!({"status": "password changed"}), cors)
 }
@@ -2798,10 +2787,10 @@ pub async fn handle_password_reset_submit(
     )
     .await;
 
-    let revoked_jwts = state
+    let revoked_jtis = state
         .session_store
         .destroy_others_by_canonical_id(canonical_id, None);
-    revoke_jwt_jtis(state, &revoked_jwts);
+    state.jti_revocation.revoke_many(&revoked_jtis);
 
     json_response_with_credentials(200, &json!({"status": "password_reset"}), cors)
 }
@@ -2845,6 +2834,7 @@ pub async fn handle_dev_login(state: &ServerState, body: &[u8]) -> HttpResponse 
 
     let Some(session_id) = state.session_store.create(NewSession {
         jwt: String::new(),
+        jti: String::new(),
         canonical_id: canonical_id.clone(),
         provider: "dev".to_string(),
         provider_sub: "dev-local".to_string(),

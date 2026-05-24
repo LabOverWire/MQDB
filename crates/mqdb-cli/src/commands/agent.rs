@@ -420,6 +420,8 @@ pub(crate) fn build_http_config(
         vault_backend: None,
         auth_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
         email_auth: oauth.email_auth,
+        session_store: std::sync::Arc::new(mqdb_agent::http::SessionStore::new()),
+        jti_revocation: std::sync::Arc::new(mqdb_agent::http::JtiRevocationStore::new()),
     })
 }
 

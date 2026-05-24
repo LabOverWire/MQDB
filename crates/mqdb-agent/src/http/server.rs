@@ -39,6 +39,8 @@ pub struct HttpServerConfig {
     pub vault_backend: Option<Arc<dyn VaultBackend>>,
     pub auth_rate_limit: u32,
     pub email_auth: bool,
+    pub session_store: Arc<SessionStore>,
+    pub jti_revocation: Arc<JtiRevocationStore>,
 }
 
 pub struct HttpServer {
@@ -79,14 +81,14 @@ impl HttpServer {
             mqtt_client: self.mqtt_client,
             db_access: self.config.db_access,
             frontend_redirect_uri: self.config.frontend_redirect_uri,
-            session_store: SessionStore::new(),
+            session_store: self.config.session_store,
             ticket_expiry_secs: self.config.ticket_expiry_secs,
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
             ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
             login_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 10 }),
             register_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 5 }),
-            jti_revocation: JtiRevocationStore::new(),
+            jti_revocation: self.config.jti_revocation,
             trust_proxy: self.config.trust_proxy,
             identity_crypto: self.config.identity_crypto,
             ownership_config: self.config.ownership_config,

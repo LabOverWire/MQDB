@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-23 — mqdb-agent 0.8.3
+
+### Fixed
+
+- MQTT password change and reset (`$DB/_auth/password/change`, `$DB/_auth/password/reset/submit`) updated `_credentials` and returned success without invalidating any HTTP sessions for the same user, leaving every cookie-backed session live until its 24h TTL — the HTTP-only fix in 0.8.2 (#68) only closed the HTTP scope of #37. `SessionStore`, `JtiRevocationStore`, and the existing HTTP-session-invalidation step now reach both MQTT handlers via Option-wrapped `Arc` references threaded through `MqdbAgent` → `MessageContext` → `AdminContext` (Option because the cluster-agent code path does not run an HTTP server). After the MQTT credential write succeeds, `invalidate_http_sessions` calls `destroy_others_by_canonical_id(canonical_id, None)` (no live caller session at MQTT request time) and revokes the returned JTIs via the new `JtiRevocationStore::revoke_many`.
+- Cleanup along the way: `Session`/`NewSession`/`SessionRef` now carry the `jti` directly (captured when the session's JWT is minted), so `destroy_others_by_canonical_id` returns JTIs rather than JWTs and `handle_logout` no longer decodes its own session's JWT to find the JTI. `mint_callback_jwt` returns `(jwt, jti)` so all 3 callers (callback, register, login) pass the JTI through to `SessionStore::create`; the dev-login session keeps an empty JTI and is filtered out of revocation results. `verify_jwt_ignore_expiry` is no longer called from the password-change/logout paths (only the refresh path still needs it). `HttpServerConfig` now owns the `Arc<SessionStore>` and `Arc<JtiRevocationStore>` so the same instances back both the HTTP server and the MQTT handler task — closing the architectural gap noted as the reason for partial scope in #68.
+- Code-review nit from #68 addressed: `JtiRevocationStore::revoke` now `warn!`s when the `MAX_REVOKED_JTIS` cap is hit and the JTI is dropped (was silent).
+- Test coverage: 2 new unit tests in `session_store.rs` (`destroy_others_skips_empty_jti_sessions`, `revoke_many_revokes_all_jtis`); the existing 3 destroy-others tests rewritten around JTIs instead of JWTs to match the new return type.
+
 ## 2026-05-23 — mqdb-agent 0.8.2
 
 ### Fixed
