@@ -60,6 +60,24 @@ pub enum Request {
     Unsubscribe {
         id: String,
     },
+    Share {
+        entity: String,
+        id: String,
+        grantee: String,
+        permission: String,
+    },
+    Unshare {
+        entity: String,
+        id: String,
+        grantee: String,
+    },
+    Shares {
+        entity: String,
+        id: String,
+    },
+    Shared {
+        entity: String,
+    },
 }
 
 impl Request {
@@ -73,6 +91,10 @@ impl Request {
             Request::List { .. } => "list",
             Request::Subscribe { .. } => "subscribe",
             Request::Unsubscribe { .. } => "unsubscribe",
+            Request::Share { .. } => "share",
+            Request::Unshare { .. } => "unshare",
+            Request::Shares { .. } => "shares",
+            Request::Shared { .. } => "shared",
         }
     }
 }

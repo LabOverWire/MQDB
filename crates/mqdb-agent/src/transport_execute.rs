@@ -42,6 +42,21 @@ impl Database {
         scope_config: &ScopeConfig,
         vault_constraint: Option<VaultConstraintData>,
     ) -> Response {
+        match &request {
+            Request::Create { entity, .. }
+            | Request::Read { entity, .. }
+            | Request::Update { entity, .. }
+            | Request::Delete { entity, .. }
+            | Request::List { entity, .. }
+                if entity == mqdb_core::types::SHARES_ENTITY =>
+            {
+                return mqdb_core::error::Error::Forbidden(
+                    "direct access to shares is not permitted".to_string(),
+                )
+                .into();
+            }
+            _ => {}
+        }
         match request {
             Request::Create { entity, data } => {
                 let constraint_data = match vault_constraint {
@@ -199,6 +214,42 @@ impl Database {
             },
             Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
                 Ok(()) => Response::ok(value_from_unit(())),
+                Err(e) => e.into(),
+            },
+            Request::Share {
+                entity,
+                id,
+                grantee,
+                permission,
+            } => match self
+                .share_grant(&entity, &id, &grantee, &permission, sender, ownership)
+                .await
+            {
+                Ok(v) => Response::ok(v),
+                Err(e) => e.into(),
+            },
+            Request::Unshare {
+                entity,
+                id,
+                grantee,
+            } => match self
+                .share_revoke(&entity, &id, &grantee, sender, ownership)
+                .await
+            {
+                Ok(v) => Response::ok(v),
+                Err(e) => e.into(),
+            },
+            Request::Shares { entity, id } => {
+                match self
+                    .list_resource_shares(&entity, &id, sender, ownership)
+                    .await
+                {
+                    Ok(v) => Response::ok(value_from_vec(v)),
+                    Err(e) => e.into(),
+                }
+            }
+            Request::Shared { entity } => match self.list_shared_with(&entity, sender).await {
+                Ok(v) => Response::ok(value_from_vec(v)),
                 Err(e) => e.into(),
             },
         }

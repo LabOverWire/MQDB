@@ -242,7 +242,7 @@ impl VaultBackend for VaultBackendImpl {
                         vault_decrypt_fields(&crypto, entity, &id, data, &skip);
                     }
                 }
-                DbOp::List => {
+                DbOp::List | DbOp::Shared => {
                     if let Some(items) = data.as_array_mut() {
                         for item in items {
                             if let Some(id) =
@@ -253,7 +253,7 @@ impl VaultBackend for VaultBackendImpl {
                         }
                     }
                 }
-                DbOp::Delete => {}
+                DbOp::Delete | DbOp::Share | DbOp::Unshare | DbOp::Shares => {}
             }
         })
     }

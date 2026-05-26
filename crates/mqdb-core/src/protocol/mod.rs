@@ -24,6 +24,10 @@ pub enum DbOp {
     Update,
     Delete,
     List,
+    Share,
+    Unshare,
+    Shares,
+    Shared,
 }
 
 impl fmt::Display for DbOp {
@@ -34,6 +38,10 @@ impl fmt::Display for DbOp {
             Self::Update => f.write_str("update"),
             Self::Delete => f.write_str("delete"),
             Self::List => f.write_str("list"),
+            Self::Share => f.write_str("share"),
+            Self::Unshare => f.write_str("unshare"),
+            Self::Shares => f.write_str("shares"),
+            Self::Shared => f.write_str("shared"),
         }
     }
 }
@@ -221,6 +229,32 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
             operation: DbOp::List,
             id: None,
         }),
+        [entity, "shared"] if is_valid_entity_name(entity) => Some(DbOperation {
+            entity: (*entity).to_string(),
+            operation: DbOp::Shared,
+            id: None,
+        }),
+        [entity, id, "share"] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Share,
+                id: Some((*id).to_string()),
+            })
+        }
+        [entity, id, "unshare"] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Unshare,
+                id: Some((*id).to_string()),
+            })
+        }
+        [entity, id, "shares"] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
+            Some(DbOperation {
+                entity: (*entity).to_string(),
+                operation: DbOp::Shares,
+                id: Some((*id).to_string()),
+            })
+        }
         [entity, id] if is_valid_entity_name(entity) && is_valid_record_id(id) => {
             Some(DbOperation {
                 entity: (*entity).to_string(),
@@ -301,6 +335,46 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 projection,
             })
         }
+        DbOp::Share => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Share))?;
+            let grantee = data
+                .get("grantee")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let permission = data
+                .get("permission")
+                .and_then(Value::as_str)
+                .unwrap_or("view")
+                .to_string();
+            Ok(Request::Share {
+                entity: op.entity,
+                id,
+                grantee,
+                permission,
+            })
+        }
+        DbOp::Unshare => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Unshare))?;
+            let grantee = data
+                .get("grantee")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(Request::Unshare {
+                entity: op.entity,
+                id,
+                grantee,
+            })
+        }
+        DbOp::Shares => {
+            let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Shares))?;
+            Ok(Request::Shares {
+                entity: op.entity,
+                id,
+            })
+        }
+        DbOp::Shared => Ok(Request::Shared { entity: op.entity }),
     }
 }
 
@@ -430,6 +504,49 @@ mod tests {
         assert!(parse_db_topic("invalid/topic").is_none());
         assert!(parse_db_topic("$DB").is_none());
         assert!(parse_db_topic("$DB/").is_none());
+    }
+
+    #[test]
+    fn test_parse_db_topic_share_family() {
+        let grant_op = parse_db_topic("$DB/diagrams/abc/share").unwrap();
+        assert_eq!(grant_op.entity, "diagrams");
+        assert_eq!(grant_op.operation, DbOp::Share);
+        assert_eq!(grant_op.id, Some("abc".to_string()));
+
+        let revoke_op = parse_db_topic("$DB/diagrams/abc/unshare").unwrap();
+        assert_eq!(revoke_op.operation, DbOp::Unshare);
+
+        let list_grants_op = parse_db_topic("$DB/diagrams/abc/shares").unwrap();
+        assert_eq!(list_grants_op.operation, DbOp::Shares);
+        assert_eq!(list_grants_op.id, Some("abc".to_string()));
+
+        let discovery_op = parse_db_topic("$DB/diagrams/shared").unwrap();
+        assert_eq!(discovery_op.operation, DbOp::Shared);
+        assert!(discovery_op.id.is_none());
+    }
+
+    #[test]
+    fn test_build_share_request() {
+        let op = DbOperation {
+            entity: "diagrams".to_string(),
+            operation: DbOp::Share,
+            id: Some("abc".to_string()),
+        };
+        let payload = br#"{"grantee":"bob","permission":"edit"}"#;
+        match build_request(op, payload).unwrap() {
+            Request::Share {
+                entity,
+                id,
+                grantee,
+                permission,
+            } => {
+                assert_eq!(entity, "diagrams");
+                assert_eq!(id, "abc");
+                assert_eq!(grantee, "bob");
+                assert_eq!(permission, "edit");
+            }
+            other => panic!("expected Share, got {other:?}"),
+        }
     }
 
     #[test]

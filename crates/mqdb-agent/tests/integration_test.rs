@@ -1701,6 +1701,7 @@ async fn test_ownership_isolates_user_data_on_list() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_share_grant_gates_read_update_delete() {
     use mqdb_core::{Request, Response};
 
@@ -1754,17 +1755,19 @@ async fn test_share_grant_gates_read_update_delete() {
         .await
     };
     let grant = async |permission: &str| {
-        db.execute(Request::Create {
-            entity: "_shares".into(),
-            data: json!({
-                "resource_entity": "diagrams",
-                "resource_id": diagram_id,
-                "grantee": "bob",
-                "grantee_key": "bob",
-                "permission": permission,
-                "granted_by": "alice",
-            }),
-        })
+        db.execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                grantee: "bob".into(),
+                permission: permission.into(),
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
         .await
     };
 
@@ -1827,6 +1830,172 @@ async fn test_share_grant_gates_read_update_delete() {
             Response::Ok { .. }
         ),
         "owner delete should succeed"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_share_endpoints_and_protection() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "Alice Diagram"}),
+        })
+        .await;
+    let diagram_id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let share = async |sender: &str, grantee: &str, permission: &str| {
+        db.execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                grantee: grantee.into(),
+                permission: permission.into(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let list_shares = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Shares {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let shared_with = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    assert!(
+        matches!(
+            share("carol", "mallory", "edit").await,
+            Response::Error { code: 403, .. }
+        ),
+        "non-owner share must be forbidden"
+    );
+    assert!(
+        matches!(share("alice", "bob", "view").await, Response::Ok { .. }),
+        "owner share should succeed"
+    );
+
+    match list_shares("alice").await {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["grantee"], "bob");
+            assert_eq!(items[0]["permission"], "view");
+        }
+        Response::Error { code, message } => panic!("shares list failed {code}: {message}"),
+    }
+
+    share("alice", "bob", "edit").await;
+    if let Response::Ok { data } = list_shares("alice").await {
+        let items = data.as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "direct re-share must replace, not duplicate"
+        );
+        assert_eq!(items[0]["permission"], "edit");
+    } else {
+        panic!("shares list failed after re-share");
+    }
+
+    match shared_with("bob").await {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["id"], diagram_id);
+        }
+        Response::Error { code, message } => panic!("shared list failed {code}: {message}"),
+    }
+
+    assert!(
+        matches!(list_shares("bob").await, Response::Error { code: 403, .. }),
+        "non-owner shares list must be forbidden"
+    );
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+            grantee: "bob".into(),
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+    if let Response::Ok { data } = shared_with("bob").await {
+        assert!(
+            data.as_array().unwrap().is_empty(),
+            "unshare should remove discovery"
+        );
+    } else {
+        panic!("shared list failed after unshare");
+    }
+
+    assert!(
+        matches!(
+            db.execute(Request::List {
+                entity: "_shares".into(),
+                filters: vec![],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            })
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "direct _shares list must be forbidden"
+    );
+    assert!(
+        matches!(
+            db.execute(Request::Create {
+                entity: "_shares".into(),
+                data: json!({"x": 1}),
+            })
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "direct _shares create must be forbidden"
     );
 }
 

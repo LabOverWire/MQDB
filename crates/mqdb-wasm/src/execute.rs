@@ -67,6 +67,12 @@ impl WasmDatabase {
             Request::Subscribe { .. } | Request::Unsubscribe { .. } => Err(JsValue::from_str(
                 "use subscribe/unsubscribe methods directly",
             )),
+            Request::Share { .. }
+            | Request::Unshare { .. }
+            | Request::Shares { .. }
+            | Request::Shared { .. } => Err(JsValue::from_str(
+                "sharing is not supported in embedded mode",
+            )),
         }
     }
 }
