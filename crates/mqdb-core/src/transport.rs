@@ -65,11 +65,15 @@ pub enum Request {
         id: String,
         grantee: String,
         permission: String,
+        #[serde(default = "default_cascade")]
+        cascade: bool,
     },
     Unshare {
         entity: String,
         id: String,
         grantee: String,
+        #[serde(default = "default_cascade")]
+        cascade: bool,
     },
     Shares {
         entity: String,
@@ -78,6 +82,10 @@ pub enum Request {
     Shared {
         entity: String,
     },
+}
+
+fn default_cascade() -> bool {
+    true
 }
 
 impl Request {

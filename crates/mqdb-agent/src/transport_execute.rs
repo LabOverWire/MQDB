@@ -221,8 +221,17 @@ impl Database {
                 id,
                 grantee,
                 permission,
+                cascade,
             } => match self
-                .share_grant(&entity, &id, &grantee, &permission, sender, ownership)
+                .share_grant(
+                    &entity,
+                    &id,
+                    &grantee,
+                    &permission,
+                    sender,
+                    ownership,
+                    cascade,
+                )
                 .await
             {
                 Ok(v) => Response::ok(v),
@@ -232,8 +241,9 @@ impl Database {
                 entity,
                 id,
                 grantee,
+                cascade,
             } => match self
-                .share_revoke(&entity, &id, &grantee, sender, ownership)
+                .share_revoke(&entity, &id, &grantee, sender, ownership, cascade)
                 .await
             {
                 Ok(v) => Response::ok(v),

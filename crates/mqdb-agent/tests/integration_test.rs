@@ -1761,6 +1761,7 @@ async fn test_share_grant_gates_read_update_delete() {
                 id: diagram_id.clone(),
                 grantee: "bob".into(),
                 permission: permission.into(),
+                cascade: false,
             },
             Some("alice"),
             None,
@@ -1863,6 +1864,7 @@ async fn test_share_endpoints_and_protection() {
                 id: diagram_id.clone(),
                 grantee: grantee.into(),
                 permission: permission.into(),
+                cascade: false,
             },
             Some(sender),
             None,
@@ -1954,6 +1956,7 @@ async fn test_share_endpoints_and_protection() {
             entity: "diagrams".into(),
             id: diagram_id.clone(),
             grantee: "bob".into(),
+            cascade: false,
         },
         Some("alice"),
         None,
@@ -1997,6 +2000,131 @@ async fn test_share_endpoints_and_protection() {
         ),
         "direct _shares create must be forbidden"
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_share_cascade_follows_references() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+
+    let make_diagram = async |title: &str, parent: Option<&str>| {
+        let data = match parent {
+            Some(p) => json!({"userId": "alice", "title": title, "parent_id": p}),
+            None => json!({"userId": "alice", "title": title}),
+        };
+        match db
+            .execute(Request::Create {
+                entity: "diagrams".into(),
+                data,
+            })
+            .await
+        {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { code, message } => panic!("create failed {code}: {message}"),
+        }
+    };
+    let c = make_diagram("C", None).await;
+    let b = make_diagram("B", Some(&c)).await;
+    let a = make_diagram("A", Some(&b)).await;
+
+    let read_as = async |sender: &str, id: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: id.to_string(),
+                includes: vec![],
+                projection: None,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    let shared = db
+        .execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: a.clone(),
+                grantee: "bob".into(),
+                permission: "edit".into(),
+                cascade: true,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(shared, Response::Ok { .. }),
+        "cascade share should succeed"
+    );
+
+    for id in [&a, &b, &c] {
+        assert!(
+            matches!(read_as("bob", id).await, Response::Ok { .. }),
+            "bob should read every diagram in the closure"
+        );
+    }
+
+    if let Response::Ok { data } = db
+        .execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        assert_eq!(
+            data.as_array().unwrap().len(),
+            3,
+            "discovery should list the full closure"
+        );
+    } else {
+        panic!("shared discovery failed");
+    }
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: a.clone(),
+            grantee: "bob".into(),
+            cascade: true,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    for id in [&a, &b, &c] {
+        assert!(
+            matches!(read_as("bob", id).await, Response::Error { code: 403, .. }),
+            "cascade unshare should revoke access across the closure"
+        );
+    }
 }
 
 #[tokio::test]

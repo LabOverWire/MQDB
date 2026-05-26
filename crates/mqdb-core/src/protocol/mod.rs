@@ -347,11 +347,13 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 .and_then(Value::as_str)
                 .unwrap_or("view")
                 .to_string();
+            let cascade = data.get("cascade").and_then(Value::as_bool).unwrap_or(true);
             Ok(Request::Share {
                 entity: op.entity,
                 id,
                 grantee,
                 permission,
+                cascade,
             })
         }
         DbOp::Unshare => {
@@ -361,10 +363,12 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let cascade = data.get("cascade").and_then(Value::as_bool).unwrap_or(true);
             Ok(Request::Unshare {
                 entity: op.entity,
                 id,
                 grantee,
+                cascade,
             })
         }
         DbOp::Shares => {
@@ -539,11 +543,13 @@ mod tests {
                 id,
                 grantee,
                 permission,
+                cascade,
             } => {
                 assert_eq!(entity, "diagrams");
                 assert_eq!(id, "abc");
                 assert_eq!(grantee, "bob");
                 assert_eq!(permission, "edit");
+                assert!(cascade, "cascade defaults to true");
             }
             other => panic!("expected Share, got {other:?}"),
         }

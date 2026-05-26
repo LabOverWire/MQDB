@@ -2,11 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Database;
+use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::keys;
 use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY, ScopeConfig};
 use mqdb_core::{Filter, FilterOp};
 use serde_json::{Value, json};
+use std::collections::{BTreeSet, HashSet, VecDeque};
+
+const MAX_CASCADE_DIAGRAMS: usize = 256;
 
 fn eq_filter(field: &str, value: &str) -> Filter {
     Filter::new(
@@ -77,12 +81,89 @@ impl Database {
         Ok(())
     }
 
+    async fn write_grant(
+        &self,
+        entity: &str,
+        id: &str,
+        grantee: &str,
+        level: AccessLevel,
+        granted_by: &str,
+    ) -> Result<()> {
+        self.clear_grant(entity, id, grantee).await?;
+        let record = json!({
+            "resource_entity": entity,
+            "resource_id": id,
+            "grantee": grantee,
+            "grantee_key": grantee,
+            "permission": level.as_str(),
+            "granted_by": granted_by,
+        });
+        self.create(
+            SHARES_ENTITY.to_string(),
+            record,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn self_reference_fields(&self, entity: &str) -> Vec<String> {
+        let mut fields = BTreeSet::new();
+        for rel in self.list_relationships(entity).await {
+            if rel.target_entity == entity {
+                fields.insert(rel.field_suffix);
+            }
+        }
+        for constraint in self.list_constraints(entity).await {
+            if let mqdb_core::constraint::Constraint::ForeignKey(fk) = constraint
+                && fk.target_entity == entity
+            {
+                fields.insert(fk.source_field);
+            }
+        }
+        fields.into_iter().collect()
+    }
+
+    async fn referenced_closure(&self, entity: &str, root_id: &str) -> Result<Vec<String>> {
+        let ref_fields = self.self_reference_fields(entity).await;
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::new();
+        queue.push_back(root_id.to_string());
+        while let Some(id) = queue.pop_front() {
+            if visited.len() >= MAX_CASCADE_DIAGRAMS {
+                break;
+            }
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            let key = keys::encode_data_key(entity, &id);
+            let Some(bytes) = self.storage.get(&key)? else {
+                continue;
+            };
+            let record = Entity::deserialize(entity.to_string(), id.clone(), &bytes)?;
+            for field in &ref_fields {
+                if let Some(ref_id) = record.data.get(field).and_then(Value::as_str)
+                    && !visited.contains(ref_id)
+                {
+                    queue.push_back(ref_id.to_string());
+                }
+            }
+        }
+        Ok(visited.into_iter().collect())
+    }
+
     /// Grant `grantee` access to a resource at `permission` (`view`/`edit`).
-    /// Direct share is set-to-level: any existing grant for the same grantee is replaced.
+    /// The root resource is set-to-level (a re-share may demote it); when `cascade`
+    /// is set, every diagram reachable via self-references is granted at max-of-levels
+    /// (never downgrading an existing grant).
     ///
     /// # Errors
     /// Returns `Forbidden` if the sender is not the owner/admin, `Validation` for a
     /// bad permission or non-shareable entity, or `NotFound` if the resource is missing.
+    #[allow(clippy::too_many_arguments)]
     pub async fn share_grant(
         &self,
         entity: &str,
@@ -91,6 +172,7 @@ impl Database {
         permission: &str,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
+        cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
         if grantee.trim().is_empty() {
@@ -105,27 +187,33 @@ impl Database {
                 id: id.to_string(),
             });
         }
-        self.clear_grant(entity, id, grantee).await?;
-        let record = json!({
-            "resource_entity": entity,
-            "resource_id": id,
+        let granted_by = sender.unwrap_or_default();
+        self.write_grant(entity, id, grantee, level, granted_by)
+            .await?;
+        let mut shared = 1usize;
+        if cascade {
+            for ref_id in self.referenced_closure(entity, id).await? {
+                if ref_id == id {
+                    continue;
+                }
+                let existing = self.share_level(entity, &ref_id, grantee).await?;
+                if existing.is_none_or(|current| current < level) {
+                    self.write_grant(entity, &ref_id, grantee, level, granted_by)
+                        .await?;
+                }
+                shared += 1;
+            }
+        }
+        Ok(json!({
+            "status": "shared",
             "grantee": grantee,
-            "grantee_key": grantee,
             "permission": level.as_str(),
-            "granted_by": sender.unwrap_or_default(),
-        });
-        self.create(
-            SHARES_ENTITY.to_string(),
-            record,
-            None,
-            None,
-            None,
-            &ScopeConfig::default(),
-        )
-        .await
+            "resources_shared": shared,
+        }))
     }
 
-    /// Revoke `grantee`'s grant on a resource.
+    /// Revoke `grantee`'s grant on a resource, and (when `cascade` is set) across
+    /// every diagram reachable via self-references.
     ///
     /// # Errors
     /// Returns `Forbidden` if the sender is not the owner/admin, or `Validation` for a
@@ -137,9 +225,18 @@ impl Database {
         grantee: &str,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
+        cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
         self.clear_grant(entity, id, grantee).await?;
+        if cascade {
+            for ref_id in self.referenced_closure(entity, id).await? {
+                if ref_id == id {
+                    continue;
+                }
+                self.clear_grant(entity, &ref_id, grantee).await?;
+            }
+        }
         Ok(json!({ "status": "unshared", "grantee": grantee }))
     }
 
