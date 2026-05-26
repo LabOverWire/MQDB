@@ -3,7 +3,7 @@
 
 use crate::database::{CallerContext, Database};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
-use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
+use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
 
 fn value_from_unit(_: ()) -> Value {
@@ -73,7 +73,9 @@ impl Database {
                     owner_field,
                     sender: uid,
                 } = ownership.evaluate(&entity, sender)
-                    && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    && let Err(e) = self
+                        .check_access(&entity, &id, owner_field, uid, AccessLevel::View)
+                        .await
                 {
                     return e.into();
                 }
@@ -92,7 +94,10 @@ impl Database {
                     sender: uid,
                 } = ownership.evaluate(&entity, sender)
                 {
-                    if let Err(e) = self.check_ownership(&entity, &id, owner_field, uid) {
+                    if let Err(e) = self
+                        .check_access(&entity, &id, owner_field, uid, AccessLevel::Edit)
+                        .await
+                    {
                         return e.into();
                     }
                     if let Value::Object(ref mut map) = fields {

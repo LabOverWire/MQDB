@@ -1701,6 +1701,136 @@ async fn test_ownership_isolates_user_data_on_list() {
 }
 
 #[tokio::test]
+async fn test_share_grant_gates_read_update_delete() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "Alice Diagram"}),
+        })
+        .await;
+    let diagram_id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let read_diagram = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let update_diagram = async |sender: &str, title: &str| {
+        db.execute_with_sender(
+            Request::Update {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                fields: json!({ "title": title }),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let grant = async |permission: &str| {
+        db.execute(Request::Create {
+            entity: "_shares".into(),
+            data: json!({
+                "resource_entity": "diagrams",
+                "resource_id": diagram_id,
+                "grantee": "bob",
+                "grantee_key": "bob",
+                "permission": permission,
+                "granted_by": "alice",
+            }),
+        })
+        .await
+    };
+
+    assert!(
+        matches!(read_diagram("bob").await, Response::Error { code: 403, .. }),
+        "non-grantee read should be forbidden"
+    );
+
+    grant("view").await;
+    assert!(
+        matches!(read_diagram("bob").await, Response::Ok { .. }),
+        "view grantee read should succeed"
+    );
+    assert!(
+        matches!(
+            update_diagram("bob", "hacked").await,
+            Response::Error { code: 403, .. }
+        ),
+        "view grantee update should be forbidden"
+    );
+
+    grant("edit").await;
+    assert!(
+        matches!(update_diagram("bob", "by bob").await, Response::Ok { .. }),
+        "edit grantee update should succeed"
+    );
+
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".into(),
+                    id: diagram_id.clone(),
+                },
+                Some("bob"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "edit grantee delete should be forbidden (owner-only)"
+    );
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".into(),
+                    id: diagram_id.clone(),
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Ok { .. }
+        ),
+        "owner delete should succeed"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 
