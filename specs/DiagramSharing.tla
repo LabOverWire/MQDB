@@ -81,9 +81,15 @@ ClearGrant(d, g) ==
     /\ grants' = [grants EXCEPT ![<<d, g>>] = "none"]
     /\ UNCHANGED owner
 
+\* ownership transfer changes only the owner field; grants are preserved
+Transfer(d, u) ==
+    /\ owner' = [owner EXCEPT ![d] = u]
+    /\ UNCHANGED grants
+
 Next ==
     \/ \E d \in Diagrams, g \in GranteeSpace, l \in Levels : SetGrant(d, g, l)
     \/ \E d \in Diagrams, g \in GranteeSpace : ClearGrant(d, g)
+    \/ \E d \in Diagrams, u \in Users : Transfer(d, u)
 
 Spec == Init /\ [][Next]_vars
 
@@ -132,6 +138,11 @@ InvAnonConfinedSee ==
     \A x \in Resources : CanSee(ANON, x) => (GrantOf(DiagramOf(x), PUBLIC) \in {"view", "edit"})
 InvAnonConfinedEdit ==
     \A x \in Resources : CanEdit(ANON, x) => (GrantOf(DiagramOf(x), PUBLIC) = "edit")
+
+\* Completeness for anonymous viewers: a public resource's events reach anonymous.
+InvAnonPublicReceives ==
+    \A x \in Resources :
+        (GrantOf(DiagramOf(x), PUBLIC) \in {"view", "edit"}) => Delivers(ANON, x)
 
 \* A pending grant (grantee = PENDING) is inert: a user with no personal/public
 \* grant and not owner/admin cannot see the diagram even if a PENDING grant exists.

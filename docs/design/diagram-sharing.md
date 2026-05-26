@@ -438,8 +438,8 @@ specs, all exhaustively checked (no `limit_reached`):
 
 | Spec | What it checks | Result |
 |------|----------------|--------|
-| `specs/DiagramSharing.tla` | Proposed design: view/edit/public/pending grants, child derivation, recipient-scoped event routing | **12/12 invariants hold**, 26,244 states exhausted |
-| `specs/DiagramSharingCurrent.tla` | Today's behavior (owner-only diagrams, ungated children, broadcast events) | `InvEventConfidentiality` and `InvChildNeedsParentEdit` **violated** (counterexamples in initial state) |
+| `specs/DiagramSharing.tla` | Proposed design: view/edit/public/pending grants, child derivation, recipient-scoped event routing, ownership transfer | **13/13 invariants hold**, 26,244 states exhausted |
+| `specs/DiagramSharingCurrent.tla` | Today's behavior (owner-only diagrams, ungated children, broadcast events). Checked with two cfgs: `DiagramSharingCurrent.cfg` and `DiagramSharingCurrentChild.cfg` | `InvEventConfidentiality` (first cfg) and `InvChildNeedsParentEdit` (second cfg) **violated** (counterexamples in initial state) |
 | `specs/CascadeClosure.tla` | Transitive cascade vs. an independent fixpoint reachability, over all reference graphs on 3 diagrams | **3/3 invariants hold**, cycle-safe & terminating, 1,792 states |
 | `specs/GrantLifecycle.tla` | Level-merge and revocation rules for a grant cell (direct = set, cascade = max, unshare = remove) | **6/6 invariants hold**; a replay confirms direct demotes, cascade never downgrades, revoke clears access |
 
@@ -450,11 +450,14 @@ Invariants proven on the proposed design:
   the property that makes the per-user-topic + `%u`-ACL scheme equivalent to CRUD
   ownership.
 - **Event completeness** — every authorized non-admin reader *does* receive the
-  event (grantees never miss live updates).
+  event (grantees never miss live updates), and a public resource's events reach
+  anonymous viewers.
 - **Edit ⇒ see**, **delete is owner/admin only** (never via edit or public grant),
   **view-grantee cannot edit a child** (the "view is a lie" property defeated),
   **child ⇒ parent** for both see and edit, **anonymous confined to public**,
   **pending grants inert**, **reserved sentinels never own**.
+- **Ownership transfer** preserves grants (the action leaves the grant set
+  unchanged) and every safety invariant continues to hold in post-transfer states.
 - **Cascade = exact reference closure** (no over- or under-sharing) and terminates
   on cyclic graphs.
 - **Level-merge**: direct `/share` sets exactly the requested level (demotion
