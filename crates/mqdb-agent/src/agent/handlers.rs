@@ -67,6 +67,77 @@ pub(super) struct MessageContext<'a> {
     pub jti_revocation: Option<&'a Arc<crate::http::JtiRevocationStore>>,
 }
 
+/// Resolve a grantee email to its canonical identity via `_identity_links`.
+/// Returns `None` when no registered identity matches the email.
+#[cfg(feature = "http-api")]
+pub(crate) async fn resolve_grantee_email(
+    db: &Database,
+    crypto: &crate::http::IdentityCrypto,
+    email: &str,
+) -> Option<String> {
+    let hash = crypto.blind_index("_identity_links", email);
+    let records =
+        crate::db_helpers::list_entities_db(db, "_identity_links", &format!("email_hash={hash}"))
+            .await
+            .ok()?;
+    records
+        .first()?
+        .get("canonical_id")
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+/// For `Share`/`Unshare` in identity (OAuth) deployments, rewrite the grantee email
+/// to its canonical id. A `Share` for an unregistered email is rejected (`Err(email)`);
+/// an `Unshare` for an unknown email is left as-is (a harmless no-op revoke).
+/// When no identity crypto is configured (password mode), the grantee is used verbatim.
+#[cfg(feature = "http-api")]
+async fn resolve_share_request(
+    db: &Database,
+    crypto: Option<&Arc<crate::http::IdentityCrypto>>,
+    request: mqdb_core::transport::Request,
+) -> Result<mqdb_core::transport::Request, String> {
+    use mqdb_core::transport::Request;
+    let Some(crypto) = crypto else {
+        return Ok(request);
+    };
+    match request {
+        Request::Share {
+            entity,
+            id,
+            grantee,
+            permission,
+            cascade,
+        } => match resolve_grantee_email(db, crypto, &grantee).await {
+            Some(canonical_id) => Ok(Request::Share {
+                entity,
+                id,
+                grantee: canonical_id,
+                permission,
+                cascade,
+            }),
+            None => Err(grantee),
+        },
+        Request::Unshare {
+            entity,
+            id,
+            grantee,
+            cascade,
+        } => {
+            let resolved = resolve_grantee_email(db, crypto, &grantee)
+                .await
+                .unwrap_or(grantee);
+            Ok(Request::Unshare {
+                entity,
+                id,
+                grantee: resolved,
+                cascade,
+            })
+        }
+        other => Ok(other),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     let db = ctx.db;
@@ -172,6 +243,29 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         }
     } else {
         (request, None)
+    };
+
+    #[cfg(feature = "http-api")]
+    let request = match resolve_share_request(db, ctx.identity_crypto, request).await {
+        Ok(resolved) => resolved,
+        Err(unknown_email) => {
+            if let Some(response_topic) = &message.properties.response_topic {
+                let response = Response::error(
+                    mqdb_core::ErrorCode::NotFound,
+                    format!("unknown user '{unknown_email}'"),
+                );
+                if let Ok(payload) = serde_json::to_vec(&response) {
+                    publish_response(
+                        client,
+                        response_topic,
+                        message.properties.correlation_data.as_deref(),
+                        payload,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
     };
 
     let span = info_span!(
@@ -1618,4 +1712,44 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     invalidate_http_sessions(ctx, canonical_id);
 
     Response::ok(json!({"status": "password_reset"}))
+}
+
+#[cfg(all(test, feature = "http-api"))]
+mod tests {
+    use super::resolve_grantee_email;
+    use crate::database::Database;
+    use crate::http::IdentityCrypto;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn resolve_grantee_email_maps_known_email_to_canonical_id() {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+
+        let hash = crypto.blind_index("_identity_links", "bob@example.com");
+        crate::db_helpers::create_entity_db(
+            &db,
+            "_identity_links",
+            &json!({
+                "id": "google:bob",
+                "canonical_id": "cid-bob",
+                "email_hash": hash,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolve_grantee_email(&db, &crypto, "bob@example.com").await,
+            Some("cid-bob".to_string())
+        );
+        assert_eq!(
+            resolve_grantee_email(&db, &crypto, "nobody@example.com").await,
+            None
+        );
+    }
 }
