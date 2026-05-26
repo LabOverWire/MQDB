@@ -2128,6 +2128,98 @@ async fn test_share_cascade_follows_references() {
 }
 
 #[tokio::test]
+async fn test_shares_index_path_correct_and_idempotent() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    db.ensure_index(
+        "_shares".into(),
+        vec!["resource_id".into(), "grantee".into()],
+    )
+    .await
+    .unwrap();
+    db.ensure_index(
+        "_shares".into(),
+        vec!["resource_id".into(), "grantee".into()],
+    )
+    .await
+    .unwrap();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await;
+    let id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let shared = db
+        .execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: id.clone(),
+                grantee: "bob".into(),
+                permission: "view".into(),
+                cascade: false,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(matches!(shared, Response::Ok { .. }));
+
+    let read = db
+        .execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(read, Response::Ok { .. }),
+        "indexed share_level lookup should authorize the read"
+    );
+
+    if let Response::Ok { data } = db
+        .execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        assert_eq!(data.as_array().unwrap().len(), 1);
+    } else {
+        panic!("indexed discovery failed");
+    }
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 

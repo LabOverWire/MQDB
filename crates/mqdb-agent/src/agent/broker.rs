@@ -25,6 +25,20 @@ pub(super) struct AuthProviderConfig<'a> {
 }
 
 impl MqdbAgent {
+    async fn register_share_indexes(&self) {
+        if self.ownership_config.is_empty() {
+            return;
+        }
+        let fields = vec!["resource_id".to_string(), "grantee".to_string()];
+        if let Err(e) = self
+            .db
+            .ensure_index(mqdb_core::types::SHARES_ENTITY.to_string(), fields)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to register _shares indexes");
+        }
+    }
+
     pub(super) async fn build_broker_config(
         &self,
     ) -> Result<
@@ -37,6 +51,7 @@ impl MqdbAgent {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        self.register_share_indexes().await;
         let mqtt_storage_dir = self.db.path().join("mqtt_storage");
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
