@@ -1,7 +1,9 @@
 -------------------------------- MODULE DiagramSharing --------------------------------
 \* Authorization core of the diagram-sharing design (docs/design/diagram-sharing.md).
 \* Verifies the PROPOSED design: named view/edit grants + public grants + pending
-\* grants + child-entity derivation + recipient-scoped event routing.
+\* grants + child-entity derivation + recipient-scoped event routing. The parent
+\* mapping is a VARIABLE here and may be reparented arbitrarily, to test whether
+\* derived child access can leak when a child moves between diagrams.
 \*
 \* Threat model: authenticated users are mutually untrusting tenants.
 \* Assumption NOT modeled (taken as given): mqtt-lib's %u ACL correctly isolates
@@ -17,7 +19,7 @@ Users    == {u1, u2}            \* regular principals: can own and be grantees
 Admins   == {adm}               \* bypass everything
 Diagrams == {d1, d2}            \* ownership-enabled resources
 Children == {c1}                \* derive permission from a parent diagram
-Parent   == (c1 :> d1)          \* c1 belongs to diagram d1
+\* parent is a VARIABLE (see below); initial mapping c1 |-> d1 set in Init
 
 Resources    == Diagrams \cup Children
 Readers      == Users \cup Admins \cup {ANON}
@@ -26,12 +28,12 @@ Levels       == {"view", "edit"}
 LevelOrNone  == {"none", "view", "edit"}
 GrantKeys    == Diagrams \X GranteeSpace
 
-VARIABLES owner, grants
-vars == <<owner, grants>>
+VARIABLES owner, grants, parent
+vars == <<owner, grants, parent>>
 
 GrantOf(d, g) == IF <<d, g>> \in DOMAIN grants THEN grants[<<d, g>>] ELSE "none"
 IsAdmin(u)    == u \in Admins
-DiagramOf(x)  == IF x \in Diagrams THEN x ELSE Parent[x]
+DiagramOf(x)  == IF x \in Diagrams THEN x ELSE parent[x]
 
 \* ---- permission predicates on a diagram ----
 SeeDiagram(u, d) ==
@@ -72,24 +74,34 @@ Delivers(u, x) == (u \in Recipients(x)) \/ (PUBLIC \in Recipients(x))
 Init ==
     /\ owner \in [Diagrams -> Users]
     /\ grants = [k \in GrantKeys |-> "none"]
+    /\ parent = (c1 :> d1)
 
 SetGrant(d, g, l) ==
     /\ grants' = [grants EXCEPT ![<<d, g>>] = l]
-    /\ UNCHANGED owner
+    /\ UNCHANGED <<owner, parent>>
 
 ClearGrant(d, g) ==
     /\ grants' = [grants EXCEPT ![<<d, g>>] = "none"]
-    /\ UNCHANGED owner
+    /\ UNCHANGED <<owner, parent>>
 
 \* ownership transfer changes only the owner field; grants are preserved
 Transfer(d, u) ==
     /\ owner' = [owner EXCEPT ![d] = u]
-    /\ UNCHANGED grants
+    /\ UNCHANGED <<grants, parent>>
+
+\* A child is reparented to a different diagram. Modeled UNRESTRICTED (any child,
+\* any target) to test whether derived child access can leak when the parent moves.
+\* The agent forbids this on update (the parent reference is immutable), so this is
+\* the permissive upper bound the implementation refines.
+Reparent(c, dNew) ==
+    /\ parent' = [parent EXCEPT ![c] = dNew]
+    /\ UNCHANGED <<owner, grants>>
 
 Next ==
     \/ \E d \in Diagrams, g \in GranteeSpace, l \in Levels : SetGrant(d, g, l)
     \/ \E d \in Diagrams, g \in GranteeSpace : ClearGrant(d, g)
     \/ \E d \in Diagrams, u \in Users : Transfer(d, u)
+    \/ \E c \in Children, dNew \in Diagrams : Reparent(c, dNew)
 
 Spec == Init /\ [][Next]_vars
 
@@ -98,6 +110,7 @@ Spec == Init /\ [][Next]_vars
 TypeOK ==
     /\ owner \in [Diagrams -> Users]
     /\ grants \in [GrantKeys -> LevelOrNone]
+    /\ parent \in [Children -> Diagrams]
 
 \* No over-delivery: anyone who receives an event for x can also read x.
 \* Ties the recipient-scoped routing to the CRUD read predicate.
@@ -119,18 +132,18 @@ InvDeleteOwnerOnly ==
 
 \* A child can never be seen/edited by someone who can't see/edit its parent.
 InvChildNeedsParentSee ==
-    \A u \in Readers, x \in Children : CanSee(u, x) => CanSee(u, Parent[x])
+    \A u \in Readers, x \in Children : CanSee(u, x) => CanSee(u, parent[x])
 InvChildNeedsParentEdit ==
-    \A u \in Readers, x \in Children : CanEdit(u, x) => CanEdit(u, Parent[x])
+    \A u \in Readers, x \in Children : CanEdit(u, x) => CanEdit(u, parent[x])
 
 \* A view-only grantee (no other relationship, no public-edit) cannot edit a child.
 \* This is the "view is a lie" property the design must defeat.
 InvViewGranteeCannotEditChild ==
     \A u \in Users, x \in Children :
-        ( u # owner[Parent[x]]
+        ( u # owner[parent[x]]
           /\ ~IsAdmin(u)
-          /\ GrantOf(Parent[x], u) = "view"
-          /\ GrantOf(Parent[x], PUBLIC) # "edit" )
+          /\ GrantOf(parent[x], u) = "view"
+          /\ GrantOf(parent[x], PUBLIC) # "edit" )
         => ~CanEdit(u, x)
 
 \* Anonymous callers reach only public resources, and never edit except public-edit.

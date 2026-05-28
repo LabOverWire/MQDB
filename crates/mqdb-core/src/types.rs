@@ -76,6 +76,7 @@ impl ScopeConfig {
 pub struct OwnershipConfig {
     pub entity_owner_fields: HashMap<String, String>,
     admin_users: HashSet<String>,
+    derivations: HashMap<String, (String, String)>,
 }
 
 impl OwnershipConfig {
@@ -84,6 +85,7 @@ impl OwnershipConfig {
         Self {
             entity_owner_fields,
             admin_users: HashSet::new(),
+            derivations: HashMap::new(),
         }
     }
 
@@ -107,7 +109,44 @@ impl OwnershipConfig {
         Ok(Self {
             entity_owner_fields: fields,
             admin_users: HashSet::new(),
+            derivations: HashMap::new(),
         })
+    }
+
+    /// Parse a child-entity derivation spec and attach it. Format:
+    /// `child=fk_field>parent_entity` pairs, comma-separated
+    /// (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A child entity
+    /// with a derivation inherits its access from the referenced parent record.
+    ///
+    /// # Errors
+    /// Returns an error if any pair is not in `child=field>parent` format.
+    pub fn with_derivations(mut self, spec: &str) -> Result<Self, String> {
+        for pair in spec.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (child, rest) = pair.split_once('=').ok_or_else(|| {
+                format!("invalid derivation spec '{pair}': expected child=field>parent")
+            })?;
+            let (field, parent) = rest.split_once('>').ok_or_else(|| {
+                format!("invalid derivation spec '{pair}': expected child=field>parent")
+            })?;
+            if child.is_empty() || field.is_empty() || parent.is_empty() {
+                return Err(format!("invalid derivation spec '{pair}': empty component"));
+            }
+            self.derivations
+                .insert(child.to_string(), (field.to_string(), parent.to_string()));
+        }
+        Ok(self)
+    }
+
+    /// The `(fk_field, parent_entity)` a child entity derives its access from.
+    #[must_use]
+    pub fn derivation(&self, entity: &str) -> Option<(&str, &str)> {
+        self.derivations
+            .get(entity)
+            .map(|(field, parent)| (field.as_str(), parent.as_str()))
     }
 
     #[must_use]
@@ -147,9 +186,16 @@ impl OwnershipConfig {
         if self.is_admin(uid) {
             return OwnershipDecision::Allowed;
         }
-        match self.owner_field(entity) {
-            Some(field) => OwnershipDecision::Check {
+        if let Some(field) = self.owner_field(entity) {
+            return OwnershipDecision::Check {
                 owner_field: field,
+                sender: uid,
+            };
+        }
+        match self.derivation(entity) {
+            Some((fk_field, parent_entity)) => OwnershipDecision::Derive {
+                parent_entity,
+                fk_field,
                 sender: uid,
             },
             None => OwnershipDecision::Allowed,
@@ -161,6 +207,11 @@ pub enum OwnershipDecision<'a, 'b> {
     Allowed,
     Check {
         owner_field: &'a str,
+        sender: &'b str,
+    },
+    Derive {
+        parent_entity: &'a str,
+        fk_field: &'a str,
         sender: &'b str,
     },
 }

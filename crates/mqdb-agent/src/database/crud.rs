@@ -513,6 +513,97 @@ impl Database {
         }
     }
 
+    /// Resolve the parent id a child record references via `fk_field`.
+    ///
+    /// # Errors
+    /// Returns `NotFound` if the child record is missing, or `Validation` if it
+    /// lacks the parent reference field.
+    fn parent_ref(&self, child_entity: &str, child_id: &str, fk_field: &str) -> Result<String> {
+        let key = keys::encode_data_key(child_entity, child_id);
+        let data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: child_entity.to_string(),
+            id: child_id.to_string(),
+        })?;
+        let entity = Entity::deserialize(child_entity.to_string(), child_id.to_string(), &data)?;
+        entity
+            .data
+            .get(fk_field)
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| {
+                Error::Validation(format!(
+                    "child '{child_entity}/{child_id}' is missing parent reference '{fk_field}'"
+                ))
+            })
+    }
+
+    async fn check_parent_access(
+        &self,
+        parent_entity: &str,
+        parent_id: &str,
+        sender: &str,
+        required: AccessLevel,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        match ownership.owner_field(parent_entity) {
+            Some(owner_field) => {
+                self.check_access(parent_entity, parent_id, owner_field, sender, required)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Authorize a child operation by deriving access from its parent record. The
+    /// parent id is read from the existing child via `fk_field`.
+    ///
+    /// # Errors
+    /// Returns `Forbidden` if access is denied, `NotFound` if the child is missing,
+    /// or `Validation` if the parent reference is absent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn check_derived_access(
+        &self,
+        child_entity: &str,
+        child_id: &str,
+        parent_entity: &str,
+        fk_field: &str,
+        sender: &str,
+        required: AccessLevel,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        let parent_id = self.parent_ref(child_entity, child_id, fk_field)?;
+        self.check_parent_access(parent_entity, &parent_id, sender, required, ownership)
+            .await
+    }
+
+    /// Authorize a child create by deriving access from the parent referenced in the
+    /// incoming `data` via `fk_field`. A child create requires `Edit` on the parent.
+    ///
+    /// # Errors
+    /// Returns `Forbidden` if access is denied, or `Validation` if `data` lacks the
+    /// parent reference.
+    pub async fn check_derived_create(
+        &self,
+        data: &Value,
+        parent_entity: &str,
+        fk_field: &str,
+        sender: &str,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        let parent_id = data
+            .get(fk_field)
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Validation(format!("missing parent reference '{fk_field}'")))?;
+        self.check_parent_access(
+            parent_entity,
+            parent_id,
+            sender,
+            AccessLevel::Edit,
+            ownership,
+        )
+        .await
+    }
+
     pub(super) fn generate_id(entity_name: &str, data: &[u8]) -> String {
         use std::sync::atomic::{AtomicU16, Ordering};
         static COUNTER: AtomicU16 = AtomicU16::new(0);

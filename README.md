@@ -378,6 +378,8 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 
 `share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only and clears the resource's grants. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id (an unregistered email returns 404); with password/SCRAM auth it is the username.
 
+**Child-entity derivation.** Child records (e.g. a diagram's nodes/edges) can inherit access from their parent via `--ownership-derive` (env `MQDB_OWNERSHIP_DERIVE`), a comma-separated map of `child=fk_field>parent_entity` (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A derived child's read requires `view` on the parent and create/update/delete require `edit`; the parent reference is immutable on update, so an editor cannot move a child into a diagram they cannot edit. Without a mapping a child entity is unrestricted (default), so derivation is opt-in per deployment.
+
 #### Admin Operations
 
 | Topic | Action |

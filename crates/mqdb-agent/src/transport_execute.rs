@@ -59,6 +59,17 @@ impl Database {
         }
         match request {
             Request::Create { entity, data } => {
+                if let OwnershipDecision::Derive {
+                    parent_entity,
+                    fk_field,
+                    sender: uid,
+                } = ownership.evaluate(&entity, sender)
+                    && let Err(e) = self
+                        .check_derived_create(&data, parent_entity, fk_field, uid, ownership)
+                        .await
+                {
+                    return e.into();
+                }
                 let constraint_data = match vault_constraint {
                     Some(VaultConstraintData::Create(cd)) => Some(cd),
                     _ => None,
@@ -84,15 +95,39 @@ impl Database {
                 includes,
                 projection,
             } => {
-                if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = ownership.evaluate(&entity, sender)
-                    && let Err(e) = self
-                        .check_access(&entity, &id, owner_field, uid, AccessLevel::View)
-                        .await
-                {
-                    return e.into();
+                match ownership.evaluate(&entity, sender) {
+                    OwnershipDecision::Check {
+                        owner_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self
+                            .check_access(&entity, &id, owner_field, uid, AccessLevel::View)
+                            .await
+                        {
+                            return e.into();
+                        }
+                    }
+                    OwnershipDecision::Derive {
+                        parent_entity,
+                        fk_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self
+                            .check_derived_access(
+                                &entity,
+                                &id,
+                                parent_entity,
+                                fk_field,
+                                uid,
+                                AccessLevel::View,
+                                ownership,
+                            )
+                            .await
+                        {
+                            return e.into();
+                        }
+                    }
+                    OwnershipDecision::Allowed => {}
                 }
                 match self.read(entity, id, includes, projection).await {
                     Ok(v) => Response::ok(v),
@@ -104,20 +139,45 @@ impl Database {
                 id,
                 mut fields,
             } => {
-                if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = ownership.evaluate(&entity, sender)
-                {
-                    if let Err(e) = self
-                        .check_access(&entity, &id, owner_field, uid, AccessLevel::Edit)
-                        .await
-                    {
-                        return e.into();
+                match ownership.evaluate(&entity, sender) {
+                    OwnershipDecision::Check {
+                        owner_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self
+                            .check_access(&entity, &id, owner_field, uid, AccessLevel::Edit)
+                            .await
+                        {
+                            return e.into();
+                        }
+                        if let Value::Object(ref mut map) = fields {
+                            map.remove(owner_field);
+                        }
                     }
-                    if let Value::Object(ref mut map) = fields {
-                        map.remove(owner_field);
+                    OwnershipDecision::Derive {
+                        parent_entity,
+                        fk_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self
+                            .check_derived_access(
+                                &entity,
+                                &id,
+                                parent_entity,
+                                fk_field,
+                                uid,
+                                AccessLevel::Edit,
+                                ownership,
+                            )
+                            .await
+                        {
+                            return e.into();
+                        }
+                        if let Value::Object(ref mut map) = fields {
+                            map.remove(fk_field);
+                        }
                     }
+                    OwnershipDecision::Allowed => {}
                 }
                 let update_constraint = match vault_constraint {
                     Some(VaultConstraintData::Update(new_data, old_data)) => {
@@ -139,13 +199,36 @@ impl Database {
                 }
             }
             Request::Delete { entity, id } => {
-                if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = ownership.evaluate(&entity, sender)
-                    && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
-                {
-                    return e.into();
+                match ownership.evaluate(&entity, sender) {
+                    OwnershipDecision::Check {
+                        owner_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self.check_ownership(&entity, &id, owner_field, uid) {
+                            return e.into();
+                        }
+                    }
+                    OwnershipDecision::Derive {
+                        parent_entity,
+                        fk_field,
+                        sender: uid,
+                    } => {
+                        if let Err(e) = self
+                            .check_derived_access(
+                                &entity,
+                                &id,
+                                parent_entity,
+                                fk_field,
+                                uid,
+                                AccessLevel::Edit,
+                                ownership,
+                            )
+                            .await
+                        {
+                            return e.into();
+                        }
+                    }
+                    OwnershipDecision::Allowed => {}
                 }
                 let id_clone = id.clone();
                 let shareable = ownership.owner_field(&entity).is_some();

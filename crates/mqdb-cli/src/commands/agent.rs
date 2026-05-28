@@ -29,6 +29,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) ws_bind: Option<SocketAddr>,
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
+    pub(crate) ownership_derive: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
@@ -133,12 +134,19 @@ pub(crate) async fn cmd_agent_start(
     if let Some(ws_addr) = args.ws_bind {
         agent = agent.with_ws_bind_address(ws_addr);
     }
-    if let Some(ownership_spec) = args.ownership {
+    if args.ownership.is_some() || args.ownership_derive.is_some() {
         let admin_set = args.auth.admin_users.iter().cloned().collect();
-        let ownership = mqdb_core::types::OwnershipConfig::parse(&ownership_spec)
-            .map_err(|e| format!("invalid --ownership: {e}"))?
-            .with_admin_users(admin_set);
-        agent = agent.with_ownership_config(ownership);
+        let mut ownership = match &args.ownership {
+            Some(spec) => mqdb_core::types::OwnershipConfig::parse(spec)
+                .map_err(|e| format!("invalid --ownership: {e}"))?,
+            None => mqdb_core::types::OwnershipConfig::default(),
+        };
+        if let Some(derive_spec) = &args.ownership_derive {
+            ownership = ownership
+                .with_derivations(derive_spec)
+                .map_err(|e| format!("invalid --ownership-derive: {e}"))?;
+        }
+        agent = agent.with_ownership_config(ownership.with_admin_users(admin_set));
     }
 
     if let Some(event_scope_spec) = args.event_scope {
