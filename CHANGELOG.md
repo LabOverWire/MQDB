@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-28 — mqdb-core 0.7.1, mqdb-agent 0.8.5, mqdb-vault 0.1.1, mqdb-wasm 0.3.3, mqdb-cli 0.8.5
+
+### Added
+
+- Resource sharing for agent mode. An owner can grant another user `view` or `edit` on any ownership-enabled entity (the motivating case is diagrams) through four new resource-scoped MQTT topics: `$DB/{entity}/{id}/share` (`{"grantee","permission":"view|edit","cascade":true}`), `$DB/{entity}/{id}/unshare` (`{"grantee","cascade":true}`), `$DB/{entity}/{id}/shares` (owner/admin lists a resource's grants), and `$DB/{entity}/shared` (caller lists resources shared with them). Grants are stored in a server-managed `_shares` entity that is not reachable through generic CRUD — direct `$DB/_shares/...` returns 403. Read now requires `view` and update requires `edit`; delete stays owner-only, and deleting a resource clears its grants so a record reusing the same id cannot inherit them. `share`/`unshare` cascade by default over self-referencing diagram→diagram references (bounded at 256, cycle-safe; a direct share sets the level while a cascade only raises an existing grant). In OAuth deployments the grantee email is resolved to its canonical id via `_identity_links` (resolve-existing only — sharing with an unregistered email returns 404; password/SCRAM use the username verbatim). The authorization core is verified in TLA+ (`specs/DiagramSharing.tla`, `CascadeClosure.tla`, `GrantLifecycle.tla`).
+- New `mqdb-core` public API backing the feature: `AccessLevel` (`View`/`Edit`, ordered), `SHARES_ENTITY`, and the `Share`/`Unshare`/`Shares`/`Shared` variants on `Request` and `DbOp`. Cluster parity is tracked in #75; the embedded `mqdb-wasm` build rejects these operations with "sharing is not supported in embedded mode".
+
 ## 2026-05-24 — mqdb-agent 0.8.4
 
 ### Removed

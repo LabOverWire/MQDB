@@ -148,14 +148,30 @@ impl Database {
                     return e.into();
                 }
                 let id_clone = id.clone();
+                let shareable = ownership.owner_field(&entity).is_some();
+                let entity_clone = entity.clone();
                 match self
                     .delete(entity, id, sender, client_id, scope_config, ownership)
                     .await
                 {
-                    Ok(()) => Response::ok(serde_json::json!({
-                        "id": id_clone,
-                        "deleted": true
-                    })),
+                    Ok(()) => {
+                        if shareable
+                            && let Err(e) = self
+                                .clear_all_resource_grants(&entity_clone, &id_clone)
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                entity = %entity_clone,
+                                id = %id_clone,
+                                "failed to clear shares after delete"
+                            );
+                        }
+                        Response::ok(serde_json::json!({
+                            "id": id_clone,
+                            "deleted": true
+                        }))
+                    }
                     Err(e) => e.into(),
                 }
             }

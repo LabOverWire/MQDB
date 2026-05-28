@@ -50,9 +50,7 @@ impl Database {
         }
     }
 
-    async fn clear_grant(&self, entity: &str, id: &str, grantee_key: &str) -> Result<()> {
-        let mut filters = Self::resource_filters(entity, id);
-        filters.push(eq_filter("grantee_key", grantee_key));
+    async fn delete_grants(&self, filters: Vec<Filter>) -> Result<()> {
         let records = self
             .list_core(
                 SHARES_ENTITY.to_string(),
@@ -79,6 +77,21 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    async fn clear_grant(&self, entity: &str, id: &str, grantee_key: &str) -> Result<()> {
+        let mut filters = Self::resource_filters(entity, id);
+        filters.push(eq_filter("grantee_key", grantee_key));
+        self.delete_grants(filters).await
+    }
+
+    /// Remove every grant on a resource. Called when the resource itself is deleted
+    /// so stale grants cannot be inherited by a later record reusing the same id.
+    ///
+    /// # Errors
+    /// Returns an error if scanning or deleting the share records fails.
+    pub(crate) async fn clear_all_resource_grants(&self, entity: &str, id: &str) -> Result<()> {
+        self.delete_grants(Self::resource_filters(entity, id)).await
     }
 
     async fn write_grant(

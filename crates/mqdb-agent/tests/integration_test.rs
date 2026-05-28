@@ -2220,6 +2220,95 @@ async fn test_shares_index_path_correct_and_idempotent() {
 }
 
 #[tokio::test]
+async fn test_delete_clears_shares_no_inheritance() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await;
+    let id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let read_as_bob = async |diagram_id: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: diagram_id.to_string(),
+                includes: vec![],
+                projection: None,
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: id.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(read_as_bob(&id).await, Response::Ok { .. }),
+        "bob should read while the grant exists"
+    );
+
+    db.execute_with_sender(
+        Request::Delete {
+            entity: "diagrams".into(),
+            id: id.clone(),
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let recreated = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"id": id, "userId": "alice", "title": "D2"}),
+        })
+        .await;
+    assert!(
+        matches!(recreated, Response::Ok { .. }),
+        "recreate with the same id should succeed"
+    );
+
+    assert!(
+        matches!(read_as_bob(&id).await, Response::Error { code: 403, .. }),
+        "stale grant must not be inherited by a record reusing the id"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 
