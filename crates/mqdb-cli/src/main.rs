@@ -185,7 +185,9 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
         AgentAction::Start(fields) => {
             cmd_agent_start(AgentStartArgs {
                 bind: fields.bind,
-                db_path: fields.db,
+                db_path: fields
+                    .db
+                    .unwrap_or_else(|| std::env::temp_dir().join("mqdb-memory")),
                 memory_backend: fields.memory_backend,
                 auth: *fields.auth,
                 durability: fields.durability,
@@ -555,5 +557,26 @@ async fn dispatch_bench(action: BenchAction) -> Result<(), Box<dyn std::error::E
                 _ => Box::pin(cmd_bench_db(args)).await,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use crate::cli_types::Cli;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn memory_backend_makes_db_optional() {
+        let parsed = Cli::try_parse_from(["mqdb", "agent", "start", "--memory-backend"]);
+        assert!(
+            parsed.is_ok(),
+            "--memory-backend should not require --db: {:?}",
+            parsed.err()
+        );
     }
 }

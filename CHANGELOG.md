@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-28 — mqdb-cli 0.8.6
+
+### Fixed
+
+- `mqdb agent start` (and `cluster start`) panicked at startup on every invocation in debug builds: `thread 'main' panicked ... Long option names must be unique ... '--' is in use by both 'passwd_data' and 'acl_data'`. Seventeen optional inline-content args (`passwd_data`, `acl_data`, `scram_data`, the `*_data`/`*_key`/`*_secret` variants in both agent and cluster) were declared `#[arg(long = "")]`, which clap registers as the empty long option `--`; the duplicates tripped clap's `debug_assert`, crashing every debug-build command before parsing (release builds skip the assert, so the flags were silently mis-defined and never parsed). Each now has a distinct hidden long name (`--passwd-data`, `--acl-data`, `--scram-data`, …), so debug builds run and the inline-content flags parse correctly while staying hidden from `--help`. Added a `Cli::command().debug_assert()` regression test so a future empty/duplicate long name fails CI instead of only crashing debug binaries.
+- `mqdb agent start --memory-backend` no longer requires `--db`. The flag is now `required_unless_present = "memory_backend"`; in memory mode without a path it defaults to a temp directory, which the in-memory backend never touches. Callers no longer need to pass a dummy `--db`.
+
 ## 2026-05-28 — mqdb-core 0.7.1, mqdb-agent 0.8.5, mqdb-vault 0.1.1, mqdb-wasm 0.3.3, mqdb-cli 0.8.5
 
 ### Added

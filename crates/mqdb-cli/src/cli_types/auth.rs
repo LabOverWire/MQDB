@@ -11,11 +11,11 @@ use super::base::JwtAlgorithmArg;
 pub(crate) struct AuthArgs {
     #[arg(long, env = "MQDB_PASSWD_FILE", help = "Path to password file")]
     pub(crate) passwd: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_PASSWD", hide = true)]
+    #[arg(long = "passwd-data", env = "MQDB_PASSWD", hide = true)]
     pub(crate) passwd_data: Option<String>,
     #[arg(long, env = "MQDB_ACL_FILE", help = "Path to ACL file")]
     pub(crate) acl: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_ACL", hide = true)]
+    #[arg(long = "acl-data", env = "MQDB_ACL", hide = true)]
     pub(crate) acl_data: Option<String>,
     #[cfg(feature = "dev-insecure")]
     #[arg(long, help = "Allow anonymous connections (dev only)")]
@@ -26,7 +26,7 @@ pub(crate) struct AuthArgs {
         help = "Path to SCRAM-SHA-256 credentials file"
     )]
     pub(crate) scram_file: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_SCRAM", hide = true)]
+    #[arg(long = "scram-data", env = "MQDB_SCRAM", hide = true)]
     pub(crate) scram_data: Option<String>,
     #[arg(
         long,
@@ -41,7 +41,7 @@ pub(crate) struct AuthArgs {
         help = "Path to JWT secret/key file"
     )]
     pub(crate) jwt_key: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_JWT_KEY", hide = true)]
+    #[arg(long = "jwt-key-data", env = "MQDB_JWT_KEY", hide = true)]
     pub(crate) jwt_key_data: Option<String>,
     #[arg(long, env = "MQDB_JWT_ISSUER", help = "JWT issuer claim")]
     pub(crate) jwt_issuer: Option<String>,
@@ -56,7 +56,11 @@ pub(crate) struct AuthArgs {
     pub(crate) jwt_clock_skew: u64,
     #[arg(long, env = "MQDB_FEDERATED_JWT_CONFIG_FILE", conflicts_with_all = ["jwt_algorithm"], help = "Path to federated JWT config JSON")]
     pub(crate) federated_jwt_config: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_FEDERATED_JWT_CONFIG", hide = true)]
+    #[arg(
+        long = "federated-jwt-config-data",
+        env = "MQDB_FEDERATED_JWT_CONFIG",
+        hide = true
+    )]
     pub(crate) federated_jwt_config_data: Option<String>,
     #[arg(
         long,
@@ -64,7 +68,7 @@ pub(crate) struct AuthArgs {
         help = "Path to certificate auth file"
     )]
     pub(crate) cert_auth_file: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_CERT_AUTH", hide = true)]
+    #[arg(long = "cert-auth-data", env = "MQDB_CERT_AUTH", hide = true)]
     pub(crate) cert_auth_data: Option<String>,
     #[arg(
         long,
@@ -116,7 +120,11 @@ pub(crate) struct OAuthArgs {
         help = "Path to file containing Google OAuth client secret"
     )]
     pub(crate) oauth_client_secret: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_OAUTH_CLIENT_SECRET", hide = true)]
+    #[arg(
+        long = "oauth-client-secret-data",
+        env = "MQDB_OAUTH_CLIENT_SECRET",
+        hide = true
+    )]
     pub(crate) oauth_client_secret_data: Option<String>,
     #[arg(
         long,
@@ -168,7 +176,7 @@ pub(crate) struct OAuthArgs {
         help = "Path to 32-byte identity encryption key file (auto-generated if omitted)"
     )]
     pub(crate) identity_key_file: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_IDENTITY_KEY", hide = true)]
+    #[arg(long = "identity-key-data", env = "MQDB_IDENTITY_KEY", hide = true)]
     pub(crate) identity_key_data: Option<String>,
     #[arg(
         long,
