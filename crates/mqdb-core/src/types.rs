@@ -165,6 +165,33 @@ pub enum OwnershipDecision<'a, 'b> {
     },
 }
 
+pub const SHARES_ENTITY: &str = "_shares";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AccessLevel {
+    View,
+    Edit,
+}
+
+impl AccessLevel {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessLevel::View => "view",
+            AccessLevel::Edit => "edit",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "view" => Some(AccessLevel::View),
+            "edit" => Some(AccessLevel::Edit),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {

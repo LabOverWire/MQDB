@@ -365,6 +365,19 @@ ready_rx.changed().await?; // wait until broker + handler are ready
 | `$DB/{entity}/list` | List entities (payload: filters, sort, projection) |
 | `$DB/{entity}/events/#` | Subscribe to change events |
 
+#### Sharing Operations
+
+An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent mode only (cluster parity tracked separately); the embedded WASM build rejects these operations.
+
+| Topic | Action |
+|-------|--------|
+| `$DB/{entity}/{id}/share` | Grant access (payload: `{"grantee","permission","cascade"}`; permission is `view` or `edit`, cascade defaults to `true`) |
+| `$DB/{entity}/{id}/unshare` | Revoke a grant (payload: `{"grantee","cascade"}`) |
+| `$DB/{entity}/{id}/shares` | List a resource's grants (owner/admin only) |
+| `$DB/{entity}/shared` | List resources shared with the caller |
+
+`share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only and clears the resource's grants. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id (an unregistered email returns 404); with password/SCRAM auth it is the username.
+
 #### Admin Operations
 
 | Topic | Action |

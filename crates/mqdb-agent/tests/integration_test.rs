@@ -1701,6 +1701,614 @@ async fn test_ownership_isolates_user_data_on_list() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_share_grant_gates_read_update_delete() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "Alice Diagram"}),
+        })
+        .await;
+    let diagram_id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let read_diagram = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let update_diagram = async |sender: &str, title: &str| {
+        db.execute_with_sender(
+            Request::Update {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                fields: json!({ "title": title }),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let grant = async |permission: &str| {
+        db.execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                grantee: "bob".into(),
+                permission: permission.into(),
+                cascade: false,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    assert!(
+        matches!(read_diagram("bob").await, Response::Error { code: 403, .. }),
+        "non-grantee read should be forbidden"
+    );
+
+    grant("view").await;
+    assert!(
+        matches!(read_diagram("bob").await, Response::Ok { .. }),
+        "view grantee read should succeed"
+    );
+    assert!(
+        matches!(
+            update_diagram("bob", "hacked").await,
+            Response::Error { code: 403, .. }
+        ),
+        "view grantee update should be forbidden"
+    );
+
+    grant("edit").await;
+    assert!(
+        matches!(update_diagram("bob", "by bob").await, Response::Ok { .. }),
+        "edit grantee update should succeed"
+    );
+
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".into(),
+                    id: diagram_id.clone(),
+                },
+                Some("bob"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "edit grantee delete should be forbidden (owner-only)"
+    );
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Delete {
+                    entity: "diagrams".into(),
+                    id: diagram_id.clone(),
+                },
+                Some("alice"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Ok { .. }
+        ),
+        "owner delete should succeed"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_share_endpoints_and_protection() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "Alice Diagram"}),
+        })
+        .await;
+    let diagram_id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let share = async |sender: &str, grantee: &str, permission: &str| {
+        db.execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                grantee: grantee.into(),
+                permission: permission.into(),
+                cascade: false,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let list_shares = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Shares {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let shared_with = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    assert!(
+        matches!(
+            share("carol", "mallory", "edit").await,
+            Response::Error { code: 403, .. }
+        ),
+        "non-owner share must be forbidden"
+    );
+    assert!(
+        matches!(share("alice", "bob", "view").await, Response::Ok { .. }),
+        "owner share should succeed"
+    );
+
+    match list_shares("alice").await {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["grantee"], "bob");
+            assert_eq!(items[0]["permission"], "view");
+        }
+        Response::Error { code, message } => panic!("shares list failed {code}: {message}"),
+    }
+
+    share("alice", "bob", "edit").await;
+    if let Response::Ok { data } = list_shares("alice").await {
+        let items = data.as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "direct re-share must replace, not duplicate"
+        );
+        assert_eq!(items[0]["permission"], "edit");
+    } else {
+        panic!("shares list failed after re-share");
+    }
+
+    match shared_with("bob").await {
+        Response::Ok { data } => {
+            let items = data.as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["id"], diagram_id);
+        }
+        Response::Error { code, message } => panic!("shared list failed {code}: {message}"),
+    }
+
+    assert!(
+        matches!(list_shares("bob").await, Response::Error { code: 403, .. }),
+        "non-owner shares list must be forbidden"
+    );
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+            grantee: "bob".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+    if let Response::Ok { data } = shared_with("bob").await {
+        assert!(
+            data.as_array().unwrap().is_empty(),
+            "unshare should remove discovery"
+        );
+    } else {
+        panic!("shared list failed after unshare");
+    }
+
+    assert!(
+        matches!(
+            db.execute(Request::List {
+                entity: "_shares".into(),
+                filters: vec![],
+                sort: vec![],
+                pagination: None,
+                includes: vec![],
+                projection: None,
+            })
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "direct _shares list must be forbidden"
+    );
+    assert!(
+        matches!(
+            db.execute(Request::Create {
+                entity: "_shares".into(),
+                data: json!({"x": 1}),
+            })
+            .await,
+            Response::Error { code: 403, .. }
+        ),
+        "direct _shares create must be forbidden"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_share_cascade_follows_references() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+
+    let make_diagram = async |title: &str, parent: Option<&str>| {
+        let data = match parent {
+            Some(p) => json!({"userId": "alice", "title": title, "parent_id": p}),
+            None => json!({"userId": "alice", "title": title}),
+        };
+        match db
+            .execute(Request::Create {
+                entity: "diagrams".into(),
+                data,
+            })
+            .await
+        {
+            Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+            Response::Error { code, message } => panic!("create failed {code}: {message}"),
+        }
+    };
+    let c = make_diagram("C", None).await;
+    let b = make_diagram("B", Some(&c)).await;
+    let a = make_diagram("A", Some(&b)).await;
+
+    let read_as = async |sender: &str, id: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: id.to_string(),
+                includes: vec![],
+                projection: None,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    let shared = db
+        .execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: a.clone(),
+                grantee: "bob".into(),
+                permission: "edit".into(),
+                cascade: true,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(shared, Response::Ok { .. }),
+        "cascade share should succeed"
+    );
+
+    for id in [&a, &b, &c] {
+        assert!(
+            matches!(read_as("bob", id).await, Response::Ok { .. }),
+            "bob should read every diagram in the closure"
+        );
+    }
+
+    if let Response::Ok { data } = db
+        .execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        assert_eq!(
+            data.as_array().unwrap().len(),
+            3,
+            "discovery should list the full closure"
+        );
+    } else {
+        panic!("shared discovery failed");
+    }
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: a.clone(),
+            grantee: "bob".into(),
+            cascade: true,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    for id in [&a, &b, &c] {
+        assert!(
+            matches!(read_as("bob", id).await, Response::Error { code: 403, .. }),
+            "cascade unshare should revoke access across the closure"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_shares_index_path_correct_and_idempotent() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    db.ensure_index(
+        "_shares".into(),
+        vec!["resource_id".into(), "grantee".into()],
+    )
+    .await
+    .unwrap();
+    db.ensure_index(
+        "_shares".into(),
+        vec!["resource_id".into(), "grantee".into()],
+    )
+    .await
+    .unwrap();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await;
+    let id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let shared = db
+        .execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: id.clone(),
+                grantee: "bob".into(),
+                permission: "view".into(),
+                cascade: false,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(matches!(shared, Response::Ok { .. }));
+
+    let read = db
+        .execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(read, Response::Ok { .. }),
+        "indexed share_level lookup should authorize the read"
+    );
+
+    if let Response::Ok { data } = db
+        .execute_with_sender(
+            Request::Shared {
+                entity: "diagrams".into(),
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        assert_eq!(data.as_array().unwrap().len(), 1);
+    } else {
+        panic!("indexed discovery failed");
+    }
+}
+
+#[tokio::test]
+async fn test_delete_clears_shares_no_inheritance() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let created = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await;
+    let id = match created {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+
+    let read_as_bob = async |diagram_id: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "diagrams".into(),
+                id: diagram_id.to_string(),
+                includes: vec![],
+                projection: None,
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: id.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(read_as_bob(&id).await, Response::Ok { .. }),
+        "bob should read while the grant exists"
+    );
+
+    db.execute_with_sender(
+        Request::Delete {
+            entity: "diagrams".into(),
+            id: id.clone(),
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let recreated = db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"id": id, "userId": "alice", "title": "D2"}),
+        })
+        .await;
+    assert!(
+        matches!(recreated, Response::Ok { .. }),
+        "recreate with the same id should succeed"
+    );
+
+    assert!(
+        matches!(read_as_bob(&id).await, Response::Error { code: 403, .. }),
+        "stale grant must not be inherited by a record reusing the id"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 

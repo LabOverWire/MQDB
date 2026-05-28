@@ -3,7 +3,7 @@
 
 use crate::database::{CallerContext, Database};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
-use mqdb_core::types::{OwnershipConfig, OwnershipDecision, ScopeConfig};
+use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
 
 fn value_from_unit(_: ()) -> Value {
@@ -42,6 +42,21 @@ impl Database {
         scope_config: &ScopeConfig,
         vault_constraint: Option<VaultConstraintData>,
     ) -> Response {
+        match &request {
+            Request::Create { entity, .. }
+            | Request::Read { entity, .. }
+            | Request::Update { entity, .. }
+            | Request::Delete { entity, .. }
+            | Request::List { entity, .. }
+                if entity == mqdb_core::types::SHARES_ENTITY =>
+            {
+                return mqdb_core::error::Error::Forbidden(
+                    "direct access to shares is not permitted".to_string(),
+                )
+                .into();
+            }
+            _ => {}
+        }
         match request {
             Request::Create { entity, data } => {
                 let constraint_data = match vault_constraint {
@@ -73,7 +88,9 @@ impl Database {
                     owner_field,
                     sender: uid,
                 } = ownership.evaluate(&entity, sender)
-                    && let Err(e) = self.check_ownership(&entity, &id, owner_field, uid)
+                    && let Err(e) = self
+                        .check_access(&entity, &id, owner_field, uid, AccessLevel::View)
+                        .await
                 {
                     return e.into();
                 }
@@ -92,7 +109,10 @@ impl Database {
                     sender: uid,
                 } = ownership.evaluate(&entity, sender)
                 {
-                    if let Err(e) = self.check_ownership(&entity, &id, owner_field, uid) {
+                    if let Err(e) = self
+                        .check_access(&entity, &id, owner_field, uid, AccessLevel::Edit)
+                        .await
+                    {
                         return e.into();
                     }
                     if let Value::Object(ref mut map) = fields {
@@ -128,14 +148,30 @@ impl Database {
                     return e.into();
                 }
                 let id_clone = id.clone();
+                let shareable = ownership.owner_field(&entity).is_some();
+                let entity_clone = entity.clone();
                 match self
                     .delete(entity, id, sender, client_id, scope_config, ownership)
                     .await
                 {
-                    Ok(()) => Response::ok(serde_json::json!({
-                        "id": id_clone,
-                        "deleted": true
-                    })),
+                    Ok(()) => {
+                        if shareable
+                            && let Err(e) = self
+                                .clear_all_resource_grants(&entity_clone, &id_clone)
+                                .await
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                entity = %entity_clone,
+                                id = %id_clone,
+                                "failed to clear shares after delete"
+                            );
+                        }
+                        Response::ok(serde_json::json!({
+                            "id": id_clone,
+                            "deleted": true
+                        }))
+                    }
                     Err(e) => e.into(),
                 }
             }
@@ -194,6 +230,52 @@ impl Database {
             },
             Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
                 Ok(()) => Response::ok(value_from_unit(())),
+                Err(e) => e.into(),
+            },
+            Request::Share {
+                entity,
+                id,
+                grantee,
+                permission,
+                cascade,
+            } => match self
+                .share_grant(
+                    &entity,
+                    &id,
+                    &grantee,
+                    &permission,
+                    sender,
+                    ownership,
+                    cascade,
+                )
+                .await
+            {
+                Ok(v) => Response::ok(v),
+                Err(e) => e.into(),
+            },
+            Request::Unshare {
+                entity,
+                id,
+                grantee,
+                cascade,
+            } => match self
+                .share_revoke(&entity, &id, &grantee, sender, ownership, cascade)
+                .await
+            {
+                Ok(v) => Response::ok(v),
+                Err(e) => e.into(),
+            },
+            Request::Shares { entity, id } => {
+                match self
+                    .list_resource_shares(&entity, &id, sender, ownership)
+                    .await
+                {
+                    Ok(v) => Response::ok(value_from_vec(v)),
+                    Err(e) => e.into(),
+                }
+            }
+            Request::Shared { entity } => match self.list_shared_with(&entity, sender).await {
+                Ok(v) => Response::ok(value_from_vec(v)),
                 Err(e) => e.into(),
             },
         }

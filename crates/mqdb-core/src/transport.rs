@@ -60,6 +60,32 @@ pub enum Request {
     Unsubscribe {
         id: String,
     },
+    Share {
+        entity: String,
+        id: String,
+        grantee: String,
+        permission: String,
+        #[serde(default = "default_cascade")]
+        cascade: bool,
+    },
+    Unshare {
+        entity: String,
+        id: String,
+        grantee: String,
+        #[serde(default = "default_cascade")]
+        cascade: bool,
+    },
+    Shares {
+        entity: String,
+        id: String,
+    },
+    Shared {
+        entity: String,
+    },
+}
+
+fn default_cascade() -> bool {
+    true
 }
 
 impl Request {
@@ -73,6 +99,10 @@ impl Request {
             Request::List { .. } => "list",
             Request::Subscribe { .. } => "subscribe",
             Request::Unsubscribe { .. } => "unsubscribe",
+            Request::Share { .. } => "share",
+            Request::Unshare { .. } => "unshare",
+            Request::Shares { .. } => "shares",
+            Request::Shared { .. } => "shared",
         }
     }
 }

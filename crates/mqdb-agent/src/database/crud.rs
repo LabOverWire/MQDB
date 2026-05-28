@@ -7,9 +7,10 @@ use mqdb_core::error::{Error, Result};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::keys;
 use mqdb_core::types::ScopeConfig;
+use mqdb_core::{Filter, FilterOp};
 use serde_json::Value;
 
-use mqdb_core::types::OwnershipConfig;
+use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY};
 
 pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
@@ -406,6 +407,25 @@ impl Database {
     }
 
     /// # Errors
+    /// Returns `NotFound` if the entity does not exist.
+    pub fn is_owner(
+        &self,
+        entity_name: &str,
+        id: &str,
+        owner_field: &str,
+        sender: &str,
+    ) -> Result<bool> {
+        let key = keys::encode_data_key(entity_name, id);
+        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
+            entity: entity_name.to_string(),
+            id: id.to_string(),
+        })?;
+        let entity = Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
+        let owner_value = entity.data.get(owner_field).and_then(|v| v.as_str());
+        Ok(owner_value == Some(sender))
+    }
+
+    /// # Errors
     /// Returns `Forbidden` if the sender doesn't own the entity, or `NotFound` if it doesn't exist.
     pub fn check_ownership(
         &self,
@@ -414,17 +434,83 @@ impl Database {
         owner_field: &str,
         sender: &str,
     ) -> Result<()> {
-        let key = keys::encode_data_key(entity_name, id);
-        let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
-            entity: entity_name.to_string(),
-            id: id.to_string(),
-        })?;
-        let entity = Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
-        let owner_value = entity.data.get(owner_field).and_then(|v| v.as_str());
-        if owner_value != Some(sender) {
-            return Err(Error::Forbidden("permission denied".to_string()));
+        if self.is_owner(entity_name, id, owner_field, sender)? {
+            Ok(())
+        } else {
+            Err(Error::Forbidden("permission denied".to_string()))
         }
-        Ok(())
+    }
+
+    /// Highest access level granted to `sender` on a specific resource via `_shares`.
+    ///
+    /// # Errors
+    /// Returns an error if scanning the share records fails.
+    pub(crate) async fn share_level(
+        &self,
+        entity_name: &str,
+        id: &str,
+        sender: &str,
+    ) -> Result<Option<AccessLevel>> {
+        let filters = vec![
+            Filter::new(
+                "resource_entity".to_string(),
+                FilterOp::Eq,
+                Value::String(entity_name.to_string()),
+            ),
+            Filter::new(
+                "resource_id".to_string(),
+                FilterOp::Eq,
+                Value::String(id.to_string()),
+            ),
+            Filter::new(
+                "grantee".to_string(),
+                FilterOp::Eq,
+                Value::String(sender.to_string()),
+            ),
+        ];
+        let records = self
+            .list_core(
+                SHARES_ENTITY.to_string(),
+                filters,
+                vec![],
+                None,
+                vec![],
+                None,
+            )
+            .await?;
+        let mut best: Option<AccessLevel> = None;
+        for rec in &records {
+            if let Some(level) = rec
+                .get("permission")
+                .and_then(Value::as_str)
+                .and_then(AccessLevel::parse)
+            {
+                best = Some(best.map_or(level, |b| b.max(level)));
+            }
+        }
+        Ok(best)
+    }
+
+    /// Authorize an operation on an ownership-enabled entity: the sender must own
+    /// the record or hold a share grant at least as strong as `required`.
+    ///
+    /// # Errors
+    /// Returns `Forbidden` if access is denied, or `NotFound` if the record is missing.
+    pub async fn check_access(
+        &self,
+        entity_name: &str,
+        id: &str,
+        owner_field: &str,
+        sender: &str,
+        required: AccessLevel,
+    ) -> Result<()> {
+        if self.is_owner(entity_name, id, owner_field, sender)? {
+            return Ok(());
+        }
+        match self.share_level(entity_name, id, sender).await? {
+            Some(level) if level >= required => Ok(()),
+            _ => Err(Error::Forbidden("permission denied".to_string())),
+        }
     }
 
     pub(super) fn generate_id(entity_name: &str, data: &[u8]) -> String {

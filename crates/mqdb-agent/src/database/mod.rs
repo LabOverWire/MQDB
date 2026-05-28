@@ -6,6 +6,7 @@ mod backup;
 mod crud;
 mod query;
 mod schema_ops;
+mod sharing;
 mod subscriptions;
 
 pub use crud::CallerContext;

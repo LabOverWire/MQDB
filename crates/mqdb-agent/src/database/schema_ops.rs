@@ -77,6 +77,23 @@ impl Database {
         Ok(())
     }
 
+    /// Register an index only if the entity is not already indexed on all of `fields`.
+    /// Idempotent: skips the reindex scan when the index already exists.
+    ///
+    /// # Errors
+    /// Returns an error if field validation or persisting the index fails.
+    pub async fn ensure_index(&self, entity: String, fields: Vec<String>) -> Result<()> {
+        {
+            let manager = self.index_manager.read().await;
+            if let Some(existing) = manager.get_indexed_fields(&entity)
+                && fields.iter().all(|f| existing.contains(f))
+            {
+                return Ok(());
+            }
+        }
+        self.add_index(entity, fields).await
+    }
+
     pub async fn add_relationship(
         &self,
         source_entity: String,
