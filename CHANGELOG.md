@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-28 — mqdb-core 0.7.2, mqdb-agent 0.8.6, mqdb-cli 0.8.7
+
+### Added
+
+- Child-entity access derivation (diagram sharing phase 2, #77). A new opt-in `--ownership-derive` flag (env `MQDB_OWNERSHIP_DERIVE`) maps a child entity to its parent: `child=fk_field>parent_entity` pairs, comma-separated (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A derived child inherits access from the referenced parent record — read requires `view` on the parent, and create/update/delete require `edit`. The parent reference is immutable on update, so an editor cannot reparent a child into a diagram they cannot edit. Absent a mapping a child entity stays unrestricted (prior behavior), so the change is opt-in per deployment. This closes the pre-existing hole where any authenticated user could read or edit a child record (e.g. a diagram's nodes/edges) just by knowing its id. New `mqdb-core` API: `OwnershipConfig::with_derivations`/`derivation` and the `OwnershipDecision::Derive` variant. Agent mode only; cluster parity tracked in #75. Verified in TLA+: `specs/DiagramSharing.tla` now models a mutable parent with an unrestricted reparent action, and all 13 invariants still hold across reparented states (52,488 states), confirming derived access cannot leak when a child moves between parents.
+
 ## 2026-05-28 — mqdb-cli 0.8.6
 
 ### Fixed

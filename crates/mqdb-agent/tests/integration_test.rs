@@ -2309,6 +2309,344 @@ async fn test_delete_clears_shares_no_inheritance() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn test_child_enforcement_derives_from_parent() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_derivations("nodes=diagramId>diagrams")
+        .unwrap();
+    let scope = ScopeConfig::default();
+
+    let diagram_id = match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create diagram failed {code}: {message}"),
+    };
+
+    let create_node = async |sender: &str, diagram: &str| {
+        db.execute_with_sender(
+            Request::Create {
+                entity: "nodes".into(),
+                data: json!({"diagramId": diagram, "label": "n"}),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let node_id = match create_node("alice", &diagram_id).await {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("owner create node failed {code}: {message}"),
+    };
+
+    let read_node = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Read {
+                entity: "nodes".into(),
+                id: node_id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let update_node = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Update {
+                entity: "nodes".into(),
+                id: node_id.clone(),
+                fields: json!({"label": "edited"}),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let delete_node = async |sender: &str| {
+        db.execute_with_sender(
+            Request::Delete {
+                entity: "nodes".into(),
+                id: node_id.clone(),
+            },
+            Some(sender),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+    let share = async |permission: &str| {
+        db.execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: diagram_id.clone(),
+                grantee: "bob".into(),
+                permission: permission.into(),
+                cascade: false,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    };
+
+    assert!(
+        matches!(read_node("bob").await, Response::Error { code: 403, .. }),
+        "stranger cannot read a child"
+    );
+    assert!(
+        matches!(update_node("bob").await, Response::Error { code: 403, .. }),
+        "stranger cannot update a child"
+    );
+    assert!(
+        matches!(
+            create_node("bob", &diagram_id).await,
+            Response::Error { code: 403, .. }
+        ),
+        "stranger cannot create a child"
+    );
+    assert!(
+        matches!(delete_node("bob").await, Response::Error { code: 403, .. }),
+        "stranger cannot delete a child"
+    );
+
+    share("view").await;
+    assert!(
+        matches!(read_node("bob").await, Response::Ok { .. }),
+        "view grantee reads the child"
+    );
+    assert!(
+        matches!(update_node("bob").await, Response::Error { code: 403, .. }),
+        "view grantee cannot update the child"
+    );
+    assert!(
+        matches!(
+            create_node("bob", &diagram_id).await,
+            Response::Error { code: 403, .. }
+        ),
+        "view grantee cannot create a child"
+    );
+    assert!(
+        matches!(delete_node("bob").await, Response::Error { code: 403, .. }),
+        "view grantee cannot delete the child"
+    );
+
+    share("edit").await;
+    assert!(
+        matches!(read_node("bob").await, Response::Ok { .. }),
+        "edit grantee reads the child"
+    );
+    assert!(
+        matches!(update_node("bob").await, Response::Ok { .. }),
+        "edit grantee updates the child"
+    );
+    assert!(
+        matches!(create_node("bob", &diagram_id).await, Response::Ok { .. }),
+        "edit grantee creates a child"
+    );
+    assert!(
+        matches!(delete_node("bob").await, Response::Ok { .. }),
+        "edit grantee deletes the child"
+    );
+}
+
+#[tokio::test]
+async fn test_child_reparent_blocked() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_derivations("nodes=diagramId>diagrams")
+        .unwrap();
+    let scope = ScopeConfig::default();
+
+    let mk_diagram = async |user: &str| match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": user, "title": "d"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create diagram failed {code}: {message}"),
+    };
+    let d1 = mk_diagram("alice").await;
+    let d2 = mk_diagram("carol").await;
+
+    let node_id = match db
+        .execute_with_sender(
+            Request::Create {
+                entity: "nodes".into(),
+                data: json!({"diagramId": d1, "label": "n"}),
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create node failed {code}: {message}"),
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: d1.clone(),
+            grantee: "bob".into(),
+            permission: "edit".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let updated = db
+        .execute_with_sender(
+            Request::Update {
+                entity: "nodes".into(),
+                id: node_id.clone(),
+                fields: json!({"diagramId": d2, "label": "moved"}),
+            },
+            Some("bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(updated, Response::Ok { .. }),
+        "edit on the current parent permits the update"
+    );
+
+    match db
+        .execute_with_sender(
+            Request::Read {
+                entity: "nodes".into(),
+                id: node_id.clone(),
+                includes: vec![],
+                projection: None,
+            },
+            Some("alice"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await
+    {
+        Response::Ok { data } => {
+            assert_eq!(
+                data["diagramId"], d1,
+                "parent reference must stay d1 (reparent blocked)"
+            );
+            assert_eq!(data["label"], "moved", "non-parent fields still update");
+        }
+        Response::Error { code, message } => panic!("read failed {code}: {message}"),
+    }
+}
+
+#[tokio::test]
+async fn test_unconfigured_child_unrestricted() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let widget_id = match db
+        .execute(Request::Create {
+            entity: "widgets".into(),
+            data: json!({"k": "v"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create widget failed {code}: {message}"),
+    };
+
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Read {
+                    entity: "widgets".into(),
+                    id: widget_id.clone(),
+                    includes: vec![],
+                    projection: None,
+                },
+                Some("bob"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Ok { .. }
+        ),
+        "unconfigured entity read is unrestricted"
+    );
+    assert!(
+        matches!(
+            db.execute_with_sender(
+                Request::Update {
+                    entity: "widgets".into(),
+                    id: widget_id.clone(),
+                    fields: json!({"k": "v2"}),
+                },
+                Some("bob"),
+                None,
+                &ownership,
+                &scope,
+                None,
+            )
+            .await,
+            Response::Ok { .. }
+        ),
+        "unconfigured entity update is unrestricted"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 

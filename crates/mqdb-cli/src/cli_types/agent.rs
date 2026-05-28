@@ -103,6 +103,12 @@ pub(crate) struct AgentStartFields {
     pub(crate) vault_min_passphrase_length: usize,
     #[arg(
         long,
+        env = "MQDB_OWNERSHIP_DERIVE",
+        help = "Child-entity access derivation: child=field>parent pairs (e.g. nodes=diagramId>diagrams)"
+    )]
+    pub(crate) ownership_derive: Option<String>,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]
