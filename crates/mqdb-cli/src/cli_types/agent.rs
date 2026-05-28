@@ -17,8 +17,13 @@ pub(crate) struct AgentStartFields {
         help = "Address to bind MQTT listener"
     )]
     pub(crate) bind: SocketAddr,
-    #[arg(long, env = "MQDB_DB", help = "Path to database directory")]
-    pub(crate) db: PathBuf,
+    #[arg(
+        long,
+        env = "MQDB_DB",
+        required_unless_present = "memory_backend",
+        help = "Path to database directory (optional with --memory-backend)"
+    )]
+    pub(crate) db: Option<PathBuf>,
     #[arg(
         long,
         env = "MQDB_MEMORY_BACKEND",
@@ -79,15 +84,15 @@ pub(crate) struct AgentStartFields {
         help = "Path to file containing encryption passphrase"
     )]
     pub(crate) passphrase_file: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_PASSPHRASE", hide = true)]
+    #[arg(long = "passphrase-data", env = "MQDB_PASSPHRASE", hide = true)]
     pub(crate) passphrase_data: Option<String>,
     #[arg(long, env = "MQDB_LICENSE_FILE", help = "Path to license key file")]
     pub(crate) license: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_LICENSE", hide = true)]
+    #[arg(long = "license-data", env = "MQDB_LICENSE", hide = true)]
     pub(crate) license_data: Option<String>,
-    #[arg(long = "", env = "MQDB_QUIC_CERT", hide = true)]
+    #[arg(long = "quic-cert-data", env = "MQDB_QUIC_CERT", hide = true)]
     pub(crate) quic_cert_data: Option<String>,
-    #[arg(long = "", env = "MQDB_QUIC_KEY", hide = true)]
+    #[arg(long = "quic-key-data", env = "MQDB_QUIC_KEY", hide = true)]
     pub(crate) quic_key_data: Option<String>,
     #[arg(
         long,
@@ -240,17 +245,17 @@ pub(crate) struct ClusterStartFields {
         help = "Path to file containing encryption passphrase"
     )]
     pub(crate) passphrase_file: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_PASSPHRASE", hide = true)]
+    #[arg(long = "passphrase-data", env = "MQDB_PASSPHRASE", hide = true)]
     pub(crate) passphrase_data: Option<String>,
     #[arg(long, env = "MQDB_LICENSE_FILE", help = "Path to license key file")]
     pub(crate) license: Option<PathBuf>,
-    #[arg(long = "", env = "MQDB_LICENSE", hide = true)]
+    #[arg(long = "license-data", env = "MQDB_LICENSE", hide = true)]
     pub(crate) license_data: Option<String>,
-    #[arg(long = "", env = "MQDB_QUIC_CERT", hide = true)]
+    #[arg(long = "quic-cert-data", env = "MQDB_QUIC_CERT", hide = true)]
     pub(crate) quic_cert_data: Option<String>,
-    #[arg(long = "", env = "MQDB_QUIC_KEY", hide = true)]
+    #[arg(long = "quic-key-data", env = "MQDB_QUIC_KEY", hide = true)]
     pub(crate) quic_key_data: Option<String>,
-    #[arg(long = "", env = "MQDB_QUIC_CA", hide = true)]
+    #[arg(long = "quic-ca-data", env = "MQDB_QUIC_CA", hide = true)]
     pub(crate) quic_ca_data: Option<String>,
 }
 
