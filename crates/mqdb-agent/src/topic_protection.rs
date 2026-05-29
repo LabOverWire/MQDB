@@ -17,6 +17,19 @@ pub struct TopicProtectionAuthProvider {
     admin_users: Arc<HashSet<String>>,
     internal_service_username: Option<String>,
     all_users_admin: bool,
+    scoped_events: bool,
+}
+
+/// If `topic` is a per-user event namespace `$DB/u/{user}/...`, return `{user}`.
+fn user_scope_segment(topic: &str) -> Option<&str> {
+    let mut parts = topic.split('/');
+    if parts.next()? != "$DB" {
+        return None;
+    }
+    if parts.next()? != "u" {
+        return None;
+    }
+    parts.next()
 }
 
 impl TopicProtectionAuthProvider {
@@ -27,6 +40,7 @@ impl TopicProtectionAuthProvider {
             admin_users: Arc::new(admin_users),
             internal_service_username: None,
             all_users_admin: false,
+            scoped_events: false,
         }
     }
 
@@ -39,6 +53,12 @@ impl TopicProtectionAuthProvider {
     #[must_use]
     pub fn with_all_users_admin(mut self, enabled: bool) -> Self {
         self.all_users_admin = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scoped_events(mut self, enabled: bool) -> Self {
+        self.scoped_events = enabled;
         self
     }
 
@@ -99,6 +119,15 @@ impl AuthProvider for TopicProtectionAuthProvider {
                     .await;
             }
 
+            if self.scoped_events && user_scope_segment(topic).is_some() {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic = %topic,
+                    "publish to per-user event namespace denied (service-only)"
+                );
+                return false;
+            }
+
             if let Err(reason) = check_topic_access(topic, true, is_admin) {
                 if reason == BlockReason::AdminRequired {
                     let allowed = self
@@ -145,6 +174,18 @@ impl AuthProvider for TopicProtectionAuthProvider {
                     .inner
                     .authorize_subscribe(&client_id_owned, user_id, topic_filter)
                     .await;
+            }
+
+            if self.scoped_events
+                && let Some(seg) = user_scope_segment(topic_filter)
+                && !(is_admin || user_id == Some(seg))
+            {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe to another user's event namespace denied"
+                );
+                return false;
             }
 
             if let Err(reason) = check_topic_access(topic_filter, false, is_admin) {
@@ -487,5 +528,81 @@ mod tests {
             .authorize_subscribe("client-1", None, "sensors/temperature")
             .await;
         assert!(result);
+    }
+
+    fn create_scoped_provider() -> TopicProtectionAuthProvider {
+        TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), HashSet::new())
+            .with_scoped_events(true)
+    }
+
+    #[tokio::test]
+    async fn scoped_events_user_can_subscribe_own_namespace() {
+        let provider = create_scoped_provider();
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("alice"), "$DB/u/alice/events/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_events_user_cannot_subscribe_other_namespace() {
+        let provider = create_scoped_provider();
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), "$DB/u/bob/events/#")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), "$DB/u/+/events/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_events_non_service_cannot_publish_user_namespace() {
+        let provider = create_scoped_provider();
+        assert!(
+            !provider
+                .authorize_publish("c", Some("alice"), "$DB/u/alice/events/diagrams/1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_events_internal_service_publishes_user_namespace() {
+        let provider =
+            TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), HashSet::new())
+                .with_internal_service_username(Some("mqdb-internal".to_string()))
+                .with_scoped_events(true);
+        assert!(
+            provider
+                .authorize_publish("c", Some("mqdb-internal"), "$DB/u/alice/events/diagrams/1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_events_admin_can_subscribe_any_namespace() {
+        let mut admins = HashSet::new();
+        admins.insert("root".to_string());
+        let provider = TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), admins)
+            .with_scoped_events(true);
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("root"), "$DB/u/alice/events/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_events_off_does_not_restrict_user_namespace() {
+        let provider = create_test_provider(HashSet::new());
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("alice"), "$DB/u/bob/events/#")
+                .await
+        );
     }
 }

@@ -38,6 +38,7 @@ pub struct MqdbAgent {
     pub(super) http_config: std::sync::Mutex<Option<crate::http::HttpServerConfig>>,
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
+    pub(super) scoped_events: bool,
     pub(super) vault_backend: Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
     pub(super) auth_rate_limiter: Arc<RateLimiter>,
@@ -74,6 +75,7 @@ impl MqdbAgent {
             http_config: std::sync::Mutex::new(None),
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
+            scoped_events: false,
             vault_backend: Arc::new(NoopVaultBackend),
             #[cfg(feature = "http-api")]
             auth_rate_limiter: Arc::new(RateLimiter::new(10)),
@@ -200,6 +202,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_scoped_events(mut self, enabled: bool) -> Self {
+        self.scoped_events = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
         self.license_expires_at = Some(expires_at);
         self
@@ -258,6 +266,7 @@ impl MqdbAgent {
                 acl_file: self.auth_setup.acl_file.as_deref(),
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
+                scoped_events: self.scoped_events,
             },
         )
         .await?;
@@ -339,6 +348,7 @@ impl MqdbAgent {
                 acl_file: self.auth_setup.acl_file.as_deref(),
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
+                scoped_events: self.scoped_events,
             },
         )
         .await?;

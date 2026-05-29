@@ -2647,6 +2647,83 @@ async fn test_unconfigured_child_unrestricted() {
 }
 
 #[tokio::test]
+async fn test_event_recipients_owner_grantees_and_global() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_derivations("nodes=diagramId>diagrams")
+        .unwrap();
+    let scope = ScopeConfig::default();
+
+    let diagram_id = match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create diagram failed {code}: {message}"),
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut owned = db
+        .event_recipients(
+            &ownership,
+            "diagrams",
+            &diagram_id,
+            Some(&json!({"userId": "alice"})),
+        )
+        .await
+        .unwrap()
+        .expect("ownership entity yields recipients");
+    owned.sort();
+    assert_eq!(owned, vec!["alice".to_string(), "bob".to_string()]);
+
+    let mut derived = db
+        .event_recipients(
+            &ownership,
+            "nodes",
+            "n1",
+            Some(&json!({"diagramId": diagram_id})),
+        )
+        .await
+        .unwrap()
+        .expect("derived entity resolves recipients via parent");
+    derived.sort();
+    assert_eq!(derived, vec!["alice".to_string(), "bob".to_string()]);
+
+    let global = db
+        .event_recipients(&ownership, "widgets", "w1", Some(&json!({"k": "v"})))
+        .await
+        .unwrap();
+    assert!(
+        global.is_none(),
+        "global entity broadcasts (no recipient scope)"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 

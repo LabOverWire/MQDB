@@ -30,6 +30,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
     pub(crate) ownership_derive: Option<String>,
+    pub(crate) scoped_events: bool,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
@@ -153,6 +154,10 @@ pub(crate) async fn cmd_agent_start(
         let scope_config = mqdb_core::types::ScopeConfig::parse(&event_scope_spec)
             .map_err(|e| format!("invalid --event-scope: {e}"))?;
         agent = agent.with_scope_config(scope_config);
+    }
+
+    if args.scoped_events {
+        agent = agent.with_scoped_events(true);
     }
 
     #[cfg(feature = "opentelemetry")]

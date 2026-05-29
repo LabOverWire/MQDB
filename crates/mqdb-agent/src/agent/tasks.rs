@@ -164,6 +164,8 @@ impl MqdbAgent {
         let event_db = Arc::clone(&self.db);
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
         let num_partitions = self.db.num_partitions();
+        let scoped_events = self.scoped_events;
+        let ownership_config = Arc::clone(&self.ownership_config);
 
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -191,7 +193,6 @@ impl MqdbAgent {
                     event = event_rx.recv() => {
                         match event {
                             Ok(change_event) => {
-                                let topic = change_event.event_topic(num_partitions);
                                 let client_id = change_event.client_id.clone();
 
                                 let payload = match serde_json::to_vec(&change_event) {
@@ -202,18 +203,35 @@ impl MqdbAgent {
                                     }
                                 };
 
-                                let mut options = mqtt5::types::PublishOptions {
-                                    qos: mqtt5::QoS::AtLeastOnce,
-                                    ..Default::default()
+                                let Some(topics) = event_publish_topics(
+                                    &event_db,
+                                    &ownership_config,
+                                    scoped_events,
+                                    num_partitions,
+                                    &change_event,
+                                )
+                                .await
+                                else {
+                                    continue;
                                 };
-                                if let Some(ref cid) = client_id {
-                                    options.properties.user_properties.push((
-                                        "x-origin-client-id".to_string(),
-                                        cid.clone(),
-                                    ));
-                                }
-                                if let Err(e) = client.publish_with_options(&topic, payload, options).await {
-                                    warn!("Failed to publish event: {e}");
+
+                                for topic in topics {
+                                    let mut options = mqtt5::types::PublishOptions {
+                                        qos: mqtt5::QoS::AtLeastOnce,
+                                        ..Default::default()
+                                    };
+                                    if let Some(ref cid) = client_id {
+                                        options.properties.user_properties.push((
+                                            "x-origin-client-id".to_string(),
+                                            cid.clone(),
+                                        ));
+                                    }
+                                    if let Err(e) = client
+                                        .publish_with_options(&topic, payload.clone(), options)
+                                        .await
+                                    {
+                                        warn!("Failed to publish event: {e}");
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -278,5 +296,38 @@ impl MqdbAgent {
                 error!("HTTP server error: {e}");
             }
         }))
+    }
+}
+
+async fn event_publish_topics(
+    db: &crate::database::Database,
+    ownership: &mqdb_core::types::OwnershipConfig,
+    scoped_events: bool,
+    num_partitions: u8,
+    event: &mqdb_core::events::ChangeEvent,
+) -> Option<Vec<String>> {
+    if !scoped_events {
+        return Some(vec![event.event_topic(num_partitions)]);
+    }
+    match db
+        .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
+        .await
+    {
+        Ok(Some(recipients)) => Some(
+            recipients
+                .iter()
+                .map(|r| format!("$DB/u/{r}/events/{}/{}", event.entity, event.id))
+                .collect(),
+        ),
+        Ok(None) => Some(vec![event.event_topic(num_partitions)]),
+        Err(e) => {
+            warn!(
+                entity = %event.entity,
+                id = %event.id,
+                error = %e,
+                "failed to compute event recipients; dropping event"
+            );
+            None
+        }
     }
 }
