@@ -34,6 +34,7 @@ echo "WASM:"
 echo "  cargo make wasm-build    Build WASM package (pkg/)"
 echo "  cargo make wasm-test     Run WASM tests (Node.js)"
 echo "  cargo make ci-wasm       WASM CI (build + test)"
+echo "  cargo make wasm-publish  Publish mqdb-wasm to npm (requires auth)"
 echo ""
 echo "Benchmarking:"
 echo "  cargo make bench-pubsub  Run pub/sub benchmark"
@@ -258,3 +259,38 @@ wasm-pack test --node
 [tasks.ci-wasm]
 description = "WASM CI: build + test"
 dependencies = ["wasm-build", "wasm-test"]
+
+[tasks.wasm-publish]
+description = "Publish mqdb-wasm to npm (requires npm auth)"
+dependencies = ["wasm-build"]
+script = '''
+set -e
+VERSION=$(grep '^version' crates/mqdb-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+if npm view "mqdb-wasm@$VERSION" version > /dev/null 2>&1; then
+    echo "mqdb-wasm@$VERSION already published to npm; skipping"
+    exit 0
+fi
+cat > crates/mqdb-wasm/pkg/package.json <<PKGJSON
+{
+  "name": "mqdb-wasm",
+  "version": "$VERSION",
+  "description": "WASM client library for MQDB reactive database",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LabOverWire/MQDB"
+  },
+  "files": [
+    "mqdb_wasm_bg.wasm",
+    "mqdb_wasm.js",
+    "mqdb_wasm.d.ts"
+  ],
+  "main": "mqdb_wasm.js",
+  "types": "mqdb_wasm.d.ts"
+}
+PKGJSON
+cp LICENSE-APACHE crates/mqdb-wasm/pkg/LICENSE
+cd crates/mqdb-wasm/pkg
+npm pkg fix
+npm publish
+'''
