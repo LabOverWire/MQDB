@@ -12,6 +12,8 @@ use serde_json::Value;
 
 use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY};
 
+const MAX_WRITE_ATTEMPTS: u32 = 32;
+
 pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
     pub client_id: Option<&'a str>,
@@ -163,19 +165,48 @@ impl Database {
         update_constraint_data: Option<(Value, Value)>,
         caller: &CallerContext<'_>,
     ) -> Result<Value> {
-        let key = keys::encode_data_key(&entity_name, &id);
+        let retryable = update_constraint_data.is_none();
+        let mut attempt = 1;
+        loop {
+            let result = self
+                .try_update_once(
+                    &entity_name,
+                    &id,
+                    fields.clone(),
+                    update_constraint_data.clone(),
+                    caller,
+                )
+                .await;
+            match result {
+                Err(Error::Conflict(_)) if retryable && attempt < MAX_WRITE_ATTEMPTS => {
+                    attempt += 1;
+                }
+                other => return other,
+            }
+        }
+    }
 
+    async fn try_update_once(
+        &self,
+        entity_name: &str,
+        id: &str,
+        fields: Value,
+        update_constraint_data: Option<(Value, Value)>,
+        caller: &CallerContext<'_>,
+    ) -> Result<Value> {
+        let key = keys::encode_data_key(entity_name, id);
         let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
-            entity: entity_name.clone(),
-            id: id.clone(),
+            entity: entity_name.to_string(),
+            id: id.to_string(),
         })?;
 
-        let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
+        let existing_entity =
+            Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
         let mut updated_data = existing_entity.data.clone();
 
         if let (Value::Object(existing), Value::Object(updates)) = (&mut updated_data, fields) {
-            for (key, value) in updates {
-                existing.insert(key, value);
+            for (field, value) in updates {
+                existing.insert(field, value);
             }
         }
 
@@ -192,10 +223,10 @@ impl Database {
         }
 
         let schema_registry = self.schema_registry.read().await;
-        schema_registry.validate_entity(&entity_name, &updated_data)?;
+        schema_registry.validate_entity(entity_name, &updated_data)?;
         drop(schema_registry);
 
-        let updated_entity = Entity::new(entity_name.clone(), id.clone(), updated_data);
+        let updated_entity = Entity::new(entity_name.to_string(), id.to_string(), updated_data);
 
         let (constraint_new, constraint_old) =
             if let Some((mut plaintext_merged, plaintext_existing)) = update_constraint_data {
@@ -207,8 +238,8 @@ impl Database {
                     );
                 }
                 (
-                    Entity::new(entity_name.clone(), id.clone(), plaintext_merged),
-                    Entity::new(entity_name.clone(), id.clone(), plaintext_existing),
+                    Entity::new(entity_name.to_string(), id.to_string(), plaintext_merged),
+                    Entity::new(entity_name.to_string(), id.to_string(), plaintext_existing),
                 )
             } else {
                 (updated_entity.clone(), existing_entity.clone())
@@ -230,12 +261,13 @@ impl Database {
 
         let index_manager = self.index_manager.read().await;
         index_manager.update_indexes(&mut batch, &constraint_new, Some(&constraint_old));
+        drop(index_manager);
 
         let scope = caller
             .scope_config
-            .resolve_scope(&entity_name, &updated_entity.data);
+            .resolve_scope(entity_name, &updated_entity.data);
         let event = ChangeEvent::update(
-            entity_name,
+            entity_name.to_string(),
             updated_entity.id.clone(),
             updated_entity.data.clone(),
         )
@@ -255,7 +287,6 @@ impl Database {
 
     /// # Errors
     /// Returns an error if the entity is not found or constraint validation fails.
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip(self, scope_config, ownership), fields(entity = %entity_name, id = %id))]
     pub async fn delete(
         &self,
@@ -266,16 +297,47 @@ impl Database {
         scope_config: &ScopeConfig,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
+        let mut attempt = 1;
+        loop {
+            let result = self
+                .try_delete_once(
+                    &entity_name,
+                    &id,
+                    sender,
+                    client_id,
+                    scope_config,
+                    ownership,
+                )
+                .await;
+            match result {
+                Err(Error::Conflict(_)) if attempt < MAX_WRITE_ATTEMPTS => {
+                    attempt += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn try_delete_once(
+        &self,
+        entity_name: &str,
+        id: &str,
+        sender: Option<&str>,
+        client_id: Option<&str>,
+        scope_config: &ScopeConfig,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
         use mqdb_core::constraint::{DeleteOperation, OwnershipContext};
 
-        let key = keys::encode_data_key(&entity_name, &id);
-
+        let key = keys::encode_data_key(entity_name, id);
         let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
-            entity: entity_name.clone(),
-            id: id.clone(),
+            entity: entity_name.to_string(),
+            id: id.to_string(),
         })?;
 
-        let existing_entity = Entity::deserialize(entity_name.clone(), id.clone(), &existing_data)?;
+        let existing_entity =
+            Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
 
         let ownership_ctx = sender
             .filter(|_| !ownership.is_empty())
@@ -294,7 +356,8 @@ impl Database {
 
         let mut batch = self.storage.batch();
 
-        batch.remove(key.clone());
+        batch.expect_value(key.clone(), existing_data);
+        batch.remove(key);
 
         let index_manager = self.index_manager.read().await;
         index_manager.remove_indexes(&mut batch, &existing_entity);
@@ -366,12 +429,16 @@ impl Database {
             }
         }
 
-        let primary_scope = scope_config.resolve_scope(&entity_name, &existing_entity.data);
+        let primary_scope = scope_config.resolve_scope(entity_name, &existing_entity.data);
         let mut events = vec![
-            ChangeEvent::delete(entity_name, id, existing_entity.data)
-                .with_sender(sender.map(String::from))
-                .with_client_id(client_id.map(String::from))
-                .with_scope(primary_scope),
+            ChangeEvent::delete(
+                entity_name.to_string(),
+                id.to_string(),
+                existing_entity.data,
+            )
+            .with_sender(sender.map(String::from))
+            .with_client_id(client_id.map(String::from))
+            .with_scope(primary_scope),
         ];
         for (cascade_entity, cascade_id, cascade_data) in deleted_entities {
             let cascade_scope = scope_config.resolve_scope(&cascade_entity, &cascade_data);
@@ -630,5 +697,151 @@ impl Database {
         let partition = mqdb_core::partition::PartitionId::new(idx)
             .unwrap_or(mqdb_core::partition::PartitionId::ZERO);
         mqdb_core::partition::generate_id_for_partition(1, entity_name, partition, data)
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::{CallerContext, Database};
+    use mqdb_core::keys;
+    use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn test_db() -> (TempDir, Arc<Database>) {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        (tmp, Arc::new(db))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_updates_to_distinct_fields_all_converge() {
+        let (_tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+        db.create(
+            "counter".to_string(),
+            json!({ "id": "c1" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        const WRITERS: usize = 16;
+        let mut handles = Vec::with_capacity(WRITERS);
+        for i in 0..WRITERS {
+            let db = Arc::clone(&db);
+            handles.push(tokio::spawn(async move {
+                let scope = ScopeConfig::default();
+                let caller = CallerContext {
+                    sender: None,
+                    client_id: None,
+                    scope_config: &scope,
+                };
+                let mut patch = serde_json::Map::new();
+                patch.insert(format!("f{i}"), json!(i));
+                db.update(
+                    "counter".to_string(),
+                    "c1".to_string(),
+                    Value::Object(patch),
+                    None,
+                    &caller,
+                )
+                .await
+            }));
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent update returned error: {:?}",
+                result.err()
+            );
+        }
+
+        let doc = db
+            .read("counter".to_string(), "c1".to_string(), vec![], None)
+            .await
+            .unwrap();
+        for i in 0..WRITERS {
+            assert_eq!(
+                doc.get(format!("f{i}")).and_then(Value::as_u64),
+                Some(i as u64),
+                "field f{i} was lost across concurrent updates"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_delete_and_update_leave_no_stale_index() {
+        let (_tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+        db.add_index("item".to_string(), vec!["tag".to_string()])
+            .await
+            .unwrap();
+
+        const ROUNDS: usize = 200;
+        for round in 0..ROUNDS {
+            let id = format!("i{round}");
+            db.create(
+                "item".to_string(),
+                json!({ "id": id, "tag": "a" }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .unwrap();
+
+            let updater = {
+                let db = Arc::clone(&db);
+                let id = id.clone();
+                tokio::spawn(async move {
+                    let scope = ScopeConfig::default();
+                    let caller = CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &scope,
+                    };
+                    let _ = db
+                        .update("item".to_string(), id, json!({ "tag": "b" }), None, &caller)
+                        .await;
+                })
+            };
+            let deleter = {
+                let db = Arc::clone(&db);
+                let id = id.clone();
+                tokio::spawn(async move {
+                    let scope = ScopeConfig::default();
+                    let ownership = OwnershipConfig::default();
+                    let _ = db
+                        .delete("item".to_string(), id, None, None, &scope, &ownership)
+                        .await;
+                })
+            };
+            updater.await.unwrap();
+            deleter.await.unwrap();
+
+            let prefix = keys::encode_index_prefix("item", "tag", None);
+            for (index_key, _) in db.storage.prefix_scan(&prefix).unwrap() {
+                let indexed_id = index_key
+                    .rsplit(|&b| b == keys::SEPARATOR)
+                    .next()
+                    .and_then(|seg| std::str::from_utf8(seg).ok())
+                    .unwrap();
+                let data_key = keys::encode_data_key("item", indexed_id);
+                assert!(
+                    db.storage.get(&data_key).unwrap().is_some(),
+                    "stale index entry for item/{indexed_id} after round {round}"
+                );
+            }
+        }
     }
 }
