@@ -28,6 +28,8 @@ pub struct ChangeEvent {
     pub client_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<(String, String)>,
+    #[serde(skip)]
+    pub recipients: Option<Vec<String>>,
 }
 
 impl ChangeEvent {
@@ -47,6 +49,7 @@ impl ChangeEvent {
             sender: None,
             client_id: None,
             scope: None,
+            recipients: None,
         }
     }
 

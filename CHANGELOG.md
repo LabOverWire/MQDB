@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-28 — mqdb-agent 0.8.7, mqdb-cli 0.8.8
+
+### Added
+
+- Recipient-scoped event confidentiality (diagram sharing phase 3, #78), behind a new opt-in `--scoped-events` flag (env `MQDB_SCOPED_EVENTS`, default off). Until now every authenticated subscriber to `$DB/{entity}/events/#` received all change events, including for records they cannot read. With the flag on, change events for ownership-enabled and derived (child) entities are published once per recipient to `$DB/u/{recipient}/events/{entity}/{id}`, where recipients are the resource owner plus its share grantees (child events resolve recipients through the parent diagram). Recipients are resolved at write time and travel with the change event, so cascade deletes still reach the owner and grantees after the parent record and its shares are removed. Global entities (no ownership/derivation) keep the single broadcast publish, unchanged. The broker enforces that a user may only subscribe to their own `$DB/u/{me}/events/#` namespace (admins may read any; only the internal event service may publish there); the legacy `$DB/+/events/#` topic is unaffected because owned-entity events are no longer published to it. Clients must subscribe to `$DB/u/{me}/events/#` instead of `$DB/{entity}/events/#` — a breaking change gated behind the flag. Authorization core verified in TLA+ (`specs/DiagramSharing.tla`: `InvEventConfidentiality` and `InvEventCompleteness` hold across 52,488 states, including reparented child states). Agent mode only; cluster parity tracked in #75; public/anonymous event topics tracked with phase 4 (#79).
+
 ## 2026-05-28 — mqdb-core 0.7.2, mqdb-agent 0.8.6, mqdb-cli 0.8.7
 
 ### Added

@@ -392,6 +392,24 @@ impl Database {
             );
         }
 
+        for event in &mut events {
+            match self
+                .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
+                .await
+            {
+                Ok(Some(recipients)) => event.recipients = Some(recipients),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        entity = %event.entity,
+                        id = %event.id,
+                        error = %err,
+                        "failed to precompute event recipients on delete"
+                    );
+                }
+            }
+        }
+
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox
             .enqueue_events(&mut batch, &operation_id, &events);

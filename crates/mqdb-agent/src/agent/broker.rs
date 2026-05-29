@@ -22,6 +22,7 @@ pub(super) struct AuthProviderConfig<'a> {
     pub acl_file: Option<&'a std::path::Path>,
     pub admin_users: &'a HashSet<String>,
     pub allow_anonymous: bool,
+    pub scoped_events: bool,
 }
 
 impl MqdbAgent {
@@ -182,7 +183,8 @@ impl MqdbAgent {
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, config.admin_users.clone())
                 .with_internal_service_username(config.service_username.cloned())
-                .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty());
+                .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty())
+                .with_scoped_events(config.scoped_events);
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if config.admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");

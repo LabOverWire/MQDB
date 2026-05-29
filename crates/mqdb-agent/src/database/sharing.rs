@@ -311,4 +311,89 @@ impl Database {
         }
         Ok(resources)
     }
+
+    /// All grantee identities with a grant on a resource. Every grant is at least
+    /// `view`, so all qualify as event recipients.
+    ///
+    /// # Errors
+    /// Returns an error if scanning the share records fails.
+    pub(crate) async fn resource_grantees(&self, entity: &str, id: &str) -> Result<Vec<String>> {
+        let records = self
+            .list_core(
+                SHARES_ENTITY.to_string(),
+                Self::resource_filters(entity, id),
+                vec![],
+                None,
+                vec![],
+                None,
+            )
+            .await?;
+        Ok(records
+            .iter()
+            .filter_map(|r| r.get("grantee").and_then(Value::as_str).map(String::from))
+            .collect())
+    }
+
+    fn record_owner(
+        &self,
+        entity: &str,
+        id: &str,
+        ownership: &OwnershipConfig,
+    ) -> Result<Option<String>> {
+        let Some(owner_field) = ownership.owner_field(entity) else {
+            return Ok(None);
+        };
+        let key = keys::encode_data_key(entity, id);
+        let Some(bytes) = self.storage.get(&key)? else {
+            return Ok(None);
+        };
+        let record = Entity::deserialize(entity.to_string(), id.to_string(), &bytes)?;
+        Ok(record
+            .data
+            .get(owner_field)
+            .and_then(Value::as_str)
+            .map(String::from))
+    }
+
+    /// Recipients of a change event for confidentiality-scoped delivery: the owner
+    /// plus every grantee of the governing resource. Ownership entities govern
+    /// themselves; derived (child) entities govern through their parent. Returns
+    /// `None` for entities with no ownership/derivation (Global — broadcast as before).
+    ///
+    /// # Errors
+    /// Returns an error if reading the parent record or scanning grants fails.
+    pub async fn event_recipients(
+        &self,
+        ownership: &OwnershipConfig,
+        entity: &str,
+        id: &str,
+        data: Option<&Value>,
+    ) -> Result<Option<Vec<String>>> {
+        let (res_entity, res_id, owner) = if let Some(owner_field) = ownership.owner_field(entity) {
+            let owner = data
+                .and_then(|d| d.get(owner_field))
+                .and_then(Value::as_str)
+                .map(String::from);
+            (entity.to_string(), id.to_string(), owner)
+        } else if let Some((fk_field, parent_entity)) = ownership.derivation(entity) {
+            let Some(parent_id) = data.and_then(|d| d.get(fk_field)).and_then(Value::as_str) else {
+                return Ok(Some(vec![]));
+            };
+            let owner = self.record_owner(parent_entity, parent_id, ownership)?;
+            (parent_entity.to_string(), parent_id.to_string(), owner)
+        } else {
+            return Ok(None);
+        };
+
+        let mut recipients: Vec<String> = Vec::new();
+        if let Some(o) = owner {
+            recipients.push(o);
+        }
+        for grantee in self.resource_grantees(&res_entity, &res_id).await? {
+            if !recipients.contains(&grantee) {
+                recipients.push(grantee);
+            }
+        }
+        Ok(Some(recipients))
+    }
 }

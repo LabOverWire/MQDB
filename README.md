@@ -380,6 +380,8 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 
 **Child-entity derivation.** Child records (e.g. a diagram's nodes/edges) can inherit access from their parent via `--ownership-derive` (env `MQDB_OWNERSHIP_DERIVE`), a comma-separated map of `child=fk_field>parent_entity` (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A derived child's read requires `view` on the parent and create/update/delete require `edit`; the parent reference is immutable on update, so an editor cannot move a child into a diagram they cannot edit. Without a mapping a child entity is unrestricted (default), so derivation is opt-in per deployment.
 
+**Event confidentiality.** By default change events broadcast on `$DB/{entity}/events/#` to every authenticated subscriber. Enabling `--scoped-events` (env `MQDB_SCOPED_EVENTS`) routes events for ownership-enabled and derived entities to per-recipient topics `$DB/u/{recipient}/events/{entity}/{id}` — the owner plus its share grantees (children resolve recipients through the parent). The broker only lets a user subscribe to their own `$DB/u/{me}/events/#`. Global entities keep the broadcast topic. **This is a breaking change for subscribers** (subscribe to `$DB/u/{me}/events/#` instead of `$DB/{entity}/events/#`), so it is opt-in; enable it on the broker and the client together.
+
 #### Admin Operations
 
 | Topic | Action |

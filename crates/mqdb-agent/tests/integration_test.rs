@@ -2647,6 +2647,192 @@ async fn test_unconfigured_child_unrestricted() {
 }
 
 #[tokio::test]
+async fn test_event_recipients_owner_grantees_and_global() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_derivations("nodes=diagramId>diagrams")
+        .unwrap();
+    let scope = ScopeConfig::default();
+
+    let diagram_id = match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create diagram failed {code}: {message}"),
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut owned = db
+        .event_recipients(
+            &ownership,
+            "diagrams",
+            &diagram_id,
+            Some(&json!({"userId": "alice"})),
+        )
+        .await
+        .unwrap()
+        .expect("ownership entity yields recipients");
+    owned.sort();
+    assert_eq!(owned, vec!["alice".to_string(), "bob".to_string()]);
+
+    let mut derived = db
+        .event_recipients(
+            &ownership,
+            "nodes",
+            "n1",
+            Some(&json!({"diagramId": diagram_id})),
+        )
+        .await
+        .unwrap()
+        .expect("derived entity resolves recipients via parent");
+    derived.sort();
+    assert_eq!(derived, vec!["alice".to_string(), "bob".to_string()]);
+
+    let global = db
+        .event_recipients(&ownership, "widgets", "w1", Some(&json!({"k": "v"})))
+        .await
+        .unwrap();
+    assert!(
+        global.is_none(),
+        "global entity broadcasts (no recipient scope)"
+    );
+}
+
+#[tokio::test]
+async fn test_cascade_delete_events_carry_recipients() {
+    use mqdb_core::{OnDeleteAction, Request, Response};
+    use std::collections::HashMap;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_derivations("nodes=diagramId>diagrams")
+        .unwrap();
+    let scope = ScopeConfig::default();
+
+    db.add_foreign_key(
+        "nodes".into(),
+        "diagramId".into(),
+        "diagrams".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let diagram_id = match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"userId": "alice", "title": "D"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create diagram failed {code}: {message}"),
+    };
+
+    let node_id = match db
+        .execute(Request::Create {
+            entity: "nodes".into(),
+            data: json!({"diagramId": diagram_id, "label": "N"}),
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create node failed {code}: {message}"),
+    };
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut receiver = db.event_receiver();
+
+    db.execute_with_sender(
+        Request::Delete {
+            entity: "diagrams".into(),
+            id: diagram_id.clone(),
+        },
+        Some("alice"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut recipients_by_entity: HashMap<String, Vec<String>> = HashMap::new();
+    while recipients_by_entity.len() < 2 {
+        let event =
+            match tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv())
+                .await
+            {
+                Ok(Ok(event)) => event,
+                _ => break,
+            };
+        if event.entity == "diagrams" || event.entity == "nodes" {
+            let mut recipients = event
+                .recipients
+                .unwrap_or_else(|| panic!("{} delete event missing recipients", event.entity));
+            recipients.sort();
+            recipients_by_entity.insert(event.entity, recipients);
+        }
+    }
+
+    let expected = vec!["alice".to_string(), "bob".to_string()];
+    assert_eq!(
+        recipients_by_entity.get("diagrams"),
+        Some(&expected),
+        "parent delete event reaches owner and grantee"
+    );
+    assert_eq!(
+        recipients_by_entity.get("nodes"),
+        Some(&expected),
+        "cascade child delete event resolves recipients via parent (id {node_id})"
+    );
+}
+
+#[tokio::test]
 async fn test_ownership_list_with_additional_filter() {
     use mqdb_core::{Request, Response};
 

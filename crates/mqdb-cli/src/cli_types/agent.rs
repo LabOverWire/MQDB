@@ -109,6 +109,12 @@ pub(crate) struct AgentStartFields {
     pub(crate) ownership_derive: Option<String>,
     #[arg(
         long,
+        env = "MQDB_SCOPED_EVENTS",
+        help = "Route change events to per-recipient topics ($DB/u/{user}/events/#) for ownership-enabled entities; subscribers must subscribe to their own namespace"
+    )]
+    pub(crate) scoped_events: bool,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]
