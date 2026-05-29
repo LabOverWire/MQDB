@@ -6,11 +6,13 @@ use crate::config::DurabilityMode;
 use crate::error::Result;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable, Slice};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 pub struct FjallBackend {
     db: Database,
     keyspace: Keyspace,
     durability: DurabilityMode,
+    commit_lock: Arc<Mutex<()>>,
 }
 
 impl FjallBackend {
@@ -25,6 +27,7 @@ impl FjallBackend {
             db,
             keyspace,
             durability,
+            commit_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -130,6 +133,7 @@ impl StorageBackend for FjallBackend {
             durability: self.durability,
             operations: Vec::new(),
             preconditions: Vec::new(),
+            commit_lock: Arc::clone(&self.commit_lock),
         })
     }
 
@@ -154,6 +158,7 @@ pub struct FjallBatch {
     durability: DurabilityMode,
     operations: Vec<BatchOp>,
     preconditions: Vec<Precondition>,
+    commit_lock: Arc<Mutex<()>>,
 }
 
 impl BatchOperations for FjallBatch {
@@ -173,30 +178,34 @@ impl BatchOperations for FjallBatch {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
-        let snapshot = self.db.snapshot();
+        {
+            let _guard = self
+                .commit_lock
+                .lock()
+                .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
 
-        for precondition in &self.preconditions {
-            let actual: Option<Slice> = snapshot.get(&self.keyspace, &precondition.key)?;
-            match actual {
-                Some(val) if val.as_ref() == precondition.expected_value.as_slice() => {}
-                _ => {
-                    return Err(crate::error::Error::Conflict(
-                        "optimistic lock failed: value was modified".into(),
-                    ));
+            let snapshot = self.db.snapshot();
+            for precondition in &self.preconditions {
+                let actual: Option<Slice> = snapshot.get(&self.keyspace, &precondition.key)?;
+                match actual {
+                    Some(val) if val.as_ref() == precondition.expected_value.as_slice() => {}
+                    _ => {
+                        return Err(crate::error::Error::Conflict(
+                            "optimistic lock failed: value was modified".into(),
+                        ));
+                    }
                 }
             }
-        }
 
-        let mut batch = self.db.batch();
-
-        for op in self.operations {
-            match op {
-                BatchOp::Insert(k, v) => batch.insert(&self.keyspace, k, v),
-                BatchOp::Remove(k) => batch.remove(&self.keyspace, k),
+            let mut batch = self.db.batch();
+            for op in self.operations {
+                match op {
+                    BatchOp::Insert(k, v) => batch.insert(&self.keyspace, k, v),
+                    BatchOp::Remove(k) => batch.remove(&self.keyspace, k),
+                }
             }
+            batch.commit()?;
         }
-
-        batch.commit()?;
 
         match self.durability {
             DurabilityMode::Immediate => {
