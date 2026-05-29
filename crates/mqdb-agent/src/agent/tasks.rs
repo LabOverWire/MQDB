@@ -309,25 +309,41 @@ async fn event_publish_topics(
     if !scoped_events {
         return Some(vec![event.event_topic(num_partitions)]);
     }
-    match db
-        .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
-        .await
-    {
-        Ok(Some(recipients)) => Some(
-            recipients
-                .iter()
-                .map(|r| format!("$DB/u/{r}/events/{}/{}", event.entity, event.id))
-                .collect(),
-        ),
-        Ok(None) => Some(vec![event.event_topic(num_partitions)]),
-        Err(e) => {
-            warn!(
-                entity = %event.entity,
-                id = %event.id,
-                error = %e,
-                "failed to compute event recipients; dropping event"
-            );
-            None
+    let recipients = if let Some(precomputed) = event.recipients.clone() {
+        Some(precomputed)
+    } else {
+        match db
+            .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
+            .await
+        {
+            Ok(recipients) => recipients,
+            Err(e) => {
+                warn!(
+                    entity = %event.entity,
+                    id = %event.id,
+                    error = %e,
+                    "failed to compute event recipients; dropping event"
+                );
+                return None;
+            }
         }
+    };
+    match recipients {
+        Some(recipients) => {
+            if recipients.is_empty() {
+                debug!(
+                    entity = %event.entity,
+                    id = %event.id,
+                    "scoped event has no recipients; dropping"
+                );
+            }
+            Some(
+                recipients
+                    .iter()
+                    .map(|r| format!("$DB/u/{r}/events/{}/{}", event.entity, event.id))
+                    .collect(),
+            )
+        }
+        None => Some(vec![event.event_topic(num_partitions)]),
     }
 }
