@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-05-30 — mqdb-agent 0.8.9, mqdb-cli 0.8.10
+
+### Fixed
+
+- `Database::list` self-heals stale secondary-index entries instead of only logging `index pointed to non-existent entity: …`. When `list_from_index_ids` reads an index entry whose data row is missing (`Error::NotFound`), it now scans `idx/{entity}/` for every key ending in `/{id}` and removes them in a single batch. The purge is race-safe via a pre-scan re-check (`storage.get(&data_key).is_none()`): if the row was re-created before the heal runs, the helper returns `Ok(0)` and the next `list` call sees the live row. The atomic row+index delete shipped in 0.8.8 (#84 / 95c138c) prevents new stale entries on the agent delete path; this heals pre-existing entries and any future entries that might be left by paths outside `mqdb-agent` (e.g. cluster snapshot/replication). The NotFound log level moves from `warn!` to `info!`/`debug!` depending on whether a heal actually ran, so a quiet system stays quiet. (#89, follow-up perf optimisation tracked in #90.)
+
 ## 2026-05-29 — mqdb-core 0.7.3, mqdb-agent 0.8.8, mqdb-cli 0.8.9
 
 ### Fixed
