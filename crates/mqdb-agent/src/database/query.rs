@@ -247,16 +247,62 @@ impl Database {
                     }
                 }
                 Err(Error::NotFound { .. }) => {
-                    tracing::warn!(
-                        "index pointed to non-existent entity: {}/{}",
-                        entity_name,
-                        id
-                    );
+                    match self.purge_stale_index_entries(entity_name, id) {
+                        Ok(0) => tracing::debug!(
+                            entity = entity_name,
+                            id = %id,
+                            "stale index entry resolved by concurrent re-create",
+                        ),
+                        Ok(removed) => tracing::info!(
+                            entity = entity_name,
+                            id = %id,
+                            removed,
+                            "self-healed stale index entries pointing to deleted row",
+                        ),
+                        Err(err) => tracing::warn!(
+                            entity = entity_name,
+                            id = %id,
+                            error = %err,
+                            "failed to purge stale index entries",
+                        ),
+                    }
                 }
                 Err(e) => return Err(e),
             }
         }
         Ok(results)
+    }
+
+    fn purge_stale_index_entries(&self, entity_name: &str, id: &str) -> Result<usize> {
+        let data_key = keys::encode_data_key(entity_name, id);
+        if self.storage.get(&data_key)?.is_some() {
+            return Ok(0);
+        }
+
+        let mut entity_index_prefix =
+            Vec::with_capacity(keys::INDEX_PREFIX.len() + 1 + entity_name.len() + 1);
+        entity_index_prefix.extend_from_slice(keys::INDEX_PREFIX);
+        entity_index_prefix.push(keys::SEPARATOR);
+        entity_index_prefix.extend_from_slice(entity_name.as_bytes());
+        entity_index_prefix.push(keys::SEPARATOR);
+
+        let mut id_suffix = Vec::with_capacity(1 + id.len());
+        id_suffix.push(keys::SEPARATOR);
+        id_suffix.extend_from_slice(id.as_bytes());
+
+        let candidate_keys = self.storage.prefix_scan_keys(&entity_index_prefix)?;
+        let mut batch = self.storage.batch();
+        let mut removed = 0usize;
+        for key in candidate_keys {
+            if key.ends_with(&id_suffix) {
+                batch.remove(key);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            batch.commit()?;
+        }
+        Ok(removed)
     }
 
     /// # Errors
@@ -409,5 +455,115 @@ impl Database {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod stale_index_tests {
+    use super::Database;
+    use mqdb_core::keys;
+    use mqdb_core::types::{Filter, FilterOp, ScopeConfig};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    async fn test_db() -> (TempDir, Database) {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        (tmp, db)
+    }
+
+    #[tokio::test]
+    async fn list_purges_stale_index_entry_for_missing_row() {
+        let (_tmp, db) = test_db().await;
+        db.add_index("users".to_string(), vec!["email".to_string()])
+            .await
+            .unwrap();
+
+        let scope = ScopeConfig::default();
+        db.create(
+            "users".to_string(),
+            json!({ "id": "real", "email": "real@x.com" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let ghost_value = keys::encode_value_for_index(&json!("ghost@x.com")).unwrap();
+        let ghost_key = keys::encode_index_key("users", "email", &ghost_value, "ghost");
+        let mut batch = db.storage.batch();
+        batch.insert(ghost_key.clone(), Vec::new());
+        batch.commit().unwrap();
+
+        assert!(
+            db.storage.get(&ghost_key).unwrap().is_some(),
+            "ghost index entry should exist before list",
+        );
+
+        let results = db
+            .list(
+                "users".to_string(),
+                vec![Filter {
+                    field: "email".to_string(),
+                    op: FilterOp::Eq,
+                    value: json!("ghost@x.com"),
+                }],
+                vec![],
+                None,
+                vec![],
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(results.is_empty(), "stale index must not return rows");
+
+        assert!(
+            db.storage.get(&ghost_key).unwrap().is_none(),
+            "ghost index entry must be purged by self-heal",
+        );
+
+        let real_value = keys::encode_value_for_index(&json!("real@x.com")).unwrap();
+        let real_key = keys::encode_index_key("users", "email", &real_value, "real");
+        assert!(
+            db.storage.get(&real_key).unwrap().is_some(),
+            "live index entry must survive self-heal",
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_skips_when_row_was_recreated_before_heal() {
+        let (_tmp, db) = test_db().await;
+        db.add_index("users".to_string(), vec!["email".to_string()])
+            .await
+            .unwrap();
+
+        let scope = ScopeConfig::default();
+        db.create(
+            "users".to_string(),
+            json!({ "id": "ghost", "email": "ghost@x.com" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let stray_value = keys::encode_value_for_index(&json!("stray@x.com")).unwrap();
+        let stray_key = keys::encode_index_key("users", "email", &stray_value, "ghost");
+        let mut batch = db.storage.batch();
+        batch.insert(stray_key.clone(), Vec::new());
+        batch.commit().unwrap();
+
+        let removed = db.purge_stale_index_entries("users", "ghost").unwrap();
+        assert_eq!(removed, 0, "must not purge when data row still exists");
+        assert!(
+            db.storage.get(&stray_key).unwrap().is_some(),
+            "stray entry must remain when row exists (race-safe)",
+        );
     }
 }
