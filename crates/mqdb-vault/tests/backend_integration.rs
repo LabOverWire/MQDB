@@ -396,6 +396,148 @@ async fn admin_unlock_skips_re_encrypt_when_records_already_rotated() {
 }
 
 #[tokio::test]
+async fn admin_unlock_resume_strands_unrotated_records_after_mid_batch_crash() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use mqdb_agent::vault_backend::DbAccess;
+    use mqdb_vault::VaultCrypto;
+
+    let (_td, db, ownership, backend) = setup(0).await;
+    seed_identity(&db, "u1").await;
+    backend
+        .admin_enable(&db, &ownership, "u1", "old-pw")
+        .await
+        .expect("enable");
+
+    let identity = DbAccess::read_entity(&db, "_identities", "u1")
+        .await
+        .expect("read identity")
+        .expect("identity exists");
+    let old_salt_b64 = identity["vault_salt"]
+        .as_str()
+        .expect("old salt")
+        .to_string();
+    let old_check = identity["vault_check"]
+        .as_str()
+        .expect("old check")
+        .to_string();
+    let old_salt = BASE64.decode(&old_salt_b64).expect("decode old salt");
+    let old_crypto = VaultCrypto::derive("old-pw", &old_salt);
+
+    let new_salt = VaultCrypto::generate_salt();
+    let new_crypto = VaultCrypto::derive("new-pw", &new_salt);
+    let new_check = new_crypto.create_check_token().expect("new check");
+    let new_salt_b64 = BASE64.encode(new_salt);
+
+    let scope = ScopeConfig::default();
+
+    let mut rotated =
+        json!({"id": "note-rotated", "userId": "u1", "title": "rotated", "body": "after"});
+    new_crypto.encrypt_record("notes", "note-rotated", &mut rotated, &["id", "userId"]);
+    db.create("notes".to_string(), rotated, None, None, None, &scope)
+        .await
+        .expect("store rotated");
+
+    let mut stranded =
+        json!({"id": "note-stranded", "userId": "u1", "title": "stranded", "body": "before"});
+    old_crypto.encrypt_record("notes", "note-stranded", &mut stranded, &["id", "userId"]);
+    db.create("notes".to_string(), stranded, None, None, None, &scope)
+        .await
+        .expect("store stranded");
+
+    DbAccess::update_entity(
+        &db,
+        "_identities",
+        "u1",
+        json!({
+            "vault_salt": new_salt_b64,
+            "vault_check": new_check,
+            "vault_migration_status": "pending",
+            "vault_migration_mode": "re_encrypt",
+            "vault_old_check": old_check,
+            "vault_old_salt": old_salt_b64,
+        }),
+    )
+    .await
+    .expect("inject mid-batch markers");
+
+    backend
+        .admin_unlock(&db, &ownership, "u1", "new-pw")
+        .await
+        .expect("unlock with new");
+
+    let identity_after = DbAccess::read_entity(&db, "_identities", "u1")
+        .await
+        .expect("read identity")
+        .expect("identity exists");
+    assert_ne!(
+        identity_after
+            .get("vault_migration_status")
+            .and_then(|v| v.as_str()),
+        Some("pending"),
+        "resume must clear the pending marker"
+    );
+
+    let rotated_stored = db
+        .read(
+            "notes".to_string(),
+            "note-rotated".to_string(),
+            vec![],
+            None,
+        )
+        .await
+        .expect("read rotated");
+    let mut rotated_resp = Response::Ok {
+        data: rotated_stored,
+    };
+    backend
+        .decrypt_response(
+            "notes",
+            DbOp::Read,
+            &ownership,
+            Some("u1"),
+            &mut rotated_resp,
+        )
+        .await;
+    let Response::Ok { data: rotated_dec } = rotated_resp else {
+        panic!("expected Ok");
+    };
+    assert_eq!(
+        rotated_dec["title"], "rotated",
+        "already-rotated record must stay readable under the new key, not be double-encrypted"
+    );
+
+    let stranded_stored = db
+        .read(
+            "notes".to_string(),
+            "note-stranded".to_string(),
+            vec![],
+            None,
+        )
+        .await
+        .expect("read stranded");
+    let mut stranded_resp = Response::Ok {
+        data: stranded_stored,
+    };
+    backend
+        .decrypt_response(
+            "notes",
+            DbOp::Read,
+            &ownership,
+            Some("u1"),
+            &mut stranded_resp,
+        )
+        .await;
+    let Response::Ok { data: stranded_dec } = stranded_resp else {
+        panic!("expected Ok");
+    };
+    assert_ne!(
+        stranded_dec["title"], "stranded",
+        "records left under the old key by a mid-batch crash are unrecoverable after resume"
+    );
+}
+
+#[tokio::test]
 async fn admin_disable_clears_vault_state() {
     let (_td, db, ownership, backend) = setup(0).await;
     seed_identity(&db, "u1").await;
