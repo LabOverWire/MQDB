@@ -163,7 +163,23 @@ pub async fn resume_pending_migration(
                 return None;
             };
             let old_crypto = VaultCrypto::derive(passphrase, &old_salt);
-            batch_vault_re_encrypt(db, ownership, canonical_id, &old_crypto, crypto).await
+            let old_passphrase_valid = identity
+                .get("vault_old_check")
+                .and_then(|v| v.as_str())
+                .is_some_and(|token| old_crypto.verify_check_token(token));
+            if old_passphrase_valid {
+                batch_vault_re_encrypt(db, ownership, canonical_id, &old_crypto, crypto).await
+            } else {
+                warn!(
+                    "vault re_encrypt resume: supplied passphrase does not match old check, \
+                     records already re-encrypted under the new passphrase; clearing markers only"
+                );
+                BatchResult {
+                    succeeded: 0,
+                    failed: 0,
+                    entities_skipped: Vec::new(),
+                }
+            }
         }
         _ => return None,
     };

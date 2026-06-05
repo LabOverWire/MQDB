@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-06-05 — mqdb-vault 0.1.2, mqdb-cli 0.8.11
+
+### Fixed
+
+- Vault passphrase change (`admin_change`) could corrupt a user's records if the migration's finalize write failed after the records were already re-encrypted. `admin_change` rotates in three steps: install the new salt/check plus `vault_old_check`/`vault_old_salt` resume markers (`migration_start`), re-encrypt every owned record from the old key to the new key (`batch_vault_re_encrypt`), then clear the markers (`migration_done`). If `migration_done` failed after the batch succeeded, the identity was left `migration_status: pending, mode: re_encrypt` with records already under the new passphrase. On the next unlock, `resume_pending_migration` derived `old_crypto` from the supplied (now **new**) passphrase plus the old salt — a key that decrypts nothing — and unconditionally re-ran `batch_vault_re_encrypt`, double-encrypting the already-rotated records (the wrong-key decrypt is a graceful no-op, then the re-encrypt wraps the existing ciphertext again). The records became permanently unrecoverable. The `re_encrypt` resume now verifies the supplied passphrase against `vault_old_check` (with the old salt) before re-running the batch: it only re-encrypts when the old passphrase genuinely matches, otherwise it recognises the half-finalized state, skips the destructive batch, and clears the markers. The `decrypt` resume path (`admin_disable`) was already safe because `decrypt_record` is a no-op on plaintext. Verified end-to-end against the release binary: a reproduced half-finalized rotation now decrypts cleanly to plaintext where the previous build returned ciphertext. (#66)
+
 ## 2026-05-30 — mqdb-agent 0.8.9, mqdb-cli 0.8.10
 
 ### Fixed
