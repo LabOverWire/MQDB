@@ -95,11 +95,11 @@ Disabled ──enable──→ Enabled+Unlocked
 Batch operations (enable, disable, change) can be interrupted by crashes. The saga pattern ensures convergence to a correct state:
 
 1. **Before batch**: persist `vault_migration_status: "pending"` and `vault_migration_mode` ("encrypt", "decrypt", or "re_encrypt") on the identity record (`handlers.rs:1457-1458, 1687-1689, 1831-1835`)
-2. **Execute batch idempotently**: re-encrypting an already-encrypted field produces valid (different) ciphertext; skipping a value that fails decryption leaves it unchanged
+2. **Execute batch**: the `encrypt` and `decrypt` modes are idempotent — re-encrypting an already-encrypted field produces valid (different) ciphertext, and a value that fails decryption is left unchanged. The `re_encrypt` mode (key rotation) is **not** idempotent: re-running it with the wrong source key double-encrypts already-rotated records, so its resume is gated on a passphrase check (step 4).
 3. **After batch**: set `vault_migration_status: "complete"`
-4. **On next unlock**: if `migration_status == "pending"`, resume the recorded migration mode (`handlers.rs:2002-2075`)
+4. **On next unlock**: if `migration_status == "pending"`, resume the recorded migration mode. For `re_encrypt`, the supplied passphrase is first verified against the preserved old check token (`vault_old_check`); the batch runs only if it matches the old key, otherwise the records are already rotated and only the markers are cleared.
 
-For passphrase changes, the old salt is persisted as `vault_old_salt` so the old key can be re-derived during recovery.
+For passphrase changes, the old salt and old check token are persisted as `vault_old_salt`/`vault_old_check`. The old check token lets recovery decide whether the supplied passphrase still matches the old key before attempting to re-derive and re-encrypt.
 
 ### Write Fences
 

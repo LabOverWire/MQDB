@@ -206,11 +206,11 @@ Three migration modes are tracked on the user's identity record:
 |------|---------|-----------------|
 | `encrypt` | Enable | Re-run batch encryption (idempotent) |
 | `decrypt` | Disable | Re-run batch decryption (idempotent) |
-| `re_encrypt` | Change passphrase | Read old salt from identity, derive both old and new keys, re-encrypt all records |
+| `re_encrypt` | Change passphrase | Verify the unlock passphrase against the preserved old check token; re-encrypt only if it matches, otherwise clear the markers |
 
-**Idempotency.** The decrypt path skips values that fail decryption (not ciphertext or wrong key). This means re-running a partially completed batch converges to the correct state: already-processed records pass through unchanged, unprocessed records are handled normally.
+**Idempotency.** The decrypt path skips values that fail decryption (not ciphertext or wrong key). This means re-running a partially completed batch converges to the correct state: already-processed records pass through unchanged, unprocessed records are handled normally. Re-encryption is **not** idempotent — re-running it with the wrong source key double-encrypts already-rotated records — so the change-passphrase resume gates the batch on a passphrase check (below).
 
-**Change passphrase recovery.** Before re-encryption begins, the old salt is persisted on the identity record alongside the new salt. If the server crashes, the next unlock reads both salts, derives both keys, and resumes re-encryption with the old key for decryption and the new key for encryption. When re-encryption completes, the old salt is cleared.
+**Change passphrase recovery.** Before re-encryption begins, the old salt and old check token are persisted on the identity record alongside the new salt and new check token. The new check token takes effect immediately, so the only passphrase that unlocks afterwards is the new one. On the next unlock the server verifies the supplied passphrase against the preserved old check token: if it matches (the records are still under the old key), it resumes re-encryption with the old key for decryption and the new key for encryption; if it does not (the records were already rotated before the crash and only the finalize write was lost), it skips the batch and clears the migration markers. Either way the records are left consistent under the new key. When the resume completes, the old salt and old check token are cleared.
 
 ## Security considerations
 
