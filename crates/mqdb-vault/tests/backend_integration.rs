@@ -291,6 +291,111 @@ async fn admin_change_rotates_keys() {
 }
 
 #[tokio::test]
+async fn admin_unlock_skips_re_encrypt_when_records_already_rotated() {
+    use mqdb_agent::vault_backend::DbAccess;
+
+    let (_td, db, ownership, backend) = setup(0).await;
+    seed_identity(&db, "u1").await;
+    backend
+        .admin_enable(&db, &ownership, "u1", "old-pw")
+        .await
+        .expect("enable");
+
+    let req = Request::Create {
+        entity: "notes".to_string(),
+        data: json!({"id": "note-1", "userId": "u1", "title": "sensitive", "body": "secret"}),
+    };
+    let (encrypted_req, _vc) = backend
+        .encrypt_request(&db, "notes", &ownership, Some("u1"), req)
+        .await
+        .expect("encrypt_request");
+    let Request::Create {
+        data: encrypted_data,
+        ..
+    } = encrypted_req
+    else {
+        panic!("expected Create");
+    };
+    let scope = ScopeConfig::default();
+    db.create(
+        "notes".to_string(),
+        encrypted_data,
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .expect("store encrypted");
+
+    let identity_before = DbAccess::read_entity(&db, "_identities", "u1")
+        .await
+        .expect("read identity")
+        .expect("identity exists");
+    let old_salt = identity_before["vault_salt"]
+        .as_str()
+        .expect("old salt")
+        .to_string();
+    let old_check = identity_before["vault_check"]
+        .as_str()
+        .expect("old check")
+        .to_string();
+
+    backend
+        .admin_change(&db, &ownership, "u1", "old-pw", "new-pw")
+        .await
+        .expect("rotate");
+
+    DbAccess::update_entity(
+        &db,
+        "_identities",
+        "u1",
+        json!({
+            "vault_migration_status": "pending",
+            "vault_migration_mode": "re_encrypt",
+            "vault_old_check": old_check,
+            "vault_old_salt": old_salt,
+        }),
+    )
+    .await
+    .expect("inject half-finalized markers");
+
+    backend
+        .admin_unlock(&db, &ownership, "u1", "new-pw")
+        .await
+        .expect("unlock with new");
+
+    let identity_after = DbAccess::read_entity(&db, "_identities", "u1")
+        .await
+        .expect("read identity")
+        .expect("identity exists");
+    assert_ne!(
+        identity_after
+            .get("vault_migration_status")
+            .and_then(|v| v.as_str()),
+        Some("pending"),
+        "resume must clear the pending marker"
+    );
+
+    let stored = db
+        .read("notes".to_string(), "note-1".to_string(), vec![], None)
+        .await
+        .expect("read note");
+    let mut response = Response::Ok { data: stored };
+    backend
+        .decrypt_response("notes", DbOp::Read, &ownership, Some("u1"), &mut response)
+        .await;
+    let Response::Ok { data: decrypted } = response else {
+        panic!("expected Ok");
+    };
+    assert_eq!(
+        decrypted["title"], "sensitive",
+        "record must not be double-encrypted by a spurious re_encrypt resume"
+    );
+    assert_eq!(decrypted["body"], "secret");
+}
+
+#[tokio::test]
 async fn admin_disable_clears_vault_state() {
     let (_td, db, ownership, backend) = setup(0).await;
     seed_identity(&db, "u1").await;
