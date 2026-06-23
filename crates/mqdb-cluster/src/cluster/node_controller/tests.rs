@@ -1167,6 +1167,110 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     }
 }
 
+async fn setup_owned_posts_referencing_user(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+) {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    make_all_primary(ctrl, node);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner").unwrap(),
+    ));
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+
+    let alice_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &alice_post, 1000)
+        .await
+        .unwrap();
+    let bob_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "bob", "id": "post-bob"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-bob", &bob_post, 1000)
+        .await
+        .unwrap();
+}
+
+fn sent_fk_lookup_response(
+    ctrl: &NodeController<MockTransport>,
+    to: NodeId,
+) -> crate::cluster::protocol::FkReverseLookupResponse {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .find_map(|(dest, msg)| match msg {
+            ClusterMessage::FkReverseLookupResponse(r) if dest == to => Some(r),
+            _ => None,
+        })
+        .expect("FK reverse lookup response sent to requester")
+}
+
+#[tokio::test]
+async fn handle_fk_reverse_lookup_partitions_cross_owned_by_sender() {
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let req = FkReverseLookupRequest::create(1, "posts", "author_id", "u1", "users", "alice");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    assert_eq!(
+        resp.referencing_ids(),
+        vec!["post-alice".to_string()],
+        "alice's own post is owned and cascade-deletable"
+    );
+    assert_eq!(
+        resp.cross_owned_ids(),
+        vec!["post-bob".to_string()],
+        "bob's post is cross-owned and must be set-null'd, not deleted"
+    );
+}
+
+#[tokio::test]
+async fn handle_fk_reverse_lookup_blind_sender_returns_all_owned() {
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let req = FkReverseLookupRequest::create(2, "posts", "author_id", "u1", "users", "");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    let mut owned = resp.referencing_ids();
+    owned.sort();
+    assert_eq!(
+        owned,
+        vec!["post-alice".to_string(), "post-bob".to_string()],
+        "a blind (empty) sender treats every ref as owned"
+    );
+    assert!(resp.cross_owned_ids().is_empty());
+}
+
 #[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};

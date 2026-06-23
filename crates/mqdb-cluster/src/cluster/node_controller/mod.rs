@@ -120,13 +120,18 @@ pub struct PendingFkCheck {
     pub receiver: oneshot::Receiver<bool>,
 }
 
+pub struct FkReverseLookupReply {
+    pub owned: Vec<String>,
+    pub cross_owned: Vec<String>,
+}
+
 pub struct PendingFkReverseLookup {
     pub constraint_name: String,
     pub source_entity: String,
     pub source_field: String,
     pub on_delete: super::db::OnDeleteAction,
     pub target_id: String,
-    pub receiver: oneshot::Receiver<Vec<String>>,
+    pub receiver: oneshot::Receiver<FkReverseLookupReply>,
 }
 
 pub struct PendingFkWork {

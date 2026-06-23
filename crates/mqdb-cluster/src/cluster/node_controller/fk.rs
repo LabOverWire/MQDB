@@ -81,14 +81,22 @@ pub async fn await_fk_reverse_lookups(
             tokio::time::Instant::now() + std::time::Duration::from_secs(FK_CHECK_TIMEOUT_SECS);
 
         match tokio::time::timeout_at(deadline, lookup.receiver).await {
-            Ok(Ok(ids)) if !ids.is_empty() => {
+            Ok(Ok(reply)) if !(reply.owned.is_empty() && reply.cross_owned.is_empty()) => {
+                let (referencing_ids, cross_owned_ids) =
+                    if lookup.on_delete == OnDeleteAction::Cascade {
+                        (reply.owned, reply.cross_owned)
+                    } else {
+                        let mut merged = reply.owned;
+                        merged.extend(reply.cross_owned);
+                        (merged, Vec::new())
+                    };
                 results.push(FkReverseLookupResult {
                     constraint_name: lookup.constraint_name,
                     source_entity: lookup.source_entity,
                     source_field: lookup.source_field,
                     on_delete: lookup.on_delete,
-                    referencing_ids: ids,
-                    cross_owned_ids: Vec::new(),
+                    referencing_ids,
+                    cross_owned_ids,
                     target_id: lookup.target_id,
                 });
             }
@@ -342,6 +350,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let is_blind = sender.is_none() || sender.is_some_and(|s| self.ownership.is_admin(s));
+        let wire_sender = if is_blind { "" } else { sender.unwrap_or("") };
 
         let mut local_results = Vec::new();
         let mut pending_remote: Vec<PendingFkReverseLookup> = Vec::new();
@@ -405,8 +414,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 target_id: id,
                 target_entity: entity,
             };
-            self.scatter_reverse_lookup_to_remote_nodes(&mut pending_remote, &fk_params)
-                .await;
+            self.scatter_reverse_lookup_to_remote_nodes(
+                &mut pending_remote,
+                &fk_params,
+                wire_sender,
+            )
+            .await;
         }
 
         Ok((local_results, pending_remote))
@@ -449,6 +462,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         pending_remote: &mut Vec<PendingFkReverseLookup>,
         params: &FkLookupParams<'_>,
+        sender: &str,
     ) {
         let constraint_name = params.constraint_name;
         let source_entity = params.source_entity;
@@ -474,6 +488,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 source_field,
                 target_id,
                 target_entity,
+                sender,
             );
             let _ = self
                 .transport
@@ -521,7 +536,15 @@ impl<T: ClusterTransport> NodeController<T> {
             })
             .collect();
 
-        let response = FkReverseLookupResponse::create(req.request_id, &referencing_ids);
+        let sender = req.sender_str();
+        let is_blind = sender.is_empty() || self.ownership.is_admin(sender);
+        let (owned, cross_owned) = if is_blind {
+            (referencing_ids, Vec::new())
+        } else {
+            self.partition_refs_by_ownership(req.source_entity_str(), referencing_ids, sender)
+        };
+
+        let response = FkReverseLookupResponse::create(req.request_id, &owned, &cross_owned);
         let _ = self
             .transport
             .send(from, ClusterMessage::FkReverseLookupResponse(response))
