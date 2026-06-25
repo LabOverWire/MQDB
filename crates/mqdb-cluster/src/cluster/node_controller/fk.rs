@@ -155,7 +155,7 @@ async fn resolve_single_level(
     (None, combined)
 }
 
-fn filter_and_extract_cascade(
+pub(crate) fn filter_and_extract_cascade(
     results: Vec<FkReverseLookupResult>,
     visited: &mut std::collections::HashSet<(String, String)>,
 ) -> (Vec<FkReverseLookupResult>, Vec<(String, String)>) {
@@ -171,7 +171,7 @@ fn filter_and_extract_cascade(
                     false
                 }
             });
-            if r.referencing_ids.is_empty() {
+            if r.referencing_ids.is_empty() && r.cross_owned_ids.is_empty() {
                 continue;
             }
         }
@@ -198,7 +198,10 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
     let mut visited = std::collections::HashSet::new();
     visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
     let (filtered, mut queue) = filter_and_extract_cascade(level_results, &mut visited);
-    let mut total_work: usize = filtered.iter().map(|r| r.referencing_ids.len()).sum();
+    let mut total_work: usize = filtered
+        .iter()
+        .map(|r| r.referencing_ids.len() + r.cross_owned_ids.len())
+        .sum();
     if total_work > MAX_CASCADE_WORK_ITEMS {
         return (
             Some(format!(
@@ -250,7 +253,7 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
         let (filtered, next_queue) = filter_and_extract_cascade(level_results, &mut visited);
         total_work += filtered
             .iter()
-            .map(|r| r.referencing_ids.len())
+            .map(|r| r.referencing_ids.len() + r.cross_owned_ids.len())
             .sum::<usize>();
         if total_work > MAX_CASCADE_WORK_ITEMS {
             return (

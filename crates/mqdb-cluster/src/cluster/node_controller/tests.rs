@@ -1272,6 +1272,53 @@ async fn handle_fk_reverse_lookup_blind_sender_returns_all_owned() {
 }
 
 #[tokio::test]
+async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
+    use super::db_ops::CascadeSideEffect;
+    use super::fk::{FkReverseLookupResult, filter_and_extract_cascade};
+    use crate::cluster::db::OnDeleteAction;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let reply = FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: Vec::new(),
+        cross_owned_ids: vec!["post-bob".to_string()],
+        target_id: "u1".to_string(),
+    };
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(("users".to_string(), "u1".to_string()));
+    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert_eq!(
+        filtered.len(),
+        1,
+        "a cross-owned-only cascade result must survive filtering"
+    );
+
+    let effects = ctrl.prepare_fk_side_effects(&filtered);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            CascadeSideEffect::LocalSetNull { entity, id, .. } if entity == "posts" && id == "post-bob"
+        )),
+        "post-bob is cross-owned and must be set-null'd, not silently dropped"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { id, .. } if id == "post-bob"
+        )),
+        "post-bob must never be deleted"
+    );
+}
+
+#[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
 
