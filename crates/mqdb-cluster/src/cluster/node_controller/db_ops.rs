@@ -823,7 +823,12 @@ impl<T: ClusterTransport> NodeController<T> {
             );
         }
 
-        let all_results = match self.collect_local_cascade(entity, id, local_results) {
+        let all_results = match self.collect_local_cascade(
+            entity,
+            id,
+            local_results,
+            request.sender.as_deref(),
+        ) {
             Ok(results) => results,
             Err(msg) => return (Self::json_error(409, &msg), None),
         };

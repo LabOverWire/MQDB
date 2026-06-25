@@ -945,7 +945,8 @@ impl DbRequestHandler {
             }));
         }
 
-        let all_results = match controller.collect_local_cascade(entity, id, local_results) {
+        let all_results = match controller.collect_local_cascade(entity, id, local_results, sender)
+        {
             Ok(results) => results,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };

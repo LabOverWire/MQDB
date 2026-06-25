@@ -1319,6 +1319,103 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
 }
 
 #[tokio::test]
+async fn local_cascade_set_nulls_cross_owned_grandchild() {
+    use super::db_ops::CascadeSideEffect;
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner,comments=owner").unwrap(),
+    ));
+
+    let fk_posts = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_posts).await.unwrap();
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+    let post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &post, 1000)
+        .await
+        .unwrap();
+    let owned_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "alice", "id": "comment-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-alice", &owned_comment, 1000)
+        .await
+        .unwrap();
+    let cross_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "carol", "id": "comment-carol"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-carol", &cross_comment, 1000)
+        .await
+        .unwrap();
+
+    let (local_results, pending_remote) = ctrl
+        .start_fk_reverse_lookup("users", "u1", Some("alice"))
+        .await
+        .unwrap();
+    assert!(
+        pending_remote.is_empty(),
+        "single-node: collect_local_cascade path"
+    );
+
+    let all = ctrl
+        .collect_local_cascade("users", "u1", local_results, Some("alice"))
+        .unwrap();
+    let effects = ctrl.prepare_fk_side_effects(&all);
+    let has = |pred: &dyn Fn(&CascadeSideEffect) -> bool| effects.iter().any(pred);
+
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalSetNull { entity, id, .. } if entity == "comments" && id == "comment-carol"
+        )) && !has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-carol"
+        )),
+        "carol's cross-owned grandchild must be set-null'd, not deleted, at cascade depth 2"
+    );
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-alice"
+        )),
+        "alice's own grandchild is still cascade-deleted"
+    );
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "posts" && id == "post-alice"
+        )),
+        "alice's own post is still cascade-deleted"
+    );
+}
+
+#[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
 
@@ -1356,7 +1453,7 @@ async fn circular_fk_cascade_terminates() {
         .await
         .unwrap();
 
-    let result = ctrl.collect_local_cascade("alpha", "a1", local);
+    let result = ctrl.collect_local_cascade("alpha", "a1", local, None);
     assert!(
         result.is_ok(),
         "circular cascade should terminate via visited set"
@@ -1422,7 +1519,7 @@ async fn three_way_circular_fk_cascade_terminates() {
         .start_fk_reverse_lookup("aaa", "a1", None)
         .await
         .unwrap();
-    let result = ctrl.collect_local_cascade("aaa", "a1", local);
+    let result = ctrl.collect_local_cascade("aaa", "a1", local, None);
     assert!(
         result.is_ok(),
         "3-way circular cascade should terminate: {result:?}"

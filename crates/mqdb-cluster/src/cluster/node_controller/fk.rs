@@ -560,11 +560,13 @@ impl<T: ClusterTransport> NodeController<T> {
         deleted_entity: &str,
         deleted_id: &str,
         initial: Vec<FkReverseLookupResult>,
+        sender: Option<&str>,
     ) -> Result<Vec<FkReverseLookupResult>, String> {
         let mut all_results = Vec::new();
         let mut visited = std::collections::HashSet::new();
         visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
         let mut queue: Vec<(String, String)> = Vec::new();
+        let is_blind = sender.is_none() || sender.is_some_and(|s| self.ownership.is_admin(s));
 
         for r in &initial {
             if r.on_delete == OnDeleteAction::Cascade {
@@ -620,8 +622,19 @@ impl<T: ClusterTransport> NodeController<T> {
                         continue;
                     }
 
-                    let filtered_refs: Vec<String> = if on_delete == OnDeleteAction::Cascade {
-                        local_refs
+                    let (owned_refs, cross_owned) =
+                        if is_blind || on_delete != OnDeleteAction::Cascade {
+                            (local_refs, Vec::new())
+                        } else {
+                            self.partition_refs_by_ownership(
+                                source_entity,
+                                local_refs,
+                                sender.unwrap_or(""),
+                            )
+                        };
+
+                    let referencing_ids: Vec<String> = if on_delete == OnDeleteAction::Cascade {
+                        owned_refs
                             .into_iter()
                             .filter(|child_id| {
                                 if visited.insert((source_entity.to_string(), child_id.clone())) {
@@ -633,10 +646,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             })
                             .collect()
                     } else {
-                        local_refs
+                        owned_refs
                     };
 
-                    if filtered_refs.is_empty() {
+                    if referencing_ids.is_empty() && cross_owned.is_empty() {
                         continue;
                     }
 
@@ -645,8 +658,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         source_entity: source_entity.to_string(),
                         source_field: source_field.to_string(),
                         on_delete,
-                        referencing_ids: filtered_refs,
-                        cross_owned_ids: Vec::new(),
+                        referencing_ids,
+                        cross_owned_ids: cross_owned,
                         target_id: id.clone(),
                     });
                 }
