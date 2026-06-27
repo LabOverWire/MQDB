@@ -833,7 +833,9 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
         let effects = self.prepare_fk_side_effects(&all_results);
-        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = self
+            .execute_fk_side_effects(&effects, request.sender.as_deref())
+            .await;
         (
             self.execute_json_delete(entity, id, cascade.as_ref(), ack_receivers)
                 .await,
@@ -968,6 +970,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn execute_fk_side_effects(
         &mut self,
         effects: &[CascadeSideEffect],
+        sender: Option<&str>,
     ) -> (Option<CascadeOutboxPayload>, Vec<oneshot::Receiver<bool>>) {
         let now_ms = Self::current_time_ms();
         let mut remote_ops = Vec::new();
@@ -1005,6 +1008,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     remote_ops.push(CascadeRemoteOp::Delete {
                         entity: entity.clone(),
                         id: id.clone(),
+                        sender: sender.map(String::from),
                     });
                 }
                 CascadeSideEffect::RemoteSetNull {
@@ -1051,7 +1055,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                 .await;
                         }
                     } else if let Some(rx) = self
-                        .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[])
+                        .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[], sender)
                         .await
                     {
                         ack_receivers.push(rx);
@@ -1100,6 +1104,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         id: &str,
         payload: &[u8],
+        sender: Option<&str>,
     ) -> Option<oneshot::Receiver<bool>> {
         let Some(primary) = self.partition_map.primary(partition) else {
             tracing::debug!(
@@ -1132,7 +1137,7 @@ impl<T: ClusterTransport> NodeController<T> {
             payload: payload.to_vec(),
             response_topic,
             correlation_data: None,
-            sender: None,
+            sender: sender.map(String::from),
         };
         let _ = self
             .transport
@@ -1942,16 +1947,18 @@ impl<T: ClusterTransport> NodeController<T> {
             from,
             entity,
             id,
+            sender,
             response_topic,
             correlation_data,
-            ..
         } = continuation
         else {
             return;
         };
 
         let effects = self.prepare_fk_side_effects(&side_effects);
-        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = self
+            .execute_fk_side_effects(&effects, sender.as_deref())
+            .await;
         let response_payload = self
             .execute_json_delete(&entity, &id, cascade.as_ref(), ack_receivers)
             .await;

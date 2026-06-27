@@ -951,7 +951,7 @@ impl DbRequestHandler {
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
         let effects = controller.prepare_fk_side_effects(&all_results);
-        let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+        let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects, sender).await;
         let ctx = JsonOpContext {
             entity,
             id: Some(id),
@@ -1485,7 +1485,9 @@ impl DbRequestHandler {
                 correlation_data,
             } => {
                 let effects = controller.prepare_fk_side_effects(&side_effects);
-                let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects).await;
+                let (cascade, ack_receivers) = controller
+                    .execute_fk_side_effects(&effects, sender.as_deref())
+                    .await;
                 let ctx = JsonOpContext {
                     entity: &entity,
                     id: Some(&id),

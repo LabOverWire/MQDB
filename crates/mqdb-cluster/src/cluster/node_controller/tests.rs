@@ -1415,6 +1415,135 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
     );
 }
 
+async fn setup_post_with_owned_and_cross_owned_comments(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+) {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    make_all_primary(ctrl, node);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner,comments=owner").unwrap(),
+    ));
+
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let post = serde_json::to_vec(&serde_json::json!({
+        "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &post, 1000)
+        .await
+        .unwrap();
+    let owned_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "alice", "id": "comment-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-alice", &owned_comment, 1000)
+        .await
+        .unwrap();
+    let cross_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "carol", "id": "comment-carol"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-carol", &cross_comment, 1000)
+        .await
+        .unwrap();
+}
+
+fn delete_post_request(sender: Option<&str>) -> crate::cluster::protocol::JsonDbRequest {
+    use crate::cluster::protocol::{JsonDbOp, JsonDbRequest};
+    JsonDbRequest {
+        request_id: 1,
+        op: JsonDbOp::Delete,
+        entity: "posts".to_string(),
+        id: Some("post-alice".to_string()),
+        payload: Vec::new(),
+        response_topic: String::new(),
+        correlation_data: None,
+        sender: sender.map(String::from),
+    }
+}
+
+#[tokio::test]
+async fn owner_aware_delete_request_set_nulls_cross_owned_comment() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_post_with_owned_and_cross_owned_comments(&mut ctrl, node1).await;
+
+    let partition = crate::cluster::db::data_partition("posts", "post-alice");
+    let req = delete_post_request(Some("alice"));
+    ctrl.handle_json_db_request(node2, partition, &req).await;
+
+    assert!(
+        ctrl.db_get("comments", "comment-carol").is_some(),
+        "carol's cross-owned comment must survive an owner-aware delete"
+    );
+    assert!(
+        ctrl.db_get("comments", "comment-alice").is_none(),
+        "alice's own comment is cascade-deleted"
+    );
+}
+
+#[tokio::test]
+async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
+    use crate::cluster::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let partition = crate::cluster::db::data_partition("comments", "comment-carol");
+    let mut map = PartitionMap::new();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node2),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let _rx = ctrl
+        .send_cascade_request(
+            partition,
+            JsonDbOp::Delete,
+            "comments",
+            "comment-carol",
+            &[],
+            Some("alice"),
+        )
+        .await;
+
+    let req = ctrl
+        .transport
+        .sent_messages()
+        .into_iter()
+        .find_map(|(_, msg)| match msg {
+            ClusterMessage::JsonDbRequest { request, .. } => Some(request),
+            _ => None,
+        })
+        .expect("cascade delete request sent to remote primary");
+    assert_eq!(
+        req.sender.as_deref(),
+        Some("alice"),
+        "cascade delete fan-out must carry the deleter identity so the remote re-cascade stays \
+         owner-aware instead of blindly deleting cross-owned descendants"
+    );
+}
+
 #[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};

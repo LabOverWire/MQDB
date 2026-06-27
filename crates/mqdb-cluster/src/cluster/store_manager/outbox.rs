@@ -92,6 +92,8 @@ pub enum CascadeRemoteOp {
     Delete {
         entity: String,
         id: String,
+        #[serde(default)]
+        sender: Option<String>,
     },
     SetNull {
         entity: String,
@@ -275,6 +277,7 @@ mod tests {
             CascadeRemoteOp::Delete {
                 entity: "orders".to_string(),
                 id: "o-1".to_string(),
+                sender: None,
             },
             CascadeRemoteOp::SetNull {
                 entity: "invoices".to_string(),
@@ -301,6 +304,7 @@ mod tests {
         let ops = vec![CascadeRemoteOp::Delete {
             entity: "items".to_string(),
             id: "i-1".to_string(),
+            sender: None,
         }];
 
         let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
@@ -325,6 +329,7 @@ mod tests {
         let ops = vec![CascadeRemoteOp::Delete {
             entity: "x".to_string(),
             id: "1".to_string(),
+            sender: None,
         }];
         let (ck, cv) = ClusterOutbox::build_cascade_entry("cas-3", &ops);
         backend.insert(&ck, &cv).unwrap();
@@ -338,6 +343,7 @@ mod tests {
         let ops = vec![CascadeRemoteOp::Delete {
             entity: "users".to_string(),
             id: "u-1".to_string(),
+            sender: None,
         }];
         let payload = CascadeOutboxPayload::new("cas-4".to_string(), &ops);
         assert!(payload.key.starts_with(b"_cascade/cas-4"));

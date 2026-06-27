@@ -772,7 +772,7 @@ async fn send_cascade_operations<T: ClusterTransport>(
         let mut local_ops = Vec::new();
         for op in &cascade.operations {
             let partition = match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id }
+                crate::cluster::CascadeRemoteOp::Delete { entity, id, .. }
                 | crate::cluster::CascadeRemoteOp::SetNull { entity, id, .. } => {
                     crate::cluster::data_partition(entity, id)
                 }
@@ -782,7 +782,7 @@ async fn send_cascade_operations<T: ClusterTransport>(
                 continue;
             }
             match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id, sender } => {
                     if let Some(rx) = ctrl
                         .send_cascade_request(
                             partition,
@@ -790,6 +790,7 @@ async fn send_cascade_operations<T: ClusterTransport>(
                             entity,
                             id,
                             &[],
+                            sender.as_deref(),
                         )
                         .await
                     {
@@ -836,7 +837,7 @@ async fn execute_local_cascade_work(
     for item in &work {
         for op in &item.ops {
             match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id } => {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id, .. } => {
                     if let Ok((db_entity, write)) = ctrl.db_delete_prepare(entity, id) {
                         let data: serde_json::Value = serde_json::from_slice(&db_entity.data)
                             .unwrap_or(serde_json::Value::Null);
