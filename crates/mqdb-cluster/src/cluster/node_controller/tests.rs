@@ -1545,6 +1545,114 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
 }
 
 #[tokio::test]
+async fn handle_fk_reverse_lookup_classifies_ownerless_ref_as_cross_owned() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner").unwrap(),
+    ));
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+    let orphan_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "id": "post-orphan"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-orphan", &orphan_post, 1000)
+        .await
+        .unwrap();
+
+    let req = FkReverseLookupRequest::create(1, "posts", "author_id", "u1", "users", "alice");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    assert!(
+        resp.referencing_ids().is_empty(),
+        "an ownerless post must NOT be classified as owned/cascade-deletable by a non-owner"
+    );
+    assert_eq!(
+        resp.cross_owned_ids(),
+        vec!["post-orphan".to_string()],
+        "an ownerless post must be cross-owned (set-null'd), matching the direct-delete path \
+         which forbids a non-admin from deleting an ownerless record"
+    );
+}
+
+#[tokio::test]
+async fn owner_aware_delete_request_set_nulls_ownerless_comment() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner,comments=owner").unwrap(),
+    ));
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let post = serde_json::to_vec(&serde_json::json!({
+        "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &post, 1000)
+        .await
+        .unwrap();
+    let owned_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "alice", "id": "comment-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-alice", &owned_comment, 1000)
+        .await
+        .unwrap();
+    let orphan_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "id": "comment-orphan"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-orphan", &orphan_comment, 1000)
+        .await
+        .unwrap();
+
+    let partition = crate::cluster::db::data_partition("posts", "post-alice");
+    let req = delete_post_request(Some("alice"));
+    ctrl.handle_json_db_request(node2, partition, &req).await;
+
+    assert!(
+        ctrl.db_get("comments", "comment-orphan").is_some(),
+        "an ownerless comment must survive an owner-aware cascade delete, not be hard-deleted"
+    );
+    assert!(
+        ctrl.db_get("comments", "comment-alice").is_none(),
+        "alice's own comment is still cascade-deleted"
+    );
+}
+
+#[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
 

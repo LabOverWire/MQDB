@@ -352,8 +352,9 @@ impl<T: ClusterTransport> NodeController<T> {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let is_blind = sender.is_none() || sender.is_some_and(|s| self.ownership.is_admin(s));
-        let wire_sender = if is_blind { "" } else { sender.unwrap_or("") };
+        let sender_str = sender.unwrap_or("");
+        let is_blind = self.is_blind_sender(sender_str);
+        let wire_sender = if is_blind { "" } else { sender_str };
 
         let mut local_results = Vec::new();
         let mut pending_remote: Vec<PendingFkReverseLookup> = Vec::new();
@@ -385,16 +386,8 @@ impl<T: ClusterTransport> NodeController<T> {
             }
 
             if !local_refs.is_empty() {
-                let (owned_refs, cross_owned) = if is_blind || on_delete != OnDeleteAction::Cascade
-                {
-                    (local_refs, Vec::new())
-                } else {
-                    self.partition_refs_by_ownership(
-                        source_entity,
-                        local_refs,
-                        sender.unwrap_or(""),
-                    )
-                };
+                let (owned_refs, cross_owned) =
+                    self.classify_refs(source_entity, local_refs, on_delete, is_blind, sender_str);
 
                 if !owned_refs.is_empty() || !cross_owned.is_empty() {
                     local_results.push(FkReverseLookupResult {
@@ -428,6 +421,25 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok((local_results, pending_remote))
     }
 
+    fn is_blind_sender(&self, sender: &str) -> bool {
+        sender.is_empty() || self.ownership.is_admin(sender)
+    }
+
+    fn classify_refs(
+        &self,
+        source_entity: &str,
+        refs: Vec<String>,
+        on_delete: OnDeleteAction,
+        is_blind: bool,
+        sender: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        if is_blind || on_delete != OnDeleteAction::Cascade {
+            (refs, Vec::new())
+        } else {
+            self.partition_refs_by_ownership(source_entity, refs, sender)
+        }
+    }
+
     fn partition_refs_by_ownership(
         &self,
         source_entity: &str,
@@ -450,7 +462,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         .and_then(|v| v.as_str())
                         .map(String::from)
                 })
-                .is_none_or(|owner| owner == sender);
+                .is_some_and(|owner| owner == sender);
 
             if is_owned {
                 owned.push(ref_id);
@@ -540,7 +552,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect();
 
         let sender = req.sender_str();
-        let is_blind = sender.is_empty() || self.ownership.is_admin(sender);
+        let is_blind = self.is_blind_sender(sender);
         let (owned, cross_owned) = if is_blind {
             (referencing_ids, Vec::new())
         } else {
@@ -566,7 +578,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut visited = std::collections::HashSet::new();
         visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
         let mut queue: Vec<(String, String)> = Vec::new();
-        let is_blind = sender.is_none() || sender.is_some_and(|s| self.ownership.is_admin(s));
+        let sender_str = sender.unwrap_or("");
+        let is_blind = self.is_blind_sender(sender_str);
 
         for r in &initial {
             if r.on_delete == OnDeleteAction::Cascade {
@@ -622,16 +635,13 @@ impl<T: ClusterTransport> NodeController<T> {
                         continue;
                     }
 
-                    let (owned_refs, cross_owned) =
-                        if is_blind || on_delete != OnDeleteAction::Cascade {
-                            (local_refs, Vec::new())
-                        } else {
-                            self.partition_refs_by_ownership(
-                                source_entity,
-                                local_refs,
-                                sender.unwrap_or(""),
-                            )
-                        };
+                    let (owned_refs, cross_owned) = self.classify_refs(
+                        source_entity,
+                        local_refs,
+                        on_delete,
+                        is_blind,
+                        sender_str,
+                    );
 
                     let referencing_ids: Vec<String> = if on_delete == OnDeleteAction::Cascade {
                         owned_refs
