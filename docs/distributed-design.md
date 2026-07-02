@@ -2288,10 +2288,39 @@ index to find all records that reference it. Depending on the constraint's
 
 - **Restrict**: The delete is rejected if any references exist.
 - **Cascade**: Referencing records are deleted recursively (depth limit: 16,
-  work-item limit: 16,000).
+  work-item limit: 16,000), subject to the owner-aware filter below.
 - **SetNull**: The FK field on referencing records is set to null. A CAS guard
   (`__mqdb_fk_expected`) ensures the field still holds the expected value at
   write time, preventing overwrites of concurrent updates.
+
+#### Owner-Aware Cascade
+
+Cascade is the only action that filters by ownership; Restrict and SetNull do not.
+The delete request carries the deleter's identity (`sender`), and each node that is
+primary for a referencing record's partition classifies that record against its own
+`OwnershipConfig`:
+
+- If the referencing entity has **no owner field configured**, every reference is
+  treated as owned and cascade-deleted (recursively).
+- If the entity **is** ownership-configured, a reference is **owned** only when its
+  owner field equals `sender`. Owned children are cascade-deleted and recursed into.
+- **Cross-owned** references (owner field present but not equal to `sender`) and
+  references whose **owner field is missing or null** are **set to null**, not
+  deleted, and are not recursed into. A missing/null owner is treated as protected —
+  the same record the direct delete/update path forbids a non-owner from removing
+  (`403`), so cascade and direct paths agree.
+- A **blind** deleter — an admin `sender`, or an empty `sender` — bypasses the filter
+  entirely: every reference is treated as owned and cascade-deleted.
+
+Because classification happens on the partition primary that holds each referencing
+record, ownership is enforced consistently across nodes. The reverse-lookup RPC
+(`FkReverseLookupRequest`/`Response`, wire version 2) carries `sender` on the request
+and returns the split as separate `owned` and `cross_owned` id lists on the response.
+
+> **Cluster vs agent:** the single-node agent additionally aborts the whole delete
+> (`CascadeBlocked`) when a cross-owned/ownerless child would be set to null on a
+> field carrying a NOT NULL constraint. Cluster mode does not evaluate NOT NULL
+> during cascade, so it set-nulls unconditionally.
 
 `CascadeSideEffect` partitions effects into local (same batch) and remote
 (transport request). Cascade and set-null operations on remote partitions are

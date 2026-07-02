@@ -14,7 +14,7 @@ Per-entity atomicity with constraint enforcement and correlation ID dedup.
 - Schemas with type validation, required fields, and default values
 - Unique constraints (single and composite), not-null constraints
 - Foreign keys with CASCADE, RESTRICT, and SET NULL delete policies
-- Owner-aware cascade: cross-owned entities survive deletion with FK set to null
+- Owner-aware cascade: cross-owned and ownerless entities survive deletion with FK set to null
 
 Secondary indexes accelerate equality lookups. Ten filter operators cover the rest.
 
@@ -295,9 +295,14 @@ db.add_foreign_key(
 | `OnDeleteAction::SetNull` | Set foreign key field to null |
 
 When ownership is configured, cascade deletes are owner-aware. Entities owned by the
-deleting user are deleted normally. Cross-owned entities are excluded from the cascade — their
-FK field is set to null instead. If the FK field has a NotNull constraint, the entire delete
-is blocked. Admin users bypass ownership and perform a full blind cascade.
+deleting user are deleted normally. Cross-owned entities — and entities whose owner field
+is missing or null — are excluded from the cascade and have their FK field set to null
+instead; a missing/null owner is treated as protected, matching the direct delete/update
+path that already forbids a non-owner from removing such a record. Entities in a type with
+no ownership configured are always cascade-deleted. In agent mode, if a to-be-null'd FK
+field carries a NotNull constraint the entire delete is blocked (cluster mode set-nulls
+unconditionally — NotNull is not evaluated during cluster cascade). Admin users, and any
+delete with an empty sender, bypass ownership and perform a full blind cascade.
 
 ### Constraint Examples
 

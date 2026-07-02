@@ -527,13 +527,14 @@ mqdb dev start-cluster --nodes 3 --clean \
 
 **Cascade delete + ownership:**
 - [ ] Cross-owner cascade: referencing entity owned by different user survives with FK set to null
+- [ ] Missing/null owner field (configured entity): protected — survives with FK set to null, not deleted
 - [ ] Cross-owner + NotNull FK: delete is blocked (409)
 - [ ] Admin cascade bypasses ownership (blind cascade)
 - [ ] See [04-schema.md § Owner-Aware Cascade Delete](04-schema.md#6-owner-aware-cascade-delete) for full scenarios
 
 **Edge cases:**
-- [ ] Entity without ownership config allows all operations
-- [ ] Record missing the owner field allows all operations (no crash)
+- [ ] Entity type without ownership config allows all operations
+- [ ] Record missing the owner field (in a configured entity) is protected: non-admin read/update/delete returns 403, and cascade set-nulls it instead of deleting
 
 ---
 
