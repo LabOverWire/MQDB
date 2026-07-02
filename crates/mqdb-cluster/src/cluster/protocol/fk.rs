@@ -98,10 +98,13 @@ pub struct FkReverseLookupRequest {
     pub target_entity_len: u16,
     #[FromField(target_entity_len)]
     pub target_entity: Vec<u8>,
+    pub sender_len: u16,
+    #[FromField(sender_len)]
+    pub sender: Vec<u8>,
 }
 
 impl FkReverseLookupRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     pub fn create(
@@ -110,6 +113,7 @@ impl FkReverseLookupRequest {
         source_field: &str,
         target_id: &str,
         target_entity: &str,
+        sender: &str,
     ) -> Self {
         assert!(
             u16::try_from(source_entity.len()).is_ok(),
@@ -127,6 +131,10 @@ impl FkReverseLookupRequest {
             u16::try_from(target_entity.len()).is_ok(),
             "target_entity exceeds u16::MAX bytes"
         );
+        assert!(
+            u16::try_from(sender.len()).is_ok(),
+            "sender exceeds u16::MAX bytes"
+        );
         #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
@@ -139,6 +147,8 @@ impl FkReverseLookupRequest {
             target_id: target_id.as_bytes().to_vec(),
             target_entity_len: target_entity.len() as u16,
             target_entity: target_entity.as_bytes().to_vec(),
+            sender_len: sender.len() as u16,
+            sender: sender.as_bytes().to_vec(),
         }
     }
 
@@ -181,6 +191,58 @@ impl FkReverseLookupRequest {
             ""
         }
     }
+
+    #[must_use]
+    pub fn sender_str(&self) -> &str {
+        if let Ok(s) = std::str::from_utf8(&self.sender) {
+            s
+        } else {
+            tracing::warn!("invalid UTF-8 in FkReverseLookupRequest sender field");
+            ""
+        }
+    }
+}
+
+fn encode_id_list(ids: &[String]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for id in ids {
+        let bytes = id.as_bytes();
+        assert!(
+            u16::try_from(bytes.len()).is_ok(),
+            "individual id exceeds u16::MAX bytes"
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        data.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        data.extend_from_slice(bytes);
+    }
+    assert!(
+        u32::try_from(data.len()).is_ok(),
+        "id list exceeds u32::MAX bytes"
+    );
+    data
+}
+
+fn decode_id_list(data: &[u8]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut pos = 0;
+    while pos + 2 <= data.len() {
+        let len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len > data.len() {
+            break;
+        }
+        if let Ok(s) = std::str::from_utf8(&data[pos..pos + len]) {
+            result.push(s.to_string());
+        } else {
+            tracing::warn!(
+                byte_offset = pos,
+                len,
+                "non-UTF-8 ID in FK reverse lookup response, skipping"
+            );
+        }
+        pos += len;
+    }
+    result
 }
 
 #[derive(Debug, Clone, BeBytes)]
@@ -190,59 +252,37 @@ pub struct FkReverseLookupResponse {
     pub ids_data_len: u32,
     #[FromField(ids_data_len)]
     pub ids_data: Vec<u8>,
+    pub cross_owned_data_len: u32,
+    #[FromField(cross_owned_data_len)]
+    pub cross_owned_data: Vec<u8>,
 }
 
 impl FkReverseLookupResponse {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
-    pub fn create(request_id: u64, ids: &[String]) -> Self {
-        let mut ids_data = Vec::new();
-        for id in ids {
-            let bytes = id.as_bytes();
-            assert!(
-                u16::try_from(bytes.len()).is_ok(),
-                "individual id exceeds u16::MAX bytes"
-            );
-            #[allow(clippy::cast_possible_truncation)]
-            ids_data.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            ids_data.extend_from_slice(bytes);
-        }
-        assert!(
-            u32::try_from(ids_data.len()).is_ok(),
-            "ids_data exceeds u32::MAX bytes"
-        );
+    pub fn create(request_id: u64, owned_ids: &[String], cross_owned_ids: &[String]) -> Self {
+        let ids_data = encode_id_list(owned_ids);
+        let cross_owned_data = encode_id_list(cross_owned_ids);
         #[allow(clippy::cast_possible_truncation)]
         Self {
             version: Self::VERSION,
             request_id,
             ids_data_len: ids_data.len() as u32,
             ids_data,
+            cross_owned_data_len: cross_owned_data.len() as u32,
+            cross_owned_data,
         }
     }
 
     #[must_use]
     pub fn referencing_ids(&self) -> Vec<String> {
-        let mut result = Vec::new();
-        let mut pos = 0;
-        while pos + 2 <= self.ids_data.len() {
-            let len = u16::from_be_bytes([self.ids_data[pos], self.ids_data[pos + 1]]) as usize;
-            pos += 2;
-            if pos + len > self.ids_data.len() {
-                break;
-            }
-            if let Ok(s) = std::str::from_utf8(&self.ids_data[pos..pos + len]) {
-                result.push(s.to_string());
-            } else {
-                tracing::warn!(
-                    byte_offset = pos,
-                    len,
-                    "non-UTF-8 ID in FK reverse lookup response, skipping"
-                );
-            }
-            pos += len;
-        }
-        result
+        decode_id_list(&self.ids_data)
+    }
+
+    #[must_use]
+    pub fn cross_owned_ids(&self) -> Vec<String> {
+        decode_id_list(&self.cross_owned_data)
     }
 }
 
@@ -276,7 +316,8 @@ mod tests {
 
     #[test]
     fn fk_reverse_lookup_request_roundtrip() {
-        let req = FkReverseLookupRequest::create(99, "posts", "author_id", "user-456", "users");
+        let req =
+            FkReverseLookupRequest::create(99, "posts", "author_id", "user-456", "users", "alice");
         let bytes = req.clone().to_be_bytes();
         let (decoded, _) = FkReverseLookupRequest::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 99);
@@ -284,34 +325,48 @@ mod tests {
         assert_eq!(decoded.source_field_str(), "author_id");
         assert_eq!(decoded.target_id_str(), "user-456");
         assert_eq!(decoded.target_entity_str(), "users");
+        assert_eq!(decoded.sender_str(), "alice");
+        assert_eq!(decoded.version, FkReverseLookupRequest::VERSION);
+    }
+
+    #[test]
+    fn fk_reverse_lookup_request_empty_sender_is_blind() {
+        let req = FkReverseLookupRequest::create(7, "posts", "author_id", "u1", "users", "");
+        let bytes = req.clone().to_be_bytes();
+        let (decoded, _) = FkReverseLookupRequest::try_from_be_bytes(&bytes).unwrap();
+        assert_eq!(decoded.sender_str(), "");
     }
 
     #[test]
     fn fk_reverse_lookup_response_roundtrip() {
-        let ids = vec![
+        let owned = vec![
             "post-1".to_string(),
             "post-2".to_string(),
             "post-3".to_string(),
         ];
-        let resp = FkReverseLookupResponse::create(99, &ids);
+        let cross_owned = vec!["post-9".to_string()];
+        let resp = FkReverseLookupResponse::create(99, &owned, &cross_owned);
         let bytes = resp.clone().to_be_bytes();
         let (decoded, _) = FkReverseLookupResponse::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 99);
-        assert_eq!(decoded.referencing_ids(), ids);
+        assert_eq!(decoded.referencing_ids(), owned);
+        assert_eq!(decoded.cross_owned_ids(), cross_owned);
+        assert_eq!(decoded.version, FkReverseLookupResponse::VERSION);
     }
 
     #[test]
     fn fk_reverse_lookup_response_empty() {
-        let resp = FkReverseLookupResponse::create(1, &[]);
+        let resp = FkReverseLookupResponse::create(1, &[], &[]);
         let bytes = resp.clone().to_be_bytes();
         let (decoded, _) = FkReverseLookupResponse::try_from_be_bytes(&bytes).unwrap();
         assert!(decoded.referencing_ids().is_empty());
+        assert!(decoded.cross_owned_ids().is_empty());
     }
 
     #[test]
     fn ids_data_len_is_byte_length_not_id_count() {
         let ids = vec!["ab".to_string(), "cdef".to_string()];
-        let resp = FkReverseLookupResponse::create(1, &ids);
+        let resp = FkReverseLookupResponse::create(1, &ids, &[]);
         let expected_byte_len: u32 = (2 + 2 + 2 + 4) as u32;
         assert_eq!(resp.ids_data_len, expected_byte_len);
         assert_eq!(resp.referencing_ids().len(), 2);

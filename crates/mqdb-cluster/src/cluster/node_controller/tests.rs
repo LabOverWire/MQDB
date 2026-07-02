@@ -1167,6 +1167,450 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     }
 }
 
+async fn setup_owned_posts_referencing_user(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+) {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    make_all_primary(ctrl, node);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner").unwrap(),
+    ));
+
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+
+    let alice_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &alice_post, 1000)
+        .await
+        .unwrap();
+    let bob_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "bob", "id": "post-bob"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-bob", &bob_post, 1000)
+        .await
+        .unwrap();
+}
+
+fn sent_fk_lookup_response(
+    ctrl: &NodeController<MockTransport>,
+    to: NodeId,
+) -> crate::cluster::protocol::FkReverseLookupResponse {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .find_map(|(dest, msg)| match msg {
+            ClusterMessage::FkReverseLookupResponse(r) if dest == to => Some(r),
+            _ => None,
+        })
+        .expect("FK reverse lookup response sent to requester")
+}
+
+#[tokio::test]
+async fn handle_fk_reverse_lookup_partitions_cross_owned_by_sender() {
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let req = FkReverseLookupRequest::create(1, "posts", "author_id", "u1", "users", "alice");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    assert_eq!(
+        resp.referencing_ids(),
+        vec!["post-alice".to_string()],
+        "alice's own post is owned and cascade-deletable"
+    );
+    assert_eq!(
+        resp.cross_owned_ids(),
+        vec!["post-bob".to_string()],
+        "bob's post is cross-owned and must be set-null'd, not deleted"
+    );
+}
+
+#[tokio::test]
+async fn handle_fk_reverse_lookup_blind_sender_returns_all_owned() {
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let req = FkReverseLookupRequest::create(2, "posts", "author_id", "u1", "users", "");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    let mut owned = resp.referencing_ids();
+    owned.sort();
+    assert_eq!(
+        owned,
+        vec!["post-alice".to_string(), "post-bob".to_string()],
+        "a blind (empty) sender treats every ref as owned"
+    );
+    assert!(resp.cross_owned_ids().is_empty());
+}
+
+#[tokio::test]
+async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
+    use super::db_ops::CascadeSideEffect;
+    use super::fk::{FkReverseLookupResult, filter_and_extract_cascade};
+    use crate::cluster::db::OnDeleteAction;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let reply = FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: Vec::new(),
+        cross_owned_ids: vec!["post-bob".to_string()],
+        target_id: "u1".to_string(),
+    };
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(("users".to_string(), "u1".to_string()));
+    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert_eq!(
+        filtered.len(),
+        1,
+        "a cross-owned-only cascade result must survive filtering"
+    );
+
+    let effects = ctrl.prepare_fk_side_effects(&filtered);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            CascadeSideEffect::LocalSetNull { entity, id, .. } if entity == "posts" && id == "post-bob"
+        )),
+        "post-bob is cross-owned and must be set-null'd, not silently dropped"
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { id, .. } if id == "post-bob"
+        )),
+        "post-bob must never be deleted"
+    );
+}
+
+#[tokio::test]
+async fn local_cascade_set_nulls_cross_owned_grandchild() {
+    use super::db_ops::CascadeSideEffect;
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner,comments=owner").unwrap(),
+    ));
+
+    let fk_posts = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_posts).await.unwrap();
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+    let post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &post, 1000)
+        .await
+        .unwrap();
+    let owned_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "alice", "id": "comment-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-alice", &owned_comment, 1000)
+        .await
+        .unwrap();
+    let cross_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "carol", "id": "comment-carol"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-carol", &cross_comment, 1000)
+        .await
+        .unwrap();
+
+    let (local_results, pending_remote) = ctrl
+        .start_fk_reverse_lookup("users", "u1", Some("alice"))
+        .await
+        .unwrap();
+    assert!(
+        pending_remote.is_empty(),
+        "single-node: collect_local_cascade path"
+    );
+
+    let all = ctrl
+        .collect_local_cascade("users", "u1", local_results, Some("alice"))
+        .unwrap();
+    let effects = ctrl.prepare_fk_side_effects(&all);
+    let has = |pred: &dyn Fn(&CascadeSideEffect) -> bool| effects.iter().any(pred);
+
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalSetNull { entity, id, .. } if entity == "comments" && id == "comment-carol"
+        )) && !has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-carol"
+        )),
+        "carol's cross-owned grandchild must be set-null'd, not deleted, at cascade depth 2"
+    );
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-alice"
+        )),
+        "alice's own grandchild is still cascade-deleted"
+    );
+    assert!(
+        has(&|e| matches!(
+            e,
+            CascadeSideEffect::LocalDelete { entity, id } if entity == "posts" && id == "post-alice"
+        )),
+        "alice's own post is still cascade-deleted"
+    );
+}
+
+async fn setup_post_with_owned_and_cross_owned_comments(
+    ctrl: &mut NodeController<MockTransport>,
+    node: NodeId,
+) {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    make_all_primary(ctrl, node);
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("posts=owner,comments=owner").unwrap(),
+    ));
+
+    let fk_comments = ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk_comments).await.unwrap();
+
+    let post = serde_json::to_vec(&serde_json::json!({
+        "owner": "alice", "id": "post-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-alice", &post, 1000)
+        .await
+        .unwrap();
+    let owned_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "alice", "id": "comment-alice"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-alice", &owned_comment, 1000)
+        .await
+        .unwrap();
+    let cross_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "owner": "carol", "id": "comment-carol"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-carol", &cross_comment, 1000)
+        .await
+        .unwrap();
+}
+
+fn delete_post_request(sender: Option<&str>) -> crate::cluster::protocol::JsonDbRequest {
+    use crate::cluster::protocol::{JsonDbOp, JsonDbRequest};
+    JsonDbRequest {
+        request_id: 1,
+        op: JsonDbOp::Delete,
+        entity: "posts".to_string(),
+        id: Some("post-alice".to_string()),
+        payload: Vec::new(),
+        response_topic: String::new(),
+        correlation_data: None,
+        sender: sender.map(String::from),
+    }
+}
+
+#[tokio::test]
+async fn owner_aware_delete_request_set_nulls_cross_owned_comment() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_post_with_owned_and_cross_owned_comments(&mut ctrl, node1).await;
+
+    let partition = crate::cluster::db::data_partition("posts", "post-alice");
+    let req = delete_post_request(Some("alice"));
+    ctrl.handle_json_db_request(node2, partition, &req).await;
+
+    assert!(
+        ctrl.db_get("comments", "comment-carol").is_some(),
+        "carol's cross-owned comment must survive an owner-aware delete"
+    );
+    assert!(
+        ctrl.db_get("comments", "comment-alice").is_none(),
+        "alice's own comment is cascade-deleted"
+    );
+}
+
+#[tokio::test]
+async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
+    use crate::cluster::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let partition = crate::cluster::db::data_partition("comments", "comment-carol");
+    let mut map = PartitionMap::new();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node2),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let _rx = ctrl
+        .send_cascade_request(
+            partition,
+            JsonDbOp::Delete,
+            "comments",
+            "comment-carol",
+            &[],
+            Some("alice"),
+        )
+        .await;
+
+    let req = ctrl
+        .transport
+        .sent_messages()
+        .into_iter()
+        .find_map(|(_, msg)| match msg {
+            ClusterMessage::JsonDbRequest { request, .. } => Some(request),
+            _ => None,
+        })
+        .expect("cascade delete request sent to remote primary");
+    assert_eq!(
+        req.sender.as_deref(),
+        Some("alice"),
+        "cascade delete fan-out must carry the deleter identity so the remote re-cascade stays \
+         owner-aware instead of blindly deleting cross-owned descendants"
+    );
+}
+
+#[tokio::test]
+async fn handle_fk_reverse_lookup_classifies_ownerless_ref_as_cross_owned() {
+    use crate::cluster::protocol::FkReverseLookupRequest;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let orphan_post = serde_json::to_vec(&serde_json::json!({
+        "author_id": "u1", "id": "post-orphan"
+    }))
+    .unwrap();
+    ctrl.db_create("posts", "post-orphan", &orphan_post, 1000)
+        .await
+        .unwrap();
+
+    let req = FkReverseLookupRequest::create(1, "posts", "author_id", "u1", "users", "alice");
+    ctrl.handle_fk_reverse_lookup_request(node2, &req).await;
+
+    let resp = sent_fk_lookup_response(&ctrl, node2);
+    assert_eq!(
+        resp.referencing_ids(),
+        vec!["post-alice".to_string()],
+        "only alice's own post is owned/cascade-deletable by alice"
+    );
+    let mut cross_owned = resp.cross_owned_ids();
+    cross_owned.sort();
+    assert_eq!(
+        cross_owned,
+        vec!["post-bob".to_string(), "post-orphan".to_string()],
+        "an ownerless post must be cross-owned (set-null'd) just like bob's, matching the \
+         direct-delete path which forbids a non-admin from deleting an ownerless record"
+    );
+}
+
+#[tokio::test]
+async fn owner_aware_delete_request_set_nulls_ownerless_comment() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_post_with_owned_and_cross_owned_comments(&mut ctrl, node1).await;
+
+    let orphan_comment = serde_json::to_vec(&serde_json::json!({
+        "post_id": "post-alice", "id": "comment-orphan"
+    }))
+    .unwrap();
+    ctrl.db_create("comments", "comment-orphan", &orphan_comment, 1000)
+        .await
+        .unwrap();
+
+    let partition = crate::cluster::db::data_partition("posts", "post-alice");
+    let req = delete_post_request(Some("alice"));
+    ctrl.handle_json_db_request(node2, partition, &req).await;
+
+    assert!(
+        ctrl.db_get("comments", "comment-orphan").is_some(),
+        "an ownerless comment must survive an owner-aware cascade delete, not be hard-deleted"
+    );
+    assert!(
+        ctrl.db_get("comments", "comment-alice").is_none(),
+        "alice's own comment is still cascade-deleted"
+    );
+}
+
 #[tokio::test]
 async fn circular_fk_cascade_terminates() {
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
@@ -1205,7 +1649,7 @@ async fn circular_fk_cascade_terminates() {
         .await
         .unwrap();
 
-    let result = ctrl.collect_local_cascade("alpha", "a1", local);
+    let result = ctrl.collect_local_cascade("alpha", "a1", local, None);
     assert!(
         result.is_ok(),
         "circular cascade should terminate via visited set"
@@ -1271,7 +1715,7 @@ async fn three_way_circular_fk_cascade_terminates() {
         .start_fk_reverse_lookup("aaa", "a1", None)
         .await
         .unwrap();
-    let result = ctrl.collect_local_cascade("aaa", "a1", local);
+    let result = ctrl.collect_local_cascade("aaa", "a1", local, None);
     assert!(
         result.is_ok(),
         "3-way circular cascade should terminate: {result:?}"

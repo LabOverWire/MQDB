@@ -1,17 +1,18 @@
 [package]
 name = "mqdb-wasm"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 license = "Apache-2.0"
 authors = ["LabOverWire"]
 description = "WASM client library for MQDB reactive database"
 repository = "https://github.com/LabOverWire/MQDB"
+exclude = ["examples/pkg"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-mqdb-core = { path = "../mqdb-core", default-features = false }
+mqdb-core = { path = "../mqdb-core", version = "0.7.3", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

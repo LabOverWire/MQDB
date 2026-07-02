@@ -81,14 +81,22 @@ pub async fn await_fk_reverse_lookups(
             tokio::time::Instant::now() + std::time::Duration::from_secs(FK_CHECK_TIMEOUT_SECS);
 
         match tokio::time::timeout_at(deadline, lookup.receiver).await {
-            Ok(Ok(ids)) if !ids.is_empty() => {
+            Ok(Ok(reply)) if !(reply.owned.is_empty() && reply.cross_owned.is_empty()) => {
+                let (referencing_ids, cross_owned_ids) =
+                    if lookup.on_delete == OnDeleteAction::Cascade {
+                        (reply.owned, reply.cross_owned)
+                    } else {
+                        let mut merged = reply.owned;
+                        merged.extend(reply.cross_owned);
+                        (merged, Vec::new())
+                    };
                 results.push(FkReverseLookupResult {
                     constraint_name: lookup.constraint_name,
                     source_entity: lookup.source_entity,
                     source_field: lookup.source_field,
                     on_delete: lookup.on_delete,
-                    referencing_ids: ids,
-                    cross_owned_ids: Vec::new(),
+                    referencing_ids,
+                    cross_owned_ids,
                     target_id: lookup.target_id,
                 });
             }
@@ -147,7 +155,7 @@ async fn resolve_single_level(
     (None, combined)
 }
 
-fn filter_and_extract_cascade(
+pub(crate) fn filter_and_extract_cascade(
     results: Vec<FkReverseLookupResult>,
     visited: &mut std::collections::HashSet<(String, String)>,
 ) -> (Vec<FkReverseLookupResult>, Vec<(String, String)>) {
@@ -163,7 +171,7 @@ fn filter_and_extract_cascade(
                     false
                 }
             });
-            if r.referencing_ids.is_empty() {
+            if r.referencing_ids.is_empty() && r.cross_owned_ids.is_empty() {
                 continue;
             }
         }
@@ -190,7 +198,10 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
     let mut visited = std::collections::HashSet::new();
     visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
     let (filtered, mut queue) = filter_and_extract_cascade(level_results, &mut visited);
-    let mut total_work: usize = filtered.iter().map(|r| r.referencing_ids.len()).sum();
+    let mut total_work: usize = filtered
+        .iter()
+        .map(|r| r.referencing_ids.len() + r.cross_owned_ids.len())
+        .sum();
     if total_work > MAX_CASCADE_WORK_ITEMS {
         return (
             Some(format!(
@@ -242,7 +253,7 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
         let (filtered, next_queue) = filter_and_extract_cascade(level_results, &mut visited);
         total_work += filtered
             .iter()
-            .map(|r| r.referencing_ids.len())
+            .map(|r| r.referencing_ids.len() + r.cross_owned_ids.len())
             .sum::<usize>();
         if total_work > MAX_CASCADE_WORK_ITEMS {
             return (
@@ -341,7 +352,9 @@ impl<T: ClusterTransport> NodeController<T> {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let is_blind = sender.is_none() || sender.is_some_and(|s| self.ownership.is_admin(s));
+        let sender_str = sender.unwrap_or("");
+        let is_blind = self.is_blind_sender(sender_str);
+        let wire_sender = if is_blind { "" } else { sender_str };
 
         let mut local_results = Vec::new();
         let mut pending_remote: Vec<PendingFkReverseLookup> = Vec::new();
@@ -354,15 +367,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let all_refs = self
                 .stores
                 .fk_reverse_lookup(entity, id, source_entity, source_field);
-            let local_refs: Vec<String> = all_refs
-                .into_iter()
-                .filter(|ref_id| {
-                    self.is_primary_for_partition(super::super::db::data_partition(
-                        source_entity,
-                        ref_id,
-                    ))
-                })
-                .collect();
+            let local_refs = self.local_primary_refs(source_entity, all_refs);
 
             if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                 return Err(format!(
@@ -373,16 +378,8 @@ impl<T: ClusterTransport> NodeController<T> {
             }
 
             if !local_refs.is_empty() {
-                let (owned_refs, cross_owned) = if is_blind || on_delete != OnDeleteAction::Cascade
-                {
-                    (local_refs, Vec::new())
-                } else {
-                    self.partition_refs_by_ownership(
-                        source_entity,
-                        local_refs,
-                        sender.unwrap_or(""),
-                    )
-                };
+                let (owned_refs, cross_owned) =
+                    self.classify_refs(source_entity, local_refs, on_delete, sender_str);
 
                 if !owned_refs.is_empty() || !cross_owned.is_empty() {
                     local_results.push(FkReverseLookupResult {
@@ -405,11 +402,58 @@ impl<T: ClusterTransport> NodeController<T> {
                 target_id: id,
                 target_entity: entity,
             };
-            self.scatter_reverse_lookup_to_remote_nodes(&mut pending_remote, &fk_params)
-                .await;
+            self.scatter_reverse_lookup_to_remote_nodes(
+                &mut pending_remote,
+                &fk_params,
+                wire_sender,
+            )
+            .await;
         }
 
         Ok((local_results, pending_remote))
+    }
+
+    fn is_blind_sender(&self, sender: &str) -> bool {
+        sender.is_empty() || self.ownership.is_admin(sender)
+    }
+
+    fn local_primary_refs(&self, source_entity: &str, all_refs: Vec<String>) -> Vec<String> {
+        all_refs
+            .into_iter()
+            .filter(|ref_id| {
+                self.is_primary_for_partition(super::super::db::data_partition(
+                    source_entity,
+                    ref_id,
+                ))
+            })
+            .collect()
+    }
+
+    fn classify_refs_by_ownership(
+        &self,
+        source_entity: &str,
+        refs: Vec<String>,
+        sender: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        if self.is_blind_sender(sender) {
+            (refs, Vec::new())
+        } else {
+            self.partition_refs_by_ownership(source_entity, refs, sender)
+        }
+    }
+
+    fn classify_refs(
+        &self,
+        source_entity: &str,
+        refs: Vec<String>,
+        on_delete: OnDeleteAction,
+        sender: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        if on_delete == OnDeleteAction::Cascade {
+            self.classify_refs_by_ownership(source_entity, refs, sender)
+        } else {
+            (refs, Vec::new())
+        }
     }
 
     fn partition_refs_by_ownership(
@@ -434,7 +478,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         .and_then(|v| v.as_str())
                         .map(String::from)
                 })
-                .is_none_or(|owner| owner == sender);
+                .is_some_and(|owner| owner == sender);
 
             if is_owned {
                 owned.push(ref_id);
@@ -449,6 +493,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         pending_remote: &mut Vec<PendingFkReverseLookup>,
         params: &FkLookupParams<'_>,
+        sender: &str,
     ) {
         let constraint_name = params.constraint_name;
         let source_entity = params.source_entity;
@@ -474,6 +519,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 source_field,
                 target_id,
                 target_entity,
+                sender,
             );
             let _ = self
                 .transport
@@ -511,17 +557,15 @@ impl<T: ClusterTransport> NodeController<T> {
             req.source_entity_str(),
             req.source_field_str(),
         );
-        let referencing_ids: Vec<String> = all_refs
-            .into_iter()
-            .filter(|ref_id| {
-                self.is_primary_for_partition(super::super::db::data_partition(
-                    req.source_entity_str(),
-                    ref_id,
-                ))
-            })
-            .collect();
+        let referencing_ids = self.local_primary_refs(req.source_entity_str(), all_refs);
 
-        let response = FkReverseLookupResponse::create(req.request_id, &referencing_ids);
+        let (owned, cross_owned) = self.classify_refs_by_ownership(
+            req.source_entity_str(),
+            referencing_ids,
+            req.sender_str(),
+        );
+
+        let response = FkReverseLookupResponse::create(req.request_id, &owned, &cross_owned);
         let _ = self
             .transport
             .send(from, ClusterMessage::FkReverseLookupResponse(response))
@@ -534,11 +578,13 @@ impl<T: ClusterTransport> NodeController<T> {
         deleted_entity: &str,
         deleted_id: &str,
         initial: Vec<FkReverseLookupResult>,
+        sender: Option<&str>,
     ) -> Result<Vec<FkReverseLookupResult>, String> {
         let mut all_results = Vec::new();
         let mut visited = std::collections::HashSet::new();
         visited.insert((deleted_entity.to_string(), deleted_id.to_string()));
         let mut queue: Vec<(String, String)> = Vec::new();
+        let sender_str = sender.unwrap_or("");
 
         for r in &initial {
             if r.on_delete == OnDeleteAction::Cascade {
@@ -572,15 +618,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     let all_refs =
                         self.stores
                             .fk_reverse_lookup(&entity, &id, source_entity, source_field);
-                    let local_refs: Vec<String> = all_refs
-                        .into_iter()
-                        .filter(|ref_id| {
-                            self.is_primary_for_partition(super::super::db::data_partition(
-                                source_entity,
-                                ref_id,
-                            ))
-                        })
-                        .collect();
+                    let local_refs = self.local_primary_refs(source_entity, all_refs);
 
                     if !local_refs.is_empty() && on_delete == OnDeleteAction::Restrict {
                         return Err(format!(
@@ -594,8 +632,11 @@ impl<T: ClusterTransport> NodeController<T> {
                         continue;
                     }
 
-                    let filtered_refs: Vec<String> = if on_delete == OnDeleteAction::Cascade {
-                        local_refs
+                    let (owned_refs, cross_owned) =
+                        self.classify_refs(source_entity, local_refs, on_delete, sender_str);
+
+                    let referencing_ids: Vec<String> = if on_delete == OnDeleteAction::Cascade {
+                        owned_refs
                             .into_iter()
                             .filter(|child_id| {
                                 if visited.insert((source_entity.to_string(), child_id.clone())) {
@@ -607,10 +648,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             })
                             .collect()
                     } else {
-                        local_refs
+                        owned_refs
                     };
 
-                    if filtered_refs.is_empty() {
+                    if referencing_ids.is_empty() && cross_owned.is_empty() {
                         continue;
                     }
 
@@ -619,8 +660,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         source_entity: source_entity.to_string(),
                         source_field: source_field.to_string(),
                         on_delete,
-                        referencing_ids: filtered_refs,
-                        cross_owned_ids: Vec::new(),
+                        referencing_ids,
+                        cross_owned_ids: cross_owned,
                         target_id: id.clone(),
                     });
                 }

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::FkReverseLookupReply;
 use crate::cluster::protocol::{
     FkCheckResponse, FkReverseLookupResponse, UniqueReserveResponse, UniqueReserveStatus,
 };
@@ -13,7 +14,7 @@ use tokio::sync::oneshot;
 pub struct PendingConstraintState {
     unique_requests: Mutex<HashMap<u64, oneshot::Sender<UniqueReserveStatus>>>,
     fk_checks: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
-    fk_lookups: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
+    fk_lookups: Mutex<HashMap<u64, oneshot::Sender<FkReverseLookupReply>>>,
     cascade_acks: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
     next_unique_id: AtomicU64,
     next_fk_id: AtomicU64,
@@ -66,13 +67,16 @@ impl PendingConstraintState {
         }
     }
 
-    pub fn insert_fk_lookup(&self, id: u64, tx: oneshot::Sender<Vec<String>>) {
+    pub fn insert_fk_lookup(&self, id: u64, tx: oneshot::Sender<FkReverseLookupReply>) {
         self.fk_lookups.lock().unwrap().insert(id, tx);
     }
 
     pub fn resolve_fk_lookup(&self, resp: &FkReverseLookupResponse) {
         if let Some(tx) = self.fk_lookups.lock().unwrap().remove(&resp.request_id) {
-            let _ = tx.send(resp.referencing_ids());
+            let _ = tx.send(FkReverseLookupReply {
+                owned: resp.referencing_ids(),
+                cross_owned: resp.cross_owned_ids(),
+            });
         }
     }
 
