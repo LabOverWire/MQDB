@@ -1,8 +1,10 @@
-# mqtt-lib Agent: Frontend Integration Tasks
+# mqtt-lib Integration Reference
 
-## Status: ✅ COMPLETE
+Purpose: how MQDB configures MQTT-over-WebSocket in the `mqtt5` broker library, for browser clients.
 
-WebSocket support is **fully implemented** in the mqtt5 broker. No additional work needed.
+## Status: implemented
+
+WebSocket support is available in the `mqtt5` broker via `WebSocketConfig`.
 
 ---
 
@@ -27,19 +29,11 @@ broker.run().await?;
 
 | Method | Description |
 |--------|-------------|
-| `with_bind_address(addr)` | Address to listen on (required) |
-| `with_path(path)` | WebSocket endpoint path (default: `/`) |
-| `with_tls(tls_config)` | Enable TLS (WSS) |
+| `with_bind_address(addr)` | Address to listen on |
+| `with_path(path)` | WebSocket endpoint path (default: `/mqtt`) |
+| `with_tls(use_tls: bool)` | Enable TLS (WSS) |
 
----
-
-## Integration Summary
-
-| Item | Status | Consumer |
-|------|--------|----------|
-| WebSocket listener API | ✅ Documented | MQDB agent |
-| `mqtt` subprotocol | ✅ Handled internally | Browser clients |
-| Binary frame handling | ✅ Handled internally | MQTT codec |
+The `mqtt` subprotocol and binary frame handling are managed internally by the codec.
 
 ---
 
@@ -56,13 +50,4 @@ ws.onopen = () => console.log('Connected');
 ws.onmessage = (e) => console.log('Received:', e.data);
 ```
 
----
-
-## Original Context
-
-MQDB is being integrated with a frontend diagramming application. Browser clients connect to the MQDB broker via MQTT over WebSocket.
-
-- **Client-side (browser):** `mqtt5-wasm` crate
-- **Server-side (broker):** `mqtt5` crate with `WebSocketConfig`
-
-This documentation was requested to confirm WebSocket support exists. It does. The MQDB agent document has been updated with these API details.
+Browser clients use the `mqtt5-wasm` crate; the server uses `mqtt5` with `WebSocketConfig`.

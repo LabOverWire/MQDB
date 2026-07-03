@@ -1,8 +1,8 @@
-# MQDB Agent: Frontend Integration Tasks
+# MQDB Agent Integration Reference
 
-## Status: ✅ COMPLETE
+Purpose: MQTT topics, event format, and startup flags a frontend uses to talk to the MQDB agent. MQDB provides generic infrastructure; application-specific sync logic lives in the frontend.
 
-MQDB provides generic infrastructure. Application-specific sync logic is handled by the frontend.
+## Status: current
 
 ---
 
@@ -12,7 +12,7 @@ MQDB provides generic infrastructure. Application-specific sync logic is handled
 |---------|--------|-------|
 | WebSocket listener | ✅ | `--ws-bind 0.0.0.0:8080` |
 | MQTT over WebSocket | ✅ | Browser connects to `ws://host:8080/mqtt` |
-| CRUD operations | ✅ | `$DB/create/{entity}`, `$DB/read/{entity}/{id}`, etc. |
+| CRUD operations | ✅ | `$DB/{entity}/create`, `$DB/{entity}/{id}`, `$DB/{entity}/{id}/update`, `$DB/{entity}/{id}/delete`, `$DB/{entity}/list` |
 | Real-time events | ✅ | `$DB/{entity}/events/#` for change notifications |
 | Change-only delivery | ✅ | Duplicate payloads suppressed on `$DB/+/events/#` |
 | Foreign keys | ✅ | CASCADE delete supported |
@@ -73,8 +73,10 @@ MQDB has no concept of "diagrams" or parent-child versioning. It's just a databa
 ### Starting the broker
 
 ```bash
-mqdb agent start --db /path --bind 0.0.0.0:1883 --ws-bind 0.0.0.0:8080 --anonymous
+mqdb agent start --db /path --bind 0.0.0.0:1883 --ws-bind 0.0.0.0:8080 --passwd passwd.txt
 ```
+
+`--anonymous` is available only when built with the `dev-insecure` feature; use `--passwd` (or another auth source) otherwise.
 
 ### Browser connection
 
