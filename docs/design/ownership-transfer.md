@@ -1,5 +1,7 @@
 # Ownership Transfer
 
+> **STATUS: DESIGN ONLY — not implemented.** No `Transfer` `DbOp`, no `transfer_ownership`, and no `$DB/{entity}/{id}/transfer` topic exist in the code.
+
 Transfer ownership of an entity from one user to another.
 
 ## Topic

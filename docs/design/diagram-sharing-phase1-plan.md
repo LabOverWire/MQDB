@@ -1,5 +1,7 @@
 # Diagram Sharing — Phase 1 Implementation Plan
 
+> **STATUS: IMPLEMENTED (historical plan).** This phase shipped in agent mode (`_shares` entity, `AccessLevel`, share-aware `check_access`). Retained for historical reference.
+
 Phase 1 of `diagram-sharing.md`: the **grants + access core**. Delivers a complete
 agent-mode vertical slice — share a diagram view/edit with a named user, grantee
 reads/updates, owner-only delete, revoke, transitive cascade — plus cluster parity

@@ -1,5 +1,7 @@
 # Queue Feature — Ideation Document
 
+> **STATUS: ON HOLD — no implementation.** No queue entity or visibility-timeout code exists. This document supersedes `queue-design.md` where decisions conflict.
+
 This document captures the design thinking for MQDB's queue feature. It supersedes the earlier QUEUE_DESIGN.md where decisions conflict. Use this as the reference during planning and implementation.
 
 ## The Core Idea

@@ -2,13 +2,11 @@
 
 Architectural issues identified during PR #13 review that require deeper design work.
 
-## Batch Vault Operations Are Not Atomic
+## Batch Vault Operations Are Not Atomic — RESOLVED
 
-`batch_vault_operation` in `handlers.rs` iterates over all user entities and encrypts/decrypts records one by one. If the process crashes mid-batch, some records are encrypted and some are plaintext. The `vault_check` token on the identity record indicates the vault *should* be enabled, but the data is in a mixed state.
+**Status: RESOLVED.** The proposed `vault_migration_status` state machine shipped in `crates/mqdb-vault`. `batch_vault_operation` now writes `vault_migration_status: "pending"` (with `vault_migration_mode` of `encrypt`/`decrypt`/`re_encrypt`) before mutating records, then flips it to `"complete"` after (`backend.rs`). On unlock, `resume_pending_migration` (`ops.rs:130`) detects a `pending` status and re-runs the batch, making enable/disable/change crash-recoverable.
 
-**Impact**: Data corruption after crash during vault enable/disable/change.
-**Mitigation**: The write fence prevents concurrent modifications during batch, but doesn't help with crash recovery.
-**Potential fix**: Store a `vault_migration_status` field on the identity (e.g., `pending`, `complete`). On next unlock, if status is `pending`, re-run the batch. Alternatively, use a WAL-style approach where the batch operation is logged before execution.
+Original issue: `batch_vault_operation` iterated over all user entities and encrypted/decrypted records one by one; a crash mid-batch left records in a mixed state while the `vault_check` token said the vault should be enabled.
 
 ## vault_pre_update TOCTOU in Agent Handlers
 

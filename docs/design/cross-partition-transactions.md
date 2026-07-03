@@ -1,5 +1,7 @@
 # Cross-partition batch atomicity in MQDB — implementation answer
 
+> **STATUS: PROPOSAL — not implemented.** No 2PC / commit-log-as-entity transaction layer exists in the code. This document explores design options only.
+
 ## The picture
 
 You have three realistic builds. Cost goes up left-to-right; correctness goes from "application-level" to "ACID-shaped."

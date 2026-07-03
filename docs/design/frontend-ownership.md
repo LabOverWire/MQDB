@@ -21,7 +21,7 @@ The original discussion proposed **user-scoped topic namespacing** (`$DB/u/{user
 
 ## How It Works
 
-When a user authenticates via MQTT CONNECT (password, SCRAM, JWT, or OAuth), the broker injects their identity as `x-mqtt-sender` (username) and `x-mqtt-client-id` (MQTT client ID) user properties on every PUBLISH they send. These are anti-spoof: the broker strips any client-supplied values before injecting the real ones. The database layer reads `x-mqtt-sender` for ownership enforcement and `x-mqtt-client-id` for echo suppression in change events (see `ARCHITECTURE.md` Section 16 for the full property flow). The ownership layer uses `x-mqtt-sender` to:
+When a user authenticates via MQTT CONNECT (password, SCRAM, JWT, or OAuth), the broker injects their identity as `x-mqtt-sender` (username) and `x-mqtt-client-id` (MQTT client ID) user properties on every PUBLISH they send. These are anti-spoof: the broker strips any client-supplied values before injecting the real ones. The database layer reads `x-mqtt-sender` for ownership enforcement and `x-mqtt-client-id` for echo suppression in change events (see `../architecture.md` Section 16 for the full property flow). The ownership layer uses `x-mqtt-sender` to:
 
 - **List operations**: Automatically injects a mandatory filter `userId = {authenticated_user}`. Alice only sees her own diagrams. Bob only sees his.
 - **Read/Update/Delete operations**: Reads the existing record and checks `data.userId == sender`. If mismatch, returns a 403 Forbidden error. Read is enforced the same as Update/Delete (`transport_execute.rs` → `check_access` with `AccessLevel::View`); it is **not** unrestricted.
@@ -162,11 +162,7 @@ Admin users (specified via `--admin-users`) bypass all ownership restrictions:
 
 ## Event Subscriptions
 
-Event subscriptions (`$DB/diagrams/events/#`) are NOT filtered by ownership. All authenticated users receive events for all diagrams. This is intentional:
-
-- The frontend already filters locally based on which diagrams it loaded
-- Events for diagrams the user doesn't own are harmless (they won't have local state for those IDs)
-- Future: ACL rules can restrict event subscriptions if needed (`%u` substitution is available)
+Recipient-scoped events shipped. For ownership-enabled entities, change events are routed to per-recipient topics `$DB/u/{user}/events/{entity}/{id}` (see `events.rs` `recipients` and `agent/tasks.rs`), enabled via the `--scoped-events` flag (`MQDB_SCOPED_EVENTS`). Each subscriber subscribes to its own `$DB/u/{user}/events/#` namespace, and the `%u`-based topic protection prevents subscribing to another user's namespace. The legacy shared `$DB/diagrams/events/#` topic remains for non-ownership entities.
 
 ---
 
@@ -213,5 +209,5 @@ mqdb dev test --ownership --nodes 3
 | Authentication | Required — anonymous mode incompatible |
 | Child entity isolation | Inherited through `diagramId` FK — no `userId` needed |
 | Admin access | `--admin-users` flag, bypasses all ownership |
-| Event filtering | Not server-filtered — frontend filters locally |
-| Sharing (future) | Can be added later by making ownership check look at a `sharedWith` array |
+| Event filtering | Recipient-scoped events available via `--scoped-events` (`$DB/u/{user}/events/#`) |
+| Sharing | Largely implemented (agent mode) — see [diagram-sharing.md](diagram-sharing.md) |
