@@ -311,9 +311,16 @@ let schema = Schema::new("users")
 - Reference integrity between entities
 - Validates referenced entity exists
 - Three deletion policies:
-  - `CASCADE`: Recursively delete referencing entities
+  - `CASCADE`: Recursively delete referencing entities (owner-aware — see below)
   - `RESTRICT`: Prevent deletion if references exist
   - `SET_NULL`: Set FK field to null when referenced entity deleted
+- When ownership is configured, only `CASCADE` filters by owner: a referencing record
+  is deleted only if the deleter (`sender`) owns it. Cross-owned records, and records
+  whose owner field is missing/null, are set to null instead of deleted (and not
+  recursed into) — a missing/null owner is protected, matching the direct-delete path.
+  Records in a type with no owner field configured are always cascade-deleted. An admin
+  or empty `sender` performs a full blind cascade. Agent mode additionally blocks the
+  whole delete if a to-be-null'd field carries NOT NULL; cluster mode does not.
 
 **Validation Timing (Agent Mode):**
 
@@ -345,7 +352,11 @@ Find all FK constraints targeting users
     ↓
 For each CASCADE constraint:
     Find referencing entities (posts where author_id=123)
-    Recursively collect cascade deletions (comments on those posts)
+    Split by ownership against the deleter (sender):
+        owned          → recurse + delete (comments on those posts)
+        cross-owned    → set FK to null, do not recurse
+        missing/null owner → set FK to null (protected), do not recurse
+    (no owner field configured for the entity → all owned; admin/empty sender → all owned)
     ↓
 For each RESTRICT constraint:
     Validate no references exist (fail if found)
@@ -603,9 +614,10 @@ Read entity to delete
     ↓
 Find FK constraints referencing this entity
     ↓
-Collect cascade operations (recursive DFS)
+Collect cascade operations (recursive DFS, owner-aware for CASCADE)
     ├─ CASCADE: posts where author_id=123
-    │   └─ CASCADE: comments where post_id in posts
+    │   ├─ owned by deleter        → delete + recurse (comments where post_id in posts)
+    │   └─ cross-owned / null owner → set FK null (protected), no recurse
     ├─ RESTRICT: verify no references
     └─ SET_NULL: update categories.owner_id=null
     ↓

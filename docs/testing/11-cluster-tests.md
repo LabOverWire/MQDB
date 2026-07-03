@@ -555,6 +555,40 @@ mqdb list posts --broker 127.0.0.1:1883 --user admin --pass admin
 
 **Expected:** Posts still exist with `author_id: null` and `_version: 2`.
 
+### Owner-Aware Cascade Across Nodes
+
+Exercises the remote-node ownership filter. Requires the cluster started with
+`--ownership "posts=userId"` and non-admin users (`alice`, `bob`) in the passwd file. Each
+node classifies the referencing records it is primary for against the deleter's identity, so
+cross-owned and ownerless posts on any node are set-null'd rather than deleted.
+
+```bash
+# authors is NOT ownership-configured; posts=userId. Cascade FK posts.author_id -> authors.id
+mqdb constraint add posts --fk "author_id:authors:id:cascade" \
+  --broker 127.0.0.1:1883 --user admin --pass admin
+mqdb create authors --data '{"name": "Shared"}' --broker 127.0.0.1:1883 --user admin --pass admin
+# Note the ID → <author-id>
+
+# alice's own post (owned), on a remote node
+mqdb create posts --data '{"title": "Alice Post", "userId": "alice", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1884 --user alice --pass alice
+# bob's post (cross-owned), on another node
+mqdb create posts --data '{"title": "Bob Post", "userId": "bob", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1885 --user bob --pass bob
+# ownerless post (no userId field), on node 1
+mqdb create posts --data '{"title": "Orphan Post", "author_id": "<author-id>"}' \
+  --broker 127.0.0.1:1883 --user admin --pass admin
+
+# alice deletes the shared parent (authors is unowned, so the delete itself is allowed)
+mqdb delete authors <author-id> --broker 127.0.0.1:1883 --user alice --pass alice
+
+mqdb list posts --broker 127.0.0.1:1883 --user admin --pass admin
+```
+
+**Expected:** Alice's own post is deleted. Bob's cross-owned post and the ownerless post survive
+on their respective nodes with `author_id: null` — remote nodes filter by ownership instead of
+blindly deleting. Re-running with `--user admin` (blind cascade) deletes all three.
+
 ---
 
 ## 20. Cluster Database Features

@@ -350,10 +350,12 @@ mqdb list tasks --user admin --pass admin
 
 **Expected:** All tasks are deleted (both alice's and bob's). Admin cascade is blind.
 
-### Unowned Entity Always Cascades
+### Unowned Entity Type Always Cascades
 
-If the referencing entity has no ownership configured, it is always included in the cascade
-regardless of the sender. Start a broker with ownership only on projects (not tasks):
+This is about an **entity type that is not listed in `--ownership`** — distinct from a record
+whose owner *field* is missing (covered in the next scenario). If the referencing entity has no
+owner field configured at all, every reference is treated as owned and is always included in the
+cascade regardless of the sender. Start a broker with ownership only on projects (not tasks):
 
 ```bash
 mqdb agent start --db /tmp/mqdb-cascade-unowned --bind 127.0.0.1:1883 \
@@ -373,7 +375,39 @@ mqdb delete projects <pid> --user alice --pass alice
 mqdb list tasks --user admin --pass admin
 ```
 
-**Expected:** Task is deleted. Entities without ownership config are always cascade-eligible.
+**Expected:** Task is deleted. Entity types without ownership config are always cascade-eligible.
+
+### Missing/Null Owner Field Is Protected
+
+When the referencing entity **is** ownership-configured but a specific record has **no owner
+field** (or a null one) — legacy data, an internal/admin insert, or a client that omitted it —
+that record is treated as not-owned: it is set-null'd, not deleted. This matches the direct
+delete/update path, which returns 403 when a non-admin targets a record with a missing/null
+owner. Fresh broker with ownership on both projects and tasks:
+
+```bash
+mqdb agent start --db /tmp/mqdb-cascade-nullowner --bind 127.0.0.1:1883 \
+    --passwd /tmp/cascade-passwd \
+    --ownership "projects=userId,tasks=userId" \
+    --admin-users admin
+
+mqdb constraint add tasks --fk "projectId:projects:id:cascade" \
+    --user admin --pass admin
+mqdb create projects --data '{"name": "P1", "userId": "alice"}' \
+    --user alice --pass alice
+# Note project ID → <pid>
+
+# A task in the ownership-configured `tasks` entity, but with NO userId field
+mqdb create tasks --data '{"name": "Ownerless Task", "projectId": "<pid>"}' \
+    --user admin --pass admin
+# Note ownerless task ID → <otid>
+
+mqdb delete projects <pid> --user alice --pass alice
+mqdb read tasks <otid> --user admin --pass admin
+```
+
+**Expected:** The ownerless task survives with `projectId: null` and `_version: 2` — it is
+set-null'd, not deleted, even though alice (a non-owner) triggered the cascade.
 
 ### Verification Checklist
 
@@ -381,5 +415,6 @@ mqdb list tasks --user admin --pass admin
 - [ ] Cross-owner cascade: entities owned by other users survive with FK set to null
 - [ ] Cross-owner + NotNull: delete is blocked with 409
 - [ ] Admin cascade: blind (deletes all regardless of owner)
-- [ ] Unowned entity: always included in cascade
+- [ ] Unowned entity type: always included in cascade
+- [ ] Missing/null owner field (configured entity): protected — set-null'd, not deleted
 - [ ] ChangeEvents: cross-owner survivors emit Update events (FK nulled), not Delete events

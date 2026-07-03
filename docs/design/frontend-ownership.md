@@ -24,10 +24,10 @@ The original discussion proposed **user-scoped topic namespacing** (`$DB/u/{user
 When a user authenticates via MQTT CONNECT (password, SCRAM, JWT, or OAuth), the broker injects their identity as `x-mqtt-sender` (username) and `x-mqtt-client-id` (MQTT client ID) user properties on every PUBLISH they send. These are anti-spoof: the broker strips any client-supplied values before injecting the real ones. The database layer reads `x-mqtt-sender` for ownership enforcement and `x-mqtt-client-id` for echo suppression in change events (see `ARCHITECTURE.md` Section 16 for the full property flow). The ownership layer uses `x-mqtt-sender` to:
 
 - **List operations**: Automatically injects a mandatory filter `userId = {authenticated_user}`. Alice only sees her own diagrams. Bob only sees his.
-- **Update/Delete operations**: Reads the existing record, checks `data.userId == sender`. If mismatch, returns a 403 Forbidden error.
+- **Read/Update/Delete operations**: Reads the existing record and checks `data.userId == sender`. If mismatch, returns a 403 Forbidden error. Read is enforced the same as Update/Delete (`transport_execute.rs` → `check_access` with `AccessLevel::View`); it is **not** unrestricted.
+- **Missing/null owner**: A record whose owner field is absent or null is **protected** — `None == Some(sender)` is false, so any non-admin gets 403. This holds uniformly: the direct Read/Update/Delete path and the FK cascade path both treat a null/missing owner as not-owned (cascade set-nulls it instead of deleting). See [distributed-design.md → Owner-Aware Cascade](../distributed-design.md).
 - **Create operations**: No restriction. The frontend sets `userId` in the data payload.
-- **Read operations**: No restriction. IDs are UUIDs, not guessable.
-- **Admin users**: Bypass all ownership checks. Admins see all records and can update/delete anything.
+- **Admin users**: Bypass all ownership checks. Admins see all records and can read/update/delete anything.
 - **Internal operations**: When `sender` is absent (replication, outbox, internal handlers), all checks are bypassed.
 
 ### MQTT Topic Structure (Unchanged)
@@ -153,7 +153,7 @@ Admin users (specified via `--admin-users`) bypass all ownership restrictions:
 | Operation | Regular User | Admin User |
 |-----------|-------------|------------|
 | List diagrams | Only own diagrams | All diagrams |
-| Read diagram | Allowed (by UUID) | Allowed |
+| Read diagram | Only own diagrams (403 otherwise) | Any diagram |
 | Create diagram | Allowed | Allowed |
 | Update diagram | Only own diagrams (403 otherwise) | Any diagram |
 | Delete diagram | Only own diagrams (403 otherwise) | Any diagram |
