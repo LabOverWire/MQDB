@@ -27,6 +27,8 @@ MQDB is a message-oriented reactive database built in Rust that combines:
 
 MQDB prioritizes correctness and simplicity over raw performance and feature count. The architecture reflects this through explicit error handling, clear component boundaries, and incremental feature additions.
 
+This document focuses on the single-node agent architecture; cluster-specific behavior is covered in section 9 and `docs/distributed-design.md`.
+
 ---
 
 ## 2. High-Level Architecture
@@ -57,7 +59,7 @@ MQDB prioritizes correctness and simplicity over raw performance and feature cou
 │  BatchWriter │ Transactions │ Durability        │
 ├─────────────────────────────────────────────────┤
 │    Fjall (Native) │ Memory (WASM/Testing)       │
-│  LSM Persistence  │  In-Memory HashMap          │
+│  LSM Persistence  │  In-Memory BTreeMap         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -134,7 +136,7 @@ For asynchronous contexts, `AsyncStorageBackend` and `AsyncBatchOperations` trai
 | Backend | Use Case | Persistence | Platform | Internal Implementation |
 |---------|----------|-------------|----------|-------------------------|
 | `FjallBackend` | Production | LSM-based disk | Native | `fjall::Database` with `Keyspace` |
-| `MemoryBackend` | Testing/WASM | In-memory HashMap | All | `std::collections::BTreeMap` |
+| `MemoryBackend` | Testing/WASM | In-memory BTreeMap | All | `std::collections::BTreeMap` |
 
 **Key Features:**
 - `BatchOperations` for atomic multi-key operations
@@ -1143,18 +1145,7 @@ Payload: {"ok": true, "data": {"id": "1", "name": "Alice"}}
 
 **Current Implementation:**
 
-The `StorageBackend` trait enables pluggable persistence:
-
-```rust
-pub trait StorageBackend: Send + Sync {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()>;
-    fn remove(&self, key: &[u8]) -> Result<()>;
-    fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
-    fn batch(&self) -> Box<dyn BatchWriter>;
-    fn flush(&self) -> Result<()>;
-}
-```
+The `StorageBackend` trait enables pluggable persistence. See section 3.1 for the full trait definition, including the scan variants (`prefix_scan_keys`, `prefix_scan_batch`, `range_scan`) and `BatchOperations`.
 
 **Available Backends:**
 
@@ -1227,7 +1218,7 @@ In cluster mode, the `StorageBackend` trait is used by multiple subsystems:
 - Uses `DurabilityMode::Immediate` for consensus safety
 - Path: `{db_path}/raft/`
 
-**Cluster Stores** (`crates/mqdb-cluster/src/cluster/store_manager.rs`):
+**Cluster Stores** (`crates/mqdb-cluster/src/cluster/store_manager/`):
 - Manages 17 distinct stores for MQTT and database state
 - Uses configurable durability (default: `PeriodicMs(10)`)
 - Path: `{db_path}/stores/`
@@ -1296,7 +1287,7 @@ $DB/{entity}/create → ClusteredAgent → NodeController → Partition primary 
 
 The `$DB/` topic prefix is handled by both modes, ensuring client applications work transparently.
 
-For detailed cluster architecture, see `DISTRIBUTED_DESIGN.md`.
+For detailed cluster architecture, see `docs/distributed-design.md`.
 
 ---
 
@@ -1311,7 +1302,7 @@ For detailed cluster architecture, see `DISTRIBUTED_DESIGN.md`.
 | Updates   | 191k/s     | 0.00ms      | 0.01ms      | 0.01ms      |
 | List/Scan | 91/s       | 10.96ms     | -           | -           |
 
-Note: These benchmarks are for single-node agent mode. For cluster mode performance characteristics, see `DISTRIBUTED_DESIGN.md` section A6.
+Note: These benchmarks are for single-node agent mode. For cluster mode performance characteristics, see `docs/distributed-design.md` section A6.
 
 ### Bottlenecks
 
@@ -1380,6 +1371,8 @@ pub enum Error {
     ForeignKeyRestrict { entity, id, referencing_entity },
     NotNullViolation { entity, field },
     InvalidForeignKey,            // FK value not a string
+    Forbidden(String),            // Ownership/authorization denial
+    CascadeBlocked(Box<CascadeBlockedInfo>), // Cross-owned entity has non-nullable FK
 }
 ```
 
@@ -1483,20 +1476,15 @@ DatabaseConfig::new("db")
 
 ## 13. Testing Strategy
 
-### Test Coverage: 683+ Tests
+### Test Coverage
+
+Run `cargo make test` for the current, authoritative counts across all suites.
 
 **Major Test Suites:**
-- 472 unit tests (library components including cluster modules)
-- 68 protocol/encoding tests
-- 49 subscription/topic tests
-- Integration tests:
-  - 25 constraint tests
-  - 17 CRUD + features
-  - 13 crash recovery
-  - 7 point-to-point delivery
-  - 6 transaction tests
-  - 4 concurrency tests
-  - 4 cluster integration tests
+- Unit tests (library components including cluster modules)
+- Protocol/encoding tests
+- Subscription/topic tests
+- Integration tests: constraints, CRUD + features, crash recovery, point-to-point delivery, transactions, concurrency, cluster integration
 
 ### Test Categories
 
@@ -1517,13 +1505,13 @@ DatabaseConfig::new("db")
 - `durability_test.rs`: Fsync behavior, crash simulation
 - `point_to_point_test.rs`: Shared subscriptions, consumer groups, heartbeat
 
-**3. Constraint Tests (25 tests):**
-- NOT NULL: 4 tests (create/update violations, success)
-- Unique: 6 tests (single, composite, concurrent, update)
-- Foreign Key: 8 tests (valid, invalid, null, CASCADE, RESTRICT, SET_NULL, multilevel)
-- Schema: 3 tests (type validation, required, defaults)
-- Persistence: 4 tests (survive restart)
-- Combined: 1 test (all constraints together)
+**3. Constraint Tests (`constraint_test.rs`):**
+- NOT NULL (create/update violations, success)
+- Unique (single, composite, concurrent, update)
+- Foreign Key (valid, invalid, null, CASCADE, RESTRICT, SET_NULL, multilevel)
+- Schema (type validation, required, defaults)
+- Persistence (survive restart)
+- Combined (all constraints together)
 
 ### Test Patterns
 
@@ -1699,7 +1687,7 @@ Located in `crates/mqdb-agent/src/topic_rules.rs`:
 | `$DB/_unique/#` | BlockAll | Unique constraint enforcement |
 | `$DB/_fk/#` | BlockAll | Foreign key validation |
 | `$DB/_query/#` | BlockAll | Query execution internals |
-| `$DB/p+/#` | BlockAll | Partition-specific topics (p0, p1, ..., p63) |
+| `$DB/p+/#` | BlockAll | Partition-specific topics (p0, p1, ..., p255) |
 | `$SYS/#` | ReadOnly | Broker statistics, monitoring |
 | `$DB/_admin/#` | AdminRequired | Schema, constraints, backup operations |
 | `$DB/_oauth_tokens/#` | AdminRequired | OAuth token storage |
@@ -1939,7 +1927,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 
 ## Related Documentation
 
-- **DISTRIBUTED_DESIGN.md** - Detailed cluster architecture and design decisions
-- **IMPLEMENTATION_PLAN.md** - Milestone plan (all M1-M10 complete)
-- **COMPLETE_MATRIX_DOC.md** - Benchmark specification
+- **docs/distributed-design.md** - Detailed cluster architecture and design decisions
+- **docs/implementation-plan.md** - Milestone plan (all M1-M10 complete)
+- **docs/benchmarks/matrix-spec.md** - Benchmark specification
 - **README.md** - User-facing documentation with examples

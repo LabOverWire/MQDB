@@ -1,5 +1,9 @@
 # MQDB Distributed Implementation Plan
 
+> **Archived — historical record.** All milestones (M1-M11) are complete; this
+> document is preserved as the milestone plan of record and is no longer a live
+> task list. MQTT bridge transport is deprecated (QUIC is the default).
+
 > **Status: ALL MILESTONES COMPLETE (M1-M11)**
 > Last verified: March 2026
 
@@ -25,7 +29,7 @@
 
 ### Components
 - `NodeId` - Node identifier (u16)
-- `PartitionId` - Partition identifier (0-63)
+- `PartitionId` - Partition identifier (0-255, 256 fixed partitions)
 - `Epoch` - Monotonic version for partition assignments
 - `PartitionMap` - Mapping of partitions to primaries/replicas
 - `PartitionAssignment` - Per-partition ownership info
@@ -354,17 +358,17 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 - Cookie-based session authentication required
 - Rate-limited unlock attempts
 
-**Cryptography** (`crates/mqdb-agent/src/http/vault_crypto.rs`):
+**Cryptography** (`crates/mqdb-vault/src/crypto.rs`):
 - `VaultCrypto` struct wraps AES-256-GCM key derived via PBKDF2-HMAC-SHA256
-- Per-record nonce derived from entity + record ID (deterministic, no nonce storage)
+- Random 12-byte nonce generated per encryption and stored prepended to the ciphertext (`base64(nonce || ciphertext || tag)`)
 - Recursive field-level encryption: each string leaf value encrypted independently at any JSON depth
 
-**Transform layer** (`crates/mqdb-agent/src/vault_transform.rs`):
+**Transform layer** (`crates/mqdb-vault/src/transform.rs`):
 - `vault_encrypt_fields` / `vault_decrypt_fields` for record-level operations
 - `is_vault_eligible` gates encryption to owned, non-system entities
 - `build_vault_skip_fields` excludes `id` and ownership field from encryption
 
-**Key storage** (`crates/mqdb-core/src/vault_keys.rs`):
+**Key storage** (`crates/mqdb-vault/src/key_store.rs`):
 - `VaultKeyStore` maps canonical_id → `VaultCrypto` (in-memory only)
 - Keys never persisted — user must unlock after each server restart
 
@@ -374,10 +378,10 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 - Constraint validation operates on plaintext (decrypt before validate, re-encrypt after)
 
 ### Files
-- `crates/mqdb-agent/src/http/vault_crypto.rs`
+- `crates/mqdb-vault/src/crypto.rs`
+- `crates/mqdb-vault/src/transform.rs`
+- `crates/mqdb-vault/src/key_store.rs`
 - `crates/mqdb-agent/src/http/handlers.rs`
-- `crates/mqdb-agent/src/vault_transform.rs`
-- `crates/mqdb-core/src/vault_keys.rs`
 - `examples/vault-mqtt/` (single-node demo)
 - `examples/vault-cluster/` (multi-node E2E test, 70 tests)
 
@@ -402,26 +406,3 @@ Per-user transparent encryption at rest for owned entities, in both agent and cl
 - Real multi-process cluster
 - Network partition simulation
 - Performance benchmarks
-
----
-
-## Dependencies
-
-### mqtt-lib Fixes Needed
-
-1. **PUBACK Timeout Fix** (was committed as `ac885a6`, may be lost)
-   - Bridge forwarding must be non-blocking
-   - Don't await PUBACK when forwarding to remote broker
-   - File: `mqtt5/src/broker/bridge/connection.rs`
-
-```rust
-// In handle_remote_message():
-// Change from:
-let _ = local_client.publish_qos(...).await;  // BLOCKS!
-
-// To:
-let client = local_client.clone();
-tokio::spawn(async move {
-    let _ = client.publish_qos(...).await;
-});
-```
