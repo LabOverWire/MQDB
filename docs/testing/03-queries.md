@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for filtering, sorting, pagination, limits, edge cases, and MQTT-only query features. Assumes an agent started per 01-setup.
+
 ## 3. List and Filtering
 
 ### Setup Test Data
@@ -146,6 +148,7 @@ MQDB enforces hard limits on query complexity: `MAX_FILTERS=16`, `MAX_SORT_FIELD
 ### Setup
 
 ```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb agent start --db /tmp/mqdb-limits-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
 ```
 
@@ -249,6 +252,7 @@ mqdb list products \
 ### Setup
 
 ```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb agent start --db /tmp/mqdb-sort-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
 ```
 
@@ -344,6 +348,7 @@ mqdb list nullsort --sort 'missing_field:asc' --user admin --pass admin123
 ### Setup
 
 ```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb agent start --db /tmp/mqdb-filter-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
 ```
 
@@ -467,6 +472,7 @@ These features are accessible only via MQTT payloads, not through CLI `--filter`
 ### Setup
 
 ```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb agent start --db /tmp/mqdb-mqtt-query-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
 ```
 

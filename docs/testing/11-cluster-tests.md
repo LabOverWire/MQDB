@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for cluster resilience, MQTT protocol behavior, cluster constraints, DB features, and scatter-gather queries. Assumes a running cluster per 10-cluster.
+
 > **License:** All cluster tests require an Enterprise license. Pass `--license /path/to/license.key`
 > to every `mqdb dev start-cluster` and `mqdb cluster start` command. Examples below omit `--license`
 > for brevity — add it to every cluster start invocation.

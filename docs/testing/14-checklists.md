@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual test checklists covering quick verification, complete verification, and additions. Assumes an agent started per 01-setup.
+
 ## Quick Test Checklist
 
 Run through these commands to validate core functionality.

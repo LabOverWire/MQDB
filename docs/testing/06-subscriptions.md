@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for reactive subscriptions and consumer groups. Assumes an agent started per 01-setup.
+
 ## 6. Reactive Subscriptions
 
 ### Watch Command (Broadcast)
@@ -18,7 +20,7 @@ mqdb create users --data '{"name": "Watcher Test"}'
 
 **Expected in Terminal 3:**
 ```json
-{"type": "create", "entity": "users", "id": "...", "data": {"name": "Watcher Test"}}
+{"sequence": 0, "entity": "users", "id": "...", "operation": "Create", "data": {"name": "Watcher Test"}}
 ```
 
 ### Subscribe with Consumer Group (Load-Balanced)

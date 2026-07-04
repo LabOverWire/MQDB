@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for password, SCRAM, and JWT authentication, ACLs, topic protection, and ownership. Assumes an agent started per 01-setup.
+
 ## 9. Authentication
 
 ### Create Password File

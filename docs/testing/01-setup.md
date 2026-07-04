@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for building the CLI, starting an agent, error handling, and troubleshooting. Start here — the other guides assume an agent started as shown below.
+
 ## Prerequisites
 
 ### Build the CLI

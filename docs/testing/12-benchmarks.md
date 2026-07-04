@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for the pub/sub and database benchmark harness and the health endpoint. Assumes an agent or cluster started per 01-setup or 10-cluster.
+
 ## 15. Benchmarking
 
 The `mqdb bench` commands measure performance.
@@ -52,7 +54,7 @@ mqdb bench db \
 |--------|-------------|---------|
 | `--operations` | Number of operations | `1000` |
 | `--entity` | Entity name to use | `bench_entity` |
-| `--op` | Operation type: `insert`, `get`, `update`, `delete`, `list`, `mixed` | `mixed` |
+| `--op` | Operation type: `insert`, `get`, `update`, `delete`, `list`, `mixed`, `changefeed`, `unique`, `cascade` | `mixed` |
 | `--concurrency` | Number of concurrent clients | `1` |
 | `--fields` | Fields per record | `5` |
 | `--field-size` | Size of each field value in bytes | `100` |
@@ -62,8 +64,16 @@ mqdb bench db \
 | `--no-latency` | Disable latency tracking for pure throughput | `false` |
 | `--async` | Use pipelined mode (fire all ops, collect responses) | `false` |
 | `--qos` | MQTT QoS level for async mode | `1` |
-| `--duration` | Duration in seconds (async mode only, overrides `--operations`) | (none) |
+| `--duration` | Duration in seconds (async mode / `changefeed`, overrides `--operations`) | (none) |
+| `--write-rate` | Write rate in ops/sec (`changefeed` op only) | `500` |
+| `--attempts-per-client` | Attempts per client on the contested field (`unique` op only) | `100` |
+| `--children` | Children per parent (`cascade` op only) | `100` |
+| `--runs` | Cascade iterations (`cascade` op only) | `5` |
 | `--format` | Output format: `json`, `table`, `csv` | `table` |
+
+> **Extended ops:** `changefeed` measures live event-delivery latency (drives writes with `--write-rate`
+> for `--duration`); `unique` stress-tests unique-constraint contention (`--attempts-per-client`);
+> `cascade` measures cascade-delete fan-out (`--children` per parent over `--runs` iterations).
 
 > **QoS Warning:** Async mode defaults to QoS 1 because QoS 0 causes connection resets at
 > ~5000 ops/s due to lack of flow control. QoS 1's PUBACK provides natural backpressure.
