@@ -2,10 +2,34 @@
 
 A high-performance reactive database with native MQTT integration, point-to-point delivery, and consumer groups. Built in Rust with support for both native and WASM targets.
 
-MQDB is available in two editions:
+MQDB ships as a single `mqdb` binary. The core is permissively licensed and advanced features are unlocked by a license token — there are no separate editions or downloads:
 
-- **Agent** (open-source): Standalone embedded MQTT broker with full database, authentication, vault encryption, and consumer groups.
-- **Native** (commercial): Everything in Agent plus distributed clustering with Raft consensus, QUIC transport, partition rebalancing, and cross-node replication.
+- **Open-source core (Apache-2.0):** the `mqdb-core`, `mqdb-agent`, and `mqdb-wasm` crates — a standalone embedded MQTT broker with full database, authentication, and consumer groups.
+- **Licensed features:** vault transparent encryption requires a Pro or Enterprise license; distributed clustering (Raft consensus, QUIC transport, partition rebalancing, cross-node replication) requires an Enterprise license. Both run from the same binary once a valid `--license` token is supplied.
+
+See the [License](#license) section for the full per-crate breakdown.
+
+## Table of Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Reactive Subscriptions](#reactive-subscriptions)
+- [Point-to-Point Delivery](#point-to-point-delivery)
+- [Secondary Indexes](#secondary-indexes)
+- [Sorting and Pagination](#sorting-and-pagination)
+- [Relationships](#relationships)
+- [Constraints & Data Integrity](#constraints--data-integrity)
+- [TTL (Time-To-Live)](#ttl-time-to-live)
+- [MQTT Agent](#mqtt-agent)
+- [Vault Encryption](#vault-encryption)
+- [Observability](#observability)
+- [Distributed Clustering](#distributed-clustering)
+- [CLI Tool](#cli-tool)
+- [Testing](#testing)
+- [Examples](#examples)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Features
 
@@ -294,15 +318,13 @@ db.add_foreign_key(
 | `OnDeleteAction::Restrict` | Prevent deletion if references exist |
 | `OnDeleteAction::SetNull` | Set foreign key field to null |
 
-When ownership is configured, cascade deletes are owner-aware. Entities owned by the
-deleting user are deleted normally. Cross-owned entities — and entities whose owner field
-is missing or null — are excluded from the cascade and have their FK field set to null
-instead; a missing/null owner is treated as protected, matching the direct delete/update
-path that already forbids a non-owner from removing such a record. Entities in a type with
-no ownership configured are always cascade-deleted. In agent mode, if a to-be-null'd FK
-field carries a NotNull constraint the entire delete is blocked (cluster mode set-nulls
-unconditionally — NotNull is not evaluated during cluster cascade). Admin users, and any
-delete with an empty sender, bypass ownership and perform a full blind cascade.
+When ownership is configured, cascade deletes are owner-aware:
+
+- **Owned entities** (owned by the deleting user) are deleted normally.
+- **Cross-owned entities, and entities whose owner field is missing or null,** are excluded from the cascade and have their FK field set to null instead. A missing/null owner is treated as protected, matching the direct delete/update path that already forbids a non-owner from removing such a record.
+- **Entities in a type with no ownership configured** are always cascade-deleted.
+- **NotNull FK constraint:** in agent mode, if a to-be-null'd FK field carries a NotNull constraint the entire delete is blocked. Cluster mode set-nulls unconditionally — NotNull is not evaluated during cluster cascade.
+- **Admin users, and any delete with an empty sender,** bypass ownership and perform a full blind cascade.
 
 ### Constraint Examples
 
@@ -456,7 +478,7 @@ Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin acces
 mqdb agent start --db /path/to/db --admin-users alice,bob
 
 mqdb cluster start --node-id 1 --db /path/to/db --admin-users alice,bob \
-    --quic-cert server.pem --quic-key server.key
+    --quic-cert server.pem --quic-key server.key --license /path/to/license.key
 ```
 
 Admin users have access to `$DB/_admin/*` topics (schema, constraints, backup), `$DB/_oauth_tokens/*` topics, and internal entities (`_sessions`, `_mqtt_subs`, etc.).
@@ -649,7 +671,7 @@ The `database_operation` span links to the W3C `traceparent` from the incoming M
 
 Any OTLP-compatible collector works: Jaeger, Grafana Tempo, Datadog, Honeycomb, AWS X-Ray (via ADOT collector).
 
-## Distributed Clustering (Native Edition)
+## Distributed Clustering
 
 > Clustering requires the `cluster` feature on the `mqdb` CLI (enabled by default). To build without cluster code, use `--no-default-features` (and add `--features http-api` to keep the HTTP server).
 
@@ -664,17 +686,20 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 # Node 1 (first node becomes Raft leader)
 ./target/release/mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 \
     --db /tmp/mqdb-node1 \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+    --license /path/to/license.key
 
 # Node 2 (joins via peer)
 ./target/release/mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 \
     --db /tmp/mqdb-node2 --peers "1@127.0.0.1:1883" \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+    --license /path/to/license.key
 
 # Node 3 (joins via peer)
 ./target/release/mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 \
     --db /tmp/mqdb-node3 --peers "1@127.0.0.1:1883" \
-    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem
+    --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+    --license /path/to/license.key
 ```
 
 ### Cluster CLI Commands
@@ -682,7 +707,7 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 ```bash
 # Start a cluster node
 mqdb cluster start --node-id 1 --bind 0.0.0.0:1883 --db ./data/node1 \
-    --quic-cert server.pem --quic-key server.key
+    --quic-cert server.pem --quic-key server.key --license /path/to/license.key
 
 # Check cluster status
 mqdb cluster status
@@ -733,7 +758,7 @@ When `--quic-ca` is provided, the cluster transport enables mTLS: each node veri
 
 ```bash
 # Start a 3-node cluster with mTLS (QUIC transport is the default)
-mqdb dev start-cluster --nodes 3 --clean
+mqdb dev start-cluster --nodes 3 --clean --license /path/to/license.key
 ```
 
 ### Data Persistence
@@ -804,6 +829,8 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_DURABILITY` | `immediate`, `periodic`, or `none` | `periodic` |
 | `MQDB_DURABILITY_MS` | Fsync interval in ms | `10` |
 | `MQDB_OWNERSHIP` | Ownership config (`entity=field` pairs) | — |
+| `MQDB_OWNERSHIP_DERIVE` | Child-entity access derivation (`child=field>parent` pairs, agent mode only) | — |
+| `MQDB_SCOPED_EVENTS` | Route change events to per-recipient topics for ownership-enabled entities (agent mode only) | `false` |
 | `MQDB_EVENT_SCOPE` | Scope events by entity field | — |
 | `MQDB_WS_BIND` | WebSocket bind address | — |
 
