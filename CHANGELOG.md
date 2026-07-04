@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-03 — mqdb-cli 0.8.13
+
+### Security
+
+- Patched the `rustls-webpki` and `openssl` dependency advisories flagged by Dependabot (#97).
+
+### Docs
+
+- Documented the owner-aware cascade null-owner protection behavior added in 0.8.12 (#96).
+
+## 2026-07-02 — mqdb-agent 0.8.10, mqdb-cluster 0.3.7, mqdb-wasm 0.3.4, mqdb-cli 0.8.12
+
+### Fixed
+
+- Owner-aware foreign-key cascade delete now filters by ownership at every depth on both the local and remote (cross-node cluster) delete paths, and threads the deleter's identity through the remote cascade fan-out. A cascade only removes child records the deleter owns; cross-owned children are preserved (set-null work on cross-owned references is retained). Records with no owner or a null owner are protected from cascade deletion by a foreign owner (#95).
+
 ## 2026-06-05 — mqdb-vault 0.1.2, mqdb-cli 0.8.11
 
 ### Fixed
