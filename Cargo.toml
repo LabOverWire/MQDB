@@ -33,7 +33,7 @@ zeroize = "1.8.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 comfy-table = "7.2"
 fjall = "3.0"
-mqtt5 = "0.31"
+mqtt5 = "0.35"
 tokio = { version = "1.49", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 lru = "0.16"
@@ -52,8 +52,8 @@ reqwest = { version = "0.13", features = ["form", "json"] }
 base64 = "0.22"
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 
-opentelemetry = { version = "0.31", features = ["trace"] }
-tracing-opentelemetry = "0.32"
+opentelemetry = { version = "0.32", features = ["trace"] }
+tracing-opentelemetry = "0.33"
 
 tempfile = "3.23.0"
 

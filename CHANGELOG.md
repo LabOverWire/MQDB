@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-06 — mqdb-cli 0.8.14, mqdb-agent 0.8.11, mqdb-cluster 0.3.8, mqdb-vault 0.1.3
+
+### Changed
+
+- Updated mqtt5 to 0.35.1 and opentelemetry to 0.32, moving opentelemetry_sdk to 0.32.1 and clearing the remaining Dependabot advisory (#98).
+
 ## 2026-07-03 — mqdb-cli 0.8.13
 
 ### Security
