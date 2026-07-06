@@ -603,7 +603,7 @@ impl FkReverseIndex {
 
 impl std::fmt::Debug for FkReverseIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self.index.lock().map(|m| m.len()).unwrap_or(0);
+        let count = self.index.lock().map_or(0, |m| m.len());
         f.debug_struct("FkReverseIndex")
             .field("entries", &count)
             .finish()

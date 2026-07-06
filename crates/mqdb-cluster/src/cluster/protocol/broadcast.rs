@@ -53,8 +53,7 @@ impl WildcardBroadcast {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Subscribe as u8,
@@ -75,8 +74,7 @@ impl WildcardBroadcast {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
         Self {
             version: Self::VERSION,
             operation: WildcardOp::Unsubscribe as u8,

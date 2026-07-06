@@ -2803,13 +2803,11 @@ async fn test_cascade_delete_events_carry_recipients() {
 
     let mut recipients_by_entity: HashMap<String, Vec<String>> = HashMap::new();
     while recipients_by_entity.len() < 2 {
-        let event =
-            match tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv())
-                .await
-            {
-                Ok(Ok(event)) => event,
-                _ => break,
-            };
+        let Ok(Ok(event)) =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv()).await
+        else {
+            break;
+        };
         if event.entity == "diagrams" || event.entity == "nodes" {
             let mut recipients = event
                 .recipients

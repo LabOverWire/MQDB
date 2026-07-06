@@ -42,8 +42,7 @@ impl ClusterOutbox {
             user_properties: user_properties.to_vec(),
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs()),
         };
         let value = serde_json::to_vec(&stored).unwrap_or_default();
         (key.into_bytes(), value)
@@ -117,8 +116,7 @@ impl ClusterOutbox {
             operations: ops.to_vec(),
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs()),
         };
         let value = serde_json::to_vec(&stored).unwrap_or_default();
         (key.into_bytes(), value)

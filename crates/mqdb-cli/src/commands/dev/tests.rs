@@ -161,7 +161,7 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
         let data = format!(r#"{{"name": "User{node}", "node": {node}}}"#);
         let create_output = mqdb_cmd(&exe, &["create", "test_users", "-d", &data], port);
 
-        let created = create_output.map(|o| o.status.success()).unwrap_or(false);
+        let created = create_output.is_ok_and(|o| o.status.success());
 
         if created {
             println!("  Create via Node {node}: ✓");
@@ -177,12 +177,10 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
         let filter = format!("node={node}");
         let list_output = mqdb_cmd(&exe, &["list", "test_users", "-f", &filter], read_port);
 
-        let can_read = list_output
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.contains(&format!("User{node}"))
-            })
-            .unwrap_or(false);
+        let can_read = list_output.is_ok_and(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.contains(&format!("User{node}"))
+        });
 
         if can_read {
             println!("  Read from Node {read_node} (created on {node}): ✓");
@@ -216,10 +214,7 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
     let mut passed = 0;
     let mut failed = 0;
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("test_products_{ts}");
     let constraint_name = format!("unique_{entity}_sku");
 
@@ -237,13 +232,10 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
         ports[0],
     );
 
-    let constraint_added = add_output
-        .as_ref()
-        .map(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
-        })
-        .unwrap_or(false);
+    let constraint_added = add_output.as_ref().is_ok_and(|o| {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
+    });
 
     if constraint_added {
         println!("  Add unique constraint via Node 1: ✓");
@@ -272,7 +264,7 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
         ports[0],
     );
 
-    let first_created = create1.map(|o| o.status.success()).unwrap_or(false);
+    let first_created = create1.is_ok_and(|o| o.status.success());
 
     if first_created {
         println!("  Create first product (SKU-001) via Node 1: ✓");
@@ -295,18 +287,16 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
         ports[0],
     );
 
-    let dup_rejected = create_dup
-        .map(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            let combined = format!("{stdout}{stderr}").to_lowercase();
-            !o.status.success()
-                || combined.contains("unique")
-                || combined.contains("conflict")
-                || combined.contains("duplicate")
-                || combined.contains("constraint")
-        })
-        .unwrap_or(false);
+    let dup_rejected = create_dup.is_ok_and(|o| {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        let combined = format!("{stdout}{stderr}").to_lowercase();
+        !o.status.success()
+            || combined.contains("unique")
+            || combined.contains("conflict")
+            || combined.contains("duplicate")
+            || combined.contains("constraint")
+    });
 
     if dup_rejected {
         println!("  Duplicate SKU-001 rejected: ✓");
@@ -330,10 +320,7 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
     let src_node = ports.len();
     let dst_node = 1;
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let sub_id = format!("wild_sub_{ts}");
     let pub_id = format!("wild_pub_{ts}");
 
@@ -348,10 +335,7 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    if single_level
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("single_level_ok"))
-        .unwrap_or(false)
-    {
+    if single_level.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("single_level_ok")) {
         println!("  Single-level (+) Node {src_node} → Node {dst_node}: ✓");
         passed += 1;
     } else {
@@ -372,10 +356,7 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    if multi_level
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("multi_level_ok"))
-        .unwrap_or(false)
-    {
+    if multi_level.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("multi_level_ok")) {
         println!("  Multi-level (#) Node {src_node} → Node {dst_node}: ✓");
         passed += 1;
     } else {
@@ -392,10 +373,7 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
     let mut passed = 0;
     let mut failed = 0;
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let topic = format!("retained/test/{ts}");
     let msg = format!("retained_msg_{ts}");
 
@@ -422,7 +400,7 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    std::thread::sleep(std::time::Duration::from_secs(1));
 
     let sub_output = Command::new("timeout")
         .args([
@@ -443,9 +421,7 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    let received = sub_output
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&msg))
-        .unwrap_or(false);
+    let received = sub_output.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&msg));
 
     if received {
         println!(
@@ -488,10 +464,7 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
     let mut passed = 0;
     let mut failed = 0;
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let will_topic = format!("lwt/status/{ts}");
     let will_msg = format!("client_offline_{ts}");
 
@@ -512,9 +485,7 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    let received = lwt_output
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&will_msg))
-        .unwrap_or(false);
+    let received = lwt_output.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&will_msg));
 
     if received {
         println!("  LWT from Node 1 received on Node {}: ✓", ports.len());
@@ -531,8 +502,7 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     let sub_client_id = format!("sub-{sub_port}-{ts}");
     let pub_client_id = format!("pub-{pub_port}-{ts}");
     let output = Command::new("timeout")
@@ -620,10 +590,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
             .output();
     }
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("test_owned_{ts}");
     let ownership_spec = format!("{entity}=userId");
 
@@ -990,10 +957,7 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
     let mut passed = 0;
     let mut failed = 0;
 
-    let ts = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("stress_products_{ts}");
     let constraint_name = format!("unique_{entity}_sku");
 
@@ -1011,13 +975,10 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
         ports[0],
     );
 
-    let constraint_added = add_output
-        .as_ref()
-        .map(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
-        })
-        .unwrap_or(false);
+    let constraint_added = add_output.as_ref().is_ok_and(|o| {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
+    });
 
     if !constraint_added {
         println!("  Add unique constraint: ✗ (aborting stress test)");
@@ -1053,7 +1014,7 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
                 let data = format!(r#"{{"name": "Item {sku}", "sku": "{sku}"}}"#);
                 let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
 
-                if result.map(|o| o.status.success()).unwrap_or(false) {
+                if result.is_ok_and(|o| o.status.success()) {
                     successes += 1;
                 } else {
                     failures += 1;
@@ -1102,7 +1063,7 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
         conflict_handles.push(std::thread::spawn(move || {
             let data = format!(r#"{{"name": "Conflict Item {i}", "sku": "{sku}"}}"#);
             let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
-            result.map(|o| o.status.success()).unwrap_or(false)
+            result.is_ok_and(|o| o.status.success())
         }));
     }
 

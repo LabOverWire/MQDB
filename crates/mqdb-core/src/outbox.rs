@@ -46,8 +46,7 @@ impl Outbox {
             retry_count: 0,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_secs()),
             dispatched_count: 0,
         };
         let value = serde_json::to_vec(&stored).unwrap_or_default();

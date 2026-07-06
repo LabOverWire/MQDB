@@ -76,15 +76,15 @@ impl ClusteredAgent {
         let mut tick_interval = interval(Duration::from_millis(10));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
-        let mut wildcard_reconciliation_interval = interval(Duration::from_secs(60));
-        let mut subscription_reconciliation_interval = interval(Duration::from_secs(300));
+        let mut wildcard_reconciliation_interval = interval(Duration::from_mins(1));
+        let mut subscription_reconciliation_interval = interval(Duration::from_mins(5));
         let mut retained_sync_cleanup_interval =
             interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
         let mut cascade_retry_interval = tokio::time::interval_at(
             tokio::time::Instant::now() + Duration::from_secs(30),
             Duration::from_secs(30),
         );
-        let mut license_check_interval = interval(Duration::from_secs(3600));
+        let mut license_check_interval = interval(Duration::from_hours(1));
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -450,8 +450,7 @@ impl ClusteredAgent {
     async fn handle_ttl_cleanup(&self) {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         let ctrl = self.controller.read().await;
         let expired_ttl = ctrl.stores().db_data.cleanup_expired_ttl(now_secs);
         if !expired_ttl.is_empty() {

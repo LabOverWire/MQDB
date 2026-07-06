@@ -18,7 +18,7 @@ impl MqdbAgent {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let shutdown_tx = self.shutdown_tx.clone();
         Some(tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(3600));
+            let mut interval = tokio::time::interval(Duration::from_hours(1));
             interval.tick().await;
             loop {
                 tokio::select! {
