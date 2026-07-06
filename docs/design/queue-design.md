@@ -1,5 +1,7 @@
 # Work Queue Design
 
+> **STATUS: ON HOLD — no implementation.** No queue entity, visibility-timeout, or ACK state machine exists in the code. Superseded by `queue-ideation.md` where the two conflict.
+
 ## Overview
 
 MQDB work queues provide durable, push-based message processing built on top of the existing entity storage system. Queues are entities with special consumption semantics: messages persist until consumed, and the broker distributes them across competing consumers.

@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for index management, range queries, projection, and backfill. Assumes an agent started per 01-setup.
+
 ## 5b. Index Management
 
 Indexes optimize range filter queries (`>`, `>=`, `<`, `<=`) by avoiding full table scans.
@@ -473,6 +475,7 @@ mqdb dev kill
 ### Setup
 
 ```bash
+mqdb passwd admin -b admin123 -f /tmp/passwd.txt
 mqdb agent start --db /tmp/mqdb-index-test --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt --admin-users admin
 ```
 

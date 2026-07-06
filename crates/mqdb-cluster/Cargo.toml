@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-cluster"
-version = "0.3.7"
+version = "0.3.8"
 publish = false
 edition.workspace = true
 license = "AGPL-3.0-only"

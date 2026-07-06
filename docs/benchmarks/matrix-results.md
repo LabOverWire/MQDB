@@ -1,6 +1,8 @@
 # MQDB Benchmark Results - 2026-03-20
 
 **Date:** 2026-03-20
+**MQDB version / commit:** <record at run time — exact git commit not captured for this run>
+**Build features:** default (cluster, http-api)
 **Transport:** Direct QUIC (mTLS)
 **Methodology:** Triplicate runs per experiment, mean +/- stdev reported
 **Platform:** macOS (Darwin 25.3.0), local loopback
@@ -361,6 +363,8 @@ Coefficient of variation (stdev/mean) across nodes within each topology, for asy
 | Parameter | Value |
 |-----------|-------|
 | Date | 2026-03-20 |
+| MQDB version / commit | <record at run time — exact git commit not captured for this run> |
+| Build features | default (cluster, http-api) |
 | Platform | macOS (Darwin 25.3.0) |
 | Network | Local loopback (127.0.0.1) |
 | Transport | Direct QUIC with mTLS |

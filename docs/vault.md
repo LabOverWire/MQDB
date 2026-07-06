@@ -117,7 +117,7 @@ Vault operations are also available over MQTT 5.0 request-response. Set the `res
 
 Responses follow the standard MQDB response envelope: `{"status": "ok", "data": {...}}` on success, `{"status": "error", "code": N, "message": "..."}` on failure.
 
-Unlock attempts are rate-limited per user per minute (MQTT path: 10, HTTP path: 5). Wrong passphrase returns error code 401 (Unauthorized), rate limiting returns error code 429 (RateLimited).
+Unlock attempts are rate-limited to 5 per user per minute (both MQTT and HTTP paths share the same limiter). Wrong passphrase returns error code 401 (Unauthorized), rate limiting returns error code 429 (RateLimited).
 
 The `$DB/_vault/*` topics are exempt from internal entity topic protection, so any authenticated user can publish to them without admin privileges.
 
@@ -216,7 +216,7 @@ This recovers exactly one failure: the batch had already finished and only the `
 
 ## Security considerations
 
-**Rate limiting.** Unlock attempts are rate-limited per user per minute (HTTP: 5, MQTT: 10). This prevents online brute-force attacks through the API but does not protect against offline attacks on stolen database files.
+**Rate limiting.** Unlock attempts are rate-limited to 5 per user per minute (both MQTT and HTTP paths share the same limiter). This prevents online brute-force attacks through the API but does not protect against offline attacks on stolen database files.
 
 **Passphrase length enforcement.** Use `--vault-min-passphrase-length N` to reject short passphrases on enable and change operations. This is a defense-in-depth measure against weak passphrases. It does not apply to unlock or disable (which verify an existing passphrase, not set a new one).
 

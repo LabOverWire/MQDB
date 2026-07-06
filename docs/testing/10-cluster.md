@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for cluster-mode setup, dev commands, and multi-node operation. Assumes generated TLS certs and an Enterprise license.
+
 ## 11. Cluster Mode
 
 Cluster mode runs a distributed MQDB with Raft consensus for partition management.
@@ -31,7 +33,8 @@ mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-node1 \
 - Becomes Raft leader immediately (single-node quorum)
 - Assigns all 256 partitions to itself
 
-> **Tip:** For quick testing without TLS, use `--no-quic` to fall back to TCP bridges.
+> **Tip:** `--no-quic` disables QUIC and falls back to the deprecated TCP bridge transport.
+> QUIC is the default and only recommended transport; use `--no-quic` only for legacy debugging.
 
 ### Starting a Multi-Node Cluster (Manual)
 
@@ -136,18 +139,28 @@ mqdb cluster start --node-id 1 --bind 127.0.0.1:1883 --db /tmp/mqdb-test \
 mqdb cluster status --broker 127.0.0.1:1883
 ```
 
-**Expected output:**
-```json
-{
-  "leader": 1,
-  "nodes": [
-    {"id": 1, "name": "node-1", "status": "alive"},
-    {"id": 2, "name": "node-2", "status": "alive"},
-    {"id": 3, "name": "node-3", "status": "alive"}
-  ],
-  "partitions": 256
-}
+**Expected output** (the CLI prints a formatted summary, not JSON):
 ```
+┌─────────────────────────────────────────┐
+│             CLUSTER STATUS              │
+├─────────────────────────────────────────┤
+│ Node:     node-1 (id=1)                 │
+│ Role:     Leader                        │
+│ Term:     1                             │
+├─────────────────────────────────────────┤
+│ Nodes:    3 total (1 + [2, 3])          │
+├─────────────────────────────────────────┤
+│ Partitions: 256 total                   │
+│   Node 1: 86 primary                    │
+│   Node 2: 85 primary                    │
+│   Node 3: 85 primary                    │
+│   Replicated: 256/256                   │
+└─────────────────────────────────────────┘
+```
+
+The CLI reads the `$SYS/mqdb/cluster/status` endpoint, whose `data` payload carries
+`node_id`, `node_name`, `is_raft_leader`, `raft_term`, `alive_nodes`, `partition_count`,
+and `partitions` as an array of `{"id", "primary", "replicas", "epoch"}` objects.
 
 ### Trigger Rebalance
 

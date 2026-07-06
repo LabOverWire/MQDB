@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for license key verification and feature enforcement. Assumes a built CLI per 01-setup.
+
 ## Overview
 
 MQDB uses ECDSA P-256 signed license tokens to gate commercial features (vault encryption, clustering). Tokens are generated externally and verified by the MQDB binary using an embedded public key.

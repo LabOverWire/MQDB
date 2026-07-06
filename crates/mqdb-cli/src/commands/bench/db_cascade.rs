@@ -145,9 +145,9 @@ pub(crate) async fn cmd_bench_db_cascade(
             v.push(delete_elapsed);
         }
 
-        let wait_result = tokio::time::timeout(Duration::from_secs(60), done_rx.recv_async()).await;
+        let wait_result = tokio::time::timeout(Duration::from_mins(1), done_rx.recv_async()).await;
         if wait_result.is_err() {
-            let remaining = pending_children.lock().map(|s| s.len()).unwrap_or(0);
+            let remaining = pending_children.lock().map_or(0, |s| s.len());
             total_events_missing.fetch_add(remaining as u64, Ordering::Relaxed);
         }
 

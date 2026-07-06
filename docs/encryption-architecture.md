@@ -16,18 +16,18 @@ Encrypts user-owned entity records with a user-provided passphrase. Keys exist o
 
 | Parameter | Value | Source |
 |-----------|-------|--------|
-| Algorithm | PBKDF2-HMAC-SHA256 | `vault_crypto.rs:29` |
-| Iterations | 600,000 | `vault_crypto.rs:16` |
-| Salt | 32 bytes, random, per-user | `vault_crypto.rs:14` |
-| Output | 256-bit AES-256-GCM key | `vault_crypto.rs:13,42` |
+| Algorithm | PBKDF2-HMAC-SHA256 | `crypto.rs:29` |
+| Iterations | 600,000 | `crypto.rs:16` |
+| Salt | 32 bytes, random, per-user | `crypto.rs:14` |
+| Output | 256-bit AES-256-GCM key | `crypto.rs:13,43` |
 
 The derived key is stored in a `VaultKeyStore` as `Zeroizing<Vec<u8>>` — memory is overwritten with zeros on drop. No key material is ever written to disk.
 
 ### Passphrase Verification
 
-A check token is created by encrypting the constant `b"mqdb-vault-check-v1"` with the derived key (`vault_crypto.rs:17,87-88`). On unlock, the system re-derives the key and attempts to decrypt the stored check token. If the plaintext matches, the passphrase is correct. No plaintext passphrase or hash is stored.
+A check token is created by encrypting the constant `b"mqdb-vault-check-v1"` with the derived key (`crypto.rs:17,87-88`). On unlock, the system re-derives the key and attempts to decrypt the stored check token. If the plaintext matches, the passphrase is correct. No plaintext passphrase or hash is stored.
 
-Unlock attempts are rate-limited to 5 per user per minute (`agent.rs:330`, `rate_limiter.rs:9`).
+Unlock attempts are rate-limited to 5 per user per minute, shared across both the MQTT and HTTP paths (`crates/mqdb-vault/src/backend.rs`, `crates/mqdb-cli/src/commands/agent.rs`).
 
 ### Field-Level Encryption
 
@@ -35,20 +35,20 @@ Vault encryption operates at the JSON field level, recursively encrypting every 
 
 **Per-field encryption:**
 
-1. Generate a random 12-byte nonce (`vault_crypto.rs:209-212`)
-2. For non-string values (numbers, booleans, null), prepend `\x01` before encryption (`vault_crypto.rs:146-151`). On decryption, the prefix signals that the plaintext should be parsed back to its original JSON type (`vault_crypto.rs:176-180`)
-3. Construct AAD as `"{entity}:{record_id}"` (`vault_crypto.rs:216-217`). This binds ciphertext to a specific record, preventing copy-paste attacks between records
+1. Generate a random 12-byte nonce (`crypto.rs:210-213`)
+2. For non-string values (numbers, booleans, null), prepend `\x01` before encryption (`crypto.rs:147`). On decryption, the prefix signals that the plaintext should be parsed back to its original JSON type (`crypto.rs:176`)
+3. Construct AAD as `"{entity}:{record_id}"` (`crypto.rs:216-217`). This binds ciphertext to a specific record, preventing copy-paste attacks between records
 4. Encrypt with AES-256-GCM, producing ciphertext + 16-byte authentication tag
-5. Store as `base64(nonce || ciphertext || tag)` (`vault_crypto.rs:218-229`)
+5. Store as `base64(nonce || ciphertext || tag)` (`crypto.rs:225-226`)
 
-**Recursive traversal** (`vault_transform.rs:59-89`):
+**Recursive traversal** (`transform.rs`):
 
 - String leaf values: encrypted
 - Number/bool/null leaf values: encrypted with `\x01` type prefix
 - Objects: recurse into each field
 - Arrays: recurse into each element
 
-**Skipped fields** (`vault_transform.rs:14-25`):
+**Skipped fields** (`transform.rs:14-24`):
 
 - `id` (top-level): needed for routing
 - Owner field (top-level): needed for access control
@@ -105,10 +105,10 @@ For passphrase changes, the old salt and old check token are persisted as `vault
 
 ### Write Fences
 
-Batch operations must not interleave with concurrent MQTT operations on the same user's data. A per-user `RwLock` fence prevents this (`vault_keys.rs:58-83`):
+Batch operations must not interleave with concurrent MQTT operations on the same user's data. A per-user `RwLock` fence prevents this (`key_store.rs:50-80`):
 
 - Batch operations acquire an **exclusive write fence** (`acquire_fence`)
-- MQTT handlers acquire a **shared read fence** (`read_fence`) before processing vault-eligible requests (`handlers.rs:102-104`)
+- MQTT handlers acquire a **shared read fence** (`read_fence`) before processing vault-eligible requests
 - While a batch holds the write fence, all MQTT operations for that user block until the batch completes
 
 This guarantees clients never observe a mixed state (some fields encrypted, others plaintext).
@@ -239,10 +239,10 @@ With 600,000 PBKDF2 iterations (~5 guesses/second/core):
 
 | Component | File |
 |-----------|------|
-| Vault crypto primitives | `crates/mqdb-agent/src/http/vault_crypto.rs` |
-| Field encrypt/decrypt helpers | `crates/mqdb-agent/src/vault_transform.rs` |
+| Vault crypto primitives | `crates/mqdb-vault/src/crypto.rs` |
+| Field encrypt/decrypt helpers | `crates/mqdb-vault/src/transform.rs` |
 | Identity crypto | `crates/mqdb-agent/src/http/identity_crypto.rs` |
-| Key store (memory + fences) | `crates/mqdb-core/src/vault_keys.rs` |
+| Key store (memory + fences) | `crates/mqdb-vault/src/key_store.rs` |
 | Agent MQTT handler integration | `crates/mqdb-agent/src/agent/handlers.rs` |
 | Agent HTTP vault endpoints | `crates/mqdb-agent/src/http/handlers.rs` |
 | Cluster field encryption | `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` |

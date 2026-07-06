@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for vault transparent encryption. Assumes an agent started per 01-setup and an Enterprise license.
+
 ## 25. Vault Encryption Testing
 
 ### Prerequisites

@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for basic CRUD operations and output formats. Assumes an agent started per 01-setup.
+
 ## 2. Basic CRUD Operations
 
 > **Note:** These examples assume the agent started in Section 1 with `--passwd`. All commands

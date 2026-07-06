@@ -395,6 +395,26 @@ async fn admin_unlock_skips_re_encrypt_when_records_already_rotated() {
     assert_eq!(decrypted["body"], "secret");
 }
 
+async fn read_decrypted(
+    db: &Database,
+    backend: &VaultBackendImpl,
+    ownership: &OwnershipConfig,
+    id: &str,
+) -> serde_json::Value {
+    let stored = db
+        .read("notes".to_string(), id.to_string(), vec![], None)
+        .await
+        .expect("read");
+    let mut resp = Response::Ok { data: stored };
+    backend
+        .decrypt_response("notes", DbOp::Read, ownership, Some("u1"), &mut resp)
+        .await;
+    let Response::Ok { data } = resp else {
+        panic!("expected Ok");
+    };
+    data
+}
+
 #[tokio::test]
 async fn admin_unlock_resume_strands_unrotated_records_after_mid_batch_crash() {
     use base64::Engine as _;
@@ -478,59 +498,13 @@ async fn admin_unlock_resume_strands_unrotated_records_after_mid_batch_crash() {
         "resume must clear the pending marker"
     );
 
-    let rotated_stored = db
-        .read(
-            "notes".to_string(),
-            "note-rotated".to_string(),
-            vec![],
-            None,
-        )
-        .await
-        .expect("read rotated");
-    let mut rotated_resp = Response::Ok {
-        data: rotated_stored,
-    };
-    backend
-        .decrypt_response(
-            "notes",
-            DbOp::Read,
-            &ownership,
-            Some("u1"),
-            &mut rotated_resp,
-        )
-        .await;
-    let Response::Ok { data: rotated_dec } = rotated_resp else {
-        panic!("expected Ok");
-    };
+    let rotated_dec = read_decrypted(&db, &backend, &ownership, "note-rotated").await;
     assert_eq!(
         rotated_dec["title"], "rotated",
         "already-rotated record must stay readable under the new key, not be double-encrypted"
     );
 
-    let stranded_stored = db
-        .read(
-            "notes".to_string(),
-            "note-stranded".to_string(),
-            vec![],
-            None,
-        )
-        .await
-        .expect("read stranded");
-    let mut stranded_resp = Response::Ok {
-        data: stranded_stored,
-    };
-    backend
-        .decrypt_response(
-            "notes",
-            DbOp::Read,
-            &ownership,
-            Some("u1"),
-            &mut stranded_resp,
-        )
-        .await;
-    let Response::Ok { data: stranded_dec } = stranded_resp else {
-        panic!("expected Ok");
-    };
+    let stranded_dec = read_decrypted(&db, &backend, &ownership, "note-stranded").await;
     assert_ne!(
         stranded_dec["title"], "stranded",
         "records left under the old key by a mid-batch crash are unrecoverable after resume"

@@ -232,7 +232,7 @@ async fn mqtt_lwt_death_detection() {
     dying_node.disconnect_abnormally().await.unwrap();
     drop(dying_node);
 
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     assert!(
         death_notice_received.load(Ordering::SeqCst),

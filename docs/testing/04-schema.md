@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for schema management and constraints (unique, foreign key, not-null, cascade). Assumes an agent started per 01-setup.
+
 ## 4. Schema Management
 
 ### Create Schema File

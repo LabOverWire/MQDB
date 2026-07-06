@@ -1,13 +1,14 @@
 # Diagram Sharing
 
+> **STATUS: Phases 1-3 IMPLEMENTED (agent mode); Phase 4 (public/anon) and cluster parity PENDING.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`. No public/anonymous sharing and no cluster-mode implementation exist yet.
+
 Let a diagram owner grant other users **view** or **edit** access to a diagram and
 the diagrams it references, share a diagram **publicly** by link, and have all of
 this hold consistently across CRUD, child entities (nodes/edges/topics), and the
 live event stream — under a threat model where authenticated users are **mutually
 untrusting tenants** (Alice must not see Bob's data).
 
-This supersedes the "Sharing (future)" note in `frontend-ownership.md` and also
-corrects several stale claims in that doc (flagged inline). It is designed
+This supersedes the "Sharing (future)" note in `frontend-ownership.md`. It is designed
 generically for any ownership-enabled entity, with `diagrams` as the running
 example.
 
@@ -42,7 +43,7 @@ this work.
 | Area | Reality in code | Source |
 |------|-----------------|--------|
 | Ownership config | per-entity `--ownership diagrams=userId`, single owner field | `mqdb-core/src/types.rs:75` |
-| Read | **ownership-enforced** (403 for non-owner) — *`frontend-ownership.md:29` wrongly says unrestricted* | `transport_execute.rs:72-79` |
+| Read | **ownership-enforced** (403 for non-owner) | `transport_execute.rs:72-79` |
 | Update | owner-checked; owner field stripped from payload | `transport_execute.rs:90-101` |
 | Delete | owner-checked | `transport_execute.rs:122-129` |
 | List | injects mandatory `owner_field = sender` (single AND filter; no OR/contains) | `transport_execute.rs:156-166` |

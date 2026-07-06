@@ -2,6 +2,8 @@
 
 [Back to index](README.md)
 
+Manual tests for OAuth/identity HTTP endpoints, email verification, and admin MQTT endpoints. Assumes an agent started per 01-setup with `--http-bind` and OAuth configured.
+
 ## 26. OAuth/Identity HTTP Endpoints
 
 The HTTP server provides OAuth 2.0 login, session management, and identity linking.

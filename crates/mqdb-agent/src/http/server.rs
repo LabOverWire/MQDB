@@ -426,7 +426,7 @@ async fn spawn_receipt_handler(state: Arc<ServerState>) {
 
 fn spawn_challenge_cleanup(state: Arc<ServerState>) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        let mut interval = tokio::time::interval(std::time::Duration::from_mins(5));
         loop {
             interval.tick().await;
             handlers::cleanup_expired_challenges(&state).await;

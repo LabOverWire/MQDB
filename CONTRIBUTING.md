@@ -13,7 +13,7 @@ Thank you for your interest in contributing to MQDB. This document explains how 
 
 All contributors must sign our [Contributor License Agreement](CLA.md) before any pull request can be merged. This is required even for small changes.
 
-**Why?** The CLA grants LabOverWire the rights needed to distribute MQDB under both the AGPL-3.0 open source license and commercial licenses. Without it, we cannot accept your contribution.
+**Why?** MQDB ships under a per-crate license split: `mqdb-core`, `mqdb-agent`, and `mqdb-wasm` are Apache-2.0, while `mqdb-vault`, `mqdb-cluster`, and `mqdb-cli` are AGPL-3.0-only. The CLA grants LabOverWire the rights needed to distribute your contribution under whichever of these licenses applies, and under commercial licenses. Without it, we cannot accept your contribution.
 
 **How to sign:**
 - First-time contributors: add your name to the signature table in [CLA.md](CLA.md), or

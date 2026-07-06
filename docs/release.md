@@ -1,70 +1,38 @@
 # MQDB Release Guide
 
+How maintainers cut and publish an MQDB release.
+
 ## Prerequisites
 
 - All tests pass: `cargo make test`
 - All lints pass: `cargo make clippy`
-- Changelog updated (if applicable)
 
-## mqtt-lib Dependency Patches
+## Process
 
-The `Cargo.toml` contains local path patches for rapid development iteration:
+Releases are triggered by pushing a `v*` tag. The tag **must** equal the
+`mqdb-cli` version — `.github/workflows/release.yml` verifies that
+`TAG == mqdb-cli version` and fails the run otherwise. Bump `mqdb-cli` first,
+even if only another crate changed.
 
-```toml
-[patch.crates-io]
-mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }
-mqtt5-protocol = { path = "../mqtt-lib/crates/mqtt5-protocol" }
-```
+1. [ ] Bump the version in `crates/mqdb-cli/Cargo.toml` **first**. Bump any other
+       crates being released (`mqdb-core`, `mqdb-agent`, `mqdb-wasm`) as needed.
+2. [ ] Add a dated `CHANGELOG.md` heading listing the released crate versions:
+       `## YYYY-MM-DD — mqdb-cli <ver>[, mqdb-core <ver>, ...]`. The heading must
+       list `mqdb-cli <tag>` — CI anchors the release notes on it.
+3. [ ] Run `cargo make ci` (format-check + clippy + test).
+4. [ ] Commit, then create and push the tag: `git tag v<mqdb-cli-version>` and
+       `git push origin v<mqdb-cli-version>`.
 
-These patches override the crates.io dependencies with local copies, which is useful during development but prevents reproducible builds.
+## What CI does
 
-### For Reproducible Release Builds
+On the pushed `v*` tag, `release.yml` runs three jobs:
 
-**Option 1: Comment out patches (recommended)**
-
-```toml
-# [patch.crates-io]
-# mqtt5 = { path = "../mqtt-lib/crates/mqtt5" }
-# mqtt5-protocol = { path = "../mqtt-lib/crates/mqtt5-protocol" }
-```
-
-**Option 2: Remove patches entirely**
-
-Delete the `[patch.crates-io]` section from Cargo.toml.
-
-After either option, run:
-```bash
-cargo update -p mqtt5 -p mqtt5-protocol
-cargo make ci
-```
-
-### Version Pinning
-
-For strict version control in releases, use exact versions:
-
-```toml
-mqtt5 = { version = "=0.22.0", optional = true }
-```
-
-## Release Checklist
-
-1. [ ] Update version in `Cargo.toml`
-2. [ ] Remove or comment out `[patch.crates-io]` section
-3. [ ] Run `cargo update -p mqtt5 -p mqtt5-protocol`
-4. [ ] Run `cargo make ci` (format-check + clippy + test)
-5. [ ] Build release binary: `cargo make build-release`
-6. [ ] Test release binary manually
-7. [ ] Create git tag: `git tag -a v0.X.Y -m "Release 0.X.Y"`
-8. [ ] Push tag: `git push origin v0.X.Y`
-9. [ ] Restore patches for continued development (if desired)
-
-## Published Crate Versions
-
-The mqtt-lib crates are published to crates.io:
-
-| Crate | Version | Published |
-|-------|---------|-----------|
-| mqtt5 | 0.22.0 | March 2025 |
-| mqtt5-protocol | 0.9.4 | March 2025 |
-
-These are the versions that will be used when patches are removed.
+1. **Publish to crates.io** — verifies the tag matches the `mqdb-cli` version,
+   then publishes `mqdb-core`, `mqdb-agent`, and `mqdb-wasm` (each
+   `|| echo "already published"`, so re-runs are safe).
+2. **Build binaries** — cross-builds four platform binaries with
+   `cargo build --profile dist --package mqdb-cli --no-default-features
+   --features http-api`: linux-amd64, macos-amd64, macos-arm64, windows-amd64.
+3. **Create GitHub release** — extracts the release body from `CHANGELOG.md` by
+   matching the dated heading that lists `mqdb-cli <tag>`, then attaches the four
+   binaries to the release.

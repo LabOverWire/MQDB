@@ -719,6 +719,7 @@ mod concurrency_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_updates_to_distinct_fields_all_converge() {
+        const WRITERS: usize = 16;
         let (_tmp, db) = test_db().await;
         let scope = ScopeConfig::default();
         db.create(
@@ -732,7 +733,6 @@ mod concurrency_tests {
         .await
         .unwrap();
 
-        const WRITERS: usize = 16;
         let mut handles = Vec::with_capacity(WRITERS);
         for i in 0..WRITERS {
             let db = Arc::clone(&db);
@@ -780,13 +780,13 @@ mod concurrency_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_delete_and_update_leave_no_stale_index() {
+        const ROUNDS: usize = 200;
         let (_tmp, db) = test_db().await;
         let scope = ScopeConfig::default();
         db.add_index("item".to_string(), vec!["tag".to_string()])
             .await
             .unwrap();
 
-        const ROUNDS: usize = 200;
         for round in 0..ROUNDS {
             let id = format!("i{round}");
             db.create(

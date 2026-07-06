@@ -2,7 +2,7 @@
 
 > **Living Document** - Updated iteratively with code verification.
 > Every claim has file:line references. When in doubt, verify against code.
-> Last verified: January 2026 (all milestones M1-M10 complete, Direct QUIC transport added)
+> Last verified: 2026-07 (all milestones M1-M11 complete, Direct QUIC transport is the default)
 >
 > **Note:** Clustering requires the `cluster` feature on the `mqdb` CLI (enabled by default; see `crates/mqdb-cli/Cargo.toml`). Builds with `--no-default-features` exclude all cluster code. Shared types (partitions, IDs) live in `crates/mqdb-core/src/partition/` and compile unconditionally.
 
@@ -346,9 +346,11 @@ Retained Message Queries:
 
 ## A6: Transport Layer Design
 
-### A6.1 Why MQTT Bridges?
+> **Deprecation banner**: Sections A6.1–A6.4 describe the legacy MQTT-bridge transport, which is deprecated. The actual default transport is **Direct QUIC**, documented in A6.5. Read A6.5 first; A6.1–A6.4 are retained for historical reference only.
 
-MQDB uses MQTT as the cluster communication substrate rather than custom RPC:
+### A6.1 Why MQTT Bridges? (deprecated)
+
+MQDB originally used MQTT as the cluster communication substrate rather than custom RPC:
 
 - **Reuses existing infrastructure**: The embedded MQTT broker already handles messaging
 - **Topic-based routing**: Natural fit for partition-specific traffic
@@ -376,17 +378,17 @@ All callers properly `await` transport operations. No fire-and-forget spawning�
 
 ### A6.2 Topic Namespaces
 
-Five topic namespaces structure MQDB communication:
+Seven topic namespaces structure MQDB communication:
 
-| Prefix | Purpose | QoS | Bridged |
-|--------|---------|-----|---------|
-| `_mqdb/cluster/` | Control messages, heartbeats, Raft | 1 | Yes |
-| `_mqdb/repl/` | Partition replication | 1 | Yes |
-| `_mqdb/forward/` | Message forwarding to subscribers | 1 | Yes |
-| `_mqdb/scatter/` | Distributed query scatter responses | 1 | Yes |
-| `_mqdb/http_resp/` | HTTP handler request-response | 1 | No (local) |
-| `$DB/` | Database operations | 2 | Yes |
-| `$SYS/` | Admin operations (rebalance, status) | 1 | No (local, AdminRequired for `$SYS/mqdb/cluster/#`) |
+| Prefix | Purpose | QoS |
+|--------|---------|-----|
+| `_mqdb/cluster/` | Control messages, heartbeats, Raft | 1 |
+| `_mqdb/repl/` | Partition replication | 1 |
+| `_mqdb/forward/` | Message forwarding to subscribers | 1 |
+| `_mqdb/scatter/` | Distributed query scatter responses | 1 |
+| `_mqdb/http_resp/` | HTTP handler request-response (local) | 1 |
+| `$DB/` | Database operations | 2 |
+| `$SYS/` | Admin operations (rebalance, status; AdminRequired for `$SYS/mqdb/cluster/#`) | 1 |
 
 **Detailed topic patterns** (`mqtt_transport.rs:107-163`):
 
@@ -435,7 +437,7 @@ Five topic namespaces structure MQDB communication:
 | `$DB/_sub/{sub_id}/heartbeat` | Keep subscription alive |
 | `$DB/_sub/{sub_id}/unsubscribe` | Remove subscription |
 
-*Admin patterns* (`bin/mqdb.rs`):
+*Admin patterns* (`crates/mqdb-cli/src/main.rs`):
 
 | Pattern | Purpose |
 |---------|---------|
@@ -466,7 +468,7 @@ Each node creates N-1 outbound bridges (one per peer). Messages flow bidirection
 - `clean_start = false`: Preserve session across reconnects
 - Topics: `_mqdb/cluster/#`, `_mqdb/forward/#`, `_mqdb/repl/#`, `$DB/#`
 
-**QUIC stream caching** (`quic_stream_manager.rs`): With `DataPerTopic` strategy, streams are cached per topic for reuse. When cache reaches 100 streams (hardcoded default), LRU eviction closes the oldest stream. This is a **performance optimization**, not a limit—unlimited topics are supported, they just share cached streams via eviction.
+**QUIC stream caching**: With `DataPerTopic` strategy, streams are cached per topic for reuse. When cache reaches 100 streams (hardcoded default), LRU eviction closes the oldest stream. This is a **performance optimization**, not a limit—unlimited topics are supported, they just share cached streams via eviction.
 
 **Bridge Overhead Trade-off**: Each bridge creates bidirectional MQTT connections that share the broker's event loop with client connections. More bridges enable direct routing (e.g., Node 2 → Node 3) but degrade local DB performance:
 
@@ -974,10 +976,9 @@ Each node can be:
 
 ### 1.6 Inter-Node Communication
 
-- **MQTT Bridges** connect nodes (not direct TCP sockets)
-- Bridges subscribe to cluster topics on remote nodes
-- All cluster messages flow through MQTT publish/subscribe
-- Topic prefixes (`crates/mqdb-cluster/src/cluster/mqtt_transport.rs:19-21`):
+- **Direct QUIC** is the default transport: nodes exchange cluster messages over dedicated QUIC streams, bypassing the MQTT broker (see A6.5).
+- **MQTT bridges** are deprecated/legacy and retained only for historical reference.
+- Legacy bridge topic prefixes (`crates/mqdb-cluster/src/cluster/mqtt_transport.rs:19-21`):
   ```rust
   const CLUSTER_TOPIC_PREFIX: &str = "_mqdb/cluster";
   const REPLICATION_TOPIC_PREFIX: &str = "_mqdb/repl";
@@ -2359,8 +2360,6 @@ The following are implemented but documented in other files:
 
 The following sections may need documentation:
 
-- Performance tuning and benchmarks
-- Security model and authentication
 - Monitoring and observability
 - Operational runbooks
 - Capacity planning guidelines
@@ -2383,32 +2382,31 @@ The following sections may need documentation:
 | `crates/mqdb-cluster/src/cluster/store_manager/constraint_ops.rs` | FK reverse index integration, rebuild on constraint add |
 | `crates/mqdb-cluster/src/cluster/store_manager/outbox.rs` | CascadeOutboxPayload, CascadeRemoteOp, _cascade/ prefix |
 | `crates/mqdb-cluster/src/cluster/db/data_store.rs` | FkReverseIndex in-memory data structure |
-| `crates/mqdb-cluster/src/cluster/node_controller.rs` | Main cluster controller, message handling |
+| `crates/mqdb-cluster/src/cluster/node_controller/mod.rs` | Main cluster controller, message handling |
 | `crates/mqdb-cluster/src/cluster/heartbeat.rs` | Heartbeat management, node status |
-| `crates/mqdb-cluster/src/cluster/partition_map.rs` | Partition assignments |
+| `crates/mqdb-core/src/partition/map.rs` | Partition assignments (`PartitionMap`) |
 | `crates/mqdb-cluster/src/cluster/mqtt_transport.rs` | MQTT-based cluster transport |
 | `crates/mqdb-cluster/src/cluster/quic_transport.rs` | Direct QUIC transport (bypasses MQTT bridges) |
 | `crates/mqdb-cluster/src/cluster/message_processor.rs` | Message classification and heartbeat offloading |
 | `crates/mqdb-cluster/src/cluster/dedicated_executor.rs` | Isolated Tokio runtime for blocking tasks |
-| `crates/mqdb-cluster/src/cluster/raft/coordinator.rs` | Raft consensus coordinator |
+| `crates/mqdb-cluster/src/cluster/raft/coordinator/mod.rs` | Raft consensus coordinator |
 | `crates/mqdb-cluster/src/cluster/raft/node.rs` | Raft node state machine |
 | `crates/mqdb-cluster/src/cluster/raft/state.rs` | Raft state and commands |
 | `crates/mqdb-cluster/src/cluster/topic_index.rs` | Topic → subscriber mapping |
 | `crates/mqdb-cluster/src/cluster/topic_trie.rs` | Wildcard subscription trie |
 | `crates/mqdb-cluster/src/cluster/wildcard_store.rs` | Wildcard store wrapper |
 | `crates/mqdb-cluster/src/cluster/client_location.rs` | Client → connected node mapping |
-| `crates/mqdb-cluster/src/cluster/event_handler.rs` | MQTT event hooks for cluster |
+| `crates/mqdb-cluster/src/cluster/event_handler/mod.rs` | MQTT event hooks for cluster |
 | `crates/mqdb-cluster/src/cluster/session.rs` | SessionData structure and store |
-| `crates/mqdb-cluster/src/cluster/store_manager.rs` | All entity stores coordination |
-| `crates/mqdb-cluster/src/cluster/protocol.rs` | Message definitions (BeBytes) |
+| `crates/mqdb-cluster/src/cluster/store_manager/mod.rs` | All entity stores coordination |
+| `crates/mqdb-cluster/src/cluster/protocol/mod.rs` | Message definitions (BeBytes) |
 | `crates/mqdb-cluster/src/cluster/snapshot.rs` | Snapshot transfer protocol |
 | `crates/mqdb-cluster/src/cluster/inflight_store.rs` | QoS 1 inflight tracking |
 | `crates/mqdb-cluster/src/cluster/qos2_store.rs` | QoS 2 state machine |
 | `crates/mqdb-cluster/src/cluster/retained_store.rs` | Retained message store |
 | `crates/mqdb-cluster/src/cluster/entity.rs` | Entity name constants |
-| `crates/mqdb-cluster/src/cluster/node.rs` | NodeId type |
-| `crates/mqdb-cluster/src/cluster/partition.rs` | PartitionId type, NUM_PARTITIONS |
-| `crates/mqdb-cluster/src/cluster/epoch.rs` | Epoch type |
+| `crates/mqdb-core/src/partition/types.rs` | NodeId, Epoch, PartitionId types, NUM_PARTITIONS |
+| `crates/mqdb-core/src/partition/functions.rs` | Partition hashing functions |
 | `crates/mqdb-cluster/src/cluster_agent/mod.rs` | Cluster node startup |
 | `crates/mqdb-cli/src/main.rs` | CLI entry point |
 

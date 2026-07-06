@@ -24,8 +24,7 @@ impl ClientLocationEntry {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_millis() as u64);
         let client_bytes = client_id.as_bytes().to_vec();
         Self {
             version: 2,
