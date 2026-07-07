@@ -81,6 +81,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     super::super::db::ReserveResult::Reserved => {
                         if let Some(w) = write {
                             self.write_or_forward(w).await;
+                            self.sync_unique_write();
                         }
                         local_reserved.push((field.clone(), value));
                         false
@@ -220,6 +221,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .unique_commit_replicated(entity, field, &value, request_id)
                 {
                     self.write_or_forward(w).await;
+                    self.sync_unique_write();
                 }
             } else if let Some(target_node) = primary {
                 self.send_unique_commit_fire_and_forget(
@@ -299,6 +301,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .unique_reserve_replicated(&reserve_params, Self::current_time_ms());
             if let Some(w) = write {
                 self.write_or_forward(w).await;
+                self.sync_unique_write();
             }
             match result {
                 super::super::db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
@@ -334,6 +337,7 @@ impl<T: ClusterTransport> NodeController<T> {
             {
                 Ok((_, w)) => {
                     self.write_or_forward(w).await;
+                    self.sync_unique_write();
                     true
                 }
                 Err(super::super::db::UniqueStoreError::AlreadyCommitted) => true,
@@ -372,6 +376,14 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn allocate_unique_request_id(&self) -> u64 {
         self.pending_constraints.allocate_unique_id()
+    }
+
+    /// Durably fsync a just-written unique reservation/commit so it survives a crash
+    /// before the operation is acknowledged.
+    fn sync_unique_write(&self) {
+        if let Err(e) = self.stores.sync_storage() {
+            tracing::warn!(error = ?e, "failed to sync unique write");
+        }
     }
 
     pub(crate) async fn send_unique_reserve_request_async(

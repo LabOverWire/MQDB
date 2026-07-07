@@ -117,6 +117,10 @@ impl StorageBackend for EncryptedBackend {
     fn flush(&self) -> Result<()> {
         self.inner.flush()
     }
+
+    fn sync(&self) -> Result<()> {
+        self.inner.sync()
+    }
 }
 
 struct EncryptedBatch {

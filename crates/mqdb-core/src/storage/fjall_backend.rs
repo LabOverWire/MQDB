@@ -140,6 +140,11 @@ impl StorageBackend for FjallBackend {
     fn flush(&self) -> Result<()> {
         self.sync_if_needed()
     }
+
+    fn sync(&self) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
 }
 
 enum BatchOp {

@@ -1152,9 +1152,16 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::UniqueCommitRequest(req) => {
                 self.handle_unique_commit_request(from, req).await;
             }
+            ClusterMessage::UniqueCommitResponse(resp) if resp.success == 0 => {
+                tracing::warn!(
+                    request_id = resp.request_id,
+                    "unique commit not acknowledged; reconciler will repair"
+                );
+            }
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
             }
+            ClusterMessage::UniqueReleaseResponse(_resp) => {}
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;
             }

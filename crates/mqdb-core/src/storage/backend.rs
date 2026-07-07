@@ -70,6 +70,16 @@ pub trait StorageBackend: Send + Sync {
     /// # Errors
     /// Returns an error if the flush operation fails.
     fn flush(&self) -> Result<()>;
+
+    /// Durably persists pending writes (fsync), unconditionally — independent of the
+    /// configured durability mode. Used for correctness-critical writes that must survive
+    /// a crash before the operation is acknowledged.
+    ///
+    /// # Errors
+    /// Returns an error if the sync operation fails.
+    fn sync(&self) -> Result<()> {
+        self.flush()
+    }
 }
 
 /// Batch operations for atomic writes.

@@ -128,6 +128,14 @@ impl Storage {
     pub fn flush(&self) -> Result<()> {
         self.backend.flush()
     }
+
+    /// Durably persists pending writes (fsync), independent of the durability mode.
+    ///
+    /// # Errors
+    /// Returns an error if the sync operation fails.
+    pub fn sync(&self) -> Result<()> {
+        self.backend.sync()
+    }
 }
 
 pub struct BatchWriter {
