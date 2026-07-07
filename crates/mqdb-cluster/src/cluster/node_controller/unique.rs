@@ -294,9 +294,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 data_partition,
                 ttl_ms: req.ttl_ms,
             };
-            let result = self
+            let (result, write) = self
                 .stores
-                .unique_reserve(&reserve_params, Self::current_time_ms());
+                .unique_reserve_replicated(&reserve_params, Self::current_time_ms());
+            if let Some(w) = write {
+                self.write_or_forward(w).await;
+            }
             match result {
                 super::super::db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
                 super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
@@ -324,11 +327,20 @@ impl<T: ClusterTransport> NodeController<T> {
         let field = req.field_str();
         let idempotency_key = req.idempotency_key_str();
 
-        let _ = self
-            .stores
-            .unique_commit(entity, field, &req.value, idempotency_key);
+        let committed =
+            match self
+                .stores
+                .unique_commit_replicated(entity, field, &req.value, idempotency_key)
+            {
+                Ok((_, w)) => {
+                    self.write_or_forward(w).await;
+                    true
+                }
+                Err(super::super::db::UniqueStoreError::AlreadyCommitted) => true,
+                Err(_) => false,
+            };
 
-        let response = super::UniqueCommitResponse::create(req.request_id, true);
+        let response = super::UniqueCommitResponse::create(req.request_id, committed);
         let _ = self
             .transport
             .send(from, ClusterMessage::UniqueCommitResponse(response))
@@ -344,9 +356,12 @@ impl<T: ClusterTransport> NodeController<T> {
         let field = req.field_str();
         let idempotency_key = req.idempotency_key_str();
 
-        let _ = self
-            .stores
-            .unique_release(entity, field, &req.value, idempotency_key);
+        if let Some(w) =
+            self.stores
+                .unique_release_replicated(entity, field, &req.value, idempotency_key)
+        {
+            self.write_or_forward(w).await;
+        }
 
         let response = super::UniqueReleaseResponse::create(req.request_id, true);
         let _ = self
