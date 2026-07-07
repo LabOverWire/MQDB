@@ -83,6 +83,9 @@ pub trait BatchOperations: Send {
     /// Sets an expected value for optimistic concurrency.
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>);
 
+    /// Requires that `key` is absent at commit time (compare-and-set on absence).
+    fn expect_absent(&mut self, key: Vec<u8>);
+
     /// Commits all queued operations atomically.
     ///
     /// # Errors

@@ -215,7 +215,7 @@ impl ConstraintManager {
     pub fn validate_create(
         &self,
         entity: &Entity,
-        _batch: &mut BatchWriter,
+        batch: &mut BatchWriter,
         storage: &Storage,
     ) -> Result<()> {
         let constraints = self.get_constraints(&entity.name);
@@ -223,7 +223,10 @@ impl ConstraintManager {
         for constraint in constraints {
             match constraint {
                 Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
-                Constraint::Unique(c) => Self::validate_unique(entity, c, storage)?,
+                Constraint::Unique(c) => {
+                    Self::validate_unique(entity, c, storage)?;
+                    Self::stage_unique_guards(entity, c, batch)?;
+                }
                 Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
@@ -237,7 +240,7 @@ impl ConstraintManager {
         &self,
         entity: &Entity,
         old_entity: &Entity,
-        _batch: &mut BatchWriter,
+        batch: &mut BatchWriter,
         storage: &Storage,
     ) -> Result<()> {
         let constraints = self.get_constraints(&entity.name);
@@ -247,11 +250,79 @@ impl ConstraintManager {
                 Constraint::NotNull(c) => Self::validate_not_null(entity, c)?,
                 Constraint::Unique(c) => {
                     Self::validate_unique_update(entity, old_entity, c, storage)?;
+                    Self::stage_unique_guards_update(entity, old_entity, c, batch)?;
                 }
                 Constraint::ForeignKey(c) => Self::validate_foreign_key(entity, c, storage)?,
             }
         }
 
+        Ok(())
+    }
+
+    fn stage_unique_guards(
+        entity: &Entity,
+        constraint: &UniqueConstraint,
+        batch: &mut BatchWriter,
+    ) -> Result<()> {
+        for field in &constraint.fields {
+            if let Some(value) = entity.get_field(field) {
+                let value_bytes = keys::encode_value_for_index(value)?;
+                let guard = keys::encode_unique_guard_key(&entity.name, field, &value_bytes);
+                batch.expect_absent(guard.clone());
+                batch.insert(guard, entity.id.as_bytes().to_vec());
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_unique_guards_update(
+        entity: &Entity,
+        old_entity: &Entity,
+        constraint: &UniqueConstraint,
+        batch: &mut BatchWriter,
+    ) -> Result<()> {
+        for field in &constraint.fields {
+            let new_bytes = match entity.get_field(field) {
+                Some(v) => Some(keys::encode_value_for_index(v)?),
+                None => None,
+            };
+            let old_bytes = match old_entity.get_field(field) {
+                Some(v) => Some(keys::encode_value_for_index(v)?),
+                None => None,
+            };
+            if new_bytes == old_bytes {
+                continue;
+            }
+            if let Some(nb) = &new_bytes {
+                let guard_new = keys::encode_unique_guard_key(&entity.name, field, nb);
+                batch.expect_absent(guard_new.clone());
+                batch.insert(guard_new, entity.id.as_bytes().to_vec());
+            }
+            if let Some(ob) = &old_bytes {
+                let guard_old = keys::encode_unique_guard_key(&entity.name, field, ob);
+                batch.remove(guard_old);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stages removal of every unique-guard key owned by `entity` (for deletes).
+    ///
+    /// # Errors
+    /// Returns an error if a value fails index encoding.
+    pub fn release_unique_guards(&self, entity: &Entity, batch: &mut BatchWriter) -> Result<()> {
+        for constraint in self.get_constraints(&entity.name) {
+            if let Constraint::Unique(c) = constraint {
+                for field in &c.fields {
+                    if let Some(value) = entity.get_field(field) {
+                        let value_bytes = keys::encode_value_for_index(value)?;
+                        let guard =
+                            keys::encode_unique_guard_key(&entity.name, field, &value_bytes);
+                        batch.remove(guard);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

@@ -14,6 +14,19 @@ use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY};
 
 const MAX_WRITE_ATTEMPTS: u32 = 32;
 
+fn map_unique_guard_conflict(err: Error) -> Error {
+    if let Error::AbsentPreconditionViolated(ref key) = err
+        && let Some((entity, field, value_bytes)) = keys::decode_unique_guard_key(key)
+    {
+        return Error::UniqueViolation {
+            entity,
+            field,
+            value: String::from_utf8_lossy(&value_bytes).to_string(),
+        };
+    }
+    err
+}
+
 pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
     pub client_id: Option<&'a str>,
@@ -108,7 +121,7 @@ impl Database {
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
 
-        batch.commit()?;
+        batch.commit().map_err(map_unique_guard_conflict)?;
 
         self.dispatcher.dispatch(event).await?;
         self.outbox.mark_delivered(&operation_id)?;
@@ -277,7 +290,7 @@ impl Database {
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
 
-        batch.commit()?;
+        batch.commit().map_err(map_unique_guard_conflict)?;
 
         self.dispatcher.dispatch(event).await?;
         self.outbox.mark_delivered(&operation_id)?;
@@ -352,7 +365,6 @@ impl Database {
             &self.storage,
             ownership_ctx.as_ref(),
         )?;
-        drop(constraint_manager);
 
         let mut batch = self.storage.batch();
 
@@ -362,6 +374,8 @@ impl Database {
         let index_manager = self.index_manager.read().await;
         index_manager.remove_indexes(&mut batch, &existing_entity);
         drop(index_manager);
+
+        constraint_manager.release_unique_guards(&existing_entity, &mut batch)?;
 
         let mut deleted_entities: Vec<(String, String, Value)> = Vec::new();
         let mut set_null_entities: Vec<(String, String, Value)> = Vec::new();
@@ -383,6 +397,8 @@ impl Database {
                         index_manager.remove_indexes(&mut batch, &cascade_entity);
                         drop(index_manager);
 
+                        constraint_manager.release_unique_guards(&cascade_entity, &mut batch)?;
+
                         deleted_entities.push((
                             cascade_op.entity.clone(),
                             cascade_op.id.clone(),
@@ -400,6 +416,16 @@ impl Database {
                         )?;
 
                         let old_entity = entity.clone();
+
+                        if let Some(old_val) = old_entity.get_field(&set_null_op.field) {
+                            let value_bytes = mqdb_core::keys::encode_value_for_index(old_val)?;
+                            let guard = keys::encode_unique_guard_key(
+                                &set_null_op.entity,
+                                &set_null_op.field,
+                                &value_bytes,
+                            );
+                            batch.remove(guard);
+                        }
 
                         if let Some(obj) = entity.data.as_object_mut() {
                             obj.insert(set_null_op.field.clone(), serde_json::Value::Null);
@@ -428,6 +454,8 @@ impl Database {
                 }
             }
         }
+
+        drop(constraint_manager);
 
         let primary_scope = scope_config.resolve_scope(entity_name, &existing_entity.data);
         let mut events = vec![
@@ -715,6 +743,219 @@ mod concurrency_tests {
             .await
             .unwrap();
         (tmp, Arc::new(db))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_unique_create_never_oversells() {
+        use tokio::sync::Barrier;
+
+        const ROUNDS: usize = 200;
+        const WRITERS: usize = 8;
+
+        let (_tmp, db) = test_db().await;
+        db.add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await
+            .unwrap();
+
+        for round in 0..ROUNDS {
+            let seat = format!("SEAT{round}");
+            let barrier = Arc::new(Barrier::new(WRITERS));
+            let mut handles = Vec::with_capacity(WRITERS);
+
+            for writer in 0..WRITERS {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let seat = seat.clone();
+                handles.push(tokio::spawn(async move {
+                    let scope = ScopeConfig::default();
+                    let hold_id = format!("h{round}_{writer}");
+                    barrier.wait().await;
+                    db.create(
+                        "hold".to_string(),
+                        json!({ "id": hold_id, "seat_id": seat }),
+                        None,
+                        None,
+                        None,
+                        &scope,
+                    )
+                    .await
+                }));
+            }
+
+            let mut winners = 0usize;
+            for handle in handles {
+                if handle.await.unwrap().is_ok() {
+                    winners += 1;
+                }
+            }
+
+            let seat_bytes = keys::encode_value_for_index(&json!(seat)).unwrap();
+            let prefix = keys::encode_index_prefix("hold", "seat_id", Some(&seat_bytes));
+            let committed = db.storage.prefix_scan(&prefix).unwrap().len();
+            assert_eq!(
+                winners, 1,
+                "round {round}: {winners} winners on one seat (oversell)"
+            );
+            assert_eq!(
+                committed, 1,
+                "round {round}: {committed} index rows for {seat}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_unique_update_never_double_claims() {
+        use tokio::sync::Barrier;
+
+        const ROUNDS: usize = 200;
+
+        let (_tmp, db) = test_db().await;
+        db.add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await
+            .unwrap();
+        let scope = ScopeConfig::default();
+
+        for round in 0..ROUNDS {
+            for r in 0..2 {
+                db.create(
+                    "hold".to_string(),
+                    json!({ "id": format!("h{round}_{r}"), "seat_id": format!("INIT{round}_{r}") }),
+                    None,
+                    None,
+                    None,
+                    &scope,
+                )
+                .await
+                .unwrap();
+            }
+
+            let target = format!("SEAT{round}");
+            let barrier = Arc::new(Barrier::new(2));
+            let mut handles = Vec::with_capacity(2);
+            for r in 0..2 {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let target = target.clone();
+                handles.push(tokio::spawn(async move {
+                    let scope = ScopeConfig::default();
+                    let caller = CallerContext {
+                        sender: None,
+                        client_id: None,
+                        scope_config: &scope,
+                    };
+                    barrier.wait().await;
+                    db.update(
+                        "hold".to_string(),
+                        format!("h{round}_{r}"),
+                        json!({ "seat_id": target }),
+                        None,
+                        &caller,
+                    )
+                    .await
+                }));
+            }
+
+            let mut winners = 0usize;
+            for handle in handles {
+                if handle.await.unwrap().is_ok() {
+                    winners += 1;
+                }
+            }
+
+            let seat_bytes = keys::encode_value_for_index(&json!(target)).unwrap();
+            let prefix = keys::encode_index_prefix("hold", "seat_id", Some(&seat_bytes));
+            let committed = db.storage.prefix_scan(&prefix).unwrap().len();
+            assert_eq!(
+                winners, 1,
+                "round {round}: {winners} updates claimed the same value (double-claim)"
+            );
+            assert_eq!(
+                committed, 1,
+                "round {round}: {committed} records hold {target}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_releases_unique_guard() {
+        let (_tmp, db) = test_db().await;
+        db.add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await
+            .unwrap();
+        let scope = ScopeConfig::default();
+
+        db.create(
+            "hold".to_string(),
+            json!({ "id": "a", "seat_id": "S1" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let dup = db
+            .create(
+                "hold".to_string(),
+                json!({ "id": "b", "seat_id": "S1" }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await;
+        assert!(dup.is_err(), "duplicate unique value must be rejected");
+
+        let ownership = OwnershipConfig::default();
+        db.delete(
+            "hold".to_string(),
+            "a".to_string(),
+            None,
+            None,
+            &scope,
+            &ownership,
+        )
+        .await
+        .unwrap();
+
+        db.create(
+            "hold".to_string(),
+            json!({ "id": "c", "seat_id": "S1" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .expect("value must be reusable after the owner is deleted");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_unique_constraint_rejects_existing_duplicates() {
+        let (_tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+
+        for id in ["a", "b"] {
+            db.create(
+                "hold".to_string(),
+                json!({ "id": id, "seat_id": "S1" }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .unwrap();
+        }
+
+        let res = db
+            .add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await;
+        assert!(
+            res.is_err(),
+            "adding a unique constraint over existing duplicates must fail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

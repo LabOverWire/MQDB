@@ -147,6 +147,10 @@ impl BatchWriter {
         self.inner.expect_value(key, expected_value);
     }
 
+    pub fn expect_absent(&mut self, key: Vec<u8>) {
+        self.inner.expect_absent(key);
+    }
+
     /// Commits all queued operations atomically.
     ///
     /// # Errors

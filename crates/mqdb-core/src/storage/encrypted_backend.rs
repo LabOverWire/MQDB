@@ -142,6 +142,10 @@ impl BatchOperations for EncryptedBatch {
         self.pending_expects.push((key, expected_value));
     }
 
+    fn expect_absent(&mut self, key: Vec<u8>) {
+        self.inner.expect_absent(key);
+    }
+
     fn commit(mut self: Box<Self>) -> Result<()> {
         for (key, expected_plaintext) in &self.pending_expects {
             let stored = self.backend.get(key)?;

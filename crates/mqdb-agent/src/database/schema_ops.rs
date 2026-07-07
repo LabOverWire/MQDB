@@ -120,12 +120,35 @@ impl Database {
     #[tracing::instrument(skip(self), fields(entity = %entity))]
     pub async fn add_unique_constraint(&self, entity: String, fields: Vec<String>) -> Result<()> {
         use mqdb_core::constraint::{Constraint, UniqueConstraint};
+        use mqdb_core::error::Error;
+        use std::collections::HashSet;
 
         self.add_index(entity.clone(), fields.clone()).await?;
 
-        let constraint = Constraint::Unique(UniqueConstraint::new(entity, fields));
+        let constraint = Constraint::Unique(UniqueConstraint::new(entity.clone(), fields.clone()));
 
         let mut batch = self.storage.batch();
+
+        let prefix = keys::encode_data_key(&entity, "");
+        let mut seen: HashSet<Vec<u8>> = HashSet::new();
+        for (key, value) in self.storage.prefix_scan(&prefix)? {
+            let (_, id) = keys::decode_data_key(&key)?;
+            let record = Entity::deserialize(entity.clone(), id, &value)?;
+            for field in &fields {
+                if let Some(v) = record.get_field(field) {
+                    let value_bytes = keys::encode_value_for_index(v)?;
+                    let guard = keys::encode_unique_guard_key(&entity, field, &value_bytes);
+                    if !seen.insert(guard.clone()) {
+                        return Err(Error::UniqueViolation {
+                            entity: entity.clone(),
+                            field: field.clone(),
+                            value: String::from_utf8_lossy(&value_bytes).to_string(),
+                        });
+                    }
+                    batch.insert(guard, record.id.as_bytes().to_vec());
+                }
+            }
+        }
 
         let constraint_manager = self.constraint_manager.read().await;
         constraint_manager.persist_constraint(&mut batch, &constraint)?;
