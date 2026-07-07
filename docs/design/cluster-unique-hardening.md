@@ -144,6 +144,21 @@ durable and both acknowledged to clients. Deleting one is destructive and unsafe
 be **prevented** at reserve time by consensus — which is why Phase 2 (consensus reserve) is
 required for full correctness, and why quorum-over-RF=2 (Option B) is insufficient.
 
+**Modelled finding (`specs/ClusterUniqueReconciler.tla`): the reconciler's reclaim is itself a
+TOCTOU.** If it reclaims an uncommitted, record-less claim while the coordinator is *about to* write
+the record, a late unconditional write oversells (verified: `ClaimConditionalWrite=FALSE` → oversell
+in 5 steps). The reclaim is safe **iff** the record write is fenced against a reclaimed claim.
+Two ways to fence it:
+- **Phase 2 (hard):** the record write is claim-conditional — it verifies the claim still holds
+  (CAS) before persisting. Under this, even an aggressive reconciler holds `NoOversell` (verified,
+  56 states).
+- **Phase 1 (deadline discipline):** the reconciler reclaims **only** reservations expired past a
+  safety margin (reuse the existing `expires_at`), and the create flow must abort — never write the
+  record — once its reservation could have expired. This is safe under the operational assumption
+  that a coordinator stalled past the margin aborts; the residual adversarial-stall window is closed
+  by the Phase 2 claim-conditional write. The Phase 1 reconciler is therefore **deadline-gated, not
+  aggressive.**
+
 ## 6. Component change map
 
 | Component | File | Change |
@@ -181,9 +196,12 @@ required for full correctness, and why quorum-over-RF=2 (Option B) is insufficie
   (superseded primary accepts at a stale epoch), no-majority (non-intersecting quorums). All three
   pillars are independently load-bearing and jointly sufficient. Option C thus equals the verified
   target (`ClusterUniqueFix`) with no per-create Raft.
-- Extend `ClusterUniqueQuorum.tla` toward implementation: model the reconciler's record-existence
-  check explicitly, and (optional) liveness under eventual stability (progress requires a period
-  without primary churn — the standard consensus caveat).
+- **Reconciler modelled** in `specs/ClusterUniqueReconciler.tla`: an aggressive reconciler holds
+  `NoOversell` iff the record write is claim-conditional (`ClaimConditionalWrite=TRUE` → 56 states
+  ok; `FALSE` → oversell). Drives the Phase 1 deadline-gated reclaim vs Phase 2 claim-conditional
+  write decision (see §5).
+- (Optional) liveness under eventual stability (progress requires a period without primary churn —
+  the standard consensus caveat).
 - Extend the fix model to make the reconciler's record-existence check explicit rather than the
   `Expire`/`Abandon` abstraction.
 
