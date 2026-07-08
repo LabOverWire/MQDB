@@ -3,12 +3,52 @@
 
 use super::StoreManager;
 use crate::cluster::db::{
-    ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore, unique_partition,
+    ReassertResult, ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore,
+    unique_partition,
 };
 use crate::cluster::protocol::{Operation, ReplicationWrite};
-use crate::cluster::{Epoch, entity};
+use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
+    /// Reconcile a durable record against its unique claim (record-driven repair). On a
+    /// state change (`Established`/`Repaired`), returns the write to persist + replicate.
+    #[must_use]
+    pub fn reassert_replicated(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+        now: u64,
+    ) -> (ReassertResult, Option<ReplicationWrite>) {
+        let result = self
+            .db_unique
+            .reassert(entity, field, value, record_id, data_partition, now);
+        match result {
+            ReassertResult::Established | ReassertResult::Repaired => {
+                if let Some(r) = self.db_unique.get(entity, field, value) {
+                    let serialized = UniqueStore::serialize(&r);
+                    let partition = unique_partition(entity, field, value);
+                    let key = super::super::db::unique_key(&r);
+                    let write = ReplicationWrite::new(
+                        partition,
+                        Operation::Update,
+                        Epoch::ZERO,
+                        0,
+                        entity::DB_UNIQUE.to_string(),
+                        key,
+                        serialized,
+                    );
+                    (result, Some(write))
+                } else {
+                    (result, None)
+                }
+            }
+            _ => (result, None),
+        }
+    }
+
     #[must_use]
     pub fn unique_reserve_replicated(
         &self,

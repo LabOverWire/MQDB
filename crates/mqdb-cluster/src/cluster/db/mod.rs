@@ -23,6 +23,6 @@ pub use partition::{
 };
 pub use schema_store::{ClusterSchema, SchemaState, SchemaStore, SchemaStoreError, schema_key};
 pub use unique_store::{
-    ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore, UniqueStoreError,
-    unique_key,
+    ReassertResult, ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore,
+    UniqueStoreError, unique_key,
 };

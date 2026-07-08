@@ -143,6 +143,23 @@ pub enum ReserveResult {
     Conflict,
 }
 
+/// Outcome of reconciling a durable record against the unique claim it should own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReassertResult {
+    /// No claim existed; a committed claim owned by the record was established
+    /// (repairs a reservation lost to failover/restart).
+    Established,
+    /// An uncommitted claim owned by the record was promoted to committed
+    /// (repairs a lost commit).
+    Repaired,
+    /// The record already owns a committed claim (steady state).
+    AlreadyCommitted,
+    /// A committed claim is held by a DIFFERENT record — an oversell to surface.
+    Conflict,
+    /// An uncommitted claim is held by a different (in-flight) record; skip this cycle.
+    Pending,
+}
+
 pub struct UniqueReserveParams<'a> {
     pub entity: &'a str,
     pub field: &'a str,
@@ -247,6 +264,53 @@ impl UniqueStore {
             }
         }
         false
+    }
+
+    /// Reconcile a durable record against the unique claim it should own: ensure a
+    /// committed claim for `value` owned by `record_id` exists, repairing a lost
+    /// reservation or a lost commit. The durable record is the source of truth.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn reassert(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+        now: u64,
+    ) -> ReassertResult {
+        let key = Self::unique_key(entity, field, value);
+        let mut reservations = self.reservations.write().unwrap();
+
+        match reservations.get(&key) {
+            None => {
+                let reservation = UniqueReservation::create(
+                    entity,
+                    field,
+                    value,
+                    record_id,
+                    record_id,
+                    data_partition,
+                    now,
+                )
+                .with_committed();
+                reservations.insert(key, reservation);
+                ReassertResult::Established
+            }
+            Some(existing) if existing.record_id_str() == record_id => {
+                if existing.is_committed() {
+                    ReassertResult::AlreadyCommitted
+                } else {
+                    let committed = existing.clone().with_committed();
+                    reservations.insert(key, committed);
+                    ReassertResult::Repaired
+                }
+            }
+            Some(existing) if existing.is_committed() => ReassertResult::Conflict,
+            Some(_) => ReassertResult::Pending,
+        }
     }
 
     /// # Panics
@@ -886,6 +950,76 @@ mod tests {
 
         let available = store.check("users", "email", b"alice@example.com", 1000);
         assert!(available, "value should be available after release");
+    }
+
+    #[test]
+    fn reassert_establishes_committed_claim_when_absent() {
+        let store = UniqueStore::new(node(1));
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        assert_eq!(result, ReassertResult::Established);
+        let r = store.get("users", "email", b"a@x.com").unwrap();
+        assert!(r.is_committed());
+        assert_eq!(r.record_id_str(), "u1");
+    }
+
+    #[test]
+    fn reassert_repairs_lost_commit() {
+        let store = UniqueStore::new(node(1));
+        store.reserve(
+            &params(
+                "users",
+                "email",
+                b"a@x.com",
+                "u1",
+                "req-1",
+                partition(1),
+                5000,
+            ),
+            1000,
+        );
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Repaired);
+        assert!(
+            store
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .is_committed()
+        );
+    }
+
+    #[test]
+    fn reassert_is_idempotent_when_committed() {
+        let store = UniqueStore::new(node(1));
+        store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 2000);
+        assert_eq!(result, ReassertResult::AlreadyCommitted);
+    }
+
+    #[test]
+    fn reassert_flags_conflict_when_other_committed() {
+        let store = UniqueStore::new(node(1));
+        store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        let result = store.reassert("users", "email", b"a@x.com", "u2", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Conflict);
+    }
+
+    #[test]
+    fn reassert_pending_when_other_uncommitted() {
+        let store = UniqueStore::new(node(1));
+        store.reserve(
+            &params(
+                "users",
+                "email",
+                b"a@x.com",
+                "u1",
+                "req-1",
+                partition(1),
+                5000,
+            ),
+            1000,
+        );
+        let result = store.reassert("users", "email", b"a@x.com", "u2", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Pending);
     }
 
     #[test]
