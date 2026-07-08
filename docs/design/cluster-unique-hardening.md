@@ -4,6 +4,47 @@ Status: draft for review. Pairs with the TLA models in `specs/ClusterUniqueV2.tl
 (faithful current behaviour, reproduces oversell) and `specs/ClusterUniqueFix.tla`
 (the verified target: safety + liveness).
 
+## 0. Implementation status & resume point (2026-07)
+
+Two branches, nothing pushed yet:
+- `unique-guard-cas` — the **agent-mode** fix (separate, complete): `4cc7900` makes
+  `Database::create`/`update` atomic via an id-free `uniq/entity/field/value` CAS guard key +
+  `expect_absent` storage precondition (see `specs/UniqueGuard.tla`). Ready to PR on its own.
+  Also carries all the cluster TLA specs (`e104649`, `7816e9a`).
+- `cluster-unique-phase1` (branched off the above) — **cluster Phase 1**, in progress.
+
+**Done + tested on `cluster-unique-phase1`:**
+- Step 1 (`638eecf`): cross-node reserve/commit/release now persist + replicate (were in-memory-only).
+- Steps 2–3 (`fdd1a17`): unconditional `StorageBackend::sync()` fsync on durability-critical unique
+  writes (even `flush()` was a no-op under `PeriodicMs`); commit/release response dispatch arms.
+- Reconciler model (`27afb19`, `specs/ClusterUniqueReconciler.tla`): reclaim is a TOCTOU — safe only
+  with a claim-conditional record write (Phase 2) or deadline-gated reclaim (Phase 1). See §5.
+- Reconciler store ops (`b094227`): `UniqueStore::reassert` + `StoreManager::reassert_replicated`
+  (record-driven repair, 5 unit tests). `ReassertResult`: Established/Repaired/AlreadyCommitted/
+  Conflict(oversell)/Pending. **Keyed on record_id, not request_id** — the original create's
+  reservation has request_id=uuid, so a plain reserve+commit can't repair a lost commit; that's why
+  `reassert` exists.
+- Review pass (`c5bc8cc`): fixed the one regression it surfaced (cross-node reserve test now expects
+  the replication Write). All core/agent/cluster suites green; clippy clean.
+
+**Remaining (the reconcile wiring — the record-driven reconciler, no cross-partition query needed):**
+1. New `UniqueReassertRequest` wire message (BeBytes) + `ClusterMessage` variant + dispatch arm +
+   fire-and-forget handler on the value-primary calling `reassert_replicated` + `write_or_forward` +
+   `sync_unique_write` (mirror `UniqueCommitRequest`/`handle_unique_commit_request`, `unique.rs`).
+2. Reconcile loop: iterate this node's local records with unique fields; per `(field,value)` route a
+   reassert (local `reassert_replicated` when value-primary is self, else send the message); log
+   `ReassertResult::Conflict` as detected oversell.
+3. Wire into the event-loop tick at interval **< the 30s reservation TTL** (`unique.rs` reserves with
+   `ttl_ms: 30_000`) so a lost commit is re-committed before `cleanup_expired` can reclaim it —
+   this cadence is the Phase 1 safety condition.
+4. Step 5: `cleanup_expired` already only reclaims *uncommitted* reservations (`unique_store.rs`);
+   just shorten `CLEANUP_INTERVAL_SECS` (currently 3600, `cluster_agent/mod.rs:26`) to match.
+5. Multi-node integration tests: failover-loses-reservation → reassert re-establishes; lost-commit →
+   reassert repairs; abandoned (no record) → TTL reclaims. Add to `tests/cluster_integration_test.rs`.
+
+After Phase 1: **Phase 2** (epoch-fenced quorum reserve, closes dual-primary — §3/§4, verified in
+`specs/ClusterUniqueQuorum.tla`) and the E2E cluster tests + comprehensive test strategy.
+
 ## 1. Problem (verified)
 
 The cluster unique-constraint reservation is a fragile per-node in-memory lock,
