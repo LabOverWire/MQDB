@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     CLEANUP_INTERVAL_SECS, RETAINED_SYNC_CLEANUP_INTERVAL_SECS, RETAINED_SYNC_TTL_SECS,
-    TTL_CLEANUP_INTERVAL_SECS,
+    TTL_CLEANUP_INTERVAL_SECS, UNIQUE_RECONCILE_INTERVAL_SECS,
 };
 
 impl ClusteredAgent {
@@ -85,6 +85,10 @@ impl ClusteredAgent {
             Duration::from_secs(30),
         );
         let mut license_check_interval = interval(Duration::from_hours(1));
+        let mut unique_reconcile_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
+            Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
+        );
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -152,6 +156,9 @@ impl ClusteredAgent {
                 }
                 _ = license_check_interval.tick() => {
                     self.handle_license_check();
+                }
+                _ = unique_reconcile_interval.tick() => {
+                    self.handle_unique_reconcile().await;
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
@@ -473,10 +480,6 @@ impl ClusteredAgent {
             if stale_offsets > 0 {
                 info!(stale_offsets, "cleaned up stale consumer offsets");
             }
-            let expired_unique = ctrl.stores().unique_cleanup_expired(now);
-            if expired_unique > 0 {
-                info!(expired_unique, "cleaned up expired unique reservations");
-            }
             ctrl.stores().cleanup_expired_sessions(now)
         };
         if !expired_sessions.is_empty() {
@@ -489,6 +492,16 @@ impl ClusteredAgent {
                 let client_id = session.client_id_str();
                 clear_expired_session_subscriptions(&mut ctrl, client_id).await;
             }
+        }
+    }
+
+    async fn handle_unique_reconcile(&self) {
+        let mut ctrl = self.controller.write().await;
+        ctrl.reconcile_unique_claims().await;
+        let now = current_time_ms();
+        let expired_unique = ctrl.stores().unique_cleanup_expired(now);
+        if expired_unique > 0 {
+            info!(expired_unique, "reclaimed abandoned unique reservations");
         }
     }
 

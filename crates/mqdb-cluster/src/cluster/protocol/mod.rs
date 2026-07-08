@@ -23,6 +23,6 @@ pub use query::{BatchReadRequest, BatchReadResponse, QueryRequest, QueryResponse
 pub use replication::{CatchupRequest, CatchupResponse, ReplicationAck, ReplicationWrite};
 pub use types::{AckStatus, JsonDbOp, MessageType, Operation, QueryStatus};
 pub use unique::{
-    UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest, UniqueReleaseResponse,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
 };

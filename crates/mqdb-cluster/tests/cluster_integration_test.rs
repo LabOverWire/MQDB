@@ -3861,3 +3861,222 @@ async fn unique_constraint_cross_node_message_flow() {
         "First reserve should succeed"
     );
 }
+
+fn json_value_bytes(value: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::Value::String(value.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn unique_reconcile_reestablishes_lost_reservation() {
+    use mqdb_cluster::cluster::db::ClusterConstraint;
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let value = json_value_bytes("a@x.com");
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_none(),
+        "no claim should exist before reconcile (reservation lost to failover)"
+    );
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("users", "email", &value)
+        .expect("reconcile should establish a committed claim from the durable record");
+    assert!(claim.is_committed());
+    assert_eq!(claim.record_id_str(), "u1");
+}
+
+#[tokio::test]
+async fn unique_reconcile_repairs_lost_commit() {
+    use mqdb_cluster::cluster::db::{ClusterConstraint, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    let stores = cluster.nodes[0].controller.stores();
+    stores
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    stores
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let value = json_value_bytes("a@x.com");
+    let params = UniqueReserveParams {
+        entity: "users",
+        field: "email",
+        value: &value,
+        record_id: "u1",
+        request_id: "req-lost-commit",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, _) = stores.unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, mqdb_cluster::cluster::db::ReserveResult::Reserved);
+    assert!(
+        !stores
+            .unique_get("users", "email", &value)
+            .unwrap()
+            .is_committed(),
+        "reservation must be uncommitted before reconcile (commit was lost)"
+    );
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("users", "email", &value)
+        .expect("claim should still exist");
+    assert!(
+        claim.is_committed(),
+        "reconcile should promote the uncommitted claim to committed"
+    );
+    assert_eq!(claim.record_id_str(), "u1");
+}
+
+#[tokio::test]
+async fn unique_reconcile_leaves_abandoned_for_ttl_reclaim() {
+    use mqdb_cluster::cluster::db::{ClusterConstraint, ReserveResult, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    let stores = cluster.nodes[0].controller.stores();
+    stores
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+
+    let value = json_value_bytes("ghost@x.com");
+    let ttl_ms = 1000;
+    let params = UniqueReserveParams {
+        entity: "users",
+        field: "email",
+        value: &value,
+        record_id: "ghost",
+        request_id: "req-abandoned",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms,
+    };
+    let (result, _) = stores.unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_some(),
+        "reconcile must not touch an abandoned reservation whose record does not exist"
+    );
+
+    let reclaimed = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_cleanup_expired(1000 + ttl_ms + 100);
+    assert_eq!(
+        reclaimed, 1,
+        "TTL cleanup should reclaim the abandoned claim"
+    );
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_none(),
+        "value should be free after TTL reclaim"
+    );
+}
+
+#[tokio::test]
+async fn unique_reassert_request_cross_node_establishes() {
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueReassertRequest};
+
+    let mut cluster = TestCluster::new(2);
+    cluster.runtime.network().set_base_latency_ms(0);
+
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        let output = node.controller.tick(0);
+        node.controller.send_tick_output(output).await;
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages().await;
+    }
+
+    let value = json_value_bytes("SKU-9");
+    let request = UniqueReassertRequest::create(
+        0,
+        "products",
+        "sku",
+        &value,
+        "product-9",
+        PartitionId::new(5).unwrap(),
+    );
+
+    let node2_id = cluster.nodes[1].id;
+    let request_msg = InboundMessage {
+        from: node2_id,
+        message: ClusterMessage::UniqueReassertRequest(request),
+        received_at: 0,
+    };
+    cluster.nodes[0].controller.transport().requeue(request_msg);
+    cluster.advance_ms(1);
+    cluster.nodes[0].controller.process_messages().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("products", "sku", &value)
+        .expect("reassert should establish a committed claim on the value-primary");
+    assert!(claim.is_committed());
+    assert_eq!(claim.record_id_str(), "product-9");
+}

@@ -22,8 +22,8 @@ use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{
     BatchReadRequest, CatchupRequest, ForwardedPublish, JsonDbOp, JsonDbRequest, JsonDbResponse,
     QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    UniqueReserveStatus,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
+    UniqueReserveResponse, UniqueReserveStatus,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
@@ -1160,6 +1160,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
+            }
+            ClusterMessage::UniqueReassertRequest(req) => {
+                self.handle_unique_reassert_request(req).await;
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;

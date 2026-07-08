@@ -26,24 +26,32 @@ Two branches, nothing pushed yet:
   `reassert` exists.
 - Review pass (`c5bc8cc`): fixed the one regression it surfaced (cross-node reserve test now expects
   the replication Write). All core/agent/cluster suites green; clippy clean.
+- Reconcile wiring (this session, all five remaining items — the record-driven reconciler, no
+  cross-partition query needed):
+  1. `UniqueReassertRequest` wire message (BeBytes, msg type 86) + `ClusterMessage` variant +
+     dispatch arm + fire-and-forget `handle_unique_reassert_request` on the value-primary calling
+     `reassert_replicated` + `write_or_forward` + `sync_unique_write` (mirrors `UniqueCommitRequest`).
+     Round-trip test in `protocol/tests.rs`.
+  2. `NodeController::reconcile_unique_claims` (`unique.rs`): iterates this node's durable records
+     for entities with unique constraints, reconciles only records whose *data* partition this node
+     is primary of (so each record is reconciled once); per `(field,value)` routes a reassert
+     (local `reassert_replicated` when value-primary is self, else the message). `Conflict` logged
+     as detected oversell.
+  3. Runs on a dedicated `unique_reconcile_interval` = **10s** (< the 30s reservation TTL) in the
+     cluster-agent event loop — this cadence is the Phase 1 safety condition (a lost commit is
+     re-committed before `cleanup_expired` can reclaim it).
+  4. `unique_cleanup_expired` moved out of the hourly `handle_session_cleanup` into the same 10s
+     `handle_unique_reconcile` handler, run **after** `reconcile_unique_claims` so repair always
+     precedes reclaim in a single tick. `cleanup_expired` still only reclaims *uncommitted*
+     reservations (`unique_store.rs`), so it never touches a committed/re-committed claim.
+  5. Four integration tests in `tests/cluster_integration_test.rs`: reassert re-establishes a lost
+     reservation from the record; reassert repairs a lost commit; abandoned (no record) survives
+     reconcile then is reclaimed by TTL; cross-node `UniqueReassertRequest` establishes on the
+     value-primary. All cluster suites green (615 tests); clippy clean.
 
-**Remaining (the reconcile wiring — the record-driven reconciler, no cross-partition query needed):**
-1. New `UniqueReassertRequest` wire message (BeBytes) + `ClusterMessage` variant + dispatch arm +
-   fire-and-forget handler on the value-primary calling `reassert_replicated` + `write_or_forward` +
-   `sync_unique_write` (mirror `UniqueCommitRequest`/`handle_unique_commit_request`, `unique.rs`).
-2. Reconcile loop: iterate this node's local records with unique fields; per `(field,value)` route a
-   reassert (local `reassert_replicated` when value-primary is self, else send the message); log
-   `ReassertResult::Conflict` as detected oversell.
-3. Wire into the event-loop tick at interval **< the 30s reservation TTL** (`unique.rs` reserves with
-   `ttl_ms: 30_000`) so a lost commit is re-committed before `cleanup_expired` can reclaim it —
-   this cadence is the Phase 1 safety condition.
-4. Step 5: `cleanup_expired` already only reclaims *uncommitted* reservations (`unique_store.rs`);
-   just shorten `CLEANUP_INTERVAL_SECS` (currently 3600, `cluster_agent/mod.rs:26`) to match.
-5. Multi-node integration tests: failover-loses-reservation → reassert re-establishes; lost-commit →
-   reassert repairs; abandoned (no record) → TTL reclaims. Add to `tests/cluster_integration_test.rs`.
-
-After Phase 1: **Phase 2** (epoch-fenced quorum reserve, closes dual-primary — §3/§4, verified in
-`specs/ClusterUniqueQuorum.tla`) and the E2E cluster tests + comprehensive test strategy.
+**Phase 1 is complete.** After Phase 1: **Phase 2** (epoch-fenced quorum reserve, closes dual-primary
+— §3/§4, verified in `specs/ClusterUniqueQuorum.tla`) and the E2E cluster tests + comprehensive test
+strategy.
 
 ## 1. Problem (verified)
 

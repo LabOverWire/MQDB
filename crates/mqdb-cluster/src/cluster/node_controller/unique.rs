@@ -3,8 +3,8 @@
 
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingUniqueReserve,
-    UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReleaseRequest, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueReserveStatus,
+    UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest, UniqueReleaseRequest,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
 };
 use tokio::sync::oneshot;
 
@@ -374,6 +374,50 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
+    pub(crate) async fn handle_unique_reassert_request(&mut self, req: &UniqueReassertRequest) {
+        let Some(data_partition) = req.data_partition() else {
+            return;
+        };
+        self.reassert_unique_claim(
+            req.entity_str(),
+            req.field_str(),
+            &req.value,
+            req.record_id_str(),
+            data_partition,
+        )
+        .await;
+    }
+
+    async fn reassert_unique_claim(
+        &mut self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+    ) {
+        let (result, write) = self.stores.reassert_replicated(
+            entity,
+            field,
+            value,
+            record_id,
+            data_partition,
+            Self::current_time_ms(),
+        );
+        if let Some(w) = write {
+            self.write_or_forward(w).await;
+            self.sync_unique_write();
+        }
+        if matches!(result, super::super::db::ReassertResult::Conflict) {
+            tracing::error!(
+                entity,
+                field,
+                record_id,
+                "unique oversell detected: committed claim held by a different record"
+            );
+        }
+    }
+
     fn allocate_unique_request_id(&self) -> u64 {
         self.pending_constraints.allocate_unique_id()
     }
@@ -445,5 +489,88 @@ impl<T: ClusterTransport> NodeController<T> {
             .transport
             .send(target_node, ClusterMessage::UniqueReleaseRequest(request))
             .await;
+    }
+
+    async fn send_unique_reassert_fire_and_forget(
+        &self,
+        target_node: NodeId,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+    ) {
+        let request =
+            UniqueReassertRequest::create(0, entity, field, value, record_id, data_partition);
+
+        let _ = self
+            .transport
+            .send(target_node, ClusterMessage::UniqueReassertRequest(request))
+            .await;
+    }
+
+    /// Reconcile every durable record this node owns (data-partition primary) against its
+    /// unique claim, repairing a reservation lost to failover/restart or a lost commit. The
+    /// durable record is the source of truth; each record is reconciled by exactly one node.
+    pub async fn reconcile_unique_claims(&mut self) {
+        let entities: Vec<String> = {
+            let mut set = std::collections::BTreeSet::new();
+            for constraint in self.stores.constraint_list_all() {
+                if constraint.constraint_type() == super::super::db::ConstraintType::Unique {
+                    set.insert(constraint.entity_str().to_string());
+                }
+            }
+            set.into_iter().collect()
+        };
+
+        for entity in &entities {
+            let unique_fields = self.stores.constraint_get_unique_fields(entity);
+            if unique_fields.is_empty() {
+                continue;
+            }
+            let records = self.stores.db_data.list(entity);
+            for record in records {
+                let data_partition = record.partition();
+                if self.partition_map.primary(data_partition) != Some(self.node_id) {
+                    continue;
+                }
+                let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&record.data) else {
+                    continue;
+                };
+                let record_id = record.id_str().to_string();
+                for field in &unique_fields {
+                    let value = match parsed.get(field) {
+                        Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                        None => continue,
+                    };
+
+                    let unique_part = super::super::db::unique_partition(entity, field, &value);
+                    match self.partition_map.primary(unique_part) {
+                        Some(primary) if primary == self.node_id => {
+                            self.reassert_unique_claim(
+                                entity,
+                                field,
+                                &value,
+                                &record_id,
+                                data_partition,
+                            )
+                            .await;
+                        }
+                        Some(target) => {
+                            self.send_unique_reassert_fire_and_forget(
+                                target,
+                                entity,
+                                field,
+                                &value,
+                                &record_id,
+                                data_partition,
+                            )
+                            .await;
+                        }
+                        None => {}
+                    }
+                }
+            }
+        }
     }
 }

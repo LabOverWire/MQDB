@@ -5,8 +5,9 @@ use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, FkCheckRequest,
     FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse, ForwardedPublish, Heartbeat,
     JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
-    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -60,6 +61,7 @@ pub enum ClusterMessage {
     UniqueCommitResponse(UniqueCommitResponse),
     UniqueReleaseRequest(UniqueReleaseRequest),
     UniqueReleaseResponse(UniqueReleaseResponse),
+    UniqueReassertRequest(UniqueReassertRequest),
     FkCheckRequest(FkCheckRequest),
     FkCheckResponse(FkCheckResponse),
     FkReverseLookupRequest(FkReverseLookupRequest),
@@ -101,6 +103,7 @@ impl ClusterMessage {
             Self::UniqueCommitResponse(_) => 83,
             Self::UniqueReleaseRequest(_) => 84,
             Self::UniqueReleaseResponse(_) => 85,
+            Self::UniqueReassertRequest(_) => 86,
             Self::FkCheckRequest(_) => 90,
             Self::FkCheckResponse(_) => 91,
             Self::FkReverseLookupRequest(_) => 92,
@@ -142,6 +145,7 @@ impl ClusterMessage {
             Self::UniqueCommitResponse(_) => "UniqueCommitResponse",
             Self::UniqueReleaseRequest(_) => "UniqueReleaseRequest",
             Self::UniqueReleaseResponse(_) => "UniqueReleaseResponse",
+            Self::UniqueReassertRequest(_) => "UniqueReassertRequest",
             Self::FkCheckRequest(_) => "FkCheckRequest",
             Self::FkCheckResponse(_) => "FkCheckResponse",
             Self::FkReverseLookupRequest(_) => "FkReverseLookupRequest",
@@ -189,6 +193,7 @@ impl ClusterMessage {
             Self::UniqueCommitResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::UniqueReleaseRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReleaseResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::UniqueReassertRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkCheckRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -295,6 +300,10 @@ impl ClusterMessage {
             85 => {
                 let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReleaseResponse(resp))
+            }
+            86 => {
+                let (req, _) = UniqueReassertRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReassertRequest(req))
             }
             90 => {
                 let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;

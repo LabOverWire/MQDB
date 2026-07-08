@@ -433,3 +433,25 @@ fn unique_release_response_roundtrip() {
     assert_eq!(decoded.request_id, 777);
     assert!(!decoded.is_success());
 }
+
+#[test]
+fn unique_reassert_request_roundtrip() {
+    let req = UniqueReassertRequest::create(
+        555,
+        "users",
+        "email",
+        b"a@x.com",
+        "u1",
+        PartitionId::new(7).unwrap(),
+    );
+
+    let bytes = req.to_be_bytes();
+    let (decoded, _) = UniqueReassertRequest::try_from_be_bytes(&bytes).unwrap();
+
+    assert_eq!(decoded.request_id, 555);
+    assert_eq!(decoded.entity_str(), "users");
+    assert_eq!(decoded.field_str(), "email");
+    assert_eq!(decoded.value, b"a@x.com");
+    assert_eq!(decoded.record_id_str(), "u1");
+    assert_eq!(decoded.data_partition(), PartitionId::new(7));
+}

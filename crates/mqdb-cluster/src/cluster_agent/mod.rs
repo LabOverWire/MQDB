@@ -25,6 +25,7 @@ use tokio::sync::{RwLock, broadcast, watch};
 
 const CLEANUP_INTERVAL_SECS: u64 = 3600;
 const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
+const UNIQUE_RECONCILE_INTERVAL_SECS: u64 = 10;
 const RETAINED_SYNC_CLEANUP_INTERVAL_SECS: u64 = 30;
 const RETAINED_SYNC_TTL_SECS: u64 = 5;
 
