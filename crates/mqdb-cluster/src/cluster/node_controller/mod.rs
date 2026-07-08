@@ -1161,7 +1161,6 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
             }
-            ClusterMessage::UniqueReleaseResponse(_resp) => {}
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;
             }

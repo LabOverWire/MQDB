@@ -3846,22 +3846,18 @@ async fn unique_constraint_cross_node_message_flow() {
     cluster.nodes[0].controller.process_messages().await;
 
     cluster.advance_ms(1);
-    let response = cluster.nodes[1].controller.transport().recv();
-    assert!(
-        response.is_some(),
-        "Node 1 should have sent response to Node 2"
-    );
-
-    if let Some(msg) = response {
-        assert_eq!(msg.from, node1_id, "Response should be from node 1");
-        if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
-            assert_eq!(resp.request_id, 42, "Response request_id should match");
-            assert!(
-                matches!(resp.status(), UniqueReserveStatus::Reserved),
-                "First reserve should succeed"
-            );
-        } else {
-            panic!("Expected UniqueReserveResponse");
+    let mut reserve_response = None;
+    while let Some(msg) = cluster.nodes[1].controller.transport().recv() {
+        if let ClusterMessage::UniqueReserveResponse(resp) = msg.message {
+            assert_eq!(msg.from, node1_id, "Response should be from node 1");
+            reserve_response = Some(resp);
         }
     }
+
+    let resp = reserve_response.expect("Node 1 should have sent a reserve response to Node 2");
+    assert_eq!(resp.request_id, 42, "Response request_id should match");
+    assert!(
+        matches!(resp.status(), UniqueReserveStatus::Reserved),
+        "First reserve should succeed"
+    );
 }
