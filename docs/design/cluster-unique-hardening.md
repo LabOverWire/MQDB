@@ -297,20 +297,23 @@ the verified `ClusterUniqueQuorum.tla`. **Both create paths are gated:** the pri
 (`json_ops`/`routing.rs`) and the forwarded cluster path (`db_ops` `reserve_unique_local`, gated on
 `unique_partition_sealed`).
 
-**Remaining polish (non-safety, diminishing value — backstopped by the reconciler + monotonic guard):**
-- The forwarded `db_ops` create path is now **gated and majority-awaited** for the common case:
-  `reserve_unique_local` threads `pending_quorum` into the `db_ops` create phase1, and
-  `spawn_unique_completion` awaits both `pending_remote` and `pending_quorum` (before acquiring the
-  lock — no deadlock). The **FK-then-unique continuations** (`complete_pending_fk_work`) run *holding*
-  the controller lock, so they can't await the quorum inline (the ack path needs the lock); those
-  rarer reserves stay gated + async-replicated, with the reconciler as the majority-durability
-  backstop. (Closing that would require restructuring `complete_pending_fk_work` to release the lock
-  around the await, like `spawn_unique_completion`.)
-- The fail-closed-while-unsealed reserve returns a **409** ("unique constraint violation"); during the
-  brief post-promotion unsealed window this is misleading — a **503**/retry is more accurate (needs a
-  distinct not-durable signal threaded through the reserve return type).
-- Optional: TLA re-check treating the monotonic guard as the `leaderView` substitute; `mqdb dev`
-  multi-node oversell E2E tests (§8).
+**Follow-ups — all resolved:**
+- The forwarded `db_ops` create path is **gated and majority-awaited**: `reserve_unique_local` threads
+  `pending_quorum` into the `db_ops` create phase1, and `spawn_unique_completion` awaits both
+  `pending_remote` and `pending_quorum` *before* acquiring the lock (no deadlock).
+- **FK-then-unique continuations DONE.** `complete_pending_fk_work` no longer reserves inline under the
+  lock; it runs `start_unique_constraint_check` and returns `FkThenUniqueOutcome::NeedUnique(phase1)`,
+  and `spawn_fk_completion` drops the lock then drives it via `spawn_unique_completion` — so the
+  majority-await runs outside the lock (a deadlock inline; confirmed by a verification pass). This
+  unified the two divergent create paths and also removed a latent up-to-5s stall on the FK path's
+  inline remote-reserve await. Regression test: `fk_then_unique_defers_reserve_to_async_completion`.
+- **409→503 DONE.** A `ReserveFailure { Conflict(409), NotDurable(503) }` enum is threaded through
+  every reserve failure path (sync gate, forwarded path, and the async `await_unique_reserves` /
+  `combine_quorum` completion): a real conflict is a permanent 409, while unsealed / no-primary /
+  quorum-timeout is a transient 503 the client should retry. Counter-test:
+  `unsealed_partition_reserve_is_retryable_not_a_conflict`.
+- **TLA re-check DONE** (caught the monotonic-guard gap → drove the d-2 seal-learning fix above).
+- Optional/remaining: `mqdb dev` multi-node oversell E2E tests (§8) — real-cluster validation.
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.

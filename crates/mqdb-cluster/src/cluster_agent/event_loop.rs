@@ -427,14 +427,21 @@ impl ClusteredAgent {
         let pending_checks = pending.pending_checks;
         let continuation = pending.continuation;
         tokio::spawn(async move {
+            use crate::cluster::node_controller::FkThenUniqueOutcome;
             let fk_result = await_fk_checks(pending_checks).await;
-            let mut ctrl = controller.write().await;
-            let (fk_ok, fk_error) = match fk_result {
-                Ok(()) => (true, None),
-                Err(msg) => (false, Some(msg)),
+            let outcome = {
+                let mut ctrl = controller.write().await;
+                let (fk_ok, fk_error) = match fk_result {
+                    Ok(()) => (true, None),
+                    Err(msg) => (false, Some(msg)),
+                };
+                ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
+                    .await
+                // controller write lock is released here, before the majority-await below.
             };
-            ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
-                .await;
+            if let FkThenUniqueOutcome::NeedUnique(pending) = outcome {
+                Self::spawn_unique_completion(controller, *pending);
+            }
         });
     }
 

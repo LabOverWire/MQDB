@@ -174,6 +174,15 @@ pub struct PendingUniqueWork {
     pub continuation: UniqueCheckContinuation,
 }
 
+/// Result of completing an FK check whose entity also has unique constraints. `Done` means the
+/// response was already sent (FK failed, or the reserve failed synchronously). `NeedUnique` means
+/// the unique reserve has started and its majority-await must run **outside the controller lock**
+/// (via `spawn_unique_completion`), which is why this is returned rather than awaited inline.
+pub enum FkThenUniqueOutcome {
+    Done,
+    NeedUnique(Box<PendingUniqueWork>),
+}
+
 pub struct PendingFkCheck {
     pub target_entity: String,
     pub target_id: String,

@@ -236,6 +236,56 @@ async fn unique_reserve_completes_immediately_for_single_node_group() {
 }
 
 #[tokio::test]
+async fn fk_then_unique_defers_reserve_to_async_completion() {
+    use crate::cluster::db::ClusterConstraint;
+    use crate::cluster::node_controller::{FkCheckContinuation, FkThenUniqueOutcome};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    // Single-node group: become_primary seals every partition synchronously.
+    let mut map = crate::cluster::PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+
+    let continuation = FkCheckContinuation::CreateFromNodeController {
+        from: node1,
+        entity: "users".to_string(),
+        id: "u1".to_string(),
+        data: serde_json::json!({ "id": "u1", "email": "a@x.com" }),
+        partition: crate::cluster::db::data_partition("users", "u1"),
+        request_id: "req-1".to_string(),
+        response_topic: "resp/t".to_string(),
+        correlation_data: None,
+    };
+
+    let outcome = ctrl
+        .complete_pending_fk_work(true, None, continuation)
+        .await;
+
+    // The reserve must be handed to the async completion (which awaits the quorum OUTSIDE the lock),
+    // never performed inline here — doing so would deadlock on the ack path.
+    assert!(
+        matches!(outcome, FkThenUniqueOutcome::NeedUnique(_)),
+        "an FK+unique create must defer its reserve to spawn_unique_completion"
+    );
+}
+
+#[tokio::test]
 async fn unsealed_partition_fails_reserve_closed() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
