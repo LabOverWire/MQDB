@@ -3884,6 +3884,133 @@ fn json_value_bytes(value: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn no_oversell_when_new_primary_missed_a_reservation() {
+    // Model-as-oracle NoOversell test for the exact scenario ClusterUniqueMonotonic.tla flagged:
+    // a promoted primary that MISSED an existing reservation must still refuse to reassign the value.
+    // Without the seal reservation-learning (d-2), node1 would grant the value to a second record and
+    // oversell — so this test fails if that fix regresses.
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.runtime.network().set_base_latency_ms(0);
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        cluster.nodes[0].controller.become_primary(p, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(p, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(p, Epoch::new(1), 0);
+    }
+
+    let value = json_value_bytes("sku-1");
+    let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", &value);
+    let node0_id = cluster.nodes[0].id;
+
+    // node0 (epoch 1) reserves the value for record "A", but the replication reaches only node2 —
+    // node1 (the future primary) never sees it.
+    let params_a = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value: &value,
+        record_id: "A",
+        request_id: "req-A",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (res_a, write_a) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params_a, 1000);
+    assert_eq!(res_a, ReserveResult::Reserved);
+    let write_a = write_a.unwrap();
+    let stamped_a = ReplicationWrite::new(
+        write_a.partition,
+        write_a.operation,
+        Epoch::new(1),
+        0,
+        write_a.entity.clone(),
+        write_a.id.clone(),
+        write_a.data.clone(),
+    );
+    cluster.nodes[2]
+        .controller
+        .transport()
+        .requeue(InboundMessage {
+            from: node0_id,
+            message: ClusterMessage::UniqueReplicate {
+                request_id: 0,
+                write: stamped_a,
+            },
+            received_at: 0,
+        });
+    cluster.advance_ms(1);
+    cluster.nodes[2].controller.process_messages().await;
+    assert!(
+        cluster.nodes[1]
+            .controller
+            .stores()
+            .unique_get("products", "sku", &value)
+            .is_none(),
+        "the future primary must genuinely be missing the reservation for the test to be meaningful"
+    );
+
+    // Failover: node1 is promoted to primary at epoch 2 and seals — the seal must LEARN A.
+    cluster.nodes[1]
+        .controller
+        .become_primary(unique_part, Epoch::new(2));
+    for _ in 0..4 {
+        let output = cluster.nodes[1].controller.tick(0);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+        cluster.advance_ms(1);
+        cluster.nodes[0].controller.process_messages().await;
+        cluster.nodes[2].controller.process_messages().await;
+        cluster.advance_ms(1);
+        cluster.nodes[1].controller.process_messages().await;
+    }
+
+    let learned = cluster.nodes[1]
+        .controller
+        .stores()
+        .unique_get("products", "sku", &value)
+        .expect("the promotion seal must teach the new primary the reservation it missed");
+    assert_eq!(learned.record_id_str(), "A");
+
+    // The new primary now tries to reserve the SAME value for a DIFFERENT record "B".
+    let params_b = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value: &value,
+        record_id: "B",
+        request_id: "req-B",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (res_b, _) = cluster.nodes[1]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params_b, 2000);
+    assert_eq!(
+        res_b,
+        ReserveResult::Conflict,
+        "the value is already held by A; the promoted primary must not oversell it to B"
+    );
+
+    // NoOversell: exactly one record holds the value, and it is the original owner.
+    assert_eq!(
+        cluster.nodes[1]
+            .controller
+            .stores()
+            .unique_get("products", "sku", &value)
+            .unwrap()
+            .record_id_str(),
+        "A",
+    );
+}
+
+#[tokio::test]
 async fn unique_seal_fences_superseded_primary_reserve() {
     use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueSealRequest};

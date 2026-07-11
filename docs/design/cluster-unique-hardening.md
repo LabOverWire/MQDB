@@ -313,7 +313,13 @@ the verified `ClusterUniqueQuorum.tla`. **Both create paths are gated:** the pri
   quorum-timeout is a transient 503 the client should retry. Counter-test:
   `unsealed_partition_reserve_is_retryable_not_a_conflict`.
 - **TLA re-check DONE** (caught the monotonic-guard gap → drove the d-2 seal-learning fix above).
-- Optional/remaining: `mqdb dev` multi-node oversell E2E tests (§8) — real-cluster validation.
+- **NoOversell integration test DONE.** `no_oversell_when_new_primary_missed_a_reservation` reproduces
+  the TLA counterexample in the sim cluster: node0 reserves a value for A but the replication reaches
+  only node2; node1 is promoted (epoch 2) and seals; the seal must *learn* A; node1's reserve for a
+  different record B must then Conflict — exactly one record holds the value. Verified as a real
+  regression guard: it **fails** if the d-2 seal-learning merge is removed. (A full-stack `mqdb dev`
+  E2E needs an Enterprise license unavailable in this environment; the sim harness + unit tests + TLA
+  cover the mechanics license-free.)
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
