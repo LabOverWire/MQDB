@@ -468,7 +468,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// Durably fsync a just-written unique reservation/commit so it survives a crash
     /// before the operation is acknowledged.
-    fn sync_unique_write(&self) {
+    pub(crate) fn sync_unique_write(&self) {
         if let Err(e) = self.stores.sync_storage() {
             tracing::warn!(error = ?e, "failed to sync unique write");
         }

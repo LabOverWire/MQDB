@@ -1322,6 +1322,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
         let remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
         let mut pending_remote_reserves = Vec::new();
+        let mut pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)> = Vec::new();
 
         for field in &unique_fields {
             let value = match data.get(field) {
@@ -1344,7 +1345,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let primary = self.partition_map.primary(unique_part);
 
             let is_conflict = if primary == Some(self.node_id) {
-                self.reserve_unique_local(&params, &mut local_reserved)
+                self.reserve_unique_local(&params, &mut local_reserved, &mut pending_quorum)
                     .await
             } else if let Some(target_node) = primary {
                 let reserve_params = super::db::UniqueReserveParams {
@@ -1396,7 +1397,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
 
-        if !pending_remote_reserves.is_empty() {
+        if !pending_remote_reserves.is_empty() || !pending_quorum.is_empty() {
             let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return (
                 Vec::new(),
@@ -1404,7 +1405,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     phase1: super::UniqueCheckPhase1Result {
                         local_reserved,
                         pending_remote: pending_remote_reserves,
-                        pending_quorum: Vec::new(),
+                        pending_quorum,
                     },
                     continuation: UniqueCheckContinuation::CreateFromNodeController {
                         from,
@@ -1485,6 +1486,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         params: &UniqueReservationParams<'_>,
         local_reserved: &mut Vec<(String, Vec<u8>)>,
+        pending_quorum: &mut Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
     ) -> bool {
         let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
         if !self.unique_partition_sealed(unique_part) {
@@ -1512,7 +1514,9 @@ impl<T: ClusterTransport> NodeController<T> {
         match result {
             super::db::ReserveResult::Reserved => {
                 if let Some(w) = write {
-                    self.write_or_forward(w).await;
+                    self.sync_unique_write();
+                    let rx = self.replicate_unique_reserve(w).await;
+                    pending_quorum.push((params.field.to_owned(), rx));
                 }
                 local_reserved.push((params.field.to_owned(), params.value.to_vec()));
                 false
@@ -1616,6 +1620,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 let unique_fields = self.stores.constraint_get_unique_fields(&entity);
                 let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+                // This continuation runs holding the controller lock, so it cannot await the quorum
+                // inline (the ack path needs the lock). Reserves here are gated + async-replicated;
+                // the reconciler backstops majority-durability for this rare FK+unique path.
+                let mut fk_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)> = Vec::new();
 
                 for field in &unique_fields {
                     let value = match data.get(field) {
@@ -1638,7 +1646,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     let primary = self.partition_map.primary(unique_part);
 
                     let is_conflict = if primary == Some(self.node_id) {
-                        self.reserve_unique_local(&params, &mut local_reserved)
+                        self.reserve_unique_local(&params, &mut local_reserved, &mut fk_quorum)
                             .await
                     } else if let Some(target_node) = primary {
                         let reserve_params = super::db::UniqueReserveParams {
@@ -1769,6 +1777,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+                let mut fk_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)> = Vec::new();
 
                 if has_unique_changes {
                     let unique_fields = self.stores.constraint_get_unique_fields(&entity);
@@ -1793,7 +1802,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         let primary = self.partition_map.primary(unique_part);
 
                         let is_conflict = if primary == Some(self.node_id) {
-                            self.reserve_unique_local(&params, &mut local_reserved)
+                            self.reserve_unique_local(&params, &mut local_reserved, &mut fk_quorum)
                                 .await
                         } else if let Some(target_node) = primary {
                             let reserve_params = super::db::UniqueReserveParams {

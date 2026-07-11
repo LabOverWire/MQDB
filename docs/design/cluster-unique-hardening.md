@@ -278,10 +278,14 @@ missed-reservation overwrite. **Both create paths are gated:** the primary MQTT 
 `unique_partition_sealed`).
 
 **Remaining polish (non-safety, diminishing value — backstopped by the reconciler + monotonic guard):**
-- The forwarded `db_ops` create path is **gated** but not yet **majority-awaited** (returns before the
-  async group-replicate reaches a majority); a crash in that narrow window is repaired/detected by the
-  reconciler. Full P2.c parity would thread `pending_quorum` through the `db_ops` phase1 +
-  `spawn_unique_completion`, mirroring Path 1.
+- The forwarded `db_ops` create path is now **gated and majority-awaited** for the common case:
+  `reserve_unique_local` threads `pending_quorum` into the `db_ops` create phase1, and
+  `spawn_unique_completion` awaits both `pending_remote` and `pending_quorum` (before acquiring the
+  lock — no deadlock). The **FK-then-unique continuations** (`complete_pending_fk_work`) run *holding*
+  the controller lock, so they can't await the quorum inline (the ack path needs the lock); those
+  rarer reserves stay gated + async-replicated, with the reconciler as the majority-durability
+  backstop. (Closing that would require restructuring `complete_pending_fk_work` to release the lock
+  around the await, like `spawn_unique_completion`.)
 - The fail-closed-while-unsealed reserve returns a **409** ("unique constraint violation"); during the
   brief post-promotion unsealed window this is misleading — a **503**/retry is more accurate (needs a
   distinct not-durable signal threaded through the reserve return type).

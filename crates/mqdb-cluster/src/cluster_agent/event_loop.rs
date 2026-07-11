@@ -396,13 +396,21 @@ impl ClusteredAgent {
         controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
         pending: crate::cluster::node_controller::PendingUniqueWork,
     ) {
-        use crate::cluster::node_controller::unique::await_unique_reserves;
+        use crate::cluster::node_controller::unique::{await_unique_quorum, await_unique_reserves};
 
         let local_reserved = pending.phase1.local_reserved;
         let pending_remote = pending.phase1.pending_remote;
+        let pending_quorum = pending.phase1.pending_quorum;
         let continuation = pending.continuation;
         tokio::spawn(async move {
-            let remote_results = await_unique_reserves(pending_remote).await;
+            let remote_results = match (
+                await_unique_reserves(pending_remote).await,
+                await_unique_quorum(pending_quorum).await,
+            ) {
+                (Ok(confirmed), Ok(())) => Ok(confirmed),
+                (Ok(confirmed), Err(field)) => Err((field, confirmed)),
+                (Err(e), _) => Err(e),
+            };
             let mut ctrl = controller.write().await;
             ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
                 .await;
