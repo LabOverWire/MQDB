@@ -273,9 +273,20 @@ Non-breaking — no serve-gate yet.
 **Together, the three P2 mechanisms close B:** (1) seal fences the old primary (epoch-promise at a
 majority ⇒ its stale-epoch group writes are rejected ⇒ its reserves fail closed); (2) the serve-gate
 stops a new primary serving before it has sealed; (3) the monotonic guard prevents any residual
-missed-reservation overwrite. Remaining polish (non-safety): the fail-closed-while-unsealed reserve
-returns a 409 (should be 503/retry), and the P2.c secondary `db_ops` create path is still ungated
-(both tracked in the P2.c tail above).
+missed-reservation overwrite. **Both create paths are gated:** the primary MQTT path
+(`json_ops`/`routing.rs`) and the forwarded cluster path (`db_ops` `reserve_unique_local`, gated on
+`unique_partition_sealed`).
+
+**Remaining polish (non-safety, diminishing value — backstopped by the reconciler + monotonic guard):**
+- The forwarded `db_ops` create path is **gated** but not yet **majority-awaited** (returns before the
+  async group-replicate reaches a majority); a crash in that narrow window is repaired/detected by the
+  reconciler. Full P2.c parity would thread `pending_quorum` through the `db_ops` phase1 +
+  `spawn_unique_completion`, mirroring Path 1.
+- The fail-closed-while-unsealed reserve returns a **409** ("unique constraint violation"); during the
+  brief post-promotion unsealed window this is misleading — a **503**/retry is more accurate (needs a
+  distinct not-durable signal threaded through the reserve return type).
+- Optional: TLA re-check treating the monotonic guard as the `leaderView` substitute; `mqdb dev`
+  multi-node oversell E2E tests (§8).
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
