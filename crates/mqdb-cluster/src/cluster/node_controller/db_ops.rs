@@ -1486,6 +1486,16 @@ impl<T: ClusterTransport> NodeController<T> {
         params: &UniqueReservationParams<'_>,
         local_reserved: &mut Vec<(String, Vec<u8>)>,
     ) -> bool {
+        let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
+        if !self.unique_partition_sealed(unique_part) {
+            tracing::warn!(
+                field = params.field,
+                partition = unique_part.get(),
+                "unique partition not sealed at the current epoch; failing reserve closed"
+            );
+            return true;
+        }
+
         let reserve_params = super::db::UniqueReserveParams {
             entity: params.entity,
             field: params.field,
