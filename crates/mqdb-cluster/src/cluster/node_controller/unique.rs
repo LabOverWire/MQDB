@@ -3,9 +3,9 @@
 
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingUniqueReserve,
-    UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest, UniqueReleaseRequest,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest,
-    UniqueSealResponse,
+    ReserveFailure, UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest,
+    UniqueReleaseRequest, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    UniqueSealRequest, UniqueSealResponse,
 };
 use crate::cluster::Epoch;
 use tokio::sync::oneshot;
@@ -16,7 +16,7 @@ const UNIQUE_SEAL_TIMEOUT_MS: u64 = 5000;
 
 pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
-) -> Result<Vec<(String, Vec<u8>, NodeId)>, (String, Vec<(String, Vec<u8>, NodeId)>)> {
+) -> Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)> {
     let mut confirmed: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
 
     for pending_reserve in pending {
@@ -33,8 +33,13 @@ pub async fn await_unique_reserves(
                     pending_reserve.target_node,
                 ));
             }
+            // A remote conflict is a permanent 409; a remote error, timeout, or dropped channel is a
+            // transient not-durable failure the client should retry (503).
+            Ok(Ok(UniqueReserveStatus::Conflict)) => {
+                return Err((ReserveFailure::Conflict(pending_reserve.field), confirmed));
+            }
             _ => {
-                return Err((pending_reserve.field, confirmed));
+                return Err((ReserveFailure::NotDurable(pending_reserve.field), confirmed));
             }
         }
     }
@@ -66,7 +71,7 @@ impl<T: ClusterTransport> NodeController<T> {
         data_partition: PartitionId,
         request_id: &str,
         now_ms: u64,
-    ) -> Result<UniqueCheckPhase1Result, String> {
+    ) -> Result<UniqueCheckPhase1Result, ReserveFailure> {
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
         let mut pending_remote: Vec<PendingUniqueReserve> = Vec::new();
@@ -91,15 +96,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 ttl_ms: 30_000,
             };
 
-            let is_conflict = if primary == Some(self.node_id) {
-                if !self.unique_partition_sealed(unique_part) {
-                    tracing::warn!(
-                        field,
-                        partition = unique_part.get(),
-                        "unique partition not sealed at the current epoch; failing reserve closed"
-                    );
-                    true
-                } else {
+            let failure: Option<ReserveFailure> = if primary == Some(self.node_id) {
+                if self.unique_partition_sealed(unique_part) {
                     let (result, write) = self
                         .stores
                         .unique_reserve_replicated(&reserve_params, now_ms);
@@ -112,14 +110,23 @@ impl<T: ClusterTransport> NodeController<T> {
                                 pending_quorum.push((field.clone(), rx));
                             }
                             local_reserved.push((field.clone(), value));
-                            false
+                            None
                         }
                         super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
                             local_reserved.push((field.clone(), value));
-                            false
+                            None
                         }
-                        super::super::db::ReserveResult::Conflict => true,
+                        super::super::db::ReserveResult::Conflict => {
+                            Some(ReserveFailure::Conflict(field.clone()))
+                        }
                     }
+                } else {
+                    tracing::warn!(
+                        field,
+                        partition = unique_part.get(),
+                        "unique partition not sealed at the current epoch; failing reserve closed"
+                    );
+                    Some(ReserveFailure::NotDurable(field.clone()))
                 }
             } else if let Some(target_node) = primary {
                 let receiver = self
@@ -134,15 +141,15 @@ impl<T: ClusterTransport> NodeController<T> {
                             target_node,
                             receiver: rx,
                         });
-                        false
+                        None
                     }
-                    Err(_) => true,
+                    Err(_) => Some(ReserveFailure::NotDurable(field.clone())),
                 }
             } else {
-                true
+                Some(ReserveFailure::NotDurable(field.clone()))
             };
 
-            if is_conflict {
+            if let Some(failure) = failure {
                 for (f, v) in &local_reserved {
                     if let Some(w) = self
                         .stores
@@ -154,7 +161,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 for pending in pending_remote {
                     drop(pending.receiver);
                 }
-                return Err(field.clone());
+                return Err(failure);
             }
         }
 
@@ -198,7 +205,8 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(), String> {
         let phase1 = self
             .start_unique_constraint_check(entity, id, data, data_partition, request_id, now_ms)
-            .await?;
+            .await
+            .map_err(|f| f.field().to_string())?;
 
         if !phase1.pending_remote.is_empty() {
             let remote_results = await_unique_reserves(phase1.pending_remote).await;
@@ -209,7 +217,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             .await;
                     }
                 }
-                Err((conflict_field, confirmed)) => {
+                Err((failure, confirmed)) => {
                     self.release_unique_check_reservations(
                         entity,
                         request_id,
@@ -217,7 +225,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         &confirmed,
                     )
                     .await;
-                    return Err(conflict_field);
+                    return Err(failure.field().to_string());
                 }
             }
         }

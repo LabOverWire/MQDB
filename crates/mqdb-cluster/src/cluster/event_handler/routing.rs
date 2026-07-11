@@ -421,19 +421,26 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 }
 
-type RemoteReserveResult =
-    Result<Vec<(String, Vec<u8>, NodeId)>, (String, Vec<(String, Vec<u8>, NodeId)>)>;
+type RemoteReserveResult = Result<
+    Vec<(String, Vec<u8>, NodeId)>,
+    (
+        super::super::node_controller::ReserveFailure,
+        Vec<(String, Vec<u8>, NodeId)>,
+    ),
+>;
 
 async fn combine_quorum(
     remote_results: RemoteReserveResult,
     pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
 ) -> RemoteReserveResult {
+    use super::super::node_controller::ReserveFailure;
     use super::super::node_controller::unique::await_unique_quorum;
     let quorum = await_unique_quorum(pending_quorum).await;
     match remote_results {
         Ok(confirmed) => match quorum {
             Ok(()) => Ok(confirmed),
-            Err(field) => Err((field, confirmed)),
+            // A quorum that never lands is transient, not a real conflict.
+            Err(field) => Err((ReserveFailure::NotDurable(field), confirmed)),
         },
         Err(e) => Err(e),
     }

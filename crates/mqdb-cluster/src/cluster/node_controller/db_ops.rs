@@ -690,12 +690,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 )
                 .await
             {
-                Err(conflict_field) => {
+                Err(failure) => {
                     return (
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        ),
+                        Self::json_error(failure.http_code(), &failure.message()),
                         None,
                     );
                 }
@@ -1344,7 +1341,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 super::db::unique_partition(params.entity, params.field, params.value);
             let primary = self.partition_map.primary(unique_part);
 
-            let is_conflict = if primary == Some(self.node_id) {
+            let failure = if primary == Some(self.node_id) {
                 self.reserve_unique_local(&params, &mut local_reserved, &mut pending_quorum)
                     .await
             } else if let Some(target_node) = primary {
@@ -1368,15 +1365,15 @@ impl<T: ClusterTransport> NodeController<T> {
                             target_node,
                             receiver: rx,
                         });
-                        false
+                        None
                     }
-                    Err(_) => true,
+                    Err(_) => Some(super::ReserveFailure::NotDurable(field.clone())),
                 }
             } else {
-                true
+                Some(super::ReserveFailure::NotDurable(field.clone()))
             };
 
-            if is_conflict {
+            if let Some(failure) = failure {
                 self.release_all_reservations(
                     entity,
                     &request_id,
@@ -1388,10 +1385,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     drop(pending.receiver);
                 }
                 return (
-                    Self::json_error(
-                        409,
-                        &format!("unique constraint violation on field '{field}'"),
-                    ),
+                    Self::json_error(failure.http_code(), &failure.message()),
                     None,
                 );
             }
@@ -1487,7 +1481,7 @@ impl<T: ClusterTransport> NodeController<T> {
         params: &UniqueReservationParams<'_>,
         local_reserved: &mut Vec<(String, Vec<u8>)>,
         pending_quorum: &mut Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
-    ) -> bool {
+    ) -> Option<super::ReserveFailure> {
         let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
         if !self.unique_partition_sealed(unique_part) {
             tracing::warn!(
@@ -1495,7 +1489,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 partition = unique_part.get(),
                 "unique partition not sealed at the current epoch; failing reserve closed"
             );
-            return true;
+            return Some(super::ReserveFailure::NotDurable(params.field.to_owned()));
         }
 
         let reserve_params = super::db::UniqueReserveParams {
@@ -1519,13 +1513,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     pending_quorum.push((params.field.to_owned(), rx));
                 }
                 local_reserved.push((params.field.to_owned(), params.value.to_vec()));
-                false
+                None
             }
             super::db::ReserveResult::AlreadyReservedBySameRequest => {
                 local_reserved.push((params.field.to_owned(), params.value.to_vec()));
-                false
+                None
             }
-            super::db::ReserveResult::Conflict => true,
+            super::db::ReserveResult::Conflict => {
+                Some(super::ReserveFailure::Conflict(params.field.to_owned()))
+            }
         }
     }
 
@@ -1645,7 +1641,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         super::db::unique_partition(params.entity, params.field, params.value);
                     let primary = self.partition_map.primary(unique_part);
 
-                    let is_conflict = if primary == Some(self.node_id) {
+                    let failure = if primary == Some(self.node_id) {
                         self.reserve_unique_local(&params, &mut local_reserved, &mut fk_quorum)
                             .await
                     } else if let Some(target_node) = primary {
@@ -1675,18 +1671,21 @@ impl<T: ClusterTransport> NodeController<T> {
                                             value.clone(),
                                             target_node,
                                         ));
-                                        false
+                                        None
                                     }
-                                    _ => true,
+                                    Ok(Ok(UniqueReserveStatus::Conflict)) => {
+                                        Some(super::ReserveFailure::Conflict(field.clone()))
+                                    }
+                                    _ => Some(super::ReserveFailure::NotDurable(field.clone())),
                                 }
                             }
-                            Err(_) => true,
+                            Err(_) => Some(super::ReserveFailure::NotDurable(field.clone())),
                         }
                     } else {
-                        true
+                        Some(super::ReserveFailure::NotDurable(field.clone()))
                     };
 
-                    if is_conflict {
+                    if let Some(failure) = failure {
                         self.release_all_reservations(
                             &entity,
                             &request_id,
@@ -1694,10 +1693,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             &remote_reserved,
                         )
                         .await;
-                        let payload = Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{field}'"),
-                        );
+                        let payload = Self::json_error(failure.http_code(), &failure.message());
                         let response =
                             JsonDbResponse::new(0, payload, response_topic, correlation_data);
                         let _ = self
@@ -1801,7 +1797,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             super::db::unique_partition(params.entity, params.field, params.value);
                         let primary = self.partition_map.primary(unique_part);
 
-                        let is_conflict = if primary == Some(self.node_id) {
+                        let failure = if primary == Some(self.node_id) {
                             self.reserve_unique_local(&params, &mut local_reserved, &mut fk_quorum)
                                 .await
                         } else if let Some(target_node) = primary {
@@ -1834,18 +1830,21 @@ impl<T: ClusterTransport> NodeController<T> {
                                                 value.clone(),
                                                 target_node,
                                             ));
-                                            false
+                                            None
                                         }
-                                        _ => true,
+                                        Ok(Ok(UniqueReserveStatus::Conflict)) => {
+                                            Some(super::ReserveFailure::Conflict(field.clone()))
+                                        }
+                                        _ => Some(super::ReserveFailure::NotDurable(field.clone())),
                                     }
                                 }
-                                Err(_) => true,
+                                Err(_) => Some(super::ReserveFailure::NotDurable(field.clone())),
                             }
                         } else {
-                            true
+                            Some(super::ReserveFailure::NotDurable(field.clone()))
                         };
 
-                        if is_conflict {
+                        if let Some(failure) = failure {
                             self.release_all_reservations(
                                 &entity,
                                 &request_id,
@@ -1853,10 +1852,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                 &remote_reserved,
                             )
                             .await;
-                            let payload = Self::json_error(
-                                409,
-                                &format!("unique constraint violation on field '{field}'"),
-                            );
+                            let payload = Self::json_error(failure.http_code(), &failure.message());
                             let response =
                                 JsonDbResponse::new(0, payload, response_topic, correlation_data);
                             let _ = self

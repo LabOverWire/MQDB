@@ -403,12 +403,13 @@ impl ClusteredAgent {
         let pending_quorum = pending.phase1.pending_quorum;
         let continuation = pending.continuation;
         tokio::spawn(async move {
+            use crate::cluster::node_controller::ReserveFailure;
             let remote_results = match (
                 await_unique_reserves(pending_remote).await,
                 await_unique_quorum(pending_quorum).await,
             ) {
                 (Ok(confirmed), Ok(())) => Ok(confirmed),
-                (Ok(confirmed), Err(field)) => Err((field, confirmed)),
+                (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
                 (Err(e), _) => Err(e),
             };
             let mut ctrl = controller.write().await;

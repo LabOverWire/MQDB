@@ -134,6 +134,41 @@ pub struct UniqueCheckPhase1Result {
     pub pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
 }
 
+/// Why a unique reserve failed, so the create can return the right status: a real conflict is a
+/// permanent `409`, while a not-yet-durable reserve (partition unsealed, no primary/quorum) is a
+/// transient `503` the client should retry.
+pub enum ReserveFailure {
+    Conflict(String),
+    NotDurable(String),
+}
+
+impl ReserveFailure {
+    #[must_use]
+    pub fn field(&self) -> &str {
+        match self {
+            Self::Conflict(f) | Self::NotDurable(f) => f,
+        }
+    }
+
+    #[must_use]
+    pub fn http_code(&self) -> u16 {
+        match self {
+            Self::Conflict(_) => 409,
+            Self::NotDurable(_) => 503,
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::Conflict(f) => format!("unique constraint violation on field '{f}'"),
+            Self::NotDurable(f) => {
+                format!("unique reservation for field '{f}' is not yet durable; retry")
+            }
+        }
+    }
+}
+
 pub struct PendingUniqueWork {
     pub phase1: UniqueCheckPhase1Result,
     pub continuation: UniqueCheckContinuation,
@@ -1374,7 +1409,7 @@ impl<T: ClusterTransport> NodeController<T> {
         local_reserved: Vec<(String, Vec<u8>)>,
         remote_results: Result<
             Vec<(String, Vec<u8>, NodeId)>,
-            (String, Vec<(String, Vec<u8>, NodeId)>),
+            (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>),
         >,
         continuation: UniqueCheckContinuation,
     ) {
@@ -1392,7 +1427,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
                             &entity,
                             &request_id,
@@ -1400,10 +1435,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             &confirmed,
                         )
                         .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         match self.db_create(&entity, &id, &data_bytes, now_ms).await {
@@ -1468,7 +1500,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
                             &entity,
                             &request_id,
@@ -1476,10 +1508,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             &confirmed,
                         )
                         .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         match self.db_update(&entity, &id, &data_bytes, now_ms).await {

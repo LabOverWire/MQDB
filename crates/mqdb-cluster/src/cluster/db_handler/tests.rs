@@ -273,6 +273,68 @@ async fn handle_invalid_partition_returns_error() {
 }
 
 #[tokio::test]
+async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
+    use super::super::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        // Multi-node group => become_primary QUEUES a seal but does not complete it.
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![node2, node3],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+        .await
+        .unwrap();
+
+    // The value is genuinely FREE; the create can only fail because the partition is not yet sealed.
+    let payload =
+        serde_json::to_vec(&serde_json::json!({"id": "u1", "email": "free@x.com"})).unwrap();
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/users/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await;
+
+    let resp = response.unwrap();
+    let json = parse_json_response(&resp.payload);
+    assert_eq!(json["status"], "error");
+    assert_eq!(
+        json["code"], 503,
+        "a reserve that fails only because the partition is unsealed is transient/retryable (503), \
+         not a permanent unique-constraint violation (409)"
+    );
+    assert!(
+        ctrl.db_get("users", "u1").is_none(),
+        "no record should be created for a fail-closed reserve"
+    );
+}
+
+#[tokio::test]
 async fn no_response_without_response_topic() {
     let node1 = NodeId::validated(1).unwrap();
     let handler = DbRequestHandler::new(node1);
