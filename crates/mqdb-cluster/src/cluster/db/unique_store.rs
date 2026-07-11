@@ -393,10 +393,16 @@ impl UniqueStore {
             Operation::Insert | Operation::Update => {
                 let reservation =
                     Self::deserialize(data).ok_or(UniqueStoreError::SerializationError)?;
-                self.reservations
-                    .write()
-                    .unwrap()
-                    .insert(id.to_string(), reservation);
+                let mut reservations = self.reservations.write().unwrap();
+                if let Some(existing) = reservations.get(id)
+                    && existing.is_committed()
+                    && existing.record_id_str() != reservation.record_id_str()
+                {
+                    // A committed claim is final: never reassign a committed value to a different
+                    // record, even at a higher epoch (closes the missed-reservation oversell).
+                    return Err(UniqueStoreError::AlreadyCommitted);
+                }
+                reservations.insert(id.to_string(), reservation);
                 Ok(())
             }
             Operation::Delete => {
@@ -1041,6 +1047,74 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn apply_replicated_rejects_reassigning_committed_value() {
+        let store = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        let key = unique_key(&committed);
+        store
+            .apply_replicated(Operation::Insert, &key, &UniqueStore::serialize(&committed))
+            .unwrap();
+
+        let intruder = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-b",
+            "req-b",
+            partition(5),
+            2000,
+        );
+        let result =
+            store.apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&intruder));
+
+        assert_eq!(
+            result,
+            Err(UniqueStoreError::AlreadyCommitted),
+            "a committed value must not be reassigned to a different record"
+        );
+        assert_eq!(
+            store
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .record_id_str(),
+            "owner-a",
+            "the original committed owner is preserved"
+        );
+    }
+
+    #[test]
+    fn apply_replicated_allows_recommit_by_same_record() {
+        let store = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        let key = unique_key(&committed);
+        store
+            .apply_replicated(Operation::Insert, &key, &UniqueStore::serialize(&committed))
+            .unwrap();
+
+        store
+            .apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&committed))
+            .expect("re-applying the same committed owner is idempotent, not a conflict");
     }
 
     #[test]

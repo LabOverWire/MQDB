@@ -64,6 +64,7 @@ const FORWARD_DEDUP_CAPACITY: usize = 1000;
 pub struct TickOutput {
     pub heartbeat: Option<ClusterMessage>,
     pub catchup_requests: Vec<(NodeId, ClusterMessage)>,
+    pub seal_requests: Vec<(NodeId, ClusterMessage)>,
     pub local_publishes: Vec<(String, Vec<u8>)>,
 }
 
@@ -542,7 +543,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        self.queue_unique_seal(partition, epoch);
+        self.seal_or_queue_unique(partition, epoch);
     }
 
     pub fn become_replica(&mut self, partition: PartitionId, epoch: Epoch, sequence: u64) {
@@ -610,6 +611,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         self.collect_catchup_requests(now, &mut output);
+        self.collect_pending_seals(&mut output);
         self.collect_stale_scatter_responses(now, &mut output);
         self.collect_stale_vault_decrypts(now);
 
@@ -630,6 +632,9 @@ impl<T: ClusterTransport> NodeController<T> {
             let _ = self.transport.broadcast(hb).await;
         }
         for (target, msg) in output.catchup_requests {
+            let _ = self.transport.send(target, msg).await;
+        }
+        for (target, msg) in output.seal_requests {
             let _ = self.transport.send(target, msg).await;
         }
         for (topic, payload) in output.local_publishes {

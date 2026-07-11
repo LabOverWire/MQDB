@@ -252,12 +252,30 @@ rejected, so its reserves can't reach a majority and fail closed. Tests: 3 `node
 (`unique_seal_fences_superseded_primary_reserve`). Full suite green (503+75+49), clippy clean.
 Non-breaking — no serve-gate yet.
 
-**P2.d-2 + P2.e remaining:** (d-2) the seal response should also carry the member's reservations so
-the new primary **learns existing owners** (`leaderView`) — needed so it doesn't re-reserve an
-already-taken value it happened to miss; (e) **flip serve-gating on** — the reserve path refuses
-unless `unique_sealed[partition] == acting_epoch` and the learned view shows no existing owner. P2.e
-breaks tests that reserve without sealing first, so ship d-2+e together and update those tests (or
-seal in the harness). This is the final step that fully closes B.
+**P2.e (serve-gate) + monotonic guard DONE — Phase 2 core complete, closes B:**
+- **Serve-gate:** both reserve paths (`start_unique_constraint_check` local branch,
+  `handle_unique_reserve_request` remote) refuse unless `unique_partition_sealed(part)` — i.e.
+  `unique_sealed[part] == acting_epoch`. A superseded primary is sealed only at its stale epoch, so
+  it fails closed. `become_primary` seals a single-node group synchronously (`seal_or_queue_unique`,
+  majority 1); multi-node queues, and `tick`/`send_tick_output` now emit the seal requests
+  (`collect_pending_seals` → `TickOutput.seal_requests`) so the handshake completes over normal
+  ticks (agent path uses the async `drain_pending_seals`; both share `prepare_unique_seal`).
+- **Monotonic guard (replaces the d-2 seal-transfer idea):** `UniqueStore::apply_replicated` rejects
+  any Insert/Update that would reassign a **committed** value to a *different* record
+  (`AlreadyCommitted`). This closes the "new primary missed a replicated reservation → higher-epoch
+  reserve LWW-overwrites a committed value" oversell at the **member** level — simpler than having
+  the seal transfer reservations for the primary to learn (`leaderView`), and achieves the same
+  guarantee. A committed claim is final; only its own record's release frees it.
+- Tests: `unsealed_partition_fails_reserve_closed` (gate), `apply_replicated_rejects_reassigning_committed_value`
+  + `apply_replicated_allows_recommit_by_same_record` (guard); `unique_constraint_cross_node_message_flow`
+  updated to complete the seal handshake before reserving. Full suite green (506+75+49), clippy clean.
+
+**Together, the three P2 mechanisms close B:** (1) seal fences the old primary (epoch-promise at a
+majority ⇒ its stale-epoch group writes are rejected ⇒ its reserves fail closed); (2) the serve-gate
+stops a new primary serving before it has sealed; (3) the monotonic guard prevents any residual
+missed-reservation overwrite. Remaining polish (non-safety): the fail-closed-while-unsealed reserve
+returns a 409 (should be 503/retry), and the P2.c secondary `db_ops` create path is still ungated
+(both tracked in the P2.c tail above).
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.

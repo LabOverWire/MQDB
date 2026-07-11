@@ -92,25 +92,34 @@ impl<T: ClusterTransport> NodeController<T> {
             };
 
             let is_conflict = if primary == Some(self.node_id) {
-                let (result, write) = self
-                    .stores
-                    .unique_reserve_replicated(&reserve_params, now_ms);
+                if !self.unique_partition_sealed(unique_part) {
+                    tracing::warn!(
+                        field,
+                        partition = unique_part.get(),
+                        "unique partition not sealed at the current epoch; failing reserve closed"
+                    );
+                    true
+                } else {
+                    let (result, write) = self
+                        .stores
+                        .unique_reserve_replicated(&reserve_params, now_ms);
 
-                match result {
-                    super::super::db::ReserveResult::Reserved => {
-                        if let Some(w) = write {
-                            self.sync_unique_write();
-                            let rx = self.replicate_unique_reserve(w).await;
-                            pending_quorum.push((field.clone(), rx));
+                    match result {
+                        super::super::db::ReserveResult::Reserved => {
+                            if let Some(w) = write {
+                                self.sync_unique_write();
+                                let rx = self.replicate_unique_reserve(w).await;
+                                pending_quorum.push((field.clone(), rx));
+                            }
+                            local_reserved.push((field.clone(), value));
+                            false
                         }
-                        local_reserved.push((field.clone(), value));
-                        false
+                        super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
+                            local_reserved.push((field.clone(), value));
+                            false
+                        }
+                        super::super::db::ReserveResult::Conflict => true,
                     }
-                    super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
-                        local_reserved.push((field.clone(), value));
-                        false
-                    }
-                    super::super::db::ReserveResult::Conflict => true,
                 }
             } else if let Some(target_node) = primary {
                 let receiver = self
@@ -307,7 +316,15 @@ impl<T: ClusterTransport> NodeController<T> {
         let record_id = req.record_id_str();
         let idempotency_key = req.idempotency_key_str();
 
-        let status = if let Some(data_partition) = req.data_partition() {
+        let unique_part = super::super::db::unique_partition(entity, field, &req.value);
+        let status = if !self.unique_partition_sealed(unique_part) {
+            tracing::warn!(
+                field,
+                partition = unique_part.get(),
+                "unique partition not sealed at the current epoch; rejecting remote reserve"
+            );
+            UniqueReserveStatus::Error
+        } else if let Some(data_partition) = req.data_partition() {
             let reserve_params = super::super::db::UniqueReserveParams {
                 entity,
                 field,
@@ -756,6 +773,33 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    /// Seal a unique partition immediately if this node is its own majority (single-node group),
+    /// else queue a seal round. Called from `become_primary` (stays synchronous).
+    pub(crate) fn seal_or_queue_unique(&mut self, partition: PartitionId, epoch: Epoch) {
+        if self.unique_majority() == 1 {
+            let promised = self
+                .unique_promised
+                .entry(partition.get())
+                .or_insert(Epoch::ZERO);
+            if epoch > *promised {
+                *promised = epoch;
+            }
+            self.mark_unique_sealed(partition, epoch);
+        } else {
+            self.queue_unique_seal(partition, epoch);
+        }
+    }
+
+    /// Whether this node has sealed the partition at its current acting (primary) epoch — the
+    /// precondition for serving reserves (a superseded primary is not sealed at its stale epoch).
+    #[must_use]
+    pub(crate) fn unique_partition_sealed(&self, partition: PartitionId) -> bool {
+        match self.epoch(partition) {
+            Some(epoch) => self.unique_sealed.get(&partition.get()) == Some(&epoch),
+            None => false,
+        }
+    }
+
     /// Queue a promotion seal for a unique partition (deduped; skipped if already sealed ≥ epoch).
     /// Drained by the event-loop tick so `become_primary` stays synchronous.
     pub(crate) fn queue_unique_seal(&mut self, partition: PartitionId, epoch: Epoch) {
@@ -775,33 +819,53 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Initiate any queued promotion seals: promise this node's epoch at a majority of the group
-    /// before it serves reserves for the partition (fences a superseded primary).
+    /// Initiate any queued promotion seals by sending seal requests directly (used by the cluster
+    /// agent's async tick). Promises this node's epoch at a majority before it serves reserves.
     pub(crate) async fn drain_pending_seals(&mut self) {
         let queue = std::mem::take(&mut self.pending_seal_queue);
         for (partition, epoch) in queue {
-            if self
-                .unique_sealed
-                .get(&partition.get())
-                .is_some_and(|&s| s >= epoch)
-            {
-                continue;
+            for (node, msg) in self.prepare_unique_seal(partition, epoch) {
+                let _ = self.transport.send(node, msg).await;
             }
-            if self
-                .pending_unique_seals
-                .values()
-                .any(|t| t.partition == partition && t.epoch >= epoch)
-            {
-                continue;
-            }
-            if self.epoch(partition) != Some(epoch) {
-                continue;
-            }
-            self.initiate_unique_seal(partition, epoch).await;
         }
     }
 
-    async fn initiate_unique_seal(&mut self, partition: PartitionId, epoch: Epoch) {
+    /// Collect seal requests for queued promotions into the tick output (used by the synchronous
+    /// `tick`/`send_tick_output` path).
+    pub(crate) fn collect_pending_seals(&mut self, output: &mut super::TickOutput) {
+        let queue = std::mem::take(&mut self.pending_seal_queue);
+        for (partition, epoch) in queue {
+            output
+                .seal_requests
+                .extend(self.prepare_unique_seal(partition, epoch));
+        }
+    }
+
+    /// Promise this node's epoch for the partition and register a seal tracker; returns the seal
+    /// requests to send to the group (empty if already sealed/in-flight/superseded or self-majority).
+    fn prepare_unique_seal(
+        &mut self,
+        partition: PartitionId,
+        epoch: Epoch,
+    ) -> Vec<(NodeId, ClusterMessage)> {
+        if self
+            .unique_sealed
+            .get(&partition.get())
+            .is_some_and(|&s| s >= epoch)
+        {
+            return Vec::new();
+        }
+        if self
+            .pending_unique_seals
+            .values()
+            .any(|t| t.partition == partition && t.epoch >= epoch)
+        {
+            return Vec::new();
+        }
+        if self.epoch(partition) != Some(epoch) {
+            return Vec::new();
+        }
+
         let promised = self
             .unique_promised
             .entry(partition.get())
@@ -812,13 +876,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let needed = self.unique_majority();
         let request_id = self.next_unique_quorum_id();
+        let mut requests = Vec::new();
         for node in self.unique_quorum_group() {
             if node != self.node_id {
                 let req = UniqueSealRequest::create(request_id, partition, epoch.get());
-                let _ = self
-                    .transport
-                    .send(node, ClusterMessage::UniqueSealRequest(req))
-                    .await;
+                requests.push((node, ClusterMessage::UniqueSealRequest(req)));
             }
         }
 
@@ -839,6 +901,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 },
             );
         }
+        requests
     }
 
     pub(crate) async fn handle_unique_seal_request(

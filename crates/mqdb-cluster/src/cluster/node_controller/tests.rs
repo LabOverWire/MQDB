@@ -236,6 +236,55 @@ async fn unique_reserve_completes_immediately_for_single_node_group() {
 }
 
 #[tokio::test]
+async fn unsealed_partition_fails_reserve_closed() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+
+    let entity = "users";
+    ctrl.stores()
+        .db_constraints
+        .add(crate::cluster::db::ClusterConstraint::unique(
+            entity,
+            "uniq_email",
+            "email",
+        ))
+        .unwrap();
+    let value = b"a@x.com";
+    let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
+    // Primary at epoch 1, but a multi-node group has not completed the seal handshake.
+    ctrl.become_primary(unique_part, Epoch::new(1));
+    assert!(
+        !ctrl.unique_partition_sealed(unique_part),
+        "a multi-node group is not sealed until the handshake completes"
+    );
+
+    let data = serde_json::json!({ "email": "a@x.com" });
+    let result = ctrl
+        .check_unique_constraints(
+            entity,
+            "u1",
+            &data,
+            PartitionId::new(5).unwrap(),
+            "req-1",
+            1000,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "reserve must fail closed while the value partition is unsealed"
+    );
+    assert!(
+        ctrl.stores().unique_get(entity, "email", value).is_none(),
+        "no reservation should be recorded for a fail-closed reserve"
+    );
+}
+
+#[tokio::test]
 async fn unique_seal_completes_for_single_node() {
     let node1 = NodeId::validated(1).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));

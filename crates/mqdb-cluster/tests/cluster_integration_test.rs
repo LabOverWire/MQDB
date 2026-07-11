@@ -3822,6 +3822,13 @@ async fn unique_constraint_cross_node_message_flow() {
         node.controller.process_messages().await;
     }
 
+    // Complete the promotion seal handshake so node 0 may serve reserves for the value partition.
+    for _ in 0..3 {
+        cluster.advance_ms(1);
+        cluster.nodes[0].controller.process_messages().await;
+        cluster.nodes[1].controller.process_messages().await;
+    }
+
     let request = UniqueReserveRequest::create(
         42,
         "products",
