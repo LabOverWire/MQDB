@@ -292,6 +292,16 @@ db.add_unique_constraint("users".into(), vec!["email".into()]).await?;
 db.add_unique_constraint("posts".into(), vec!["user_id".into(), "slug".into()]).await?;
 ```
 
+Unique enforcement is atomic and never oversells (two records sharing one unique value), even under
+concurrency and failover. In agent mode the reservation and record write are one compare-and-swap over
+an `expect_absent` guard key. In cluster mode the claim is epoch-fenced and quorum-durable: a reserve
+succeeds only once a majority of the value's quorum group holds it, a newly promoted primary seals the
+partition (promising its epoch at a majority and learning any reservation it missed) before serving,
+and a record-driven reconciler repairs claims lost to failover. The design is verified in TLA+
+(`specs/ClusterUniqueQuorum.tla`, `specs/UniqueGuard.tla`); see `docs/design/cluster-unique-hardening.md`.
+While a partition is briefly unsealed after a promotion, a unique create fails closed with a retryable
+`503` rather than a spurious conflict.
+
 ### Not-Null Constraints
 
 ```rust

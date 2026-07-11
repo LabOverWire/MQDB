@@ -1041,6 +1041,11 @@ All cluster messages follow this format (`crates/mqdb-cluster/src/cluster/mqtt_t
 | 83 | `UniqueCommitResponse` | Unique commit response |
 | 84 | `UniqueReleaseRequest` | Release reserved unique value |
 | 85 | `UniqueReleaseResponse` | Unique release response |
+| 86 | `UniqueReassertRequest` | Reconciler: reassert a claim from the durable record |
+| 87 | `UniqueReplicate` | Replicate a `DB_UNIQUE` write to the quorum group (epoch-fenced) |
+| 88 | `UniqueReplicateAck` | Ack of a quorum-group unique write (majority durability) |
+| 89 | `UniqueSealRequest` | Promotion seal: promise epoch + read reservations |
+| 94 | `UniqueSealResponse` | Seal response: accept/reject + learned reservations |
 | 90 | `FkCheckRequest` | FK existence check (create/update) |
 | 91 | `FkCheckResponse` | FK existence check response |
 | 92 | `FkReverseLookupRequest` | FK reverse lookup (delete) |
@@ -2378,7 +2383,7 @@ The following sections may need documentation:
 | `crates/mqdb-cluster/src/cluster/node_controller/fk.rs` | Foreign key constraint protocol |
 | `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` | CascadeSideEffect enum, cascade execution, CAS guard |
 | `crates/mqdb-cluster/src/cluster/node_controller/pending.rs` | Pending constraint state tracking, cascade ack bookkeeping |
-| `crates/mqdb-cluster/src/cluster/node_controller/unique.rs` | Unique constraint 2-phase protocol |
+| `crates/mqdb-cluster/src/cluster/node_controller/unique.rs` | Unique constraint: epoch-fenced quorum reserve, promotion seal, and record-driven reconciler (see `docs/design/cluster-unique-hardening.md`) |
 | `crates/mqdb-cluster/src/cluster/store_manager/constraint_ops.rs` | FK reverse index integration, rebuild on constraint add |
 | `crates/mqdb-cluster/src/cluster/store_manager/outbox.rs` | CascadeOutboxPayload, CascadeRemoteOp, _cascade/ prefix |
 | `crates/mqdb-cluster/src/cluster/db/data_store.rs` | FkReverseIndex in-memory data structure |
