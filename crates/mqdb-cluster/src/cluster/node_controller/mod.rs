@@ -23,7 +23,7 @@ use super::protocol::{
     BatchReadRequest, CatchupRequest, ForwardedPublish, JsonDbOp, JsonDbRequest, JsonDbResponse,
     QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse,
     UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueReserveStatus,
+    UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
@@ -117,6 +117,14 @@ pub(super) struct UniqueQuorumTracker {
     pub needed: usize,
     pub deadline_ms: u64,
     pub completion: UniqueQuorumCompletion,
+}
+
+pub(super) struct UniqueSealTracker {
+    pub partition: PartitionId,
+    pub epoch: Epoch,
+    pub responses: HashSet<NodeId>,
+    pub needed: usize,
+    pub deadline_ms: u64,
 }
 
 pub struct UniqueCheckPhase1Result {
@@ -337,6 +345,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) heartbeat: HeartbeatManager,
     pub(super) replicas: HashMap<u16, ReplicaState>,
     pub(super) unique_promised: HashMap<u16, Epoch>,
+    pub(super) unique_sealed: HashMap<u16, Epoch>,
+    pub(super) pending_seal_queue: Vec<(PartitionId, Epoch)>,
+    pub(super) pending_unique_seals: HashMap<u64, UniqueSealTracker>,
     pub(super) pending_unique_quorum: HashMap<u64, UniqueQuorumTracker>,
     pub(super) unique_quorum_counter: u64,
     pub(super) pending: PendingWrites,
@@ -406,6 +417,9 @@ impl<T: ClusterTransport> NodeController<T> {
             transport,
             replicas: HashMap::new(),
             unique_promised: HashMap::new(),
+            unique_sealed: HashMap::new(),
+            pending_seal_queue: Vec::new(),
+            pending_unique_seals: HashMap::new(),
             pending_unique_quorum: HashMap::new(),
             unique_quorum_counter: 0,
             pending: PendingWrites::new(1000),
@@ -528,6 +542,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
+        self.queue_unique_seal(partition, epoch);
     }
 
     pub fn become_replica(&mut self, partition: PartitionId, epoch: Epoch, sequence: u64) {
@@ -1191,6 +1206,12 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::UniqueReplicateAck(ack) => {
                 self.record_unique_quorum_ack(from, ack.request_id).await;
+            }
+            ClusterMessage::UniqueSealRequest(req) => {
+                self.handle_unique_seal_request(from, req).await;
+            }
+            ClusterMessage::UniqueSealResponse(resp) => {
+                self.handle_unique_seal_response(from, resp);
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;

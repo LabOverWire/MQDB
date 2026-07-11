@@ -87,7 +87,8 @@ pub use protocol::{
     QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
     TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
     UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueReserveStatus, WildcardBroadcast, WildcardOp,
+    UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
+    WildcardBroadcast, WildcardOp,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};
 pub use qos2_store::{

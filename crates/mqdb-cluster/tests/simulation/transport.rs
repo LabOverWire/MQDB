@@ -12,7 +12,8 @@ use mqdb_cluster::cluster::{
     ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest,
     TopicSubscriptionBroadcast, TransportError, UniqueCommitRequest, UniqueCommitResponse,
     UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
-    UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
+    WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -235,6 +236,14 @@ impl SimulatedTransport {
             88 => {
                 let (ack, _) = UniqueReplicateAck::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::UniqueReplicateAck(ack))
+            }
+            89 => {
+                let (req, _) = UniqueSealRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueSealRequest(req))
+            }
+            94 => {
+                let (resp, _) = UniqueSealResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueSealResponse(resp))
             }
             _ => None,
         }

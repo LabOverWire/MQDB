@@ -7,7 +7,7 @@ use super::protocol::{
     JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
     TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
     UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
-    UniqueReserveResponse, WildcardBroadcast,
+    UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -67,6 +67,8 @@ pub enum ClusterMessage {
         write: ReplicationWrite,
     },
     UniqueReplicateAck(UniqueReplicateAck),
+    UniqueSealRequest(UniqueSealRequest),
+    UniqueSealResponse(UniqueSealResponse),
     FkCheckRequest(FkCheckRequest),
     FkCheckResponse(FkCheckResponse),
     FkReverseLookupRequest(FkReverseLookupRequest),
@@ -111,6 +113,8 @@ impl ClusterMessage {
             Self::UniqueReassertRequest(_) => 86,
             Self::UniqueReplicate { .. } => 87,
             Self::UniqueReplicateAck(_) => 88,
+            Self::UniqueSealRequest(_) => 89,
+            Self::UniqueSealResponse(_) => 94,
             Self::FkCheckRequest(_) => 90,
             Self::FkCheckResponse(_) => 91,
             Self::FkReverseLookupRequest(_) => 92,
@@ -155,6 +159,8 @@ impl ClusterMessage {
             Self::UniqueReassertRequest(_) => "UniqueReassertRequest",
             Self::UniqueReplicate { .. } => "UniqueReplicate",
             Self::UniqueReplicateAck(_) => "UniqueReplicateAck",
+            Self::UniqueSealRequest(_) => "UniqueSealRequest",
+            Self::UniqueSealResponse(_) => "UniqueSealResponse",
             Self::FkCheckRequest(_) => "FkCheckRequest",
             Self::FkCheckResponse(_) => "FkCheckResponse",
             Self::FkReverseLookupRequest(_) => "FkReverseLookupRequest",
@@ -208,6 +214,8 @@ impl ClusterMessage {
                 buf.extend_from_slice(&write.to_bytes());
             }
             Self::UniqueReplicateAck(ack) => buf.extend_from_slice(&ack.to_be_bytes()),
+            Self::UniqueSealRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::UniqueSealResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkCheckRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -330,6 +338,14 @@ impl ClusterMessage {
             88 => {
                 let (ack, _) = UniqueReplicateAck::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReplicateAck(ack))
+            }
+            89 => {
+                let (req, _) = UniqueSealRequest::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueSealRequest(req))
+            }
+            94 => {
+                let (resp, _) = UniqueSealResponse::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueSealResponse(resp))
             }
             90 => {
                 let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;

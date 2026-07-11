@@ -3877,6 +3877,91 @@ fn json_value_bytes(value: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn unique_seal_fences_superseded_primary_reserve() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueSealRequest};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"sku-seal".as_slice();
+    let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", value);
+    let node0_id = cluster.nodes[0].id;
+
+    // A newly promoted primary seals the partition at epoch 2 by promising it at the group: each
+    // member records the promise on receiving the seal request.
+    for i in 1..cluster.nodes.len() {
+        cluster.nodes[i]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: ClusterMessage::UniqueSealRequest(UniqueSealRequest::create(
+                    1,
+                    unique_part,
+                    2,
+                )),
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[i].controller.process_messages().await;
+    }
+
+    // The superseded epoch-1 primary tries to replicate a reservation to the group; sealed members
+    // must reject it (epoch below their promise).
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "old",
+        request_id: "req-old",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+    let write = write.unwrap();
+    let stale = ReplicationWrite::new(
+        write.partition,
+        write.operation,
+        Epoch::new(1),
+        0,
+        write.entity.clone(),
+        write.id.clone(),
+        write.data.clone(),
+    );
+
+    for i in 1..cluster.nodes.len() {
+        cluster.nodes[i]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: ClusterMessage::UniqueReplicate {
+                    request_id: 0,
+                    write: stale.clone(),
+                },
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[i].controller.process_messages().await;
+    }
+
+    for node in &cluster.nodes[1..] {
+        assert!(
+            node.controller
+                .stores()
+                .unique_get("products", "sku", value)
+                .is_none(),
+            "a sealed member must reject the superseded primary's stale-epoch reservation"
+        );
+    }
+}
+
+#[tokio::test]
 async fn unique_reconcile_reestablishes_lost_reservation() {
     use mqdb_cluster::cluster::db::ClusterConstraint;
 

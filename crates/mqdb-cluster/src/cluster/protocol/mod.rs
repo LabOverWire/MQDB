@@ -25,5 +25,5 @@ pub use types::{AckStatus, JsonDbOp, MessageType, Operation, QueryStatus};
 pub use unique::{
     UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest,
     UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest, UniqueReserveResponse,
-    UniqueReserveStatus,
+    UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
 };

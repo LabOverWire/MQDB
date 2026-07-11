@@ -238,7 +238,26 @@ primary reserve paths on the MQTT create path are now majority-durable.
   `combine_quorum`; should be a 503 "reservation not durable" (needs a distinct durability-failure
   signal into the completion functions).
 
-Then **P2.d+e** (seal + serve-gating).
+**P2.d-1 (seal epoch-promise round) DONE:** `UniqueSealRequest`/`UniqueSealResponse` (types 89/94).
+`become_primary` queues a per-partition seal (`pending_seal_queue`); the event-loop tick drains it
+(`drain_pending_seals`) — kept off `become_primary` so that stays sync. `initiate_unique_seal`
+promises this node's epoch for the partition and sends the seal to the group; a member accepts iff
+`epoch >= promised` (then promises it), else rejects (fence). The primary marks
+`unique_sealed[partition] = epoch` once a **majority** accepts (self counts); `sweep_unique_seals`
+retries timed-out seals (liveness). A rejected response means a member already promised a higher
+epoch → this node is superseded → abandon. **Effect:** combined with P2.c majority reserves, the
+epoch promise at a majority already **fences the old primary** — its stale-epoch group writes are
+rejected, so its reserves can't reach a majority and fail closed. Tests: 3 `node_controller` unit
+(single-node seal, majority seal, seal-request fencing) + 2 protocol round-trips + 1 integration
+(`unique_seal_fences_superseded_primary_reserve`). Full suite green (503+75+49), clippy clean.
+Non-breaking — no serve-gate yet.
+
+**P2.d-2 + P2.e remaining:** (d-2) the seal response should also carry the member's reservations so
+the new primary **learns existing owners** (`leaderView`) — needed so it doesn't re-reserve an
+already-taken value it happened to miss; (e) **flip serve-gating on** — the reserve path refuses
+unless `unique_sealed[partition] == acting_epoch` and the learned view shows no existing owner. P2.e
+breaks tests that reserve without sealing first, so ship d-2+e together and update those tests (or
+seal in the harness). This is the final step that fully closes B.
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.

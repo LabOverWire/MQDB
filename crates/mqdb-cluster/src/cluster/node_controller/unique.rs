@@ -4,12 +4,15 @@
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingUniqueReserve,
     UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest, UniqueReleaseRequest,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest,
+    UniqueSealResponse,
 };
+use crate::cluster::Epoch;
 use tokio::sync::oneshot;
 
 const UNIQUE_RESERVE_TIMEOUT_SECS: u64 = 5;
 const UNIQUE_QUORUM_TIMEOUT_MS: u64 = 5000;
+const UNIQUE_SEAL_TIMEOUT_MS: u64 = 5000;
 
 pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
@@ -749,6 +752,166 @@ impl<T: ClusterTransport> NodeController<T> {
             if let Some(tracker) = self.pending_unique_quorum.remove(&id) {
                 self.fire_unique_quorum_completion(tracker.completion, false)
                     .await;
+            }
+        }
+    }
+
+    /// Queue a promotion seal for a unique partition (deduped; skipped if already sealed ≥ epoch).
+    /// Drained by the event-loop tick so `become_primary` stays synchronous.
+    pub(crate) fn queue_unique_seal(&mut self, partition: PartitionId, epoch: Epoch) {
+        if self
+            .unique_sealed
+            .get(&partition.get())
+            .is_some_and(|&s| s >= epoch)
+        {
+            return;
+        }
+        if !self
+            .pending_seal_queue
+            .iter()
+            .any(|&(p, e)| p == partition && e >= epoch)
+        {
+            self.pending_seal_queue.push((partition, epoch));
+        }
+    }
+
+    /// Initiate any queued promotion seals: promise this node's epoch at a majority of the group
+    /// before it serves reserves for the partition (fences a superseded primary).
+    pub(crate) async fn drain_pending_seals(&mut self) {
+        let queue = std::mem::take(&mut self.pending_seal_queue);
+        for (partition, epoch) in queue {
+            if self
+                .unique_sealed
+                .get(&partition.get())
+                .is_some_and(|&s| s >= epoch)
+            {
+                continue;
+            }
+            if self
+                .pending_unique_seals
+                .values()
+                .any(|t| t.partition == partition && t.epoch >= epoch)
+            {
+                continue;
+            }
+            if self.epoch(partition) != Some(epoch) {
+                continue;
+            }
+            self.initiate_unique_seal(partition, epoch).await;
+        }
+    }
+
+    async fn initiate_unique_seal(&mut self, partition: PartitionId, epoch: Epoch) {
+        let promised = self
+            .unique_promised
+            .entry(partition.get())
+            .or_insert(Epoch::ZERO);
+        if epoch > *promised {
+            *promised = epoch;
+        }
+
+        let needed = self.unique_majority();
+        let request_id = self.next_unique_quorum_id();
+        for node in self.unique_quorum_group() {
+            if node != self.node_id {
+                let req = UniqueSealRequest::create(request_id, partition, epoch.get());
+                let _ = self
+                    .transport
+                    .send(node, ClusterMessage::UniqueSealRequest(req))
+                    .await;
+            }
+        }
+
+        let mut responses = std::collections::HashSet::new();
+        responses.insert(self.node_id);
+        if responses.len() >= needed {
+            self.mark_unique_sealed(partition, epoch);
+        } else {
+            let deadline_ms = Self::current_time_ms() + UNIQUE_SEAL_TIMEOUT_MS;
+            self.pending_unique_seals.insert(
+                request_id,
+                super::UniqueSealTracker {
+                    partition,
+                    epoch,
+                    responses,
+                    needed,
+                    deadline_ms,
+                },
+            );
+        }
+    }
+
+    pub(crate) async fn handle_unique_seal_request(
+        &mut self,
+        from: NodeId,
+        req: &UniqueSealRequest,
+    ) {
+        let Some(partition) = req.partition_id() else {
+            return;
+        };
+        let epoch = Epoch::new(req.epoch);
+        let promised = self
+            .unique_promised
+            .entry(partition.get())
+            .or_insert(Epoch::ZERO);
+        let accepted = if epoch >= *promised {
+            *promised = epoch;
+            true
+        } else {
+            false
+        };
+        let resp = UniqueSealResponse::create(req.request_id, partition, req.epoch, accepted);
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::UniqueSealResponse(resp))
+            .await;
+    }
+
+    pub(crate) fn handle_unique_seal_response(&mut self, from: NodeId, resp: &UniqueSealResponse) {
+        if !resp.is_accepted() {
+            // A group member has promised a higher epoch — this node is superseded; abandon.
+            self.pending_unique_seals.remove(&resp.request_id);
+            return;
+        }
+        let reached = match self.pending_unique_seals.get_mut(&resp.request_id) {
+            Some(tracker) => {
+                tracker.responses.insert(from);
+                tracker.responses.len() >= tracker.needed
+            }
+            None => false,
+        };
+        if reached && let Some(tracker) = self.pending_unique_seals.remove(&resp.request_id) {
+            self.mark_unique_sealed(tracker.partition, tracker.epoch);
+        }
+    }
+
+    fn mark_unique_sealed(&mut self, partition: PartitionId, epoch: Epoch) {
+        let entry = self
+            .unique_sealed
+            .entry(partition.get())
+            .or_insert(Epoch::ZERO);
+        if epoch > *entry {
+            *entry = epoch;
+        }
+        tracing::debug!(
+            partition = partition.get(),
+            epoch = epoch.get(),
+            "unique partition sealed"
+        );
+    }
+
+    /// Retry seals that did not reach a majority before their deadline (liveness).
+    pub(crate) fn sweep_unique_seals(&mut self, now_ms: u64) {
+        let expired: Vec<(u64, PartitionId, Epoch)> = self
+            .pending_unique_seals
+            .iter()
+            .filter(|(_, t)| t.deadline_ms <= now_ms)
+            .map(|(&id, t)| (id, t.partition, t.epoch))
+            .collect();
+        for (id, partition, epoch) in expired {
+            self.pending_unique_seals.remove(&id);
+            if self.epoch(partition) == Some(epoch) {
+                self.queue_unique_seal(partition, epoch);
             }
         }
     }

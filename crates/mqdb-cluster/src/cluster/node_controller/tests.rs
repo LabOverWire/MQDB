@@ -236,6 +236,78 @@ async fn unique_reserve_completes_immediately_for_single_node_group() {
 }
 
 #[tokio::test]
+async fn unique_seal_completes_for_single_node() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "a single-node group is its own majority; the partition seals immediately"
+    );
+}
+
+#[tokio::test]
+async fn unique_seal_reaches_majority_on_response() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "not sealed until a majority of the group has promised the epoch"
+    );
+
+    let resp = UniqueSealResponse::create(1, p, 2, true);
+    ctrl.handle_unique_seal_response(node2, &resp);
+
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "self + one accepting member is a majority of three"
+    );
+}
+
+#[tokio::test]
+async fn unique_seal_request_fenced_by_higher_promise() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.handle_unique_seal_request(node2, &UniqueSealRequest::create(1, p, 3))
+        .await;
+    ctrl.handle_unique_seal_request(node2, &UniqueSealRequest::create(2, p, 2))
+        .await;
+
+    let accepts: Vec<bool> = ctrl
+        .transport
+        .sent_messages()
+        .iter()
+        .filter_map(|(_, m)| match m {
+            ClusterMessage::UniqueSealResponse(r) => Some(r.is_accepted()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        accepts,
+        vec![true, false],
+        "epoch 3 is promised, so the stale epoch-2 seal is fenced out"
+    );
+}
+
+#[tokio::test]
 async fn receive_heartbeat_marks_alive() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();

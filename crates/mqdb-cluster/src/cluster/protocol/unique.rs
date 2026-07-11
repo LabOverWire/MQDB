@@ -392,3 +392,64 @@ impl UniqueReplicateAck {
         }
     }
 }
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueSealRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub partition: u16,
+    pub epoch: u64,
+}
+
+impl UniqueSealRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, partition: PartitionId, epoch: u64) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            partition: partition.get(),
+            epoch,
+        }
+    }
+
+    #[must_use]
+    pub fn partition_id(&self) -> Option<PartitionId> {
+        PartitionId::new(self.partition)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueSealResponse {
+    pub version: u8,
+    pub request_id: u64,
+    pub partition: u16,
+    pub epoch: u64,
+    pub accepted: u8,
+}
+
+impl UniqueSealResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, partition: PartitionId, epoch: u64, accepted: bool) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            partition: partition.get(),
+            epoch,
+            accepted: u8::from(accepted),
+        }
+    }
+
+    #[must_use]
+    pub fn is_accepted(&self) -> bool {
+        self.accepted != 0
+    }
+
+    #[must_use]
+    pub fn partition_id(&self) -> Option<PartitionId> {
+        PartitionId::new(self.partition)
+    }
+}

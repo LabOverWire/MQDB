@@ -435,6 +435,27 @@ fn unique_release_response_roundtrip() {
 }
 
 #[test]
+fn unique_seal_request_roundtrip() {
+    let req = UniqueSealRequest::create(7, PartitionId::new(9).unwrap(), 3);
+    let bytes = req.to_be_bytes();
+    let (decoded, _) = UniqueSealRequest::try_from_be_bytes(&bytes).unwrap();
+    assert_eq!(decoded.request_id, 7);
+    assert_eq!(decoded.partition_id(), PartitionId::new(9));
+    assert_eq!(decoded.epoch, 3);
+}
+
+#[test]
+fn unique_seal_response_roundtrip() {
+    let resp = UniqueSealResponse::create(7, PartitionId::new(9).unwrap(), 3, true);
+    let bytes = resp.to_be_bytes();
+    let (decoded, _) = UniqueSealResponse::try_from_be_bytes(&bytes).unwrap();
+    assert_eq!(decoded.request_id, 7);
+    assert_eq!(decoded.partition_id(), PartitionId::new(9));
+    assert_eq!(decoded.epoch, 3);
+    assert!(decoded.is_accepted());
+}
+
+#[test]
 fn unique_reassert_request_roundtrip() {
     let req = UniqueReassertRequest::create(
         555,
