@@ -260,20 +260,30 @@ Non-breaking — no serve-gate yet.
   majority 1); multi-node queues, and `tick`/`send_tick_output` now emit the seal requests
   (`collect_pending_seals` → `TickOutput.seal_requests`) so the handshake completes over normal
   ticks (agent path uses the async `drain_pending_seals`; both share `prepare_unique_seal`).
-- **Monotonic guard (replaces the d-2 seal-transfer idea):** `UniqueStore::apply_replicated` rejects
-  any Insert/Update that would reassign a **committed** value to a *different* record
-  (`AlreadyCommitted`). This closes the "new primary missed a replicated reservation → higher-epoch
-  reserve LWW-overwrites a committed value" oversell at the **member** level — simpler than having
-  the seal transfer reservations for the primary to learn (`leaderView`), and achieves the same
-  guarantee. A committed claim is final; only its own record's release frees it.
+- **Monotonic guard:** `UniqueStore::apply_replicated` rejects any Insert/Update that would reassign
+  a **committed** value to a *different* record (`AlreadyCommitted`). A committed claim is final; only
+  its own record's release frees it. This closes the missed-**committed**-reservation overwrite.
+
+  ⚠ **TLA-verified correction (`specs/ClusterUniqueMonotonic.tla`):** the monotonic guard is **NOT** a
+  sufficient substitute for the seal-reservation-transfer (`leaderView` / d-2), contrary to the
+  initial claim. Model-checking the implemented design (seal promises the epoch but does *not* learn
+  reservations; primary serves from its local CAS; members apply under epoch-fence + monotonic guard)
+  **violates NoOversell** in 9 steps: a new primary that **missed an UNCOMMITTED reservation** for V
+  (it wasn't in that reserve's quorum, and the seal transfers nothing) grants V to a different record;
+  the member holding the uncommitted claim permits the overwrite (guard is committed-only); both
+  records get written. The verified model that holds NoOversell (`ClusterUniqueQuorum.tla`, 3076
+  states) has `leaderView` — the seal reading + learning existing reservations. **So d-2 is required.**
 - Tests: `unsealed_partition_fails_reserve_closed` (gate), `apply_replicated_rejects_reassigning_committed_value`
   + `apply_replicated_allows_recommit_by_same_record` (guard); `unique_constraint_cross_node_message_flow`
   updated to complete the seal handshake before reserving. Full suite green (506+75+49), clippy clean.
 
-**Together, the three P2 mechanisms close B:** (1) seal fences the old primary (epoch-promise at a
-majority ⇒ its stale-epoch group writes are rejected ⇒ its reserves fail closed); (2) the serve-gate
-stops a new primary serving before it has sealed; (3) the monotonic guard prevents any residual
-missed-reservation overwrite. **Both create paths are gated:** the primary MQTT path
+**The three P2 mechanisms close B *except for one TLA-identified residual*:** (1) seal fences the old
+primary (epoch-promise at a majority ⇒ its stale-epoch group writes are rejected ⇒ its reserves fail
+closed); (2) the serve-gate stops a new primary serving before it has sealed; (3) the monotonic guard
+blocks missed-**committed**-reservation overwrite. **Residual (must fix — see the TLA correction
+above): d-2 seal-reservation-learning.** Without it, a new primary that missed an *uncommitted*
+reservation oversells; this is currently **detected** by the reconciler (two committed records →
+`Conflict`) but not **prevented**. **Both create paths are gated:** the primary MQTT path
 (`json_ops`/`routing.rs`) and the forwarded cluster path (`db_ops` `reserve_unique_local`, gated on
 `unique_partition_sealed`).
 
