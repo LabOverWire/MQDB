@@ -224,6 +224,9 @@ impl SimulatedTransport {
                 let (req, _) = UniqueReassertRequest::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::UniqueReassertRequest(req))
             }
+            87 => Some(ClusterMessage::UniqueReplicate(
+                ReplicationWrite::from_bytes(payload)?,
+            )),
             _ => None,
         }
     }

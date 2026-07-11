@@ -491,6 +491,75 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
+    /// The fixed quorum group for the `DB_UNIQUE` keyspace: the registered cluster membership
+    /// (stable across heartbeat timeouts), decoupled from data replication factor.
+    #[must_use]
+    pub(crate) fn unique_quorum_group(&self) -> Vec<NodeId> {
+        self.heartbeat.registered_nodes()
+    }
+
+    /// Replicate a `DB_UNIQUE` write to the whole quorum group (sequence-free, epoch-fenced).
+    /// The local store is already updated by the store op that produced `write`; this fans the
+    /// decision out to the group members, who accept it idempotently under the epoch fence.
+    pub(crate) async fn replicate_unique_to_group(
+        &mut self,
+        write: crate::cluster::protocol::ReplicationWrite,
+    ) {
+        let partition = write.partition;
+        let epoch = self.epoch(partition).unwrap_or(crate::cluster::Epoch::ZERO);
+        let stamped = crate::cluster::protocol::ReplicationWrite::new(
+            partition,
+            write.operation,
+            epoch,
+            0,
+            write.entity,
+            write.id,
+            write.data,
+        );
+
+        let promised = self
+            .unique_promised
+            .entry(partition.get())
+            .or_insert(crate::cluster::Epoch::ZERO);
+        if epoch > *promised {
+            *promised = epoch;
+        }
+
+        for node in self.unique_quorum_group() {
+            if node != self.node_id {
+                let _ = self
+                    .transport
+                    .send(node, ClusterMessage::UniqueReplicate(stamped.clone()))
+                    .await;
+            }
+        }
+    }
+
+    /// Receive a group `DB_UNIQUE` replication write: accept iff the write's epoch is not below
+    /// this node's promised epoch for the partition (the fence), then apply last-writer-wins.
+    pub(crate) fn handle_unique_replicate(
+        &mut self,
+        write: &crate::cluster::protocol::ReplicationWrite,
+    ) {
+        let promised = self
+            .unique_promised
+            .entry(write.partition.get())
+            .or_insert(crate::cluster::Epoch::ZERO);
+        if write.epoch < *promised {
+            tracing::debug!(
+                partition = write.partition.get(),
+                write_epoch = write.epoch.get(),
+                promised = promised.get(),
+                "rejecting stale-epoch unique replicate"
+            );
+            return;
+        }
+        *promised = write.epoch;
+        if let Err(e) = self.stores.apply_write(write) {
+            tracing::error!(?e, "failed to apply unique replicate write");
+        }
+    }
+
     async fn send_unique_reassert_fire_and_forget(
         &self,
         target_node: NodeId,

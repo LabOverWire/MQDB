@@ -226,6 +226,21 @@ impl HeartbeatManager {
             .collect()
     }
 
+    /// Every node this manager knows about (self + all registered peers), regardless of
+    /// alive status. Stable across heartbeat timeouts — the basis for the unique quorum group.
+    #[must_use]
+    pub fn registered_nodes(&self) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = self
+            .nodes
+            .keys()
+            .filter_map(|&id| NodeId::validated(id))
+            .collect();
+        nodes.push(self.local_node);
+        nodes.sort_unstable_by_key(|n| n.get());
+        nodes.dedup();
+        nodes
+    }
+
     #[must_use]
     pub fn has_alive_peers(&self) -> bool {
         self.nodes
@@ -268,6 +283,26 @@ mod tests {
 
         assert_eq!(mgr.node_status(node2), NodeStatus::Unknown);
         assert_eq!(mgr.node_status(node3), NodeStatus::Unknown);
+    }
+
+    #[test]
+    fn registered_nodes_includes_self_and_peers_regardless_of_status() {
+        let local = NodeId::validated(1).unwrap();
+        let mut mgr = HeartbeatManager::new(local, config());
+        mgr.register_node(NodeId::validated(3).unwrap());
+        mgr.register_node(NodeId::validated(2).unwrap());
+
+        let group = mgr.registered_nodes();
+
+        assert_eq!(
+            group,
+            vec![
+                NodeId::validated(1).unwrap(),
+                NodeId::validated(2).unwrap(),
+                NodeId::validated(3).unwrap(),
+            ],
+            "group is self + all registered peers, sorted and deduped, independent of alive status"
+        );
     }
 
     #[test]

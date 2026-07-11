@@ -4080,3 +4080,114 @@ async fn unique_reassert_request_cross_node_establishes() {
     assert!(claim.is_committed());
     assert_eq!(claim.record_id_str(), "product-9");
 }
+
+#[tokio::test]
+async fn unique_write_replicates_to_quorum_group() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"gadget".as_slice();
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "g1",
+        request_id: "req-g",
+        data_partition: PartitionId::new(7).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+
+    cluster.nodes[0]
+        .controller
+        .write_or_forward(write.unwrap())
+        .await;
+    cluster.advance_ms(5);
+    for node in cluster.nodes.iter_mut().skip(1) {
+        node.controller.process_messages().await;
+    }
+
+    for node in &cluster.nodes[1..] {
+        let claim = node
+            .controller
+            .stores()
+            .unique_get("products", "sku", value)
+            .expect("every quorum-group member should hold the replicated reservation");
+        assert_eq!(claim.record_id_str(), "g1");
+    }
+}
+
+#[tokio::test]
+async fn unique_replicate_fences_stale_epoch() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"widget".as_slice();
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "p1",
+        request_id: "req-1",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, insert_write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+    let insert_write = insert_write.unwrap();
+    let delete_write = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_release_replicated("products", "sku", value, "req-1")
+        .unwrap();
+
+    let at_epoch = |w: &ReplicationWrite, e: u64| {
+        ReplicationWrite::new(
+            w.partition,
+            w.operation,
+            Epoch::new(e),
+            0,
+            w.entity.clone(),
+            w.id.clone(),
+            w.data.clone(),
+        )
+    };
+
+    let node0_id = cluster.nodes[0].id;
+    for msg in [
+        ClusterMessage::UniqueReplicate(at_epoch(&insert_write, 2)),
+        ClusterMessage::UniqueReplicate(at_epoch(&delete_write, 1)),
+    ] {
+        cluster.nodes[2]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: msg,
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[2].controller.process_messages().await;
+    }
+
+    assert!(
+        cluster.nodes[2]
+            .controller
+            .stores()
+            .unique_get("products", "sku", value)
+            .is_some(),
+        "a stale-epoch release must be fenced out, leaving the epoch-2 reservation intact"
+    );
+}

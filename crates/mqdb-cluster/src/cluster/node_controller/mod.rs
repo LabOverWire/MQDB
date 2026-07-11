@@ -320,6 +320,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) transport: T,
     pub(super) heartbeat: HeartbeatManager,
     pub(super) replicas: HashMap<u16, ReplicaState>,
+    pub(super) unique_promised: HashMap<u16, Epoch>,
     pub(super) pending: PendingWrites,
     pub(super) partition_map: PartitionMap,
     pub(super) current_time: u64,
@@ -386,6 +387,7 @@ impl<T: ClusterTransport> NodeController<T> {
             heartbeat: HeartbeatManager::new(node_id, config),
             transport,
             replicas: HashMap::new(),
+            unique_promised: HashMap::new(),
             pending: PendingWrites::new(1000),
             partition_map: PartitionMap::default(),
             current_time: 0,
@@ -1163,6 +1165,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::UniqueReassertRequest(req) => {
                 self.handle_unique_reassert_request(req).await;
+            }
+            ClusterMessage::UniqueReplicate(write) => {
+                self.handle_unique_replicate(write);
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;

@@ -62,6 +62,7 @@ pub enum ClusterMessage {
     UniqueReleaseRequest(UniqueReleaseRequest),
     UniqueReleaseResponse(UniqueReleaseResponse),
     UniqueReassertRequest(UniqueReassertRequest),
+    UniqueReplicate(ReplicationWrite),
     FkCheckRequest(FkCheckRequest),
     FkCheckResponse(FkCheckResponse),
     FkReverseLookupRequest(FkReverseLookupRequest),
@@ -104,6 +105,7 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(_) => 84,
             Self::UniqueReleaseResponse(_) => 85,
             Self::UniqueReassertRequest(_) => 86,
+            Self::UniqueReplicate(_) => 87,
             Self::FkCheckRequest(_) => 90,
             Self::FkCheckResponse(_) => 91,
             Self::FkReverseLookupRequest(_) => 92,
@@ -146,6 +148,7 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(_) => "UniqueReleaseRequest",
             Self::UniqueReleaseResponse(_) => "UniqueReleaseResponse",
             Self::UniqueReassertRequest(_) => "UniqueReassertRequest",
+            Self::UniqueReplicate(_) => "UniqueReplicate",
             Self::FkCheckRequest(_) => "FkCheckRequest",
             Self::FkCheckResponse(_) => "FkCheckResponse",
             Self::FkReverseLookupRequest(_) => "FkReverseLookupRequest",
@@ -194,6 +197,7 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReleaseResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::UniqueReassertRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
+            Self::UniqueReplicate(w) => buf.extend_from_slice(&w.to_bytes()),
             Self::FkCheckRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -305,6 +309,7 @@ impl ClusterMessage {
                 let (req, _) = UniqueReassertRequest::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReassertRequest(req))
             }
+            87 => Some(Self::UniqueReplicate(ReplicationWrite::from_bytes(data)?)),
             90 => {
                 let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;
                 if req.version != FkCheckRequest::VERSION {

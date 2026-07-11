@@ -202,6 +202,14 @@ reservation, and an epoch-promise can only *land*, if reserve/commit already rep
 group. So the unique partitions must be replicated to **every group member** (each holds
 `ReplicaState` + `DB_UNIQUE` for them) before sealing is meaningful. That reorders the steps vs §4:
 
+**Status:** P2.a + P2.b **DONE** (sequence-free group replication landed): `registered_nodes()` on
+`HeartbeatManager` + `unique_quorum_group()`; `UniqueReplicate` wire message (type 87);
+`replicate_unique_to_group` (fan-out on the value-primary, epoch-stamped from the partition
+`ReplicaState`) + epoch-fenced `handle_unique_replicate` receive path gated on per-partition
+`unique_promised`. Non-gating, non-breaking; full cluster suite green + 2 integration tests
+(fan-out, stale-epoch fence) + 1 heartbeat unit test. Next: P2.c (majority-ack) then P2.d+e (seal +
+gate). `unique_majority()` deferred to P2.c (its first consumer).
+
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
 - **P2.b — Replicate the `DB_UNIQUE` keyspace to the group.** **Structural fact (verified,
@@ -212,15 +220,24 @@ group. So the unique partitions must be replicated to **every group member** (ea
   writes for partition P must fan out to the fixed group (all members hold `DB_UNIQUE` for P), while
   `DB_DATA`/other writes for P keep data RF=2. Consequences: (a) the replication target for a write
   becomes keyspace-dependent (`entity == DB_UNIQUE` → group; else → partition replicas); (b) a group
-  member must accept a `DB_UNIQUE` write for P even when it is not a data replica of P — so
-  `handle_write`/`ReplicaState` gating (`replication.rs:100`, `replication_ops.rs:29`) must key
-  acceptance on group membership for the `DB_UNIQUE` keyspace, not only partition-replica role;
-  (c) sequence/epoch state for `DB_UNIQUE` must be tracked per (partition, keyspace=unique),
-  separate from the data `ReplicaState.sequence`. Still async, non-gating — a durability-breadth
-  change, but a substantial one (a keyspace-scoped replication group is new machinery).
-- **P2.c — Quorum-durable reserve/commit.** Switch the unique write path to a quorum-tracked send
-  over the group (`replicate_write` + `QuorumTracker`, `replication_ops.rs:213-262`); the create
-  flow returns `Reserved`/`Committed` only after **majority** ack. Fail-closed on no-majority.
+  member must accept a `DB_UNIQUE` write for P even when it is not a data replica of P.
+
+  **Mechanism (refined — sequence-free, matches the model exactly).** `ClusterUniqueQuorum.tla` has
+  **no sequence numbers**: `accepted[m]` is just the latest reservation a member holds and
+  `promised[m]` is a pure epoch fence. So the group does **not** need the data path's
+  sequence/catchup/snapshot machinery. `DB_UNIQUE` replicates to the group as **idempotent,
+  epoch-fenced, order-independent** writes: each group member keeps a per-partition
+  `promised_epoch`, accepts a `DB_UNIQUE` write iff `write.epoch >= promised_epoch` (then bumps it),
+  and applies it last-writer-wins by epoch (commit/release are monotonic transitions on a key). A
+  member that misses a message is repaired by the **Phase-1 reconciler** (record-driven reassert) and
+  by the seal's majority read — no catchup/snapshot subsystem, no per-keyspace sequence. This is
+  strictly simpler than a second replication group and is what the verified model actually specifies.
+  New receive path (a `DB_UNIQUE`-keyspace apply that does the epoch-fence, distinct from
+  `ReplicaState::handle_write`'s sequence logic). Still async, non-gating in P2.b.
+- **P2.c — Quorum-durable reserve/commit.** Await a **majority** of group-member acks for the
+  reserve/commit before the create flow returns `Reserved`/`Committed` (a dedicated ack tracker over
+  the group; the sequence-free writes make this a simple per-request majority count, not the
+  sequence-keyed `QuorumTracker`). Fail-closed on no-majority.
 - **P2.d — Seal at promotion.** New `UniqueSealRequest`/`UniqueSealResponse` (BeBytes). On
   `become_primary` for a unique partition (`mod.rs:503-509`): send seal to the group, collect a
   **majority** of responses (each carries the replica's promised-epoch ack + its held reservations
