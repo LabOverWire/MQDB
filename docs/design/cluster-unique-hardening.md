@@ -179,6 +179,69 @@ first; Phase 2 adds the epoch/quorum/sealing machinery. Under network partition,
 prevents B — Phase 1 can *detect* a dual-commit but not prevent it, because both records are durable
 and committed (§5).
 
+### Phase 2 implementation plan (fixed quorum group) — decided 2026-07
+
+Chosen replica-set model (step 10): **fixed quorum group** — the unique keyspace is replicated to a
+fixed ≥3 group decoupled from data RF, not by raising RF per unique partition. Grounded against
+`specs/ClusterUniqueQuorum.tla`; the TLA→code mapping is:
+
+| TLA | Meaning | Code |
+|---|---|---|
+| `Nodes` | the fixed quorum group | new `unique_quorum_group()` — see membership decision below |
+| `Majorities` | `2·|Q| > |group|` | new `unique_majority()` helper |
+| `promised[n]` | highest epoch replica accepts | **exists**: `ReplicaState.epoch` fence in `handle_write` (`replication.rs:105`) already rejects `write.epoch < epoch` and adopts higher |
+| `actingEpoch[n]` | epoch node believes it's primary at | `ReplicaState.epoch` when role=Primary (from partition map) |
+| `accepted[n]` | reservation the replica holds | that node's `DB_UNIQUE` store content |
+| `sealedAt[n]` | epoch node has sealed | **new** `ReplicaState.sealed_epoch` |
+| `leaderView[n]` | owner the sealed primary learned | the reservation present in the primary's store after the seal-merge |
+| `Seal(n,Q)` | read-majority + epoch-promise before serving | **new** seal round on `become_primary` |
+| `Reserve/Commit(n,r,Q)` | quorum-accept at epoch, gated on sealed | quorum-durable unique write |
+
+**Load-bearing prerequisite (why order matters):** a seal's read-quorum can only *learn* an existing
+reservation, and an epoch-promise can only *land*, if reserve/commit already replicate to the quorum
+group. So the unique partitions must be replicated to **every group member** (each holds
+`ReplicaState` + `DB_UNIQUE` for them) before sealing is meaningful. That reorders the steps vs §4:
+
+- **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
+  `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
+- **P2.b — Replicate the `DB_UNIQUE` keyspace to the group.** **Structural fact (verified,
+  `mqdb-core/src/partition/functions.rs:31`):** `unique_partition(entity,field,value)` hashes into
+  the *same* 256-partition space as `data_partition` — unique reservations are the `DB_UNIQUE`
+  keyspace *within* the ordinary partitions, there is **no** separate set of "unique partitions." So
+  step 10 is not a per-partition RF bump; it is a **per-keyspace replication group**: `DB_UNIQUE`
+  writes for partition P must fan out to the fixed group (all members hold `DB_UNIQUE` for P), while
+  `DB_DATA`/other writes for P keep data RF=2. Consequences: (a) the replication target for a write
+  becomes keyspace-dependent (`entity == DB_UNIQUE` → group; else → partition replicas); (b) a group
+  member must accept a `DB_UNIQUE` write for P even when it is not a data replica of P — so
+  `handle_write`/`ReplicaState` gating (`replication.rs:100`, `replication_ops.rs:29`) must key
+  acceptance on group membership for the `DB_UNIQUE` keyspace, not only partition-replica role;
+  (c) sequence/epoch state for `DB_UNIQUE` must be tracked per (partition, keyspace=unique),
+  separate from the data `ReplicaState.sequence`. Still async, non-gating — a durability-breadth
+  change, but a substantial one (a keyspace-scoped replication group is new machinery).
+- **P2.c — Quorum-durable reserve/commit.** Switch the unique write path to a quorum-tracked send
+  over the group (`replicate_write` + `QuorumTracker`, `replication_ops.rs:213-262`); the create
+  flow returns `Reserved`/`Committed` only after **majority** ack. Fail-closed on no-majority.
+- **P2.d — Seal at promotion.** New `UniqueSealRequest`/`UniqueSealResponse` (BeBytes). On
+  `become_primary` for a unique partition (`mod.rs:503-509`): send seal to the group, collect a
+  **majority** of responses (each carries the replica's promised-epoch ack + its held reservations
+  for the partition), merge learned reservations into the local store, set `sealed_epoch =
+  actingEpoch`. `FenceOk`: a member refuses to promise if it already promised a higher epoch.
+- **P2.e — Gate serving (flips fencing on).** Reserve/commit handlers (`unique.rs:277-352`) fail
+  closed unless `sealed_epoch == actingEpoch` **and** this node is the current-epoch group primary
+  (step 9). Ship P2.d + P2.e together so gating never precedes a working seal (else all unique ops
+  fail closed). `leaderView ≠ NULL` (an existing reservation was learned) ⇒ reserve returns
+  `Conflict` — this is exactly what closes A′/B.
+
+Each of P2.b, P2.c, P2.{d+e} is independently shippable and testable; the model is the oracle for the
+multi-node tests (concurrent same-value create, primary-kill during reserve/commit, induced
+dual-primary partition). **Membership source (resolved):** use the **registered cluster membership**
+already tracked by `HeartbeatManager.nodes` (keyed by node id) plus `local_node` — stable (not the
+fluctuating alive set), reachable from `NodeController` today with no new cross-task plumbing, and
+equal to the metadata-Raft `cluster_members` set in practice (`raft/coordinator/mod.rs:138`). Add a
+`HeartbeatManager` accessor for the full registered set + a `NodeController::unique_quorum_group()`
+wrapper; `unique_majority()` = `⌊|group|/2⌋ + 1`. If the group must ever diverge from Raft
+membership, swap this one accessor.
+
 ## 5. The hard part — abandonment vs record existence, and why B needs prevention
 
 The reserve→record-write→commit sequence has a window: coordinator dies after reserve, maybe after
