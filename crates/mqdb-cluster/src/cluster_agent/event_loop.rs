@@ -242,7 +242,7 @@ impl ClusteredAgent {
         }
         ctrl.transport().log_queue_stats();
         ctrl.pending_constraints().sweep_closed();
-        ctrl.sweep_unique_quorum(now);
+        ctrl.sweep_unique_quorum(now).await;
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {

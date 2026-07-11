@@ -3841,7 +3841,16 @@ async fn unique_constraint_cross_node_message_flow() {
         message: ClusterMessage::UniqueReserveRequest(request),
         received_at: 0,
     };
+    // Node 1 (value primary) applies the reserve and group-replicates it, deferring its response.
     cluster.nodes[0].controller.transport().requeue(request_msg);
+    cluster.advance_ms(1);
+    cluster.nodes[0].controller.process_messages().await;
+
+    // Node 2 (the other group member) accepts the replicate and acks it.
+    cluster.advance_ms(1);
+    cluster.nodes[1].controller.process_messages().await;
+
+    // Node 1 sees the majority ack and only now sends the deferred reserve response.
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
@@ -3854,7 +3863,8 @@ async fn unique_constraint_cross_node_message_flow() {
         }
     }
 
-    let resp = reserve_response.expect("Node 1 should have sent a reserve response to Node 2");
+    let resp = reserve_response
+        .expect("Node 1 should send a reserve response once the reservation is majority-durable");
     assert_eq!(resp.request_id, 42, "Response request_id should match");
     assert!(
         matches!(resp.status(), UniqueReserveStatus::Reserved),

@@ -104,11 +104,19 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
+pub(super) enum UniqueQuorumCompletion {
+    Local(oneshot::Sender<bool>),
+    RemoteReserve {
+        from: NodeId,
+        response_request_id: u64,
+    },
+}
+
 pub(super) struct UniqueQuorumTracker {
     pub acks: HashSet<NodeId>,
     pub needed: usize,
     pub deadline_ms: u64,
-    pub responder: oneshot::Sender<bool>,
+    pub completion: UniqueQuorumCompletion,
 }
 
 pub struct UniqueCheckPhase1Result {
@@ -1182,7 +1190,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_unique_replicate(from, *request_id, write).await;
             }
             ClusterMessage::UniqueReplicateAck(ack) => {
-                self.record_unique_quorum_ack(from, ack.request_id);
+                self.record_unique_quorum_ack(from, ack.request_id).await;
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;

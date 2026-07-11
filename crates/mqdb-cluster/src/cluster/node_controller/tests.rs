@@ -186,7 +186,7 @@ async fn unique_reserve_resolves_on_majority_ack() {
     let rx = ctrl.replicate_unique_reserve(write).await;
 
     // group is {1,2,3}, majority 2, self already counts as one; one more ack completes it.
-    ctrl.record_unique_quorum_ack(node2, 1);
+    ctrl.record_unique_quorum_ack(node2, 1).await;
 
     assert_eq!(
         rx.await,
@@ -209,7 +209,8 @@ async fn unique_reserve_fails_closed_on_timeout() {
     let rx = ctrl.replicate_unique_reserve(write).await;
 
     // no acks arrive; the deadline sweep must fail the reserve closed.
-    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000);
+    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
+        .await;
 
     assert_eq!(
         rx.await,

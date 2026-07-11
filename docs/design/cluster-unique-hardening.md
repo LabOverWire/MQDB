@@ -220,18 +220,23 @@ group. So the unique partitions must be replicated to **every group member** (ea
 - Tests: 3 `node_controller` unit tests (majority-ack resolves, timeout fails closed, single-node
   immediate) + prior P2.b tests. Full suite green (498+74+49), clippy clean.
 
-**Remaining P2.c gaps (→ P2.c-2, documented, not yet gated):**
-- **Remote-primary reserve** (coordinator ≠ value primary): `handle_unique_reserve_request` still
-  responds `Reserved` immediately (fire-and-forget group replicate), so that field isn't
-  majority-gated. Fix: defer the `UniqueReserveResponse` until the tracker completes (event-driven
-  completion = send-response), so the coordinator's existing `await_unique_reserves` becomes
-  majority-gated transparently.
-- **Secondary create path** (`db_ops` `reserve_unique_local` @ 1347/1630/1785 + the event-loop Path 2
-  completion): still P2.b fire-and-forget; `db_ops`:683 creates trackers via
-  `start_unique_constraint_check` but Path 2 never awaits `pending_quorum`.
+**P2.c-2 (remote-primary reserve) DONE:** `UniqueQuorumTracker.completion` is now an enum
+(`Local(oneshot)` vs `RemoteReserve { from, response_request_id }`). `handle_unique_reserve_request`
+on a fresh `Reserved` calls `replicate_unique_reserve_remote` and **returns without responding**; the
+tracker sends the deferred `UniqueReserveResponse` (Reserved on majority, Error on timeout via the
+async `sweep_unique_quorum`). The coordinator's existing `await_unique_reserves` therefore becomes
+majority-gated transparently. `record_unique_quorum_ack`/`sweep_unique_quorum` are now async and route
+through `fire_unique_quorum_completion`. Integration test `unique_constraint_cross_node_message_flow`
+drives the full flow (reserve → group-replicate → ack → deferred response). Both the local and remote
+primary reserve paths on the MQTT create path are now majority-durable.
+
+**Remaining P2.c gaps (small tail, documented, not yet gated):**
+- **Secondary create path** (`db_ops` `reserve_unique_local` @ 1347/1630/1785 + `spawn_unique_completion`
+  Path 2): still P2.b fire-and-forget; `db_ops`:683 creates trackers via `start_unique_constraint_check`
+  but Path 2 never awaits `pending_quorum`. Mirror the `combine_quorum` wiring here.
 - **Cosmetic:** a quorum-timeout reuses the 409 "unique constraint violation on field X" message via
-  `combine_quorum`; should be a 503 "reservation not durable". Fix when P2.c-2 threads a distinct
-  durability-failure signal.
+  `combine_quorum`; should be a 503 "reservation not durable" (needs a distinct durability-failure
+  signal into the completion functions).
 
 Then **P2.d+e** (seal + serve-gating).
 

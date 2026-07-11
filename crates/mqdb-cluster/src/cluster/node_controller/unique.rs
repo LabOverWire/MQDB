@@ -317,12 +317,18 @@ impl<T: ClusterTransport> NodeController<T> {
             let (result, write) = self
                 .stores
                 .unique_reserve_replicated(&reserve_params, Self::current_time_ms());
-            if let Some(w) = write {
-                self.write_or_forward(w).await;
-                self.sync_unique_write();
-            }
             match result {
-                super::super::db::ReserveResult::Reserved => UniqueReserveStatus::Reserved,
+                super::super::db::ReserveResult::Reserved => {
+                    if let Some(w) = write {
+                        self.sync_unique_write();
+                        // Defer the response until a majority of the group holds the reservation;
+                        // the tracker sends the UniqueReserveResponse when quorum is reached.
+                        self.replicate_unique_reserve_remote(w, from, req.request_id)
+                            .await;
+                        return;
+                    }
+                    UniqueReserveStatus::Reserved
+                }
                 super::super::db::ReserveResult::AlreadyReservedBySameRequest => {
                     UniqueReserveStatus::AlreadyReserved
                 }
@@ -599,11 +605,74 @@ impl<T: ClusterTransport> NodeController<T> {
                     acks,
                     needed,
                     deadline_ms,
-                    responder: tx,
+                    completion: super::UniqueQuorumCompletion::Local(tx),
                 },
             );
         }
         rx
+    }
+
+    /// Replicate a remote-coordinated reserve to the group and, once a **majority** holds it (or the
+    /// deadline passes), send the deferred `UniqueReserveResponse` back to `from`. This makes a
+    /// reserve routed from a non-primary coordinator majority-durable before it is acknowledged.
+    pub(crate) async fn replicate_unique_reserve_remote(
+        &mut self,
+        write: crate::cluster::protocol::ReplicationWrite,
+        from: NodeId,
+        response_request_id: u64,
+    ) {
+        let needed = self.unique_majority();
+        let request_id = self.next_unique_quorum_id();
+
+        self.send_unique_replicate(write, request_id).await;
+
+        let completion = super::UniqueQuorumCompletion::RemoteReserve {
+            from,
+            response_request_id,
+        };
+        let mut acks = std::collections::HashSet::new();
+        acks.insert(self.node_id);
+        if acks.len() >= needed {
+            self.fire_unique_quorum_completion(completion, true).await;
+        } else {
+            let deadline_ms = Self::current_time_ms() + UNIQUE_QUORUM_TIMEOUT_MS;
+            self.pending_unique_quorum.insert(
+                request_id,
+                super::UniqueQuorumTracker {
+                    acks,
+                    needed,
+                    deadline_ms,
+                    completion,
+                },
+            );
+        }
+    }
+
+    async fn fire_unique_quorum_completion(
+        &mut self,
+        completion: super::UniqueQuorumCompletion,
+        success: bool,
+    ) {
+        match completion {
+            super::UniqueQuorumCompletion::Local(tx) => {
+                let _ = tx.send(success);
+            }
+            super::UniqueQuorumCompletion::RemoteReserve {
+                from,
+                response_request_id,
+            } => {
+                let status = if success {
+                    UniqueReserveStatus::Reserved
+                } else {
+                    UniqueReserveStatus::Error
+                };
+                let response = UniqueReserveResponse::create(response_request_id, status);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::UniqueReserveResponse(response))
+                    .await;
+            }
+        }
     }
 
     fn next_unique_quorum_id(&mut self) -> u64 {
@@ -652,21 +721,24 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Record a group member's ack for a tracked reserve; resolve the waiter once a majority
+    /// Record a group member's ack for a tracked reserve; complete it once a majority
     /// (including this node) holds the reservation.
-    pub(crate) fn record_unique_quorum_ack(&mut self, from: NodeId, request_id: u64) {
-        if let Some(tracker) = self.pending_unique_quorum.get_mut(&request_id) {
-            tracker.acks.insert(from);
-            if tracker.acks.len() >= tracker.needed
-                && let Some(tracker) = self.pending_unique_quorum.remove(&request_id)
-            {
-                let _ = tracker.responder.send(true);
+    pub(crate) async fn record_unique_quorum_ack(&mut self, from: NodeId, request_id: u64) {
+        let reached = match self.pending_unique_quorum.get_mut(&request_id) {
+            Some(tracker) => {
+                tracker.acks.insert(from);
+                tracker.acks.len() >= tracker.needed
             }
+            None => false,
+        };
+        if reached && let Some(tracker) = self.pending_unique_quorum.remove(&request_id) {
+            self.fire_unique_quorum_completion(tracker.completion, true)
+                .await;
         }
     }
 
     /// Fail any reserve whose quorum was not reached before its deadline (fail-closed).
-    pub(crate) fn sweep_unique_quorum(&mut self, now_ms: u64) {
+    pub(crate) async fn sweep_unique_quorum(&mut self, now_ms: u64) {
         let expired: Vec<u64> = self
             .pending_unique_quorum
             .iter()
@@ -675,7 +747,8 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect();
         for id in expired {
             if let Some(tracker) = self.pending_unique_quorum.remove(&id) {
-                let _ = tracker.responder.send(false);
+                self.fire_unique_quorum_completion(tracker.completion, false)
+                    .await;
             }
         }
     }
