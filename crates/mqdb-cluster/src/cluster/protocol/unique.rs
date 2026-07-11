@@ -374,3 +374,21 @@ impl UniqueReassertRequest {
         PartitionId::new(self.data_partition)
     }
 }
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReplicateAck {
+    pub version: u8,
+    pub request_id: u64,
+}
+
+impl UniqueReplicateAck {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+        }
+    }
+}

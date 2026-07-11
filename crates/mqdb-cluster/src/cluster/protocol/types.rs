@@ -30,6 +30,7 @@ pub enum MessageType {
     UniqueReleaseResponse = 85,
     UniqueReassertRequest = 86,
     UniqueReplicate = 87,
+    UniqueReplicateAck = 88,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

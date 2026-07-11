@@ -4167,8 +4167,14 @@ async fn unique_replicate_fences_stale_epoch() {
 
     let node0_id = cluster.nodes[0].id;
     for msg in [
-        ClusterMessage::UniqueReplicate(at_epoch(&insert_write, 2)),
-        ClusterMessage::UniqueReplicate(at_epoch(&delete_write, 1)),
+        ClusterMessage::UniqueReplicate {
+            request_id: 0,
+            write: at_epoch(&insert_write, 2),
+        },
+        ClusterMessage::UniqueReplicate {
+            request_id: 0,
+            write: at_epoch(&delete_write, 1),
+        },
     ] {
         cluster.nodes[2]
             .controller

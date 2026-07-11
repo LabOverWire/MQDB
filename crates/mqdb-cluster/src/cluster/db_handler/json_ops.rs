@@ -418,7 +418,7 @@ impl DbRequestHandler {
         let constraint_data = data.clone();
         let data = self.vault_encrypt_if_needed(vault_crypto, entity, id, data);
 
-        if !phase1.pending_remote.is_empty() {
+        if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
             let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                 phase1,
@@ -753,7 +753,7 @@ impl DbRequestHandler {
                 }
             };
 
-            if !phase1.pending_remote.is_empty() {
+            if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                 return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                     phase1,

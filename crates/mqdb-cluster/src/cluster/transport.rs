@@ -6,8 +6,8 @@ use super::protocol::{
     FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse, ForwardedPublish, Heartbeat,
     JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
     TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    WildcardBroadcast,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
+    UniqueReserveResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -62,7 +62,11 @@ pub enum ClusterMessage {
     UniqueReleaseRequest(UniqueReleaseRequest),
     UniqueReleaseResponse(UniqueReleaseResponse),
     UniqueReassertRequest(UniqueReassertRequest),
-    UniqueReplicate(ReplicationWrite),
+    UniqueReplicate {
+        request_id: u64,
+        write: ReplicationWrite,
+    },
+    UniqueReplicateAck(UniqueReplicateAck),
     FkCheckRequest(FkCheckRequest),
     FkCheckResponse(FkCheckResponse),
     FkReverseLookupRequest(FkReverseLookupRequest),
@@ -105,7 +109,8 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(_) => 84,
             Self::UniqueReleaseResponse(_) => 85,
             Self::UniqueReassertRequest(_) => 86,
-            Self::UniqueReplicate(_) => 87,
+            Self::UniqueReplicate { .. } => 87,
+            Self::UniqueReplicateAck(_) => 88,
             Self::FkCheckRequest(_) => 90,
             Self::FkCheckResponse(_) => 91,
             Self::FkReverseLookupRequest(_) => 92,
@@ -148,7 +153,8 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(_) => "UniqueReleaseRequest",
             Self::UniqueReleaseResponse(_) => "UniqueReleaseResponse",
             Self::UniqueReassertRequest(_) => "UniqueReassertRequest",
-            Self::UniqueReplicate(_) => "UniqueReplicate",
+            Self::UniqueReplicate { .. } => "UniqueReplicate",
+            Self::UniqueReplicateAck(_) => "UniqueReplicateAck",
             Self::FkCheckRequest(_) => "FkCheckRequest",
             Self::FkCheckResponse(_) => "FkCheckResponse",
             Self::FkReverseLookupRequest(_) => "FkReverseLookupRequest",
@@ -197,7 +203,11 @@ impl ClusterMessage {
             Self::UniqueReleaseRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReleaseResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::UniqueReassertRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
-            Self::UniqueReplicate(w) => buf.extend_from_slice(&w.to_bytes()),
+            Self::UniqueReplicate { request_id, write } => {
+                buf.extend_from_slice(&request_id.to_be_bytes());
+                buf.extend_from_slice(&write.to_bytes());
+            }
+            Self::UniqueReplicateAck(ack) => buf.extend_from_slice(&ack.to_be_bytes()),
             Self::FkCheckRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -309,7 +319,18 @@ impl ClusterMessage {
                 let (req, _) = UniqueReassertRequest::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReassertRequest(req))
             }
-            87 => Some(Self::UniqueReplicate(ReplicationWrite::from_bytes(data)?)),
+            87 => {
+                if data.len() < 8 {
+                    return None;
+                }
+                let request_id = u64::from_be_bytes(data[..8].try_into().ok()?);
+                let write = ReplicationWrite::from_bytes(&data[8..])?;
+                Some(Self::UniqueReplicate { request_id, write })
+            }
+            88 => {
+                let (ack, _) = UniqueReplicateAck::try_from_be_bytes(data).ok()?;
+                Some(Self::UniqueReplicateAck(ack))
+            }
             90 => {
                 let (req, _) = FkCheckRequest::try_from_be_bytes(data).ok()?;
                 if req.version != FkCheckRequest::VERSION {

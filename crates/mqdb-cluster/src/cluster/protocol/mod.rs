@@ -24,5 +24,6 @@ pub use replication::{CatchupRequest, CatchupResponse, ReplicationAck, Replicati
 pub use types::{AckStatus, JsonDbOp, MessageType, Operation, QueryStatus};
 pub use unique::{
     UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest, UniqueReserveResponse,
+    UniqueReserveStatus,
 };

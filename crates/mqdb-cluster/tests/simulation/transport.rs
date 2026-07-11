@@ -11,8 +11,8 @@ use mqdb_cluster::cluster::{
     JsonDbResponse, NUM_PARTITIONS, NodeId, PartitionId, QueryRequest, QueryResponse,
     ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest,
     TopicSubscriptionBroadcast, TransportError, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
-    UniqueReserveResponse, WildcardBroadcast,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
+    UniqueReserveRequest, UniqueReserveResponse, WildcardBroadcast,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
@@ -224,9 +224,18 @@ impl SimulatedTransport {
                 let (req, _) = UniqueReassertRequest::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::UniqueReassertRequest(req))
             }
-            87 => Some(ClusterMessage::UniqueReplicate(
-                ReplicationWrite::from_bytes(payload)?,
-            )),
+            87 => {
+                if payload.len() < 8 {
+                    return None;
+                }
+                let request_id = u64::from_be_bytes(payload[..8].try_into().ok()?);
+                let write = ReplicationWrite::from_bytes(&payload[8..])?;
+                Some(ClusterMessage::UniqueReplicate { request_id, write })
+            }
+            88 => {
+                let (ack, _) = UniqueReplicateAck::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReplicateAck(ack))
+            }
             _ => None,
         }
     }

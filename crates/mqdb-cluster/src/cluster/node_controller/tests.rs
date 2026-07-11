@@ -152,6 +152,88 @@ async fn replicate_write_sends_to_replicas() {
     assert_eq!(sent.len(), 2);
 }
 
+fn unique_reserve_write(
+    ctrl: &NodeController<MockTransport>,
+    entity: &str,
+    field: &str,
+    value: &[u8],
+) -> ReplicationWrite {
+    let params = crate::cluster::db::UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "r1",
+        request_id: "req-1",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = ctrl.stores().unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, crate::cluster::db::ReserveResult::Reserved);
+    write.expect("reserve should yield a replication write")
+}
+
+#[tokio::test]
+async fn unique_reserve_resolves_on_majority_ack() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    // group is {1,2,3}, majority 2, self already counts as one; one more ack completes it.
+    ctrl.record_unique_quorum_ack(node2, 1);
+
+    assert_eq!(
+        rx.await,
+        Ok(true),
+        "reserve resolves once a majority holds it"
+    );
+}
+
+#[tokio::test]
+async fn unique_reserve_fails_closed_on_timeout() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    // no acks arrive; the deadline sweep must fail the reserve closed.
+    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000);
+
+    assert_eq!(
+        rx.await,
+        Ok(false),
+        "a reserve that never reaches a majority fails closed"
+    );
+}
+
+#[tokio::test]
+async fn unique_reserve_completes_immediately_for_single_node_group() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    assert_eq!(
+        rx.await,
+        Ok(true),
+        "a single-node group is its own majority; reserve is immediately durable"
+    );
+}
+
 #[tokio::test]
 async fn receive_heartbeat_marks_alive() {
     let node1 = NodeId::validated(1).unwrap();

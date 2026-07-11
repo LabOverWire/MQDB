@@ -104,9 +104,17 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
+pub(super) struct UniqueQuorumTracker {
+    pub acks: HashSet<NodeId>,
+    pub needed: usize,
+    pub deadline_ms: u64,
+    pub responder: oneshot::Sender<bool>,
+}
+
 pub struct UniqueCheckPhase1Result {
     pub local_reserved: Vec<(String, Vec<u8>)>,
     pub pending_remote: Vec<PendingUniqueReserve>,
+    pub pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
 }
 
 pub struct PendingUniqueWork {
@@ -321,6 +329,8 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) heartbeat: HeartbeatManager,
     pub(super) replicas: HashMap<u16, ReplicaState>,
     pub(super) unique_promised: HashMap<u16, Epoch>,
+    pub(super) pending_unique_quorum: HashMap<u64, UniqueQuorumTracker>,
+    pub(super) unique_quorum_counter: u64,
     pub(super) pending: PendingWrites,
     pub(super) partition_map: PartitionMap,
     pub(super) current_time: u64,
@@ -388,6 +398,8 @@ impl<T: ClusterTransport> NodeController<T> {
             transport,
             replicas: HashMap::new(),
             unique_promised: HashMap::new(),
+            pending_unique_quorum: HashMap::new(),
+            unique_quorum_counter: 0,
             pending: PendingWrites::new(1000),
             partition_map: PartitionMap::default(),
             current_time: 0,
@@ -1166,8 +1178,11 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::UniqueReassertRequest(req) => {
                 self.handle_unique_reassert_request(req).await;
             }
-            ClusterMessage::UniqueReplicate(write) => {
-                self.handle_unique_replicate(write);
+            ClusterMessage::UniqueReplicate { request_id, write } => {
+                self.handle_unique_replicate(from, *request_id, write).await;
+            }
+            ClusterMessage::UniqueReplicateAck(ack) => {
+                self.record_unique_quorum_ack(from, ack.request_id);
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;

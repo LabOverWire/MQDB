@@ -202,13 +202,38 @@ reservation, and an epoch-promise can only *land*, if reserve/commit already rep
 group. So the unique partitions must be replicated to **every group member** (each holds
 `ReplicaState` + `DB_UNIQUE` for them) before sealing is meaningful. That reorders the steps vs §4:
 
-**Status:** P2.a + P2.b **DONE** (sequence-free group replication landed): `registered_nodes()` on
-`HeartbeatManager` + `unique_quorum_group()`; `UniqueReplicate` wire message (type 87);
-`replicate_unique_to_group` (fan-out on the value-primary, epoch-stamped from the partition
-`ReplicaState`) + epoch-fenced `handle_unique_replicate` receive path gated on per-partition
-`unique_promised`. Non-gating, non-breaking; full cluster suite green + 2 integration tests
-(fan-out, stale-epoch fence) + 1 heartbeat unit test. Next: P2.c (majority-ack) then P2.d+e (seal +
-gate). `unique_majority()` deferred to P2.c (its first consumer).
+**Status:** P2.a + P2.b + P2.c-1 **DONE**.
+- P2.a/b (sequence-free group replication): `registered_nodes()` on `HeartbeatManager` +
+  `unique_quorum_group()`; `UniqueReplicate` wire message (now `{ request_id, write }`, type 87);
+  `send_unique_replicate` fan-out on the value-primary (epoch-stamped from the partition
+  `ReplicaState`) + epoch-fenced `handle_unique_replicate` receive path gated on per-partition
+  `unique_promised`.
+- P2.c-1 (majority-durable reserve, **primary MQTT create path** = `json_ops` + `routing.rs`):
+  `UniqueReplicateAck` (type 88); per-reserve `UniqueQuorumTracker` (acks/needed/deadline/responder)
+  in `pending_unique_quorum`; `replicate_unique_reserve` returns a `oneshot::Receiver<bool>` that
+  resolves `true` on majority (self counts as one) or `false` on the deadline sweep
+  (`sweep_unique_quorum`, wired into the tick). `start_unique_constraint_check` collects the receivers
+  into `phase1.pending_quorum`; the `json_ops` create/update paths route **any** reserve (mixed *or*
+  all-local) through the async completion (`|| !pending_quorum.is_empty()`); `routing.rs`'
+  `combine_quorum` folds a quorum failure into the existing reserve-failure path → release + reject
+  (fail-closed). Members ack in `handle_unique_replicate` when `request_id != 0`.
+- Tests: 3 `node_controller` unit tests (majority-ack resolves, timeout fails closed, single-node
+  immediate) + prior P2.b tests. Full suite green (498+74+49), clippy clean.
+
+**Remaining P2.c gaps (→ P2.c-2, documented, not yet gated):**
+- **Remote-primary reserve** (coordinator ≠ value primary): `handle_unique_reserve_request` still
+  responds `Reserved` immediately (fire-and-forget group replicate), so that field isn't
+  majority-gated. Fix: defer the `UniqueReserveResponse` until the tracker completes (event-driven
+  completion = send-response), so the coordinator's existing `await_unique_reserves` becomes
+  majority-gated transparently.
+- **Secondary create path** (`db_ops` `reserve_unique_local` @ 1347/1630/1785 + the event-loop Path 2
+  completion): still P2.b fire-and-forget; `db_ops`:683 creates trackers via
+  `start_unique_constraint_check` but Path 2 never awaits `pending_quorum`.
+- **Cosmetic:** a quorum-timeout reuses the 409 "unique constraint violation on field X" message via
+  `combine_quorum`; should be a 503 "reservation not durable". Fix when P2.c-2 threads a distinct
+  durability-failure signal.
+
+Then **P2.d+e** (seal + serve-gating).
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.

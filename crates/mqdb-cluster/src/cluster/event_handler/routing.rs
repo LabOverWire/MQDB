@@ -185,9 +185,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             DbPublishResult::PendingUniqueCheck(pending) => {
                 let local_reserved = pending.phase1.local_reserved;
                 let pending_remote = pending.phase1.pending_remote;
+                let pending_quorum = pending.phase1.pending_quorum;
                 let continuation = pending.continuation;
                 drop(ctrl);
-                let remote_results = await_unique_reserves(pending_remote).await;
+                let remote_results =
+                    combine_quorum(await_unique_reserves(pending_remote).await, pending_quorum)
+                        .await;
                 let mut ctrl = self.controller.write().await;
                 if let Some(response) = self
                     .db_handler
@@ -233,9 +236,14 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                     FkCheckCompletion::NeedUniqueCheck(pending) => {
                         let local_reserved = pending.phase1.local_reserved;
                         let pending_remote = pending.phase1.pending_remote;
+                        let pending_quorum = pending.phase1.pending_quorum;
                         let continuation = pending.continuation;
                         drop(ctrl);
-                        let remote_results = await_unique_reserves(pending_remote).await;
+                        let remote_results = combine_quorum(
+                            await_unique_reserves(pending_remote).await,
+                            pending_quorum,
+                        )
+                        .await;
                         let mut ctrl = self.controller.write().await;
                         if let Some(response) = self
                             .db_handler
@@ -410,5 +418,23 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             remote_nodes,
             is_clean_session,
         })
+    }
+}
+
+type RemoteReserveResult =
+    Result<Vec<(String, Vec<u8>, NodeId)>, (String, Vec<(String, Vec<u8>, NodeId)>)>;
+
+async fn combine_quorum(
+    remote_results: RemoteReserveResult,
+    pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
+) -> RemoteReserveResult {
+    use super::super::node_controller::unique::await_unique_quorum;
+    let quorum = await_unique_quorum(pending_quorum).await;
+    match remote_results {
+        Ok(confirmed) => match quorum {
+            Ok(()) => Ok(confirmed),
+            Err(field) => Err((field, confirmed)),
+        },
+        Err(e) => Err(e),
     }
 }

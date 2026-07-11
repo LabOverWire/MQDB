@@ -9,6 +9,7 @@ use super::{
 use tokio::sync::oneshot;
 
 const UNIQUE_RESERVE_TIMEOUT_SECS: u64 = 5;
+const UNIQUE_QUORUM_TIMEOUT_MS: u64 = 5000;
 
 pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
@@ -38,6 +39,20 @@ pub async fn await_unique_reserves(
     Ok(confirmed)
 }
 
+/// Await majority-durability for every locally reserved unique value. Returns `Err(field)` for the
+/// first reserve that failed to reach a group majority before its deadline (fail-closed).
+pub async fn await_unique_quorum(
+    pending: Vec<(String, oneshot::Receiver<bool>)>,
+) -> Result<(), String> {
+    for (field, receiver) in pending {
+        match receiver.await {
+            Ok(true) => {}
+            _ => return Err(field),
+        }
+    }
+    Ok(())
+}
+
 impl<T: ClusterTransport> NodeController<T> {
     #[allow(clippy::missing_errors_doc)]
     pub async fn start_unique_constraint_check(
@@ -52,6 +67,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
         let mut pending_remote: Vec<PendingUniqueReserve> = Vec::new();
+        let mut pending_quorum: Vec<(String, oneshot::Receiver<bool>)> = Vec::new();
 
         for field in &unique_fields {
             let value = match data.get(field) {
@@ -80,8 +96,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 match result {
                     super::super::db::ReserveResult::Reserved => {
                         if let Some(w) = write {
-                            self.write_or_forward(w).await;
                             self.sync_unique_write();
+                            let rx = self.replicate_unique_reserve(w).await;
+                            pending_quorum.push((field.clone(), rx));
                         }
                         local_reserved.push((field.clone(), value));
                         false
@@ -132,6 +149,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(UniqueCheckPhase1Result {
             local_reserved,
             pending_remote,
+            pending_quorum,
         })
     }
 
@@ -498,12 +516,18 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.registered_nodes()
     }
 
-    /// Replicate a `DB_UNIQUE` write to the whole quorum group (sequence-free, epoch-fenced).
-    /// The local store is already updated by the store op that produced `write`; this fans the
-    /// decision out to the group members, who accept it idempotently under the epoch fence.
-    pub(crate) async fn replicate_unique_to_group(
+    /// Majority size for the current quorum group.
+    #[must_use]
+    pub(crate) fn unique_majority(&self) -> usize {
+        self.unique_quorum_group().len() / 2 + 1
+    }
+
+    /// Stamp `write` with the value-partition epoch, bump this node's promised epoch, and fan the
+    /// decision out to every other group member under `request_id` (0 = untracked/fire-and-forget).
+    async fn send_unique_replicate(
         &mut self,
         write: crate::cluster::protocol::ReplicationWrite,
+        request_id: u64,
     ) {
         let partition = write.partition;
         let epoch = self.epoch(partition).unwrap_or(crate::cluster::Epoch::ZERO);
@@ -529,16 +553,74 @@ impl<T: ClusterTransport> NodeController<T> {
             if node != self.node_id {
                 let _ = self
                     .transport
-                    .send(node, ClusterMessage::UniqueReplicate(stamped.clone()))
+                    .send(
+                        node,
+                        ClusterMessage::UniqueReplicate {
+                            request_id,
+                            write: stamped.clone(),
+                        },
+                    )
                     .await;
             }
         }
     }
 
-    /// Receive a group `DB_UNIQUE` replication write: accept iff the write's epoch is not below
-    /// this node's promised epoch for the partition (the fence), then apply last-writer-wins.
-    pub(crate) fn handle_unique_replicate(
+    /// Replicate a `DB_UNIQUE` write to the whole quorum group, fire-and-forget (commit/release/
+    /// reassert): the Phase-1 reconciler repairs any member that misses it.
+    pub(crate) async fn replicate_unique_to_group(
         &mut self,
+        write: crate::cluster::protocol::ReplicationWrite,
+    ) {
+        self.send_unique_replicate(write, 0).await;
+    }
+
+    /// Replicate a reserve `DB_UNIQUE` write to the group and return a receiver that resolves
+    /// `true` once a **majority** of the group (including this node) holds it, or `false` on
+    /// timeout. The local store already holds the reservation, so this node counts as one ack.
+    pub(crate) async fn replicate_unique_reserve(
+        &mut self,
+        write: crate::cluster::protocol::ReplicationWrite,
+    ) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        let needed = self.unique_majority();
+        let request_id = self.next_unique_quorum_id();
+
+        self.send_unique_replicate(write, request_id).await;
+
+        let mut acks = std::collections::HashSet::new();
+        acks.insert(self.node_id);
+        if acks.len() >= needed {
+            let _ = tx.send(true);
+        } else {
+            let deadline_ms = Self::current_time_ms() + UNIQUE_QUORUM_TIMEOUT_MS;
+            self.pending_unique_quorum.insert(
+                request_id,
+                super::UniqueQuorumTracker {
+                    acks,
+                    needed,
+                    deadline_ms,
+                    responder: tx,
+                },
+            );
+        }
+        rx
+    }
+
+    fn next_unique_quorum_id(&mut self) -> u64 {
+        self.unique_quorum_counter += 1;
+        if self.unique_quorum_counter == 0 {
+            self.unique_quorum_counter = 1;
+        }
+        self.unique_quorum_counter
+    }
+
+    /// Receive a group `DB_UNIQUE` replication write: accept iff the write's epoch is not below
+    /// this node's promised epoch for the partition (the fence), then apply last-writer-wins and
+    /// ack the coordinator if the write is quorum-tracked (`request_id != 0`).
+    pub(crate) async fn handle_unique_replicate(
+        &mut self,
+        from: NodeId,
+        request_id: u64,
         write: &crate::cluster::protocol::ReplicationWrite,
     ) {
         let promised = self
@@ -557,6 +639,44 @@ impl<T: ClusterTransport> NodeController<T> {
         *promised = write.epoch;
         if let Err(e) = self.stores.apply_write(write) {
             tracing::error!(?e, "failed to apply unique replicate write");
+            return;
+        }
+        self.sync_unique_write();
+
+        if request_id != 0 {
+            let ack = crate::cluster::protocol::UniqueReplicateAck::create(request_id);
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::UniqueReplicateAck(ack))
+                .await;
+        }
+    }
+
+    /// Record a group member's ack for a tracked reserve; resolve the waiter once a majority
+    /// (including this node) holds the reservation.
+    pub(crate) fn record_unique_quorum_ack(&mut self, from: NodeId, request_id: u64) {
+        if let Some(tracker) = self.pending_unique_quorum.get_mut(&request_id) {
+            tracker.acks.insert(from);
+            if tracker.acks.len() >= tracker.needed
+                && let Some(tracker) = self.pending_unique_quorum.remove(&request_id)
+            {
+                let _ = tracker.responder.send(true);
+            }
+        }
+    }
+
+    /// Fail any reserve whose quorum was not reached before its deadline (fail-closed).
+    pub(crate) fn sweep_unique_quorum(&mut self, now_ms: u64) {
+        let expired: Vec<u64> = self
+            .pending_unique_quorum
+            .iter()
+            .filter(|(_, t)| t.deadline_ms <= now_ms)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in expired {
+            if let Some(tracker) = self.pending_unique_quorum.remove(&id) {
+                let _ = tracker.responder.send(false);
+            }
         }
     }
 

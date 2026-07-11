@@ -1404,6 +1404,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     phase1: super::UniqueCheckPhase1Result {
                         local_reserved,
                         pending_remote: pending_remote_reserves,
+                        pending_quorum: Vec::new(),
                     },
                     continuation: UniqueCheckContinuation::CreateFromNodeController {
                         from,
