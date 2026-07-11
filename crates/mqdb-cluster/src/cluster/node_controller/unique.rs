@@ -923,7 +923,20 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             false
         };
-        let resp = UniqueSealResponse::create(req.request_id, partition, req.epoch, accepted);
+        // An accepting member returns its reservations for the partition so the promoting primary
+        // learns any claim it missed (the leaderView step) before it serves reserves.
+        let reservations = if accepted {
+            self.stores.db_unique.export_for_partition(partition)
+        } else {
+            Vec::new()
+        };
+        let resp = UniqueSealResponse::create(
+            req.request_id,
+            partition,
+            req.epoch,
+            accepted,
+            reservations,
+        );
         let _ = self
             .transport
             .send(from, ClusterMessage::UniqueSealResponse(resp))
@@ -935,6 +948,12 @@ impl<T: ClusterTransport> NodeController<T> {
             // A group member has promised a higher epoch — this node is superseded; abandon.
             self.pending_unique_seals.remove(&resp.request_id);
             return;
+        }
+        // Learn any reservation this promoting primary was missing before it is allowed to serve.
+        if !resp.reservations.is_empty()
+            && let Err(e) = self.stores.db_unique.merge_for_seal(&resp.reservations)
+        {
+            tracing::warn!(error = ?e, "failed to merge reservations from seal response");
         }
         let reached = match self.pending_unique_seals.get_mut(&resp.request_id) {
             Some(tracker) => {

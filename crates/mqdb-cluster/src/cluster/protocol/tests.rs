@@ -446,13 +446,14 @@ fn unique_seal_request_roundtrip() {
 
 #[test]
 fn unique_seal_response_roundtrip() {
-    let resp = UniqueSealResponse::create(7, PartitionId::new(9).unwrap(), 3, true);
+    let resp = UniqueSealResponse::create(7, PartitionId::new(9).unwrap(), 3, true, vec![1, 2, 3]);
     let bytes = resp.to_be_bytes();
     let (decoded, _) = UniqueSealResponse::try_from_be_bytes(&bytes).unwrap();
     assert_eq!(decoded.request_id, 7);
     assert_eq!(decoded.partition_id(), PartitionId::new(9));
     assert_eq!(decoded.epoch, 3);
     assert!(decoded.is_accepted());
+    assert_eq!(decoded.reservations, vec![1, 2, 3]);
 }
 
 #[test]

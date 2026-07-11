@@ -427,19 +427,31 @@ pub struct UniqueSealResponse {
     pub partition: u16,
     pub epoch: u64,
     pub accepted: u8,
+    pub reservations_len: u32,
+    #[FromField(reservations_len)]
+    pub reservations: Vec<u8>,
 }
 
 impl UniqueSealResponse {
     pub const VERSION: u8 = 1;
 
     #[must_use]
-    pub fn create(request_id: u64, partition: PartitionId, epoch: u64, accepted: bool) -> Self {
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create(
+        request_id: u64,
+        partition: PartitionId,
+        epoch: u64,
+        accepted: bool,
+        reservations: Vec<u8>,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             request_id,
             partition: partition.get(),
             epoch,
             accepted: u8::from(accepted),
+            reservations_len: reservations.len() as u32,
+            reservations,
         }
     }
 

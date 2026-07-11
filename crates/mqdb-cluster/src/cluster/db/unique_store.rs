@@ -510,6 +510,68 @@ impl UniqueStore {
         Ok(imported)
     }
 
+    /// Merge reservations learned from a promotion-seal response into the local store, conservatively:
+    /// learn a claim we lack, upgrade an uncommitted claim to a committed one, but never downgrade a
+    /// committed claim nor reassign a committed value. This is the `leaderView` learning step that
+    /// lets a freshly promoted primary see a reservation it missed before it serves reserves.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` on a malformed key or reservation.
+    pub fn merge_for_seal(&self, data: &[u8]) -> Result<usize, UniqueStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut merged = 0;
+        let mut reservations = self.reservations.write().unwrap();
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| UniqueStoreError::SerializationError)?
+                .to_string();
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if offset + data_len > data.len() {
+                break;
+            }
+            let incoming = Self::deserialize(&data[offset..offset + data_len])
+                .ok_or(UniqueStoreError::SerializationError)?;
+            offset += data_len;
+
+            let adopt = match reservations.get(&key) {
+                None => true,
+                Some(local) => incoming.is_committed() && !local.is_committed(),
+            };
+            if adopt {
+                reservations.insert(key, incoming);
+                merged += 1;
+            }
+        }
+        Ok(merged)
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
@@ -1115,6 +1177,73 @@ mod tests {
         store
             .apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&committed))
             .expect("re-applying the same committed owner is idempotent, not a conflict");
+    }
+
+    #[test]
+    fn merge_for_seal_learns_missing_and_never_downgrades() {
+        // A member holds a committed claim for the value; a promoting primary is missing it.
+        let member = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        member
+            .apply_replicated(
+                Operation::Insert,
+                &unique_key(&committed),
+                &UniqueStore::serialize(&committed),
+            )
+            .unwrap();
+        let blob = member.export_for_partition(committed.unique_partition());
+
+        let primary = UniqueStore::new(node(2));
+        assert!(primary.get("users", "email", b"a@x.com").is_none());
+        assert_eq!(primary.merge_for_seal(&blob).unwrap(), 1);
+        let learned = primary.get("users", "email", b"a@x.com").unwrap();
+        assert!(learned.is_committed());
+        assert_eq!(
+            learned.record_id_str(),
+            "owner-a",
+            "the primary learns the missed claim"
+        );
+
+        // A second merge carrying an uncommitted claim for the same value must NOT downgrade it.
+        let uncommitted = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            2000,
+        );
+        let stale = UniqueStore::new(node(3));
+        stale
+            .apply_replicated(
+                Operation::Insert,
+                &unique_key(&uncommitted),
+                &UniqueStore::serialize(&uncommitted),
+            )
+            .unwrap();
+        assert_eq!(
+            primary
+                .merge_for_seal(&stale.export_for_partition(uncommitted.unique_partition()))
+                .unwrap(),
+            0,
+            "an uncommitted claim never downgrades a learned committed claim"
+        );
+        assert!(
+            primary
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .is_committed()
+        );
     }
 
     #[test]

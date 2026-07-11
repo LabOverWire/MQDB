@@ -318,7 +318,7 @@ async fn unique_seal_reaches_majority_on_response() {
         "not sealed until a majority of the group has promised the epoch"
     );
 
-    let resp = UniqueSealResponse::create(1, p, 2, true);
+    let resp = UniqueSealResponse::create(1, p, 2, true, Vec::new());
     ctrl.handle_unique_seal_response(node2, &resp);
 
     assert_eq!(
@@ -326,6 +326,56 @@ async fn unique_seal_reaches_majority_on_response() {
         Some(&Epoch::new(2)),
         "self + one accepting member is a majority of three"
     );
+}
+
+#[tokio::test]
+async fn seal_response_teaches_primary_a_missed_reservation() {
+    use crate::cluster::db::{UniqueReservation, UniqueStore};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+
+    let value = b"a@x.com";
+    let unique_part = crate::cluster::db::unique_partition("users", "email", value);
+    // A committed claim for the value exists on the group, but this promoting primary missed it.
+    let committed = UniqueReservation::create(
+        "users",
+        "email",
+        value,
+        "owner-a",
+        "req-a",
+        PartitionId::new(5).unwrap(),
+        1000,
+    )
+    .with_committed();
+    let member = UniqueStore::new(node2);
+    member
+        .apply_replicated(
+            crate::cluster::protocol::Operation::Insert,
+            &crate::cluster::db::unique_key(&committed),
+            &UniqueStore::serialize(&committed),
+        )
+        .unwrap();
+    let blob = member.export_for_partition(unique_part);
+
+    assert!(
+        ctrl.stores().unique_get("users", "email", value).is_none(),
+        "primary starts out missing the reservation"
+    );
+
+    let resp = UniqueSealResponse::create(1, unique_part, 2, true, blob);
+    ctrl.handle_unique_seal_response(node2, &resp);
+
+    let learned = ctrl
+        .stores()
+        .unique_get("users", "email", value)
+        .expect("the seal response must teach the primary the reservation it missed");
+    assert!(learned.is_committed());
+    assert_eq!(learned.record_id_str(), "owner-a");
 }
 
 #[tokio::test]

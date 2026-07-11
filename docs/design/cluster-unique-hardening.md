@@ -273,17 +273,27 @@ Non-breaking — no serve-gate yet.
   the member holding the uncommitted claim permits the overwrite (guard is committed-only); both
   records get written. The verified model that holds NoOversell (`ClusterUniqueQuorum.tla`, 3076
   states) has `leaderView` — the seal reading + learning existing reservations. **So d-2 is required.**
+- **d-2 (seal-reservation-learning) — IMPLEMENTED (closes the residual).** An accepting member returns
+  its reservations for the partition in `UniqueSealResponse.reservations`
+  (`UniqueStore::export_for_partition`); the promoting primary merges them
+  (`UniqueStore::merge_for_seal`: learn an absent claim, upgrade uncommitted→committed, never
+  downgrade a committed claim nor change a committed owner) in `handle_unique_seal_response` **before**
+  the seal completes. Because the original reserve was majority-durable and the seal reads a majority,
+  the two quorums intersect, so the promoting primary always learns a reservation it missed — exactly
+  the verified `leaderView` step. Its local CAS then rejects a conflicting reserve. Tests:
+  `merge_for_seal_learns_missing_and_never_downgrades`, `seal_response_teaches_primary_a_missed_reservation`.
+  With this, the implementation matches `ClusterUniqueQuorum.tla`; **dual-primary B is fully closed.**
 - Tests: `unsealed_partition_fails_reserve_closed` (gate), `apply_replicated_rejects_reassigning_committed_value`
   + `apply_replicated_allows_recommit_by_same_record` (guard); `unique_constraint_cross_node_message_flow`
   updated to complete the seal handshake before reserving. Full suite green (506+75+49), clippy clean.
 
 **The three P2 mechanisms close B *except for one TLA-identified residual*:** (1) seal fences the old
 primary (epoch-promise at a majority ⇒ its stale-epoch group writes are rejected ⇒ its reserves fail
-closed); (2) the serve-gate stops a new primary serving before it has sealed; (3) the monotonic guard
-blocks missed-**committed**-reservation overwrite. **Residual (must fix — see the TLA correction
-above): d-2 seal-reservation-learning.** Without it, a new primary that missed an *uncommitted*
-reservation oversells; this is currently **detected** by the reconciler (two committed records →
-`Conflict`) but not **prevented**. **Both create paths are gated:** the primary MQTT path
+closed); (2) the serve-gate stops a new primary serving before it has sealed; (3) **d-2
+seal-reservation-learning** — the seal teaches a promoting primary any reservation it missed, so its
+CAS rejects a conflicting reserve (the `leaderView` step; the monotonic guard remains as a
+member-level backstop for committed values). All four are implemented; the implementation now matches
+the verified `ClusterUniqueQuorum.tla`. **Both create paths are gated:** the primary MQTT path
 (`json_ops`/`routing.rs`) and the forwarded cluster path (`db_ops` `reserve_unique_local`, gated on
 `unique_partition_sealed`).
 
