@@ -3884,6 +3884,7 @@ fn json_value_bytes(value: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn no_oversell_when_new_primary_missed_a_reservation() {
     // Model-as-oracle NoOversell test for the exact scenario ClusterUniqueMonotonic.tla flagged:
     // a promoted primary that MISSED an existing reservation must still refuse to reassign the value.

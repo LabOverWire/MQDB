@@ -32,6 +32,10 @@ pub enum MessageType {
     UniqueReplicate = 87,
     UniqueReplicateAck = 88,
     UniqueSealRequest = 89,
+    FkCheckRequest = 90,
+    FkCheckResponse = 91,
+    FkReverseLookupRequest = 92,
+    FkReverseLookupResponse = 93,
     UniqueSealResponse = 94,
 }
 

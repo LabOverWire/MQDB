@@ -1567,6 +1567,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,

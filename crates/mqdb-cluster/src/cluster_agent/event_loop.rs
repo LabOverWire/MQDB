@@ -404,11 +404,16 @@ impl ClusteredAgent {
         let continuation = pending.continuation;
         tokio::spawn(async move {
             use crate::cluster::node_controller::ReserveFailure;
-            let remote_results = match (
-                await_unique_reserves(pending_remote).await,
-                await_unique_quorum(pending_quorum).await,
+            // Await the remote-reserve and local-quorum rounds concurrently so a create waits the
+            // max of the two ~5s deadlines, not their sum.
+            let remote_results = match tokio::join!(
+                await_unique_reserves(pending_remote),
+                await_unique_quorum(pending_quorum),
             ) {
-                (Ok(confirmed), Ok(())) => Ok(confirmed),
+                (Ok(confirmed), Ok(durable)) => {
+                    tracing::debug!(?durable, "unique reserve is majority-durable");
+                    Ok(confirmed)
+                }
                 (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
                 (Err(e), _) => Err(e),
             };

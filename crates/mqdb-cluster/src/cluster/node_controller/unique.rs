@@ -47,18 +47,20 @@ pub async fn await_unique_reserves(
     Ok(confirmed)
 }
 
-/// Await majority-durability for every locally reserved unique value. Returns `Err(field)` for the
-/// first reserve that failed to reach a group majority before its deadline (fail-closed).
+/// Await majority-durability for every locally reserved unique value. Returns the fields now
+/// confirmed majority-durable on success, or `Err(field)` for the first reserve that failed to
+/// reach a group majority before its deadline (fail-closed).
 pub async fn await_unique_quorum(
     pending: Vec<(String, oneshot::Receiver<bool>)>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
+    let mut durable = Vec::with_capacity(pending.len());
     for (field, receiver) in pending {
         match receiver.await {
-            Ok(true) => {}
+            Ok(true) => durable.push(field),
             _ => return Err(field),
         }
     }
-    Ok(())
+    Ok(durable)
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -351,8 +353,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         self.sync_unique_write();
                         // Defer the response until a majority of the group holds the reservation;
                         // the tracker sends the UniqueReserveResponse when quorum is reached.
-                        self.replicate_unique_reserve_remote(w, from, req.request_id)
-                            .await;
+                        self.replicate_unique_reserve_remote(
+                            w,
+                            from,
+                            req.request_id,
+                            super::UniqueClaimId {
+                                entity: entity.to_owned(),
+                                field: field.to_owned(),
+                                value: req.value.clone(),
+                                idempotency_key: idempotency_key.to_owned(),
+                            },
+                        )
+                        .await;
                         return;
                     }
                     UniqueReserveStatus::Reserved
@@ -648,6 +660,7 @@ impl<T: ClusterTransport> NodeController<T> {
         write: crate::cluster::protocol::ReplicationWrite,
         from: NodeId,
         response_request_id: u64,
+        claim: super::UniqueClaimId,
     ) {
         let needed = self.unique_majority();
         let request_id = self.next_unique_quorum_id();
@@ -657,6 +670,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let completion = super::UniqueQuorumCompletion::RemoteReserve {
             from,
             response_request_id,
+            claim,
         };
         let mut acks = std::collections::HashSet::new();
         acks.insert(self.node_id);
@@ -688,10 +702,22 @@ impl<T: ClusterTransport> NodeController<T> {
             super::UniqueQuorumCompletion::RemoteReserve {
                 from,
                 response_request_id,
+                claim,
             } => {
                 let status = if success {
                     UniqueReserveStatus::Reserved
                 } else {
+                    // The reserve never reached a majority: release the local reservation this node
+                    // holds so a transient quorum timeout does not wedge the value until its TTL.
+                    if let Some(w) = self.stores.unique_release_replicated(
+                        &claim.entity,
+                        &claim.field,
+                        &claim.value,
+                        &claim.idempotency_key,
+                    ) {
+                        self.write_or_forward(w).await;
+                        self.sync_unique_write();
+                    }
                     UniqueReserveStatus::Error
                 };
                 let response = UniqueReserveResponse::create(response_request_id, status);

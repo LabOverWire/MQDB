@@ -230,13 +230,14 @@ through `fire_unique_quorum_completion`. Integration test `unique_constraint_cro
 drives the full flow (reserve → group-replicate → ack → deferred response). Both the local and remote
 primary reserve paths on the MQTT create path are now majority-durable.
 
-**Remaining P2.c gaps (small tail, documented, not yet gated):**
-- **Secondary create path** (`db_ops` `reserve_unique_local` @ 1347/1630/1785 + `spawn_unique_completion`
-  Path 2): still P2.b fire-and-forget; `db_ops`:683 creates trackers via `start_unique_constraint_check`
-  but Path 2 never awaits `pending_quorum`. Mirror the `combine_quorum` wiring here.
-- **Cosmetic:** a quorum-timeout reuses the 409 "unique constraint violation on field X" message via
-  `combine_quorum`; should be a 503 "reservation not durable" (needs a distinct durability-failure
-  signal into the completion functions).
+**P2.c gaps at this snapshot — both since RESOLVED (see "Follow-ups — all resolved" below):**
+- **Secondary create path** (`db_ops` `reserve_unique_local` + `spawn_unique_completion` Path 2): was
+  P2.b fire-and-forget. Now `reserve_unique_local` threads `pending_quorum` into the `db_ops` create
+  phase1 and `spawn_unique_completion` awaits `await_unique_quorum` before acquiring the lock — gated
+  and majority-awaited on both create paths.
+- **Quorum-timeout status:** a quorum-timeout no longer reuses the 409 message. The
+  `ReserveFailure { Conflict(409), NotDurable(503) }` enum returns a retryable 503 for a not-yet-durable
+  reserve.
 
 **P2.d-1 (seal epoch-promise round) DONE:** `UniqueSealRequest`/`UniqueSealResponse` (types 89/94).
 `become_primary` queues a per-partition seal (`pending_seal_queue`); the event-loop tick drains it
@@ -321,6 +322,39 @@ the verified `ClusterUniqueQuorum.tla`. **Both create paths are gated:** the pri
   E2E needs an Enterprise license unavailable in this environment; the sim harness + unit tests + TLA
   cover the mechanics license-free.)
 
+## Open follow-ups (post-review, 2026-07-11)
+
+Verified by a 3-agent review quorum; none is a happy-path correctness regression. Fixed here:
+concurrent reserve/quorum await, and the remote-reserve timeout reservation leak.
+
+- **Remote-reserve timeout leaked a reservation — FIXED.** `handle_unique_reserve_request` deferred a
+  remote-coordinated reserve via `replicate_unique_reserve_remote`; on quorum timeout it sent `Error`
+  but never released the local reservation it held, wedging the value until its 30s TTL. The
+  `RemoteReserve` completion now carries the claim identity and `fire_unique_quorum_completion`
+  releases it on failure. Counter-test: `remote_reserve_quorum_timeout_releases_local_reservation`.
+- **Sequential reserve/quorum awaits — FIXED.** `combine_quorum` (`routing.rs`) and
+  `spawn_unique_completion` (`event_loop.rs`) awaited `await_unique_reserves` then `await_unique_quorum`
+  sequentially (each ~5s → ~10s worst-case create latency); neither short-circuited the quorum wait.
+  Both now `tokio::join!` the two rounds (max of the deadlines, ~5s). No behavior change — both results
+  were already awaited unconditionally.
+- **Reconciler full-scan cost — OPEN (perf follow-up).** `reconcile_unique_claims` calls
+  `db_data.list(entity)` (which clones every record of the entity, unbounded) and JSON-deserializes
+  each owned record every 10s, and `handle_unique_reconcile` holds the controller **write** lock across
+  the entire scan and its awaited reassert sends — blocking all DB ops on the node for the duration.
+  Cost is O(total records), independent of how many claims actually need repair (normally zero). Fix:
+  scope to owned partitions via `list_for_partition` before cloning, iterate without materializing the
+  full Vec, drop/reacquire the lock in chunks, and/or track a dirty-set instead of full scans.
+- **Dynamic reconfiguration — OPEN (known limitation, out of the verified model).** `unique_quorum_group()`
+  reads `HeartbeatManager::registered_nodes()`, which **grows at runtime**: `receive_heartbeat` inserts a
+  previously-unknown sender, so the group is not actually fixed and does not strictly equal the Raft
+  `cluster_members` set assumed above. If the group grows between a majority-durable reserve and a
+  post-failover seal, the reserve-write-majority and seal-read-majority can be **disjoint**, the new
+  primary never learns the reservation, and case B oversell reappears. The TLA models use a fixed
+  `Nodes` constant, so this is unmodeled. Fix (future): source the quorum group from the Raft
+  `cluster_members` set and gate membership changes through joint-consensus / epoch reconfiguration so no
+  reserve-majority and seal-majority can be disjoint; at minimum stop `receive_heartbeat` from silently
+  expanding the quorum basis.
+
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
 - **P2.b — Replicate the `DB_UNIQUE` keyspace to the group.** **Structural fact (verified,
@@ -362,13 +396,16 @@ the verified `ClusterUniqueQuorum.tla`. **Both create paths are gated:** the pri
 
 Each of P2.b, P2.c, P2.{d+e} is independently shippable and testable; the model is the oracle for the
 multi-node tests (concurrent same-value create, primary-kill during reserve/commit, induced
-dual-primary partition). **Membership source (resolved):** use the **registered cluster membership**
-already tracked by `HeartbeatManager.nodes` (keyed by node id) plus `local_node` — stable (not the
-fluctuating alive set), reachable from `NodeController` today with no new cross-task plumbing, and
-equal to the metadata-Raft `cluster_members` set in practice (`raft/coordinator/mod.rs:138`). Add a
-`HeartbeatManager` accessor for the full registered set + a `NodeController::unique_quorum_group()`
-wrapper; `unique_majority()` = `⌊|group|/2⌋ + 1`. If the group must ever diverge from Raft
-membership, swap this one accessor.
+dual-primary partition). **Membership source:** use the **registered cluster membership** tracked by
+`HeartbeatManager.nodes` (keyed by node id) plus `local_node` — more stable than the fluctuating alive
+set, reachable from `NodeController` today with no new cross-task plumbing. Add a `HeartbeatManager`
+accessor for the full registered set + a `NodeController::unique_quorum_group()` wrapper;
+`unique_majority()` = `⌊|group|/2⌋ + 1`. **Caveat (not fully stable):** `registered_nodes()` is not a
+fixed set — `receive_heartbeat` inserts a previously-unknown sender, so the group can grow at runtime
+and does not strictly equal the metadata-Raft `cluster_members` set. That is safe under fixed
+membership (what the TLA model verifies) but admits a disjoint-majority oversell if the group grows
+across a reserve→failover-seal window — see "Open follow-ups → Dynamic reconfiguration" above. To close
+it, source the group from Raft `cluster_members` and gate reconfiguration through consensus.
 
 ## 5. The hard part — abandonment vs record existence, and why B needs prevention
 

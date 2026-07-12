@@ -105,11 +105,21 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
+/// Identity of a unique claim, enough to release it: the reservation is keyed by
+/// `(entity, field, value)` and owned by `idempotency_key`.
+pub(crate) struct UniqueClaimId {
+    pub entity: String,
+    pub field: String,
+    pub value: Vec<u8>,
+    pub idempotency_key: String,
+}
+
 pub(super) enum UniqueQuorumCompletion {
     Local(oneshot::Sender<bool>),
     RemoteReserve {
         from: NodeId,
         response_request_id: u64,
+        claim: UniqueClaimId,
     },
 }
 

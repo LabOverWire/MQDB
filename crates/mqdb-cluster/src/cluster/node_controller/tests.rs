@@ -220,6 +220,65 @@ async fn unique_reserve_fails_closed_on_timeout() {
 }
 
 #[tokio::test]
+async fn remote_reserve_quorum_timeout_releases_local_reservation() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    // A remote-coordinated reserve landed on the value-primary: it holds the reservation locally
+    // and defers its response until the reservation is majority-durable.
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    assert!(
+        ctrl.stores()
+            .unique_get("users", "email", b"a@x.com")
+            .is_some(),
+        "the value-primary holds the reservation after the local reserve"
+    );
+    ctrl.replicate_unique_reserve_remote(
+        write,
+        node2,
+        42,
+        UniqueClaimId {
+            entity: "users".to_string(),
+            field: "email".to_string(),
+            value: b"a@x.com".to_vec(),
+            idempotency_key: "req-1".to_string(),
+        },
+    )
+    .await;
+
+    // No group member acks; the deadline sweep fails the reserve closed. It must ALSO release the
+    // local reservation, or a transient quorum timeout wedges the value until its 30s TTL.
+    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
+        .await;
+
+    assert!(
+        ctrl.stores()
+            .unique_get("users", "email", b"a@x.com")
+            .is_none(),
+        "a remote reserve that never reached a majority must release its local reservation"
+    );
+
+    let sent_error = ctrl.transport.sent_messages().iter().any(|(to, m)| {
+        *to == node2
+            && matches!(
+                m,
+                ClusterMessage::UniqueReserveResponse(r)
+                    if r.request_id == 42
+                        && matches!(r.status(), UniqueReserveStatus::Error)
+            )
+    });
+    assert!(
+        sent_error,
+        "the coordinator must receive an Error response so it fails the create closed"
+    );
+}
+
+#[tokio::test]
 async fn unique_reserve_completes_immediately_for_single_node_group() {
     let node1 = NodeId::validated(1).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
