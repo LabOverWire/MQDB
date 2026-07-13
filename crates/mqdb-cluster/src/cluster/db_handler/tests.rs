@@ -286,11 +286,8 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
 
     let mut map = PartitionMap::default();
     for i in 0..NUM_PARTITIONS {
-        let p = PartitionId::new(i).unwrap();
-        // Multi-node group => become_primary QUEUES a seal but does not complete it.
-        ctrl.become_primary(p, Epoch::new(1));
         map.set(
-            p,
+            PartitionId::new(i).unwrap(),
             crate::cluster::PartitionAssignment {
                 primary: Some(node1),
                 replicas: vec![node2, node3],
@@ -298,7 +295,12 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
             },
         );
     }
+    // The map (the quorum-group source) must be in place before become_primary computes the seal
+    // majority; a multi-node group => become_primary QUEUES a seal but does not complete it.
     ctrl.update_partition_map(map);
+    for i in 0..NUM_PARTITIONS {
+        ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
     ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
         .await
         .unwrap();

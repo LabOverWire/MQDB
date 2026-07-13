@@ -337,23 +337,28 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   sequentially (each ~5s → ~10s worst-case create latency); neither short-circuited the quorum wait.
   Both now `tokio::join!` the two rounds (max of the deadlines, ~5s). No behavior change — both results
   were already awaited unconditionally.
-- **Reconciler full-scan cost — OPEN (perf follow-up).** `reconcile_unique_claims` calls
-  `db_data.list(entity)` (which clones every record of the entity, unbounded) and JSON-deserializes
-  each owned record every 10s, and `handle_unique_reconcile` holds the controller **write** lock across
-  the entire scan and its awaited reassert sends — blocking all DB ops on the node for the duration.
-  Cost is O(total records), independent of how many claims actually need repair (normally zero). Fix:
-  scope to owned partitions via `list_for_partition` before cloning, iterate without materializing the
-  full Vec, drop/reacquire the lock in chunks, and/or track a dirty-set instead of full scans.
-- **Dynamic reconfiguration — OPEN (known limitation, out of the verified model).** `unique_quorum_group()`
-  reads `HeartbeatManager::registered_nodes()`, which **grows at runtime**: `receive_heartbeat` inserts a
-  previously-unknown sender, so the group is not actually fixed and does not strictly equal the Raft
-  `cluster_members` set assumed above. If the group grows between a majority-durable reserve and a
-  post-failover seal, the reserve-write-majority and seal-read-majority can be **disjoint**, the new
-  primary never learns the reservation, and case B oversell reappears. The TLA models use a fixed
-  `Nodes` constant, so this is unmodeled. Fix (future): source the quorum group from the Raft
-  `cluster_members` set and gate membership changes through joint-consensus / epoch reconfiguration so no
-  reserve-majority and seal-majority can be disjoint; at minimum stop `receive_heartbeat` from silently
-  expanding the quorum basis.
+- **Reconciler full-scan cost — FIXED.** The reconciler no longer clones records or holds the
+  controller write lock across the scan. `collect_unique_reconcile_work` (read-only, `&self`) projects
+  the reassert work via `DbDataStore::for_each_record` (iterates under the read guard, no `DbEntity`
+  clone); `apply_unique_reconcile_chunk` applies it. `handle_unique_reconcile` collects under a **read**
+  lock, then applies in 64-item chunks each under a brief **write** lock, so DB ops interleave instead
+  of stalling for the whole scan. Splitting the lock introduced a TOCTOU (a record deleted between
+  collect and apply would resurrect a committed claim), closed by an apply-time `record_owns_value`
+  re-check. Tests: `reconcile_apply_skips_record_deleted_after_collection` (fails without the re-check).
+- **Dynamic reconfiguration — quorum-group source FIXED; membership-change intersection still OPEN.**
+  `unique_quorum_group()` now derives from the **replicated partition map** (`PartitionMap::all_nodes()`
+  ∪ self), not `HeartbeatManager::registered_nodes()`. The map is consensus-agreed, so every node
+  derives the **same** group and it changes only through raft rebalance — closing the silent, divergent
+  heartbeat growth (`receive_heartbeat` inserting a previously-unknown sender) that was the disjoint-
+  majority source. `registered_nodes()` is removed. At a failover the map already holds every other
+  partition's assignment, so `all_nodes()` is the full membership when `become_primary` computes the
+  seal majority (the formation-time small-group seal is benign: no prior reservations to learn, no
+  superseded primary to fence). Tests: `unique_quorum_group_derives_from_map_not_heartbeat_growth`,
+  `PartitionMap::all_nodes` unit test.
+  **Still open:** a membership *change* that alters the majority between a reserve and its seal can in
+  principle disjoin the two majorities. Fully closing it needs joint-consensus / epoch-versioned
+  reconfiguration (overlapping old+new majorities during a transition) — the TLA models use a fixed
+  `Nodes` constant, so this transition case remains unmodeled.
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
@@ -396,16 +401,15 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
 
 Each of P2.b, P2.c, P2.{d+e} is independently shippable and testable; the model is the oracle for the
 multi-node tests (concurrent same-value create, primary-kill during reserve/commit, induced
-dual-primary partition). **Membership source:** use the **registered cluster membership** tracked by
-`HeartbeatManager.nodes` (keyed by node id) plus `local_node` — more stable than the fluctuating alive
-set, reachable from `NodeController` today with no new cross-task plumbing. Add a `HeartbeatManager`
-accessor for the full registered set + a `NodeController::unique_quorum_group()` wrapper;
-`unique_majority()` = `⌊|group|/2⌋ + 1`. **Caveat (not fully stable):** `registered_nodes()` is not a
-fixed set — `receive_heartbeat` inserts a previously-unknown sender, so the group can grow at runtime
-and does not strictly equal the metadata-Raft `cluster_members` set. That is safe under fixed
-membership (what the TLA model verifies) but admits a disjoint-majority oversell if the group grows
-across a reserve→failover-seal window — see "Open follow-ups → Dynamic reconfiguration" above. To close
-it, source the group from Raft `cluster_members` and gate reconfiguration through consensus.
+dual-primary partition). **Membership source (implemented):** `unique_quorum_group()` derives from the
+**replicated partition map** — `PartitionMap::all_nodes()` (every distinct primary/replica across all
+partitions) ∪ `local_node` — with `unique_majority()` = `⌊|group|/2⌋ + 1`. The map is consensus-agreed,
+so all nodes derive the same group and it changes only through raft rebalance; no new cross-task
+plumbing is needed (`NodeController` already holds `partition_map`). This replaces the earlier
+heartbeat-derived `registered_nodes()`, which grew locally and divergently when `receive_heartbeat` saw
+a previously-unknown sender — the disjoint-majority source. **Residual:** a membership *change* that
+shifts the majority between a reserve and its seal still needs joint-consensus / epoch-versioned
+reconfiguration to guarantee intersection — see "Open follow-ups → Dynamic reconfiguration".
 
 ## 5. The hard part — abandonment vs record existence, and why B needs prevention
 

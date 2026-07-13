@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-12 — mqdb-cli 0.8.16, mqdb-cluster 0.4.1, mqdb-core 0.7.5
+
+### Fixed
+
+- **Unique reconciler no longer stalls the node.** The periodic cluster unique reconciler cloned every record of every unique-constrained entity and held the controller write lock across the whole scan and its sends, stalling all DB ops on the node every 10s. It now collects the reassert work read-only without cloning (new `DbDataStore::for_each_record`) and applies it in chunks, each under a brief write lock, so DB traffic interleaves. Splitting the lock is made safe by an apply-time re-check that a record still owns the value, so a record deleted mid-cycle cannot resurrect a committed claim.
+
+- **Unique quorum group is now consensus-consistent.** The `DB_UNIQUE` quorum group derived from the heartbeat-discovered node set, which grows locally and divergently when a node first hears an unknown peer — nodes could compute different groups, and growth across a reserve/seal window could disjoin the reserve and seal majorities and reintroduce oversell. The group now derives from the replicated partition map (`PartitionMap::all_nodes`), which every node agrees on and which changes only through raft rebalance. A membership change that shifts the majority between a reserve and its seal is still not fully handled (needs joint-consensus reconfiguration) and is documented in `docs/design/cluster-unique-hardening.md`.
+
 ## 2026-07-11 — mqdb-cli 0.8.15, mqdb-cluster 0.4.0, mqdb-agent 0.8.12, mqdb-core 0.7.4
 
 ### Fixed

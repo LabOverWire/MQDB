@@ -245,6 +245,21 @@ impl DbDataStore {
             .collect()
     }
 
+    /// Runs `f` over every record of `entity_type` under the read guard, without cloning the
+    /// records. Use for read-only scans (e.g. reconciliation) that only need a projection.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn for_each_record(&self, entity_type: &str, mut f: impl FnMut(&DbEntity)) {
+        let prefix = format!("{entity_type}/");
+        let entities = self.read_entities();
+        for (key, record) in entities.iter() {
+            if key.starts_with(&prefix) {
+                f(record);
+            }
+        }
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]

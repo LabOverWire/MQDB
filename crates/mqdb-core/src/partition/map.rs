@@ -146,6 +146,19 @@ impl PartitionMap {
     pub fn has_any_assignment(&self, node: NodeId) -> bool {
         PartitionId::all().any(|p| self.role_for(p, node) != PartitionRole::None)
     }
+
+    /// Every distinct node that appears as a primary or replica anywhere in the map, sorted.
+    /// This is the cluster membership as agreed by the (replicated) map, independent of the
+    /// heartbeat-discovered liveness set.
+    #[must_use]
+    pub fn all_nodes(&self) -> Vec<NodeId> {
+        let mut nodes: Vec<NodeId> = PartitionId::all()
+            .flat_map(|p| self.get(p).all_nodes())
+            .collect();
+        nodes.sort_unstable_by_key(|n| n.get());
+        nodes.dedup();
+        nodes
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +178,27 @@ mod tests {
         let map = PartitionMap::new();
         assert_eq!(map.version(), 0);
         assert!(map.primary(partition(0)).is_none());
+    }
+
+    #[test]
+    fn all_nodes_unions_and_dedups_across_partitions() {
+        let mut map = PartitionMap::new();
+        assert!(map.all_nodes().is_empty(), "an empty map has no members");
+
+        map.set(
+            partition(0),
+            PartitionAssignment::new(node(1), vec![node(2)], Epoch::new(1)),
+        );
+        map.set(
+            partition(1),
+            PartitionAssignment::new(node(2), vec![node(3)], Epoch::new(1)),
+        );
+
+        assert_eq!(
+            map.all_nodes(),
+            vec![node(1), node(2), node(3)],
+            "membership is every distinct primary/replica across all partitions, sorted and deduped"
+        );
     }
 
     #[test]

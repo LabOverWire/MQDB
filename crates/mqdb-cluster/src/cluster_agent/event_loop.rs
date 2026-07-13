@@ -520,10 +520,25 @@ impl ClusteredAgent {
     }
 
     async fn handle_unique_reconcile(&self) {
-        let mut ctrl = self.controller.write().await;
-        ctrl.reconcile_unique_claims().await;
+        // Collect the reassert work under a read lock, then apply it in small chunks each under a
+        // brief write lock, so the reconciler never holds the controller write lock across the whole
+        // scan and its sends — otherwise every DB op on the node stalls for the scan's duration.
+        const RECONCILE_CHUNK: usize = 64;
+
+        let work = {
+            let ctrl = self.controller.read().await;
+            ctrl.collect_unique_reconcile_work()
+        };
+        for chunk in work.chunks(RECONCILE_CHUNK) {
+            let mut ctrl = self.controller.write().await;
+            ctrl.apply_unique_reconcile_chunk(chunk).await;
+        }
+
         let now = current_time_ms();
-        let expired_unique = ctrl.stores().unique_cleanup_expired(now);
+        let expired_unique = {
+            let ctrl = self.controller.write().await;
+            ctrl.stores().unique_cleanup_expired(now)
+        };
         if expired_unique > 0 {
             info!(expired_unique, "reclaimed abandoned unique reservations");
         }
