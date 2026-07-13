@@ -128,6 +128,14 @@ impl Storage {
     pub fn flush(&self) -> Result<()> {
         self.backend.flush()
     }
+
+    /// Durably persists pending writes (fsync), independent of the durability mode.
+    ///
+    /// # Errors
+    /// Returns an error if the sync operation fails.
+    pub fn sync(&self) -> Result<()> {
+        self.backend.sync()
+    }
 }
 
 pub struct BatchWriter {
@@ -145,6 +153,10 @@ impl BatchWriter {
 
     pub fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
         self.inner.expect_value(key, expected_value);
+    }
+
+    pub fn expect_absent(&mut self, key: Vec<u8>) {
+        self.inner.expect_absent(key);
     }
 
     /// Commits all queued operations atomically.

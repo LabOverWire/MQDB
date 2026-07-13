@@ -22,8 +22,8 @@ use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{
     BatchReadRequest, CatchupRequest, ForwardedPublish, JsonDbOp, JsonDbRequest, JsonDbResponse,
     QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
-    UniqueReserveStatus,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
+    UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
@@ -64,6 +64,7 @@ const FORWARD_DEDUP_CAPACITY: usize = 1000;
 pub struct TickOutput {
     pub heartbeat: Option<ClusterMessage>,
     pub catchup_requests: Vec<(NodeId, ClusterMessage)>,
+    pub seal_requests: Vec<(NodeId, ClusterMessage)>,
     pub local_publishes: Vec<(String, Vec<u8>)>,
 }
 
@@ -104,14 +105,92 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
+/// Identity of a unique claim, enough to release it: the reservation is keyed by
+/// `(entity, field, value)` and owned by `idempotency_key`.
+pub(crate) struct UniqueClaimId {
+    pub entity: String,
+    pub field: String,
+    pub value: Vec<u8>,
+    pub idempotency_key: String,
+}
+
+pub(super) enum UniqueQuorumCompletion {
+    Local(oneshot::Sender<bool>),
+    RemoteReserve {
+        from: NodeId,
+        response_request_id: u64,
+        claim: UniqueClaimId,
+    },
+}
+
+pub(super) struct UniqueQuorumTracker {
+    pub acks: HashSet<NodeId>,
+    pub needed: usize,
+    pub deadline_ms: u64,
+    pub completion: UniqueQuorumCompletion,
+}
+
+pub(super) struct UniqueSealTracker {
+    pub partition: PartitionId,
+    pub epoch: Epoch,
+    pub responses: HashSet<NodeId>,
+    pub needed: usize,
+    pub deadline_ms: u64,
+}
+
 pub struct UniqueCheckPhase1Result {
     pub local_reserved: Vec<(String, Vec<u8>)>,
     pub pending_remote: Vec<PendingUniqueReserve>,
+    pub pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
+}
+
+/// Why a unique reserve failed, so the create can return the right status: a real conflict is a
+/// permanent `409`, while a not-yet-durable reserve (partition unsealed, no primary/quorum) is a
+/// transient `503` the client should retry.
+pub enum ReserveFailure {
+    Conflict(String),
+    NotDurable(String),
+}
+
+impl ReserveFailure {
+    #[must_use]
+    pub fn field(&self) -> &str {
+        match self {
+            Self::Conflict(f) | Self::NotDurable(f) => f,
+        }
+    }
+
+    #[must_use]
+    pub fn http_code(&self) -> u16 {
+        match self {
+            Self::Conflict(_) => 409,
+            Self::NotDurable(_) => 503,
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::Conflict(f) => format!("unique constraint violation on field '{f}'"),
+            Self::NotDurable(f) => {
+                format!("unique reservation for field '{f}' is not yet durable; retry")
+            }
+        }
+    }
 }
 
 pub struct PendingUniqueWork {
     pub phase1: UniqueCheckPhase1Result,
     pub continuation: UniqueCheckContinuation,
+}
+
+/// Result of completing an FK check whose entity also has unique constraints. `Done` means the
+/// response was already sent (FK failed, or the reserve failed synchronously). `NeedUnique` means
+/// the unique reserve has started and its majority-await must run **outside the controller lock**
+/// (via `spawn_unique_completion`), which is why this is returned rather than awaited inline.
+pub enum FkThenUniqueOutcome {
+    Done,
+    NeedUnique(Box<PendingUniqueWork>),
 }
 
 pub struct PendingFkCheck {
@@ -320,6 +399,12 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) transport: T,
     pub(super) heartbeat: HeartbeatManager,
     pub(super) replicas: HashMap<u16, ReplicaState>,
+    pub(super) unique_promised: HashMap<u16, Epoch>,
+    pub(super) unique_sealed: HashMap<u16, Epoch>,
+    pub(super) pending_seal_queue: Vec<(PartitionId, Epoch)>,
+    pub(super) pending_unique_seals: HashMap<u64, UniqueSealTracker>,
+    pub(super) pending_unique_quorum: HashMap<u64, UniqueQuorumTracker>,
+    pub(super) unique_quorum_counter: u64,
     pub(super) pending: PendingWrites,
     pub(super) partition_map: PartitionMap,
     pub(super) current_time: u64,
@@ -386,6 +471,12 @@ impl<T: ClusterTransport> NodeController<T> {
             heartbeat: HeartbeatManager::new(node_id, config),
             transport,
             replicas: HashMap::new(),
+            unique_promised: HashMap::new(),
+            unique_sealed: HashMap::new(),
+            pending_seal_queue: Vec::new(),
+            pending_unique_seals: HashMap::new(),
+            pending_unique_quorum: HashMap::new(),
+            unique_quorum_counter: 0,
             pending: PendingWrites::new(1000),
             partition_map: PartitionMap::default(),
             current_time: 0,
@@ -506,6 +597,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
+        self.seal_or_queue_unique(partition, epoch);
     }
 
     pub fn become_replica(&mut self, partition: PartitionId, epoch: Epoch, sequence: u64) {
@@ -573,6 +665,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         self.collect_catchup_requests(now, &mut output);
+        self.collect_pending_seals(&mut output);
         self.collect_stale_scatter_responses(now, &mut output);
         self.collect_stale_vault_decrypts(now);
 
@@ -593,6 +686,9 @@ impl<T: ClusterTransport> NodeController<T> {
             let _ = self.transport.broadcast(hb).await;
         }
         for (target, msg) in output.catchup_requests {
+            let _ = self.transport.send(target, msg).await;
+        }
+        for (target, msg) in output.seal_requests {
             let _ = self.transport.send(target, msg).await;
         }
         for (topic, payload) in output.local_publishes {
@@ -1152,8 +1248,29 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::UniqueCommitRequest(req) => {
                 self.handle_unique_commit_request(from, req).await;
             }
+            ClusterMessage::UniqueCommitResponse(resp) if resp.success == 0 => {
+                tracing::warn!(
+                    request_id = resp.request_id,
+                    "unique commit not acknowledged; reconciler will repair"
+                );
+            }
             ClusterMessage::UniqueReleaseRequest(req) => {
                 self.handle_unique_release_request(from, req).await;
+            }
+            ClusterMessage::UniqueReassertRequest(req) => {
+                self.handle_unique_reassert_request(req).await;
+            }
+            ClusterMessage::UniqueReplicate { request_id, write } => {
+                self.handle_unique_replicate(from, *request_id, write).await;
+            }
+            ClusterMessage::UniqueReplicateAck(ack) => {
+                self.record_unique_quorum_ack(from, ack.request_id).await;
+            }
+            ClusterMessage::UniqueSealRequest(req) => {
+                self.handle_unique_seal_request(from, req).await;
+            }
+            ClusterMessage::UniqueSealResponse(resp) => {
+                self.handle_unique_seal_response(from, resp);
             }
             ClusterMessage::FkCheckRequest(req) => {
                 self.handle_fk_check_request(from, req).await;
@@ -1311,7 +1428,7 @@ impl<T: ClusterTransport> NodeController<T> {
         local_reserved: Vec<(String, Vec<u8>)>,
         remote_results: Result<
             Vec<(String, Vec<u8>, NodeId)>,
-            (String, Vec<(String, Vec<u8>, NodeId)>),
+            (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>),
         >,
         continuation: UniqueCheckContinuation,
     ) {
@@ -1329,7 +1446,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
                             &entity,
                             &request_id,
@@ -1337,10 +1454,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             &confirmed,
                         )
                         .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         match self.db_create(&entity, &id, &data_bytes, now_ms).await {
@@ -1405,7 +1519,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
                             &entity,
                             &request_id,
@@ -1413,10 +1527,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             &confirmed,
                         )
                         .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         match self.db_update(&entity, &id, &data_bytes, now_ms).await {

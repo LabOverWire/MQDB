@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 pub const SEPARATOR: u8 = b'/';
 pub const DATA_PREFIX: &[u8] = b"data";
 pub const INDEX_PREFIX: &[u8] = b"idx";
+pub const UNIQUE_GUARD_PREFIX: &[u8] = b"uniq";
 pub const WASM_INDEX_PREFIX: &str = "index";
 pub const SUB_PREFIX: &[u8] = b"sub";
 pub const DEDUP_PREFIX: &[u8] = b"dedup";
@@ -71,6 +72,33 @@ pub fn encode_index_prefix(entity: &str, field: &str, value: Option<&[u8]>) -> V
     }
 
     key
+}
+
+#[must_use]
+pub fn encode_unique_guard_key(entity: &str, field: &str, value: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(
+        UNIQUE_GUARD_PREFIX.len() + 3 + entity.len() + field.len() + value.len(),
+    );
+    key.extend_from_slice(UNIQUE_GUARD_PREFIX);
+    key.push(SEPARATOR);
+    key.extend_from_slice(entity.as_bytes());
+    key.push(SEPARATOR);
+    key.extend_from_slice(field.as_bytes());
+    key.push(SEPARATOR);
+    key.extend_from_slice(value);
+    key
+}
+
+#[must_use]
+pub fn decode_unique_guard_key(key: &[u8]) -> Option<(String, String, Vec<u8>)> {
+    let mut parts = key.splitn(4, |&b| b == SEPARATOR);
+    if parts.next()? != UNIQUE_GUARD_PREFIX {
+        return None;
+    }
+    let entity = std::str::from_utf8(parts.next()?).ok()?.to_string();
+    let field = std::str::from_utf8(parts.next()?).ok()?.to_string();
+    let value = parts.next()?.to_vec();
+    Some((entity, field, value))
 }
 
 #[must_use]

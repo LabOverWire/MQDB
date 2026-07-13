@@ -152,6 +152,14 @@ impl PartitionStorage {
         self.backend.flush()
     }
 
+    /// Durably persists pending writes (fsync), independent of the durability mode.
+    ///
+    /// # Errors
+    /// Returns an error if the storage backend fails to sync.
+    pub fn sync(&self) -> Result<()> {
+        self.backend.sync()
+    }
+
     #[must_use]
     pub fn make_key(partition: PartitionId, entity: &str, id: &str) -> Vec<u8> {
         format!("{:02x}/{entity}/{id}", partition.get()).into_bytes()

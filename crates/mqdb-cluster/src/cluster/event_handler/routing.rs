@@ -146,7 +146,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
         use super::super::db_handler::{DbPublishResult, MqttRequestContext};
         use super::super::node_controller::fk::await_fk_checks;
-        use super::super::node_controller::unique::await_unique_reserves;
 
         debug!(topic = %event.topic, "handling $DB/ request");
         let start = std::time::Instant::now();
@@ -185,9 +184,10 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             DbPublishResult::PendingUniqueCheck(pending) => {
                 let local_reserved = pending.phase1.local_reserved;
                 let pending_remote = pending.phase1.pending_remote;
+                let pending_quorum = pending.phase1.pending_quorum;
                 let continuation = pending.continuation;
                 drop(ctrl);
-                let remote_results = await_unique_reserves(pending_remote).await;
+                let remote_results = combine_quorum(pending_remote, pending_quorum).await;
                 let mut ctrl = self.controller.write().await;
                 if let Some(response) = self
                     .db_handler
@@ -233,9 +233,10 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                     FkCheckCompletion::NeedUniqueCheck(pending) => {
                         let local_reserved = pending.phase1.local_reserved;
                         let pending_remote = pending.phase1.pending_remote;
+                        let pending_quorum = pending.phase1.pending_quorum;
                         let continuation = pending.continuation;
                         drop(ctrl);
-                        let remote_results = await_unique_reserves(pending_remote).await;
+                        let remote_results = combine_quorum(pending_remote, pending_quorum).await;
                         let mut ctrl = self.controller.write().await;
                         if let Some(response) = self
                             .db_handler
@@ -410,5 +411,38 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             remote_nodes,
             is_clean_session,
         })
+    }
+}
+
+type RemoteReserveResult = Result<
+    Vec<(String, Vec<u8>, NodeId)>,
+    (
+        super::super::node_controller::ReserveFailure,
+        Vec<(String, Vec<u8>, NodeId)>,
+    ),
+>;
+
+async fn combine_quorum(
+    pending_remote: Vec<super::super::node_controller::PendingUniqueReserve>,
+    pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
+) -> RemoteReserveResult {
+    use super::super::node_controller::ReserveFailure;
+    use super::super::node_controller::unique::{await_unique_quorum, await_unique_reserves};
+    // Await the remote-reserve and local-quorum rounds concurrently so a create waits the max of the
+    // two ~5s deadlines, not their sum.
+    let (remote_results, quorum) = tokio::join!(
+        await_unique_reserves(pending_remote),
+        await_unique_quorum(pending_quorum),
+    );
+    match remote_results {
+        Ok(confirmed) => match quorum {
+            Ok(durable) => {
+                tracing::debug!(?durable, "unique reserve is majority-durable");
+                Ok(confirmed)
+            }
+            // A quorum that never lands is transient, not a real conflict.
+            Err(field) => Err((ReserveFailure::NotDurable(field), confirmed)),
+        },
+        Err(e) => Err(e),
     }
 }

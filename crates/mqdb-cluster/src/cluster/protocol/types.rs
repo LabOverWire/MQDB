@@ -28,6 +28,15 @@ pub enum MessageType {
     UniqueCommitResponse = 83,
     UniqueReleaseRequest = 84,
     UniqueReleaseResponse = 85,
+    UniqueReassertRequest = 86,
+    UniqueReplicate = 87,
+    UniqueReplicateAck = 88,
+    UniqueSealRequest = 89,
+    FkCheckRequest = 90,
+    FkCheckResponse = 91,
+    FkReverseLookupRequest = 92,
+    FkReverseLookupResponse = 93,
+    UniqueSealResponse = 94,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

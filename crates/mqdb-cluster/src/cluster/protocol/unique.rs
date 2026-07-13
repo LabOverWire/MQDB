@@ -306,3 +306,162 @@ impl UniqueReleaseResponse {
         self.success != 0
     }
 }
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReassertRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub entity_len: u16,
+    #[FromField(entity_len)]
+    pub entity: Vec<u8>,
+    pub field_len: u16,
+    #[FromField(field_len)]
+    pub field: Vec<u8>,
+    pub value_len: u32,
+    #[FromField(value_len)]
+    pub value: Vec<u8>,
+    pub record_id_len: u16,
+    #[FromField(record_id_len)]
+    pub record_id: Vec<u8>,
+    pub data_partition: u16,
+}
+
+impl UniqueReassertRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create(
+        request_id: u64,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            entity_len: entity.len() as u16,
+            entity: entity.as_bytes().to_vec(),
+            field_len: field.len() as u16,
+            field: field.as_bytes().to_vec(),
+            value_len: value.len() as u32,
+            value: value.to_vec(),
+            record_id_len: record_id.len() as u16,
+            record_id: record_id.as_bytes().to_vec(),
+            data_partition: data_partition.get(),
+        }
+    }
+
+    #[must_use]
+    pub fn entity_str(&self) -> &str {
+        std::str::from_utf8(&self.entity).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn field_str(&self) -> &str {
+        std::str::from_utf8(&self.field).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn record_id_str(&self) -> &str {
+        std::str::from_utf8(&self.record_id).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn data_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.data_partition)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueReplicateAck {
+    pub version: u8,
+    pub request_id: u64,
+}
+
+impl UniqueReplicateAck {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueSealRequest {
+    pub version: u8,
+    pub request_id: u64,
+    pub partition: u16,
+    pub epoch: u64,
+}
+
+impl UniqueSealRequest {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn create(request_id: u64, partition: PartitionId, epoch: u64) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            partition: partition.get(),
+            epoch,
+        }
+    }
+
+    #[must_use]
+    pub fn partition_id(&self) -> Option<PartitionId> {
+        PartitionId::new(self.partition)
+    }
+}
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct UniqueSealResponse {
+    pub version: u8,
+    pub request_id: u64,
+    pub partition: u16,
+    pub epoch: u64,
+    pub accepted: u8,
+    pub reservations_len: u32,
+    #[FromField(reservations_len)]
+    pub reservations: Vec<u8>,
+}
+
+impl UniqueSealResponse {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn create(
+        request_id: u64,
+        partition: PartitionId,
+        epoch: u64,
+        accepted: bool,
+        reservations: Vec<u8>,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            request_id,
+            partition: partition.get(),
+            epoch,
+            accepted: u8::from(accepted),
+            reservations_len: reservations.len() as u32,
+            reservations,
+        }
+    }
+
+    #[must_use]
+    pub fn is_accepted(&self) -> bool {
+        self.accepted != 0
+    }
+
+    #[must_use]
+    pub fn partition_id(&self) -> Option<PartitionId> {
+        PartitionId::new(self.partition)
+    }
+}

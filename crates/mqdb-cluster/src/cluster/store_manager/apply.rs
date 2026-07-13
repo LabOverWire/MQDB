@@ -6,6 +6,19 @@ use crate::cluster::entity;
 use crate::cluster::protocol::ReplicationWrite;
 
 impl StoreManager {
+    /// Durably persists pending writes (fsync), independent of the durability mode.
+    ///
+    /// # Errors
+    /// Returns `StoreApplyError::PersistenceError` if the sync fails.
+    pub fn sync_storage(&self) -> Result<(), StoreApplyError> {
+        if let Some(storage) = &self.storage {
+            storage
+                .sync()
+                .map_err(|_| StoreApplyError::PersistenceError)?;
+        }
+        Ok(())
+    }
+
     /// # Errors
     /// Returns `StoreApplyError::PersistenceError` if the batch write to storage fails.
     pub fn persist_writes_batch(&self, writes: &[ReplicationWrite]) -> Result<(), StoreApplyError> {

@@ -42,6 +42,9 @@ pub enum Error {
     #[error("concurrent modification conflict: {0}")]
     Conflict(String),
 
+    #[error("absent precondition violated for key")]
+    AbsentPreconditionViolated(Vec<u8>),
+
     #[error("schema validation failed: {entity}.{field} - {reason}")]
     SchemaViolation {
         entity: String,

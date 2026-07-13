@@ -407,10 +407,10 @@ impl DbRequestHandler {
             .await
         {
             Ok(p) => p,
-            Err(conflict_field) => {
+            Err(failure) => {
                 return JsonOpResult::Response(Self::json_error(
-                    409,
-                    &format!("unique constraint violation on field '{conflict_field}'"),
+                    failure.http_code(),
+                    &failure.message(),
                 ));
             }
         };
@@ -418,7 +418,7 @@ impl DbRequestHandler {
         let constraint_data = data.clone();
         let data = self.vault_encrypt_if_needed(vault_crypto, entity, id, data);
 
-        if !phase1.pending_remote.is_empty() {
+        if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
             let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                 phase1,
@@ -745,15 +745,15 @@ impl DbRequestHandler {
                 .await
             {
                 Ok(p) => p,
-                Err(conflict_field) => {
+                Err(failure) => {
                     return JsonOpResult::Response(Self::json_error(
-                        409,
-                        &format!("unique constraint violation on field '{conflict_field}'"),
+                        failure.http_code(),
+                        &failure.message(),
                     ));
                 }
             };
 
-            if !phase1.pending_remote.is_empty() {
+            if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                 return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                     phase1,
@@ -1207,7 +1207,10 @@ impl DbRequestHandler {
         local_reserved: Vec<(String, Vec<u8>)>,
         remote_results: Result<
             Vec<(String, Vec<u8>, super::NodeId)>,
-            (String, Vec<(String, Vec<u8>, super::NodeId)>),
+            (
+                super::super::node_controller::ReserveFailure,
+                Vec<(String, Vec<u8>, super::NodeId)>,
+            ),
         >,
         continuation: UniqueCheckContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
@@ -1228,7 +1231,7 @@ impl DbRequestHandler {
             } => {
                 let vault_sender = sender.clone();
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         controller
                             .release_unique_check_reservations(
                                 &entity,
@@ -1237,10 +1240,7 @@ impl DbRequestHandler {
                                 &confirmed,
                             )
                             .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         for (f, v, target) in &confirmed_remotes {
@@ -1340,7 +1340,7 @@ impl DbRequestHandler {
             } => {
                 let vault_sender = sender.clone();
                 let response_payload = match remote_results {
-                    Err((conflict_field, confirmed)) => {
+                    Err((failure, confirmed)) => {
                         controller
                             .release_unique_check_reservations(
                                 &entity,
@@ -1349,10 +1349,7 @@ impl DbRequestHandler {
                                 &confirmed,
                             )
                             .await;
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        )
+                        Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
                         for (f, v, target) in &confirmed_remotes {

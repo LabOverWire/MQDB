@@ -3822,6 +3822,13 @@ async fn unique_constraint_cross_node_message_flow() {
         node.controller.process_messages().await;
     }
 
+    // Complete the promotion seal handshake so node 0 may serve reserves for the value partition.
+    for _ in 0..3 {
+        cluster.advance_ms(1);
+        cluster.nodes[0].controller.process_messages().await;
+        cluster.nodes[1].controller.process_messages().await;
+    }
+
     let request = UniqueReserveRequest::create(
         42,
         "products",
@@ -3841,27 +3848,582 @@ async fn unique_constraint_cross_node_message_flow() {
         message: ClusterMessage::UniqueReserveRequest(request),
         received_at: 0,
     };
+    // Node 1 (value primary) applies the reserve and group-replicates it, deferring its response.
     cluster.nodes[0].controller.transport().requeue(request_msg);
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
+    // Node 2 (the other group member) accepts the replicate and acks it.
     cluster.advance_ms(1);
-    let response = cluster.nodes[1].controller.transport().recv();
-    assert!(
-        response.is_some(),
-        "Node 1 should have sent response to Node 2"
-    );
+    cluster.nodes[1].controller.process_messages().await;
 
-    if let Some(msg) = response {
-        assert_eq!(msg.from, node1_id, "Response should be from node 1");
-        if let ClusterMessage::UniqueReserveResponse(ref resp) = msg.message {
-            assert_eq!(resp.request_id, 42, "Response request_id should match");
-            assert!(
-                matches!(resp.status(), UniqueReserveStatus::Reserved),
-                "First reserve should succeed"
-            );
-        } else {
-            panic!("Expected UniqueReserveResponse");
+    // Node 1 sees the majority ack and only now sends the deferred reserve response.
+    cluster.advance_ms(1);
+    cluster.nodes[0].controller.process_messages().await;
+
+    cluster.advance_ms(1);
+    let mut reserve_response = None;
+    while let Some(msg) = cluster.nodes[1].controller.transport().recv() {
+        if let ClusterMessage::UniqueReserveResponse(resp) = msg.message {
+            assert_eq!(msg.from, node1_id, "Response should be from node 1");
+            reserve_response = Some(resp);
         }
     }
+
+    let resp = reserve_response
+        .expect("Node 1 should send a reserve response once the reservation is majority-durable");
+    assert_eq!(resp.request_id, 42, "Response request_id should match");
+    assert!(
+        matches!(resp.status(), UniqueReserveStatus::Reserved),
+        "First reserve should succeed"
+    );
+}
+
+fn json_value_bytes(value: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::Value::String(value.to_string())).unwrap()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn no_oversell_when_new_primary_missed_a_reservation() {
+    // Model-as-oracle NoOversell test for the exact scenario ClusterUniqueMonotonic.tla flagged:
+    // a promoted primary that MISSED an existing reservation must still refuse to reassign the value.
+    // Without the seal reservation-learning (d-2), node1 would grant the value to a second record and
+    // oversell — so this test fails if that fix regresses.
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.runtime.network().set_base_latency_ms(0);
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        cluster.nodes[0].controller.become_primary(p, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(p, Epoch::new(1), 0);
+        cluster.nodes[2]
+            .controller
+            .become_replica(p, Epoch::new(1), 0);
+    }
+
+    let value = json_value_bytes("sku-1");
+    let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", &value);
+    let node0_id = cluster.nodes[0].id;
+
+    // node0 (epoch 1) reserves the value for record "A", but the replication reaches only node2 —
+    // node1 (the future primary) never sees it.
+    let params_a = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value: &value,
+        record_id: "A",
+        request_id: "req-A",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (res_a, write_a) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params_a, 1000);
+    assert_eq!(res_a, ReserveResult::Reserved);
+    let write_a = write_a.unwrap();
+    let stamped_a = ReplicationWrite::new(
+        write_a.partition,
+        write_a.operation,
+        Epoch::new(1),
+        0,
+        write_a.entity.clone(),
+        write_a.id.clone(),
+        write_a.data.clone(),
+    );
+    cluster.nodes[2]
+        .controller
+        .transport()
+        .requeue(InboundMessage {
+            from: node0_id,
+            message: ClusterMessage::UniqueReplicate {
+                request_id: 0,
+                write: stamped_a,
+            },
+            received_at: 0,
+        });
+    cluster.advance_ms(1);
+    cluster.nodes[2].controller.process_messages().await;
+    assert!(
+        cluster.nodes[1]
+            .controller
+            .stores()
+            .unique_get("products", "sku", &value)
+            .is_none(),
+        "the future primary must genuinely be missing the reservation for the test to be meaningful"
+    );
+
+    // Failover: node1 is promoted to primary at epoch 2 and seals — the seal must LEARN A.
+    cluster.nodes[1]
+        .controller
+        .become_primary(unique_part, Epoch::new(2));
+    for _ in 0..4 {
+        let output = cluster.nodes[1].controller.tick(0);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+        cluster.advance_ms(1);
+        cluster.nodes[0].controller.process_messages().await;
+        cluster.nodes[2].controller.process_messages().await;
+        cluster.advance_ms(1);
+        cluster.nodes[1].controller.process_messages().await;
+    }
+
+    let learned = cluster.nodes[1]
+        .controller
+        .stores()
+        .unique_get("products", "sku", &value)
+        .expect("the promotion seal must teach the new primary the reservation it missed");
+    assert_eq!(learned.record_id_str(), "A");
+
+    // The new primary now tries to reserve the SAME value for a DIFFERENT record "B".
+    let params_b = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value: &value,
+        record_id: "B",
+        request_id: "req-B",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (res_b, _) = cluster.nodes[1]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params_b, 2000);
+    assert_eq!(
+        res_b,
+        ReserveResult::Conflict,
+        "the value is already held by A; the promoted primary must not oversell it to B"
+    );
+
+    // NoOversell: exactly one record holds the value, and it is the original owner.
+    assert_eq!(
+        cluster.nodes[1]
+            .controller
+            .stores()
+            .unique_get("products", "sku", &value)
+            .unwrap()
+            .record_id_str(),
+        "A",
+    );
+}
+
+#[tokio::test]
+async fn unique_seal_fences_superseded_primary_reserve() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueSealRequest};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"sku-seal".as_slice();
+    let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", value);
+    let node0_id = cluster.nodes[0].id;
+
+    // A newly promoted primary seals the partition at epoch 2 by promising it at the group: each
+    // member records the promise on receiving the seal request.
+    for i in 1..cluster.nodes.len() {
+        cluster.nodes[i]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: ClusterMessage::UniqueSealRequest(UniqueSealRequest::create(
+                    1,
+                    unique_part,
+                    2,
+                )),
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[i].controller.process_messages().await;
+    }
+
+    // The superseded epoch-1 primary tries to replicate a reservation to the group; sealed members
+    // must reject it (epoch below their promise).
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "old",
+        request_id: "req-old",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+    let write = write.unwrap();
+    let stale = ReplicationWrite::new(
+        write.partition,
+        write.operation,
+        Epoch::new(1),
+        0,
+        write.entity.clone(),
+        write.id.clone(),
+        write.data.clone(),
+    );
+
+    for i in 1..cluster.nodes.len() {
+        cluster.nodes[i]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: ClusterMessage::UniqueReplicate {
+                    request_id: 0,
+                    write: stale.clone(),
+                },
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[i].controller.process_messages().await;
+    }
+
+    for node in &cluster.nodes[1..] {
+        assert!(
+            node.controller
+                .stores()
+                .unique_get("products", "sku", value)
+                .is_none(),
+            "a sealed member must reject the superseded primary's stale-epoch reservation"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unique_reconcile_reestablishes_lost_reservation() {
+    use mqdb_cluster::cluster::db::ClusterConstraint;
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    cluster.nodes[0]
+        .controller
+        .stores()
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let value = json_value_bytes("a@x.com");
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_none(),
+        "no claim should exist before reconcile (reservation lost to failover)"
+    );
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("users", "email", &value)
+        .expect("reconcile should establish a committed claim from the durable record");
+    assert!(claim.is_committed());
+    assert_eq!(claim.record_id_str(), "u1");
+}
+
+#[tokio::test]
+async fn unique_reconcile_repairs_lost_commit() {
+    use mqdb_cluster::cluster::db::{ClusterConstraint, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    let stores = cluster.nodes[0].controller.stores();
+    stores
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    stores
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let value = json_value_bytes("a@x.com");
+    let params = UniqueReserveParams {
+        entity: "users",
+        field: "email",
+        value: &value,
+        record_id: "u1",
+        request_id: "req-lost-commit",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, _) = stores.unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, mqdb_cluster::cluster::db::ReserveResult::Reserved);
+    assert!(
+        !stores
+            .unique_get("users", "email", &value)
+            .unwrap()
+            .is_committed(),
+        "reservation must be uncommitted before reconcile (commit was lost)"
+    );
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("users", "email", &value)
+        .expect("claim should still exist");
+    assert!(
+        claim.is_committed(),
+        "reconcile should promote the uncommitted claim to committed"
+    );
+    assert_eq!(claim.record_id_str(), "u1");
+}
+
+#[tokio::test]
+async fn unique_reconcile_leaves_abandoned_for_ttl_reclaim() {
+    use mqdb_cluster::cluster::db::{ClusterConstraint, ReserveResult, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(1);
+    for i in 0..NUM_PARTITIONS {
+        cluster.nodes[0]
+            .controller
+            .become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+
+    let stores = cluster.nodes[0].controller.stores();
+    stores
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+
+    let value = json_value_bytes("ghost@x.com");
+    let ttl_ms = 1000;
+    let params = UniqueReserveParams {
+        entity: "users",
+        field: "email",
+        value: &value,
+        record_id: "ghost",
+        request_id: "req-abandoned",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms,
+    };
+    let (result, _) = stores.unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+
+    cluster.nodes[0].controller.reconcile_unique_claims().await;
+
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_some(),
+        "reconcile must not touch an abandoned reservation whose record does not exist"
+    );
+
+    let reclaimed = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_cleanup_expired(1000 + ttl_ms + 100);
+    assert_eq!(
+        reclaimed, 1,
+        "TTL cleanup should reclaim the abandoned claim"
+    );
+    assert!(
+        cluster.nodes[0]
+            .controller
+            .stores()
+            .unique_get("users", "email", &value)
+            .is_none(),
+        "value should be free after TTL reclaim"
+    );
+}
+
+#[tokio::test]
+async fn unique_reassert_request_cross_node_establishes() {
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueReassertRequest};
+
+    let mut cluster = TestCluster::new(2);
+    cluster.runtime.network().set_base_latency_ms(0);
+
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        cluster.nodes[0]
+            .controller
+            .become_primary(partition, Epoch::new(1));
+        cluster.nodes[1]
+            .controller
+            .become_replica(partition, Epoch::new(1), 0);
+    }
+
+    for node in &mut cluster.nodes {
+        let output = node.controller.tick(0);
+        node.controller.send_tick_output(output).await;
+    }
+    cluster.advance_ms(5);
+    for node in &mut cluster.nodes {
+        node.controller.process_messages().await;
+    }
+
+    let value = json_value_bytes("SKU-9");
+    let request = UniqueReassertRequest::create(
+        0,
+        "products",
+        "sku",
+        &value,
+        "product-9",
+        PartitionId::new(5).unwrap(),
+    );
+
+    let node2_id = cluster.nodes[1].id;
+    let request_msg = InboundMessage {
+        from: node2_id,
+        message: ClusterMessage::UniqueReassertRequest(request),
+        received_at: 0,
+    };
+    cluster.nodes[0].controller.transport().requeue(request_msg);
+    cluster.advance_ms(1);
+    cluster.nodes[0].controller.process_messages().await;
+
+    let claim = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_get("products", "sku", &value)
+        .expect("reassert should establish a committed claim on the value-primary");
+    assert!(claim.is_committed());
+    assert_eq!(claim.record_id_str(), "product-9");
+}
+
+#[tokio::test]
+async fn unique_write_replicates_to_quorum_group() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"gadget".as_slice();
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "g1",
+        request_id: "req-g",
+        data_partition: PartitionId::new(7).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+
+    cluster.nodes[0]
+        .controller
+        .write_or_forward(write.unwrap())
+        .await;
+    cluster.advance_ms(5);
+    for node in cluster.nodes.iter_mut().skip(1) {
+        node.controller.process_messages().await;
+    }
+
+    for node in &cluster.nodes[1..] {
+        let claim = node
+            .controller
+            .stores()
+            .unique_get("products", "sku", value)
+            .expect("every quorum-group member should hold the replicated reservation");
+        assert_eq!(claim.record_id_str(), "g1");
+    }
+}
+
+#[tokio::test]
+async fn unique_replicate_fences_stale_epoch() {
+    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
+
+    let mut cluster = TestCluster::new(3);
+    cluster.setup_all_primaries().await;
+
+    let value = b"widget".as_slice();
+    let params = UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id: "p1",
+        request_id: "req-1",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, insert_write) = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, ReserveResult::Reserved);
+    let insert_write = insert_write.unwrap();
+    let delete_write = cluster.nodes[0]
+        .controller
+        .stores()
+        .unique_release_replicated("products", "sku", value, "req-1")
+        .unwrap();
+
+    let at_epoch = |w: &ReplicationWrite, e: u64| {
+        ReplicationWrite::new(
+            w.partition,
+            w.operation,
+            Epoch::new(e),
+            0,
+            w.entity.clone(),
+            w.id.clone(),
+            w.data.clone(),
+        )
+    };
+
+    let node0_id = cluster.nodes[0].id;
+    for msg in [
+        ClusterMessage::UniqueReplicate {
+            request_id: 0,
+            write: at_epoch(&insert_write, 2),
+        },
+        ClusterMessage::UniqueReplicate {
+            request_id: 0,
+            write: at_epoch(&delete_write, 1),
+        },
+    ] {
+        cluster.nodes[2]
+            .controller
+            .transport()
+            .requeue(InboundMessage {
+                from: node0_id,
+                message: msg,
+                received_at: 0,
+            });
+        cluster.advance_ms(1);
+        cluster.nodes[2].controller.process_messages().await;
+    }
+
+    assert!(
+        cluster.nodes[2]
+            .controller
+            .stores()
+            .unique_get("products", "sku", value)
+            .is_some(),
+        "a stale-epoch release must be fenced out, leaving the epoch-2 reservation intact"
+    );
 }

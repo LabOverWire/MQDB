@@ -433,3 +433,47 @@ fn unique_release_response_roundtrip() {
     assert_eq!(decoded.request_id, 777);
     assert!(!decoded.is_success());
 }
+
+#[test]
+fn unique_seal_request_roundtrip() {
+    let req = UniqueSealRequest::create(7, PartitionId::new(9).unwrap(), 3);
+    let bytes = req.to_be_bytes();
+    let (decoded, _) = UniqueSealRequest::try_from_be_bytes(&bytes).unwrap();
+    assert_eq!(decoded.request_id, 7);
+    assert_eq!(decoded.partition_id(), PartitionId::new(9));
+    assert_eq!(decoded.epoch, 3);
+}
+
+#[test]
+fn unique_seal_response_roundtrip() {
+    let resp = UniqueSealResponse::create(7, PartitionId::new(9).unwrap(), 3, true, vec![1, 2, 3]);
+    let bytes = resp.to_be_bytes();
+    let (decoded, _) = UniqueSealResponse::try_from_be_bytes(&bytes).unwrap();
+    assert_eq!(decoded.request_id, 7);
+    assert_eq!(decoded.partition_id(), PartitionId::new(9));
+    assert_eq!(decoded.epoch, 3);
+    assert!(decoded.is_accepted());
+    assert_eq!(decoded.reservations, vec![1, 2, 3]);
+}
+
+#[test]
+fn unique_reassert_request_roundtrip() {
+    let req = UniqueReassertRequest::create(
+        555,
+        "users",
+        "email",
+        b"a@x.com",
+        "u1",
+        PartitionId::new(7).unwrap(),
+    );
+
+    let bytes = req.to_be_bytes();
+    let (decoded, _) = UniqueReassertRequest::try_from_be_bytes(&bytes).unwrap();
+
+    assert_eq!(decoded.request_id, 555);
+    assert_eq!(decoded.entity_str(), "users");
+    assert_eq!(decoded.field_str(), "email");
+    assert_eq!(decoded.value, b"a@x.com");
+    assert_eq!(decoded.record_id_str(), "u1");
+    assert_eq!(decoded.data_partition(), PartitionId::new(7));
+}

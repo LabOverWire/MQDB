@@ -5,7 +5,7 @@ use super::{
     ClusterMessage, ClusterTransport, Epoch, FkCheckContinuation, FkDeleteContinuation, JsonDbOp,
     JsonDbRequest, JsonDbResponse, NodeController, NodeId, PartitionId, PendingFkDeleteWork,
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
-    UniqueReservationParams, UniqueReserveStatus, entity,
+    UniqueReservationParams, entity,
 };
 use crate::cluster::replication::ReplicaState;
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
@@ -690,12 +690,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 )
                 .await
             {
-                Err(conflict_field) => {
+                Err(failure) => {
                     return (
-                        Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{conflict_field}'"),
-                        ),
+                        Self::json_error(failure.http_code(), &failure.message()),
                         None,
                     );
                 }
@@ -1322,6 +1319,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
         let remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
         let mut pending_remote_reserves = Vec::new();
+        let mut pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)> = Vec::new();
 
         for field in &unique_fields {
             let value = match data.get(field) {
@@ -1343,8 +1341,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 super::db::unique_partition(params.entity, params.field, params.value);
             let primary = self.partition_map.primary(unique_part);
 
-            let is_conflict = if primary == Some(self.node_id) {
-                self.reserve_unique_local(&params, &mut local_reserved)
+            let failure = if primary == Some(self.node_id) {
+                self.reserve_unique_local(&params, &mut local_reserved, &mut pending_quorum)
                     .await
             } else if let Some(target_node) = primary {
                 let reserve_params = super::db::UniqueReserveParams {
@@ -1367,15 +1365,15 @@ impl<T: ClusterTransport> NodeController<T> {
                             target_node,
                             receiver: rx,
                         });
-                        false
+                        None
                     }
-                    Err(_) => true,
+                    Err(_) => Some(super::ReserveFailure::NotDurable(field.clone())),
                 }
             } else {
-                true
+                Some(super::ReserveFailure::NotDurable(field.clone()))
             };
 
-            if is_conflict {
+            if let Some(failure) = failure {
                 self.release_all_reservations(
                     entity,
                     &request_id,
@@ -1387,16 +1385,13 @@ impl<T: ClusterTransport> NodeController<T> {
                     drop(pending.receiver);
                 }
                 return (
-                    Self::json_error(
-                        409,
-                        &format!("unique constraint violation on field '{field}'"),
-                    ),
+                    Self::json_error(failure.http_code(), &failure.message()),
                     None,
                 );
             }
         }
 
-        if !pending_remote_reserves.is_empty() {
+        if !pending_remote_reserves.is_empty() || !pending_quorum.is_empty() {
             let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return (
                 Vec::new(),
@@ -1404,6 +1399,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     phase1: super::UniqueCheckPhase1Result {
                         local_reserved,
                         pending_remote: pending_remote_reserves,
+                        pending_quorum,
                     },
                     continuation: UniqueCheckContinuation::CreateFromNodeController {
                         from,
@@ -1484,7 +1480,18 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         params: &UniqueReservationParams<'_>,
         local_reserved: &mut Vec<(String, Vec<u8>)>,
-    ) -> bool {
+        pending_quorum: &mut Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
+    ) -> Option<super::ReserveFailure> {
+        let unique_part = super::db::unique_partition(params.entity, params.field, params.value);
+        if !self.unique_partition_sealed(unique_part) {
+            tracing::warn!(
+                field = params.field,
+                partition = unique_part.get(),
+                "unique partition not sealed at the current epoch; failing reserve closed"
+            );
+            return Some(super::ReserveFailure::NotDurable(params.field.to_owned()));
+        }
+
         let reserve_params = super::db::UniqueReserveParams {
             entity: params.entity,
             field: params.field,
@@ -1501,16 +1508,20 @@ impl<T: ClusterTransport> NodeController<T> {
         match result {
             super::db::ReserveResult::Reserved => {
                 if let Some(w) = write {
-                    self.write_or_forward(w).await;
+                    self.sync_unique_write();
+                    let rx = self.replicate_unique_reserve(w).await;
+                    pending_quorum.push((params.field.to_owned(), rx));
                 }
                 local_reserved.push((params.field.to_owned(), params.value.to_vec()));
-                false
+                None
             }
             super::db::ReserveResult::AlreadyReservedBySameRequest => {
                 local_reserved.push((params.field.to_owned(), params.value.to_vec()));
-                false
+                None
             }
-            super::db::ReserveResult::Conflict => true,
+            super::db::ReserveResult::Conflict => {
+                Some(super::ReserveFailure::Conflict(params.field.to_owned()))
+            }
         }
     }
 
@@ -1562,7 +1573,7 @@ impl<T: ClusterTransport> NodeController<T> {
         fk_ok: bool,
         fk_error: Option<String>,
         continuation: FkCheckContinuation,
-    ) {
+    ) -> super::FkThenUniqueOutcome {
         if !fk_ok {
             let msg = fk_error.unwrap_or_else(|| "FK constraint violation".to_string());
             let payload = Self::json_error(409, &msg);
@@ -1579,14 +1590,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 ..
             }) = continuation
             else {
-                return;
+                return super::FkThenUniqueOutcome::Done;
             };
             let response = JsonDbResponse::new(0, payload, response_topic, correlation_data);
             let _ = self
                 .transport
                 .send(from, ClusterMessage::JsonDbResponse(response))
                 .await;
-            return;
+            return super::FkThenUniqueOutcome::Done;
         }
 
         match continuation {
@@ -1602,143 +1613,48 @@ impl<T: ClusterTransport> NodeController<T> {
                 ..
             } => {
                 let now_ms = Self::current_time_ms();
-                let unique_fields = self.stores.constraint_get_unique_fields(&entity);
-                let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
-                let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
-
-                for field in &unique_fields {
-                    let value = match data.get(field) {
-                        Some(v) => serde_json::to_vec(v).unwrap_or_default(),
-                        None => continue,
-                    };
-
-                    let params = UniqueReservationParams {
-                        entity: &entity,
-                        field,
-                        value: &value,
-                        id: &id,
-                        request_id: &request_id,
+                let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
+                // FK passed; run the unique reserve. Return the pending work so the majority-await
+                // runs OUTSIDE the controller lock (via spawn_unique_completion) — awaiting it here
+                // would deadlock, since the ack path needs the same lock this task holds.
+                let phase1 = match self
+                    .start_unique_constraint_check(
+                        &entity,
+                        &id,
+                        &data,
                         partition,
+                        &request_id,
                         now_ms,
-                    };
-
-                    let unique_part =
-                        super::db::unique_partition(params.entity, params.field, params.value);
-                    let primary = self.partition_map.primary(unique_part);
-
-                    let is_conflict = if primary == Some(self.node_id) {
-                        self.reserve_unique_local(&params, &mut local_reserved)
-                            .await
-                    } else if let Some(target_node) = primary {
-                        let reserve_params = super::db::UniqueReserveParams {
-                            entity: params.entity,
-                            field: params.field,
-                            value: params.value,
-                            record_id: params.id,
-                            request_id: params.request_id,
-                            data_partition: params.partition,
-                            ttl_ms: 30_000,
-                        };
-                        match self
-                            .send_unique_reserve_request_async(target_node, &reserve_params)
-                            .await
-                        {
-                            Ok(rx) => {
-                                match tokio::time::timeout(std::time::Duration::from_secs(5), rx)
-                                    .await
-                                {
-                                    Ok(Ok(
-                                        UniqueReserveStatus::Reserved
-                                        | UniqueReserveStatus::AlreadyReserved,
-                                    )) => {
-                                        remote_reserved.push((
-                                            field.clone(),
-                                            value.clone(),
-                                            target_node,
-                                        ));
-                                        false
-                                    }
-                                    _ => true,
-                                }
-                            }
-                            Err(_) => true,
-                        }
-                    } else {
-                        true
-                    };
-
-                    if is_conflict {
-                        self.release_all_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &remote_reserved,
-                        )
-                        .await;
-                        let payload = Self::json_error(
-                            409,
-                            &format!("unique constraint violation on field '{field}'"),
-                        );
+                    )
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(failure) => {
+                        let payload = Self::json_error(failure.http_code(), &failure.message());
                         let response =
                             JsonDbResponse::new(0, payload, response_topic, correlation_data);
                         let _ = self
                             .transport
                             .send(from, ClusterMessage::JsonDbResponse(response))
                             .await;
-                        return;
+                        return super::FkThenUniqueOutcome::Done;
                     }
-                }
-
-                let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                let response_payload =
-                    match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                        Ok((db_entity, write)) => {
-                            self.commit_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            let event =
-                                ChangeEvent::create(entity.clone(), id.clone(), data.clone());
-                            let outbox = build_change_event_outbox(&event);
-                            self.db_commit(write, outbox.clone()).await;
-                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                                .await;
-                            crate::cluster::db_handler::helpers::json_ok_with_id(
-                                db_entity.id_str(),
-                                &data,
-                            )
-                        }
-                        Err(super::db::DbDataStoreError::AlreadyExists) => {
-                            self.release_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            Self::json_error(409, "entity already exists")
-                        }
-                        Err(_) => {
-                            self.release_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            Self::json_error(500, "internal error")
-                        }
-                    };
-
-                let response =
-                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                };
+                super::FkThenUniqueOutcome::NeedUnique(Box::new(super::PendingUniqueWork {
+                    phase1,
+                    continuation: super::UniqueCheckContinuation::CreateFromNodeController {
+                        from,
+                        entity,
+                        id,
+                        data,
+                        data_bytes,
+                        partition,
+                        request_id,
+                        now_ms,
+                        response_topic,
+                        correlation_data,
+                    },
+                }))
             }
             FkCheckContinuation::UpdateFromNodeController {
                 from,
@@ -1754,163 +1670,56 @@ impl<T: ClusterTransport> NodeController<T> {
                 ..
             } => {
                 let now_ms = Self::current_time_ms();
-                let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
-
-                let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
-                let mut remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
-
-                if has_unique_changes {
-                    let unique_fields = self.stores.constraint_get_unique_fields(&entity);
-                    for field in &unique_fields {
-                        let value = match new_diff.get(field) {
-                            Some(v) => serde_json::to_vec(v).unwrap_or_default(),
-                            None => continue,
-                        };
-
-                        let params = UniqueReservationParams {
-                            entity: &entity,
-                            field,
-                            value: &value,
-                            id: &id,
-                            request_id: &request_id,
-                            partition,
-                            now_ms,
-                        };
-
-                        let unique_part =
-                            super::db::unique_partition(params.entity, params.field, params.value);
-                        let primary = self.partition_map.primary(unique_part);
-
-                        let is_conflict = if primary == Some(self.node_id) {
-                            self.reserve_unique_local(&params, &mut local_reserved)
-                                .await
-                        } else if let Some(target_node) = primary {
-                            let reserve_params = super::db::UniqueReserveParams {
-                                entity: params.entity,
-                                field: params.field,
-                                value: params.value,
-                                record_id: params.id,
-                                request_id: params.request_id,
-                                data_partition: params.partition,
-                                ttl_ms: 30_000,
-                            };
-                            match self
-                                .send_unique_reserve_request_async(target_node, &reserve_params)
-                                .await
-                            {
-                                Ok(rx) => {
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(5),
-                                        rx,
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(
-                                            UniqueReserveStatus::Reserved
-                                            | UniqueReserveStatus::AlreadyReserved,
-                                        )) => {
-                                            remote_reserved.push((
-                                                field.clone(),
-                                                value.clone(),
-                                                target_node,
-                                            ));
-                                            false
-                                        }
-                                        _ => true,
-                                    }
-                                }
-                                Err(_) => true,
-                            }
-                        } else {
-                            true
-                        };
-
-                        if is_conflict {
-                            self.release_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            let payload = Self::json_error(
-                                409,
-                                &format!("unique constraint violation on field '{field}'"),
-                            );
-                            let response =
-                                JsonDbResponse::new(0, payload, response_topic, correlation_data);
-                            let _ = self
-                                .transport
-                                .send(from, ClusterMessage::JsonDbResponse(response))
-                                .await;
-                            return;
-                        }
-                    }
-                }
-
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-                let response_payload =
-                    match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                        Ok((db_entity, write)) => {
-                            self.commit_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
+                // FK passed; run the unique reserve on the changed fields and return the pending
+                // work so the majority-await runs OUTSIDE the controller lock (see the Create arm).
+                let phase1 = match self
+                    .start_unique_constraint_check(
+                        &entity,
+                        &id,
+                        &new_diff,
+                        partition,
+                        &request_id,
+                        now_ms,
+                    )
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(failure) => {
+                        let payload = Self::json_error(failure.http_code(), &failure.message());
+                        let response =
+                            JsonDbResponse::new(0, payload, response_topic, correlation_data);
+                        let _ = self
+                            .transport
+                            .send(from, ClusterMessage::JsonDbResponse(response))
                             .await;
-                            self.release_unique_constraints(
-                                &entity, &id, &old_diff, partition, &id, now_ms,
-                            )
-                            .await;
-                            let event = ChangeEvent::update(
-                                entity.clone(),
-                                id.clone(),
-                                merged_data.clone(),
-                            );
-                            let outbox = build_change_event_outbox(&event);
-                            self.db_commit(write, outbox.clone()).await;
-                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                                .await;
-                            crate::cluster::db_handler::helpers::json_ok_with_id(
-                                db_entity.id_str(),
-                                &merged_data,
-                            )
-                        }
-                        Err(super::db::DbDataStoreError::NotFound) => {
-                            self.release_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                        }
-                        Err(_) => {
-                            self.release_all_reservations(
-                                &entity,
-                                &request_id,
-                                &local_reserved,
-                                &remote_reserved,
-                            )
-                            .await;
-                            Self::json_error(500, "internal error")
-                        }
-                    };
-
-                let response =
-                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                        return super::FkThenUniqueOutcome::Done;
+                    }
+                };
+                super::FkThenUniqueOutcome::NeedUnique(Box::new(super::PendingUniqueWork {
+                    phase1,
+                    continuation: super::UniqueCheckContinuation::UpdateFromNodeController {
+                        from,
+                        entity,
+                        id,
+                        merged_data,
+                        data_bytes,
+                        partition,
+                        request_id,
+                        now_ms,
+                        new_diff,
+                        old_diff,
+                        response_topic,
+                        correlation_data,
+                    },
+                }))
             }
             FkCheckContinuation::CreateFromDbHandler { .. }
             | FkCheckContinuation::UpdateFromDbHandler { .. } => {
                 tracing::error!(
                     "complete_pending_fk_work received misrouted continuation (expected *FromNodeController)"
                 );
+                super::FkThenUniqueOutcome::Done
             }
         }
     }

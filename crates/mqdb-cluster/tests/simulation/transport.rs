@@ -11,7 +11,8 @@ use mqdb_cluster::cluster::{
     JsonDbResponse, NUM_PARTITIONS, NodeId, PartitionId, QueryRequest, QueryResponse,
     ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest,
     TopicSubscriptionBroadcast, TransportError, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
     WildcardBroadcast,
 };
 
@@ -219,6 +220,30 @@ impl SimulatedTransport {
             85 => {
                 let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(payload).ok()?;
                 Some(ClusterMessage::UniqueReleaseResponse(resp))
+            }
+            86 => {
+                let (req, _) = UniqueReassertRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReassertRequest(req))
+            }
+            87 => {
+                if payload.len() < 8 {
+                    return None;
+                }
+                let request_id = u64::from_be_bytes(payload[..8].try_into().ok()?);
+                let write = ReplicationWrite::from_bytes(&payload[8..])?;
+                Some(ClusterMessage::UniqueReplicate { request_id, write })
+            }
+            88 => {
+                let (ack, _) = UniqueReplicateAck::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueReplicateAck(ack))
+            }
+            89 => {
+                let (req, _) = UniqueSealRequest::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueSealRequest(req))
+            }
+            94 => {
+                let (resp, _) = UniqueSealResponse::try_from_be_bytes(payload).ok()?;
+                Some(ClusterMessage::UniqueSealResponse(resp))
             }
             _ => None,
         }

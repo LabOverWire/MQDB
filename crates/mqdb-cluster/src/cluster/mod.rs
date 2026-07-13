@@ -85,8 +85,9 @@ pub use protocol::{
     AckStatus, BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ForwardTarget,
     ForwardedPublish, Heartbeat, JsonDbOp, JsonDbRequest, JsonDbResponse, MessageType, Operation,
     QueryRequest, QueryResponse, QueryStatus, ReplicationAck, ReplicationWrite,
-    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReleaseRequest,
-    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
+    UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
     WildcardBroadcast, WildcardOp,
 };
 pub use publish_router::{PublishRouteResult, PublishRouter, RoutingTarget, effective_qos};

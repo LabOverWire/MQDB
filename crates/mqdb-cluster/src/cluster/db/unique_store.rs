@@ -143,6 +143,23 @@ pub enum ReserveResult {
     Conflict,
 }
 
+/// Outcome of reconciling a durable record against the unique claim it should own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReassertResult {
+    /// No claim existed; a committed claim owned by the record was established
+    /// (repairs a reservation lost to failover/restart).
+    Established,
+    /// An uncommitted claim owned by the record was promoted to committed
+    /// (repairs a lost commit).
+    Repaired,
+    /// The record already owns a committed claim (steady state).
+    AlreadyCommitted,
+    /// A committed claim is held by a DIFFERENT record — an oversell to surface.
+    Conflict,
+    /// An uncommitted claim is held by a different (in-flight) record; skip this cycle.
+    Pending,
+}
+
 pub struct UniqueReserveParams<'a> {
     pub entity: &'a str,
     pub field: &'a str,
@@ -249,6 +266,53 @@ impl UniqueStore {
         false
     }
 
+    /// Reconcile a durable record against the unique claim it should own: ensure a
+    /// committed claim for `value` owned by `record_id` exists, repairing a lost
+    /// reservation or a lost commit. The durable record is the source of truth.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn reassert(
+        &self,
+        entity: &str,
+        field: &str,
+        value: &[u8],
+        record_id: &str,
+        data_partition: PartitionId,
+        now: u64,
+    ) -> ReassertResult {
+        let key = Self::unique_key(entity, field, value);
+        let mut reservations = self.reservations.write().unwrap();
+
+        match reservations.get(&key) {
+            None => {
+                let reservation = UniqueReservation::create(
+                    entity,
+                    field,
+                    value,
+                    record_id,
+                    record_id,
+                    data_partition,
+                    now,
+                )
+                .with_committed();
+                reservations.insert(key, reservation);
+                ReassertResult::Established
+            }
+            Some(existing) if existing.record_id_str() == record_id => {
+                if existing.is_committed() {
+                    ReassertResult::AlreadyCommitted
+                } else {
+                    let committed = existing.clone().with_committed();
+                    reservations.insert(key, committed);
+                    ReassertResult::Repaired
+                }
+            }
+            Some(existing) if existing.is_committed() => ReassertResult::Conflict,
+            Some(_) => ReassertResult::Pending,
+        }
+    }
+
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
@@ -329,10 +393,16 @@ impl UniqueStore {
             Operation::Insert | Operation::Update => {
                 let reservation =
                     Self::deserialize(data).ok_or(UniqueStoreError::SerializationError)?;
-                self.reservations
-                    .write()
-                    .unwrap()
-                    .insert(id.to_string(), reservation);
+                let mut reservations = self.reservations.write().unwrap();
+                if let Some(existing) = reservations.get(id)
+                    && existing.is_committed()
+                    && existing.record_id_str() != reservation.record_id_str()
+                {
+                    // A committed claim is final: never reassign a committed value to a different
+                    // record, even at a higher epoch (closes the missed-reservation oversell).
+                    return Err(UniqueStoreError::AlreadyCommitted);
+                }
+                reservations.insert(id.to_string(), reservation);
                 Ok(())
             }
             Operation::Delete => {
@@ -438,6 +508,68 @@ impl UniqueStore {
         }
 
         Ok(imported)
+    }
+
+    /// Merge reservations learned from a promotion-seal response into the local store, conservatively:
+    /// learn a claim we lack, upgrade an uncommitted claim to a committed one, but never downgrade a
+    /// committed claim nor reassign a committed value. This is the `leaderView` learning step that
+    /// lets a freshly promoted primary see a reservation it missed before it serves reserves.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    ///
+    /// # Errors
+    /// Returns `SerializationError` on a malformed key or reservation.
+    pub fn merge_for_seal(&self, data: &[u8]) -> Result<usize, UniqueStoreError> {
+        if data.len() < 4 {
+            return Ok(0);
+        }
+        let count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        let mut offset = 4;
+        let mut merged = 0;
+        let mut reservations = self.reservations.write().unwrap();
+
+        for _ in 0..count {
+            if offset + 2 > data.len() {
+                break;
+            }
+            let key_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+            offset += 2;
+            if offset + key_len > data.len() {
+                break;
+            }
+            let key = std::str::from_utf8(&data[offset..offset + key_len])
+                .map_err(|_| UniqueStoreError::SerializationError)?
+                .to_string();
+            offset += key_len;
+
+            if offset + 4 > data.len() {
+                break;
+            }
+            let data_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if offset + data_len > data.len() {
+                break;
+            }
+            let incoming = Self::deserialize(&data[offset..offset + data_len])
+                .ok_or(UniqueStoreError::SerializationError)?;
+            offset += data_len;
+
+            let adopt = match reservations.get(&key) {
+                None => true,
+                Some(local) => incoming.is_committed() && !local.is_committed(),
+            };
+            if adopt {
+                reservations.insert(key, incoming);
+                merged += 1;
+            }
+        }
+        Ok(merged)
     }
 
     /// # Panics
@@ -889,6 +1021,76 @@ mod tests {
     }
 
     #[test]
+    fn reassert_establishes_committed_claim_when_absent() {
+        let store = UniqueStore::new(node(1));
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        assert_eq!(result, ReassertResult::Established);
+        let r = store.get("users", "email", b"a@x.com").unwrap();
+        assert!(r.is_committed());
+        assert_eq!(r.record_id_str(), "u1");
+    }
+
+    #[test]
+    fn reassert_repairs_lost_commit() {
+        let store = UniqueStore::new(node(1));
+        store.reserve(
+            &params(
+                "users",
+                "email",
+                b"a@x.com",
+                "u1",
+                "req-1",
+                partition(1),
+                5000,
+            ),
+            1000,
+        );
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Repaired);
+        assert!(
+            store
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .is_committed()
+        );
+    }
+
+    #[test]
+    fn reassert_is_idempotent_when_committed() {
+        let store = UniqueStore::new(node(1));
+        store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        let result = store.reassert("users", "email", b"a@x.com", "u1", partition(1), 2000);
+        assert_eq!(result, ReassertResult::AlreadyCommitted);
+    }
+
+    #[test]
+    fn reassert_flags_conflict_when_other_committed() {
+        let store = UniqueStore::new(node(1));
+        store.reassert("users", "email", b"a@x.com", "u1", partition(1), 1000);
+        let result = store.reassert("users", "email", b"a@x.com", "u2", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Conflict);
+    }
+
+    #[test]
+    fn reassert_pending_when_other_uncommitted() {
+        let store = UniqueStore::new(node(1));
+        store.reserve(
+            &params(
+                "users",
+                "email",
+                b"a@x.com",
+                "u1",
+                "req-1",
+                partition(1),
+                5000,
+            ),
+            1000,
+        );
+        let result = store.reassert("users", "email", b"a@x.com", "u2", partition(1), 2000);
+        assert_eq!(result, ReassertResult::Pending);
+    }
+
+    #[test]
     fn apply_replicated_insert() {
         let store = UniqueStore::new(node(1));
         let reservation = UniqueReservation::create(
@@ -907,6 +1109,141 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn apply_replicated_rejects_reassigning_committed_value() {
+        let store = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        let key = unique_key(&committed);
+        store
+            .apply_replicated(Operation::Insert, &key, &UniqueStore::serialize(&committed))
+            .unwrap();
+
+        let intruder = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-b",
+            "req-b",
+            partition(5),
+            2000,
+        );
+        let result =
+            store.apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&intruder));
+
+        assert_eq!(
+            result,
+            Err(UniqueStoreError::AlreadyCommitted),
+            "a committed value must not be reassigned to a different record"
+        );
+        assert_eq!(
+            store
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .record_id_str(),
+            "owner-a",
+            "the original committed owner is preserved"
+        );
+    }
+
+    #[test]
+    fn apply_replicated_allows_recommit_by_same_record() {
+        let store = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        let key = unique_key(&committed);
+        store
+            .apply_replicated(Operation::Insert, &key, &UniqueStore::serialize(&committed))
+            .unwrap();
+
+        store
+            .apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&committed))
+            .expect("re-applying the same committed owner is idempotent, not a conflict");
+    }
+
+    #[test]
+    fn merge_for_seal_learns_missing_and_never_downgrades() {
+        // A member holds a committed claim for the value; a promoting primary is missing it.
+        let member = UniqueStore::new(node(1));
+        let committed = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            1000,
+        )
+        .with_committed();
+        member
+            .apply_replicated(
+                Operation::Insert,
+                &unique_key(&committed),
+                &UniqueStore::serialize(&committed),
+            )
+            .unwrap();
+        let blob = member.export_for_partition(committed.unique_partition());
+
+        let primary = UniqueStore::new(node(2));
+        assert!(primary.get("users", "email", b"a@x.com").is_none());
+        assert_eq!(primary.merge_for_seal(&blob).unwrap(), 1);
+        let learned = primary.get("users", "email", b"a@x.com").unwrap();
+        assert!(learned.is_committed());
+        assert_eq!(
+            learned.record_id_str(),
+            "owner-a",
+            "the primary learns the missed claim"
+        );
+
+        // A second merge carrying an uncommitted claim for the same value must NOT downgrade it.
+        let uncommitted = UniqueReservation::create(
+            "users",
+            "email",
+            b"a@x.com",
+            "owner-a",
+            "req-a",
+            partition(5),
+            2000,
+        );
+        let stale = UniqueStore::new(node(3));
+        stale
+            .apply_replicated(
+                Operation::Insert,
+                &unique_key(&uncommitted),
+                &UniqueStore::serialize(&uncommitted),
+            )
+            .unwrap();
+        assert_eq!(
+            primary
+                .merge_for_seal(&stale.export_for_partition(uncommitted.unique_partition()))
+                .unwrap(),
+            0,
+            "an uncommitted claim never downgrades a learned committed claim"
+        );
+        assert!(
+            primary
+                .get("users", "email", b"a@x.com")
+                .unwrap()
+                .is_committed()
+        );
     }
 
     #[test]

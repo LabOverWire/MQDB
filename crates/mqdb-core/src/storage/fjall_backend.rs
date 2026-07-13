@@ -140,6 +140,11 @@ impl StorageBackend for FjallBackend {
     fn flush(&self) -> Result<()> {
         self.sync_if_needed()
     }
+
+    fn sync(&self) -> Result<()> {
+        self.db.persist(PersistMode::SyncAll)?;
+        Ok(())
+    }
 }
 
 enum BatchOp {
@@ -147,9 +152,14 @@ enum BatchOp {
     Remove(Vec<u8>),
 }
 
-struct Precondition {
-    key: Vec<u8>,
-    expected_value: Vec<u8>,
+enum Precondition {
+    Equals {
+        key: Vec<u8>,
+        expected_value: Vec<u8>,
+    },
+    Absent {
+        key: Vec<u8>,
+    },
 }
 
 pub struct FjallBatch {
@@ -171,10 +181,14 @@ impl BatchOperations for FjallBatch {
     }
 
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
-        self.preconditions.push(Precondition {
+        self.preconditions.push(Precondition::Equals {
             key,
             expected_value,
         });
+    }
+
+    fn expect_absent(&mut self, key: Vec<u8>) {
+        self.preconditions.push(Precondition::Absent { key });
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
@@ -186,13 +200,27 @@ impl BatchOperations for FjallBatch {
 
             let snapshot = self.db.snapshot();
             for precondition in &self.preconditions {
-                let actual: Option<Slice> = snapshot.get(&self.keyspace, &precondition.key)?;
-                match actual {
-                    Some(val) if val.as_ref() == precondition.expected_value.as_slice() => {}
-                    _ => {
-                        return Err(crate::error::Error::Conflict(
-                            "optimistic lock failed: value was modified".into(),
-                        ));
+                match precondition {
+                    Precondition::Equals {
+                        key,
+                        expected_value,
+                    } => {
+                        let actual: Option<Slice> = snapshot.get(&self.keyspace, key)?;
+                        match actual {
+                            Some(val) if val.as_ref() == expected_value.as_slice() => {}
+                            _ => {
+                                return Err(crate::error::Error::Conflict(
+                                    "optimistic lock failed: value was modified".into(),
+                                ));
+                            }
+                        }
+                    }
+                    Precondition::Absent { key } => {
+                        if snapshot.get(&self.keyspace, key)?.is_some() {
+                            return Err(crate::error::Error::AbsentPreconditionViolated(
+                                key.clone(),
+                            ));
+                        }
                     }
                 }
             }

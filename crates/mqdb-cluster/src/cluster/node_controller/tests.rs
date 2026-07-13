@@ -152,6 +152,369 @@ async fn replicate_write_sends_to_replicas() {
     assert_eq!(sent.len(), 2);
 }
 
+fn unique_reserve_write(
+    ctrl: &NodeController<MockTransport>,
+    entity: &str,
+    field: &str,
+    value: &[u8],
+) -> ReplicationWrite {
+    let params = crate::cluster::db::UniqueReserveParams {
+        entity,
+        field,
+        value,
+        record_id: "r1",
+        request_id: "req-1",
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    };
+    let (result, write) = ctrl.stores().unique_reserve_replicated(&params, 1000);
+    assert_eq!(result, crate::cluster::db::ReserveResult::Reserved);
+    write.expect("reserve should yield a replication write")
+}
+
+#[tokio::test]
+async fn unique_reserve_resolves_on_majority_ack() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    // group is {1,2,3}, majority 2, self already counts as one; one more ack completes it.
+    ctrl.record_unique_quorum_ack(node2, 1).await;
+
+    assert_eq!(
+        rx.await,
+        Ok(true),
+        "reserve resolves once a majority holds it"
+    );
+}
+
+#[tokio::test]
+async fn unique_reserve_fails_closed_on_timeout() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    // no acks arrive; the deadline sweep must fail the reserve closed.
+    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
+        .await;
+
+    assert_eq!(
+        rx.await,
+        Ok(false),
+        "a reserve that never reaches a majority fails closed"
+    );
+}
+
+#[tokio::test]
+async fn remote_reserve_quorum_timeout_releases_local_reservation() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    // A remote-coordinated reserve landed on the value-primary: it holds the reservation locally
+    // and defers its response until the reservation is majority-durable.
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    assert!(
+        ctrl.stores()
+            .unique_get("users", "email", b"a@x.com")
+            .is_some(),
+        "the value-primary holds the reservation after the local reserve"
+    );
+    ctrl.replicate_unique_reserve_remote(
+        write,
+        node2,
+        42,
+        UniqueClaimId {
+            entity: "users".to_string(),
+            field: "email".to_string(),
+            value: b"a@x.com".to_vec(),
+            idempotency_key: "req-1".to_string(),
+        },
+    )
+    .await;
+
+    // No group member acks; the deadline sweep fails the reserve closed. It must ALSO release the
+    // local reservation, or a transient quorum timeout wedges the value until its 30s TTL.
+    ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
+        .await;
+
+    assert!(
+        ctrl.stores()
+            .unique_get("users", "email", b"a@x.com")
+            .is_none(),
+        "a remote reserve that never reached a majority must release its local reservation"
+    );
+
+    let sent_error = ctrl.transport.sent_messages().iter().any(|(to, m)| {
+        *to == node2
+            && matches!(
+                m,
+                ClusterMessage::UniqueReserveResponse(r)
+                    if r.request_id == 42
+                        && matches!(r.status(), UniqueReserveStatus::Error)
+            )
+    });
+    assert!(
+        sent_error,
+        "the coordinator must receive an Error response so it fails the create closed"
+    );
+}
+
+#[tokio::test]
+async fn unique_reserve_completes_immediately_for_single_node_group() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
+
+    let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
+    let rx = ctrl.replicate_unique_reserve(write).await;
+
+    assert_eq!(
+        rx.await,
+        Ok(true),
+        "a single-node group is its own majority; reserve is immediately durable"
+    );
+}
+
+#[tokio::test]
+async fn fk_then_unique_defers_reserve_to_async_completion() {
+    use crate::cluster::db::ClusterConstraint;
+    use crate::cluster::node_controller::{FkCheckContinuation, FkThenUniqueOutcome};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    // Single-node group: become_primary seals every partition synchronously.
+    let mut map = crate::cluster::PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+
+    let continuation = FkCheckContinuation::CreateFromNodeController {
+        from: node1,
+        entity: "users".to_string(),
+        id: "u1".to_string(),
+        data: serde_json::json!({ "id": "u1", "email": "a@x.com" }),
+        partition: crate::cluster::db::data_partition("users", "u1"),
+        request_id: "req-1".to_string(),
+        response_topic: "resp/t".to_string(),
+        correlation_data: None,
+    };
+
+    let outcome = ctrl
+        .complete_pending_fk_work(true, None, continuation)
+        .await;
+
+    // The reserve must be handed to the async completion (which awaits the quorum OUTSIDE the lock),
+    // never performed inline here — doing so would deadlock on the ack path.
+    assert!(
+        matches!(outcome, FkThenUniqueOutcome::NeedUnique(_)),
+        "an FK+unique create must defer its reserve to spawn_unique_completion"
+    );
+}
+
+#[tokio::test]
+async fn unsealed_partition_fails_reserve_closed() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+
+    let entity = "users";
+    ctrl.stores()
+        .db_constraints
+        .add(crate::cluster::db::ClusterConstraint::unique(
+            entity,
+            "uniq_email",
+            "email",
+        ))
+        .unwrap();
+    let value = b"a@x.com";
+    let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
+    // Primary at epoch 1, but a multi-node group has not completed the seal handshake.
+    ctrl.become_primary(unique_part, Epoch::new(1));
+    assert!(
+        !ctrl.unique_partition_sealed(unique_part),
+        "a multi-node group is not sealed until the handshake completes"
+    );
+
+    let data = serde_json::json!({ "email": "a@x.com" });
+    let result = ctrl
+        .check_unique_constraints(
+            entity,
+            "u1",
+            &data,
+            PartitionId::new(5).unwrap(),
+            "req-1",
+            1000,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "reserve must fail closed while the value partition is unsealed"
+    );
+    assert!(
+        ctrl.stores().unique_get(entity, "email", value).is_none(),
+        "no reservation should be recorded for a fail-closed reserve"
+    );
+}
+
+#[tokio::test]
+async fn unique_seal_completes_for_single_node() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "a single-node group is its own majority; the partition seals immediately"
+    );
+}
+
+#[tokio::test]
+async fn unique_seal_reaches_majority_on_response() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "not sealed until a majority of the group has promised the epoch"
+    );
+
+    let resp = UniqueSealResponse::create(1, p, 2, true, Vec::new());
+    ctrl.handle_unique_seal_response(node2, &resp);
+
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "self + one accepting member is a majority of three"
+    );
+}
+
+#[tokio::test]
+async fn seal_response_teaches_primary_a_missed_reservation() {
+    use crate::cluster::db::{UniqueReservation, UniqueStore};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+
+    let value = b"a@x.com";
+    let unique_part = crate::cluster::db::unique_partition("users", "email", value);
+    // A committed claim for the value exists on the group, but this promoting primary missed it.
+    let committed = UniqueReservation::create(
+        "users",
+        "email",
+        value,
+        "owner-a",
+        "req-a",
+        PartitionId::new(5).unwrap(),
+        1000,
+    )
+    .with_committed();
+    let member = UniqueStore::new(node2);
+    member
+        .apply_replicated(
+            crate::cluster::protocol::Operation::Insert,
+            &crate::cluster::db::unique_key(&committed),
+            &UniqueStore::serialize(&committed),
+        )
+        .unwrap();
+    let blob = member.export_for_partition(unique_part);
+
+    assert!(
+        ctrl.stores().unique_get("users", "email", value).is_none(),
+        "primary starts out missing the reservation"
+    );
+
+    let resp = UniqueSealResponse::create(1, unique_part, 2, true, blob);
+    ctrl.handle_unique_seal_response(node2, &resp);
+
+    let learned = ctrl
+        .stores()
+        .unique_get("users", "email", value)
+        .expect("the seal response must teach the primary the reservation it missed");
+    assert!(learned.is_committed());
+    assert_eq!(learned.record_id_str(), "owner-a");
+}
+
+#[tokio::test]
+async fn unique_seal_request_fenced_by_higher_promise() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+
+    ctrl.handle_unique_seal_request(node2, &UniqueSealRequest::create(1, p, 3))
+        .await;
+    ctrl.handle_unique_seal_request(node2, &UniqueSealRequest::create(2, p, 2))
+        .await;
+
+    let accepts: Vec<bool> = ctrl
+        .transport
+        .sent_messages()
+        .iter()
+        .filter_map(|(_, m)| match m {
+            ClusterMessage::UniqueSealResponse(r) => Some(r.is_accepted()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        accepts,
+        vec![true, false],
+        "epoch 3 is promised, so the stale epoch-2 seal is fenced out"
+    );
+}
+
 #[tokio::test]
 async fn receive_heartbeat_marks_alive() {
     let node1 = NodeId::validated(1).unwrap();

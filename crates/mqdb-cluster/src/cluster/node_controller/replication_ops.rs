@@ -347,6 +347,11 @@ impl<T: ClusterTransport> NodeController<T> {
             || write.entity == entity::CLIENT_LOCATIONS
             || write.entity == entity::DB_SCHEMA
             || write.entity == entity::DB_CONSTRAINT;
+        if write.entity == entity::DB_UNIQUE {
+            self.replicate_unique_to_group(write).await;
+            return;
+        }
+
         if is_broadcast_entity {
             let _ = self.stores.apply_write(&write);
             let alive = self.heartbeat.alive_nodes();

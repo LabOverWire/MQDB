@@ -117,6 +117,10 @@ impl StorageBackend for EncryptedBackend {
     fn flush(&self) -> Result<()> {
         self.inner.flush()
     }
+
+    fn sync(&self) -> Result<()> {
+        self.inner.sync()
+    }
 }
 
 struct EncryptedBatch {
@@ -140,6 +144,10 @@ impl BatchOperations for EncryptedBatch {
 
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
         self.pending_expects.push((key, expected_value));
+    }
+
+    fn expect_absent(&mut self, key: Vec<u8>) {
+        self.inner.expect_absent(key);
     }
 
     fn commit(mut self: Box<Self>) -> Result<()> {

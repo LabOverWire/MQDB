@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-11 — mqdb-cli 0.8.15, mqdb-cluster 0.4.0, mqdb-agent 0.8.12, mqdb-core 0.7.4
+
+### Fixed
+
+- **Unique-constraint oversell (agent mode).** `Database::create`/`update` could commit two records for the same unique value under concurrency because the check across the constraint reservation and the record write was not atomic. Unique enforcement is now an id-free compare-and-swap: a `uniq/{entity}/{field}/{value}` guard key is written under a new `expect_absent` storage precondition, so the guard claim and the record write commit or fail together. New `mqdb-core` API: an `expect_absent` precondition on the backend batch commit (in-memory, fjall, and encrypted backends). Verified in TLA+ (`specs/UniqueGuard.tla`) and by in-process barrier tests — 200 concurrent creates of the same value that previously all oversold now yield exactly one winner.
+
+- **Unique-constraint oversell (cluster mode).** The distributed unique reservation was a fragile per-node in-memory lock, decoupled from the durable+replicated record, that could oversell through durability/TTL loss, the promotion gap, dual-primary failover, and dropped commits. The cluster unique path is now an epoch-fenced, quorum-durable, seal-on-promotion protocol (Option C, modelled and verified in `specs/ClusterUniqueQuorum.tla`):
+  - reserve/commit/release are persisted, fsync'd, and replicated to a fixed quorum group (the registered cluster membership), decoupled from data replication factor;
+  - a reserve returns success only after a **majority** of the group holds it, fail-closed on timeout, on both the primary MQTT create path and the forwarded (cross-node) create/update path — the latter now runs its majority-await outside the controller lock via the pending-work path (a prior inline await would have deadlocked, and also removed a latent up-to-5s stall);
+  - on promotion a new primary **seals** the partition: it promises its epoch at a majority (fencing a superseded primary, whose stale-epoch group writes are then rejected so its reserves can't reach a majority) and **learns** any reservation it missed from the read quorum, so it cannot re-grant an already-held value; it refuses to serve reserves until sealed;
+  - a member never reassigns a **committed** value to a different record;
+  - a record-driven reconciler (leader-driven, periodic) repairs a reservation lost to failover/restart or a lost commit from the durable record, reclaims abandoned claims by TTL only when the record is absent, and surfaces any detected oversell.
+
+  These mechanisms are individually load-bearing and jointly close the dual-primary oversell, verified in TLA+: `specs/ClusterUniqueMonotonic.tla` shows that dropping the seal's reservation-learning step reintroduces oversell (a promoted primary that missed an *uncommitted* reservation re-grants the value), so the seal-learning is required — the implementation now matches the verified `ClusterUniqueQuorum` model. A not-yet-durable reserve (partition unsealed, no primary, or quorum timeout) now returns a retryable `503` instead of a misleading `409 unique constraint violation`.
+
+- `mqdb-cli`: replaced an `if let … else { return None }` with the `?` operator in license verification to satisfy a newer clippy `question_mark` lint (unblocks the pre-commit hook on the current toolchain).
+
 ## 2026-07-06 — mqdb-cli 0.8.14, mqdb-agent 0.8.11, mqdb-cluster 0.3.8, mqdb-vault 0.1.3
 
 ### Changed

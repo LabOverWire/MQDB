@@ -504,10 +504,9 @@ fn verify_and_log_license(
 ) -> Option<mqdb_core::license::LicenseInfo> {
     let result = if let Some(content) = data {
         crate::license::verify_license_token(content.trim())
-    } else if let Some(p) = path {
-        crate::license::verify_license_file(p)
     } else {
-        return None;
+        let p = path?;
+        crate::license::verify_license_file(p)
     };
 
     match result {

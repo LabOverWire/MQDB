@@ -143,9 +143,14 @@ enum BatchOp {
     Remove(Vec<u8>),
 }
 
-struct Precondition {
-    key: Vec<u8>,
-    expected_value: Vec<u8>,
+enum Precondition {
+    Equals {
+        key: Vec<u8>,
+        expected_value: Vec<u8>,
+    },
+    Absent {
+        key: Vec<u8>,
+    },
 }
 
 pub struct MemoryBatch {
@@ -164,10 +169,14 @@ impl BatchOperations for MemoryBatch {
     }
 
     fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
-        self.preconditions.push(Precondition {
+        self.preconditions.push(Precondition::Equals {
             key,
             expected_value,
         });
+    }
+
+    fn expect_absent(&mut self, key: Vec<u8>) {
+        self.preconditions.push(Precondition::Absent { key });
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
@@ -177,13 +186,22 @@ impl BatchOperations for MemoryBatch {
             .map_err(|e| Error::Internal(e.to_string()))?;
 
         for precondition in &self.preconditions {
-            let actual = data.get(&precondition.key);
-            match actual {
-                Some(val) if val.as_slice() == precondition.expected_value.as_slice() => {}
-                _ => {
-                    return Err(Error::Conflict(
-                        "optimistic lock failed: value was modified".into(),
-                    ));
+            match precondition {
+                Precondition::Equals {
+                    key,
+                    expected_value,
+                } => match data.get(key) {
+                    Some(val) if val.as_slice() == expected_value.as_slice() => {}
+                    _ => {
+                        return Err(Error::Conflict(
+                            "optimistic lock failed: value was modified".into(),
+                        ));
+                    }
+                },
+                Precondition::Absent { key } => {
+                    if data.contains_key(key) {
+                        return Err(Error::AbsentPreconditionViolated(key.clone()));
+                    }
                 }
             }
         }

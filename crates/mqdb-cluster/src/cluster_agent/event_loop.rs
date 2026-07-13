@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     CLEANUP_INTERVAL_SECS, RETAINED_SYNC_CLEANUP_INTERVAL_SECS, RETAINED_SYNC_TTL_SECS,
-    TTL_CLEANUP_INTERVAL_SECS,
+    TTL_CLEANUP_INTERVAL_SECS, UNIQUE_RECONCILE_INTERVAL_SECS,
 };
 
 impl ClusteredAgent {
@@ -85,6 +85,10 @@ impl ClusteredAgent {
             Duration::from_secs(30),
         );
         let mut license_check_interval = interval(Duration::from_hours(1));
+        let mut unique_reconcile_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
+            Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
+        );
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let tx_tick = self
             .tx_tick
@@ -152,6 +156,9 @@ impl ClusteredAgent {
                 }
                 _ = license_check_interval.tick() => {
                     self.handle_license_check();
+                }
+                _ = unique_reconcile_interval.tick() => {
+                    self.handle_unique_reconcile().await;
                 }
                 _ = shutdown_rx.recv() => {
                     info!("cluster node shutting down");
@@ -235,6 +242,9 @@ impl ClusteredAgent {
         }
         ctrl.transport().log_queue_stats();
         ctrl.pending_constraints().sweep_closed();
+        ctrl.sweep_unique_quorum(now).await;
+        ctrl.sweep_unique_seals(now);
+        ctrl.drain_pending_seals().await;
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {
@@ -386,13 +396,27 @@ impl ClusteredAgent {
         controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
         pending: crate::cluster::node_controller::PendingUniqueWork,
     ) {
-        use crate::cluster::node_controller::unique::await_unique_reserves;
+        use crate::cluster::node_controller::unique::{await_unique_quorum, await_unique_reserves};
 
         let local_reserved = pending.phase1.local_reserved;
         let pending_remote = pending.phase1.pending_remote;
+        let pending_quorum = pending.phase1.pending_quorum;
         let continuation = pending.continuation;
         tokio::spawn(async move {
-            let remote_results = await_unique_reserves(pending_remote).await;
+            use crate::cluster::node_controller::ReserveFailure;
+            // Await the remote-reserve and local-quorum rounds concurrently so a create waits the
+            // max of the two ~5s deadlines, not their sum.
+            let remote_results = match tokio::join!(
+                await_unique_reserves(pending_remote),
+                await_unique_quorum(pending_quorum),
+            ) {
+                (Ok(confirmed), Ok(durable)) => {
+                    tracing::debug!(?durable, "unique reserve is majority-durable");
+                    Ok(confirmed)
+                }
+                (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
+                (Err(e), _) => Err(e),
+            };
             let mut ctrl = controller.write().await;
             ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
                 .await;
@@ -408,14 +432,21 @@ impl ClusteredAgent {
         let pending_checks = pending.pending_checks;
         let continuation = pending.continuation;
         tokio::spawn(async move {
+            use crate::cluster::node_controller::FkThenUniqueOutcome;
             let fk_result = await_fk_checks(pending_checks).await;
-            let mut ctrl = controller.write().await;
-            let (fk_ok, fk_error) = match fk_result {
-                Ok(()) => (true, None),
-                Err(msg) => (false, Some(msg)),
+            let outcome = {
+                let mut ctrl = controller.write().await;
+                let (fk_ok, fk_error) = match fk_result {
+                    Ok(()) => (true, None),
+                    Err(msg) => (false, Some(msg)),
+                };
+                ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
+                    .await
+                // controller write lock is released here, before the majority-await below.
             };
-            ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
-                .await;
+            if let FkThenUniqueOutcome::NeedUnique(pending) = outcome {
+                Self::spawn_unique_completion(controller, *pending);
+            }
         });
     }
 
@@ -473,10 +504,6 @@ impl ClusteredAgent {
             if stale_offsets > 0 {
                 info!(stale_offsets, "cleaned up stale consumer offsets");
             }
-            let expired_unique = ctrl.stores().unique_cleanup_expired(now);
-            if expired_unique > 0 {
-                info!(expired_unique, "cleaned up expired unique reservations");
-            }
             ctrl.stores().cleanup_expired_sessions(now)
         };
         if !expired_sessions.is_empty() {
@@ -489,6 +516,16 @@ impl ClusteredAgent {
                 let client_id = session.client_id_str();
                 clear_expired_session_subscriptions(&mut ctrl, client_id).await;
             }
+        }
+    }
+
+    async fn handle_unique_reconcile(&self) {
+        let mut ctrl = self.controller.write().await;
+        ctrl.reconcile_unique_claims().await;
+        let now = current_time_ms();
+        let expired_unique = ctrl.stores().unique_cleanup_expired(now);
+        if expired_unique > 0 {
+            info!(expired_unique, "reclaimed abandoned unique reservations");
         }
     }
 
