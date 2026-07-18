@@ -520,23 +520,28 @@ impl ClusteredAgent {
     }
 
     async fn handle_unique_reconcile(&self) {
-        // Collect the reassert work under a read lock, then apply it in small chunks each under a
-        // brief write lock, so the reconciler never holds the controller write lock across the whole
-        // scan and its sends — otherwise every DB op on the node stalls for the scan's duration.
+        // Gather record keys (cheap, no JSON parse) under one brief read lock, then per chunk parse
+        // the records under a read lock and apply under a write lock. The expensive parse and the
+        // reassert sends are both chunked, so the reconciler never holds a lock across the whole
+        // scan — otherwise every DB op on the node stalls for the scan's duration.
         const RECONCILE_CHUNK: usize = 64;
 
-        let work = {
+        let keys = {
             let ctrl = self.controller.read().await;
-            ctrl.collect_unique_reconcile_work()
+            ctrl.collect_unique_reconcile_keys()
         };
-        for chunk in work.chunks(RECONCILE_CHUNK) {
+        for key_chunk in keys.chunks(RECONCILE_CHUNK) {
+            let work = {
+                let ctrl = self.controller.read().await;
+                ctrl.project_unique_reconcile_work(key_chunk)
+            };
             let mut ctrl = self.controller.write().await;
-            ctrl.apply_unique_reconcile_chunk(chunk).await;
+            ctrl.apply_unique_reconcile_chunk(&work).await;
         }
 
         let now = current_time_ms();
         let expired_unique = {
-            let ctrl = self.controller.write().await;
+            let ctrl = self.controller.read().await;
             ctrl.stores().unique_cleanup_expired(now)
         };
         if expired_unique > 0 {
