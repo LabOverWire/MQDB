@@ -338,13 +338,18 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   Both now `tokio::join!` the two rounds (max of the deadlines, ~5s). No behavior change — both results
   were already awaited unconditionally.
 - **Reconciler full-scan cost — FIXED.** The reconciler no longer clones records or holds the
-  controller write lock across the scan. `collect_unique_reconcile_work` (read-only, `&self`) projects
-  the reassert work via `DbDataStore::for_each_record` (iterates under the read guard, no `DbEntity`
-  clone); `apply_unique_reconcile_chunk` applies it. `handle_unique_reconcile` collects under a **read**
-  lock, then applies in 64-item chunks each under a brief **write** lock, so DB ops interleave instead
-  of stalling for the whole scan. Splitting the lock introduced a TOCTOU (a record deleted between
-  collect and apply would resurrect a committed claim), closed by an apply-time `record_owns_value`
-  re-check. Tests: `reconcile_apply_skips_record_deleted_after_collection` (fails without the re-check).
+  controller write lock across the scan. It runs in two passes: `collect_unique_reconcile_keys`
+  (read-only, `&self`) gathers the owned record keys via `DbDataStore::for_each_record` (iterates
+  under the read guard, no `DbEntity` clone, **no JSON parse**), and `project_unique_reconcile_work`
+  parses a chunk of those keys into reassert work; `apply_unique_reconcile_chunk` applies it.
+  `handle_unique_reconcile` gathers keys under one brief **read** lock, then per 64-key chunk projects
+  under a **read** lock and applies under a brief **write** lock — so the dominant JSON-parse cost and
+  the reassert sends are chunked out of the long lock hold and DB ops interleave (only the cheap
+  key-gather still scans the store under a read lock). Splitting the lock introduced a TOCTOU (a record
+  deleted between passes would resurrect a committed claim), closed by an apply-time `record_owns_value`
+  re-check and by `project` skipping keys whose record was deleted. Tests:
+  `reconcile_apply_skips_record_deleted_after_collection`,
+  `project_reconcile_work_skips_key_deleted_after_gather`.
 - **Dynamic reconfiguration — quorum-group source FIXED; membership-change intersection still OPEN.**
   `unique_quorum_group()` now derives from the **replicated partition map** (`PartitionMap::all_nodes()`
   ∪ self), not `HeartbeatManager::registered_nodes()`. The map is consensus-agreed, so every node

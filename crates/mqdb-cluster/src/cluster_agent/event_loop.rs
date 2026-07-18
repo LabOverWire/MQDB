@@ -522,8 +522,9 @@ impl ClusteredAgent {
     async fn handle_unique_reconcile(&self) {
         // Gather record keys (cheap, no JSON parse) under one brief read lock, then per chunk parse
         // the records under a read lock and apply under a write lock. The expensive parse and the
-        // reassert sends are both chunked, so the reconciler never holds a lock across the whole
-        // scan — otherwise every DB op on the node stalls for the scan's duration.
+        // reassert sends are chunked, so no lock is held across them — only the cheap key-gather
+        // scans the store under a read lock; otherwise every DB op on the node would stall for the
+        // whole parse.
         const RECONCILE_CHUNK: usize = 64;
 
         let keys = {

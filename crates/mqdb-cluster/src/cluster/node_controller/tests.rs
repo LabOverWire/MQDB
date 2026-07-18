@@ -348,6 +348,48 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
 }
 
 #[tokio::test]
+async fn project_reconcile_work_skips_key_deleted_after_gather() {
+    use crate::cluster::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let mut map = crate::cluster::PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    ctrl.stores()
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let keys = ctrl.collect_unique_reconcile_keys();
+    assert_eq!(keys.len(), 1, "one owned durable record gathered");
+
+    // The read lock is released between key-gather and the per-chunk parse; the record is deleted in
+    // that window, so projecting the stale key must yield no work rather than parse a gone record.
+    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    let work = ctrl.project_unique_reconcile_work(&keys);
+    assert!(
+        work.is_empty(),
+        "a key whose record was deleted after gather projects to no reassert work"
+    );
+}
+
+#[tokio::test]
 async fn unique_quorum_group_derives_from_map_not_heartbeat_growth() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();

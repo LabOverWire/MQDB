@@ -1131,14 +1131,22 @@ impl<T: ClusterTransport> NodeController<T> {
         keys: &[UniqueReassertKey],
     ) -> Vec<UniqueReassertWork> {
         let mut work = Vec::new();
+        // `collect_unique_reconcile_keys` emits keys grouped by entity, so cache the unique-field
+        // list per entity and refetch only when the entity changes, rather than once per record.
+        let mut cached_entity = String::new();
+        let mut unique_fields: Vec<String> = Vec::new();
         for key in keys {
+            if key.entity != cached_entity {
+                unique_fields = self.stores.constraint_get_unique_fields(&key.entity);
+                cached_entity.clone_from(&key.entity);
+            }
             let Some(record) = self.stores.db_data.get(&key.entity, &key.record_id) else {
                 continue;
             };
             let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&record.data) else {
                 continue;
             };
-            for field in &self.stores.constraint_get_unique_fields(&key.entity) {
+            for field in &unique_fields {
                 let value = match parsed.get(field) {
                     Some(v) => serde_json::to_vec(v).unwrap_or_default(),
                     None => continue,
