@@ -14,6 +14,25 @@ const UNIQUE_RESERVE_TIMEOUT_SECS: u64 = 5;
 const UNIQUE_QUORUM_TIMEOUT_MS: u64 = 5000;
 const UNIQUE_SEAL_TIMEOUT_MS: u64 = 5000;
 
+/// One record/field reassert the reconciler will apply: enough to re-check the durable record and
+/// route the reassert to the value-partition primary.
+pub(crate) struct UniqueReassertWork {
+    pub entity: String,
+    pub field: String,
+    pub value: Vec<u8>,
+    pub record_id: String,
+    pub data_partition: PartitionId,
+}
+
+/// A durable record this node owns, gathered by the reconciler's first pass WITHOUT parsing it.
+/// The JSON parse (the scan's dominant cost) is deferred to `project_unique_reconcile_work` so it
+/// runs in bounded chunks instead of under one long read-lock hold.
+pub(crate) struct UniqueReassertKey {
+    pub entity: String,
+    pub record_id: String,
+    pub data_partition: PartitionId,
+}
+
 pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
 ) -> Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)> {
@@ -555,11 +574,19 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    /// The fixed quorum group for the `DB_UNIQUE` keyspace: the registered cluster membership
-    /// (stable across heartbeat timeouts), decoupled from data replication factor.
+    /// The quorum group for the `DB_UNIQUE` keyspace: every node that appears in the replicated
+    /// partition map (plus self). The map is consensus-agreed, so all nodes derive the same group
+    /// and it changes only through raft rebalance — unlike the heartbeat-discovered node set, which
+    /// grows locally and divergently on first contact (a source of disjoint-majority oversell). An
+    /// uninitialised map yields just this node, which is its own majority.
     #[must_use]
     pub(crate) fn unique_quorum_group(&self) -> Vec<NodeId> {
-        self.heartbeat.registered_nodes()
+        let mut group = self.partition_map.all_nodes();
+        if !group.contains(&self.node_id) {
+            group.push(self.node_id);
+            group.sort_unstable_by_key(|n| n.get());
+        }
+        group
     }
 
     /// Majority size for the current quorum group.
@@ -1050,68 +1077,151 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    /// Reconcile every durable record this node owns (data-partition primary) against its
-    /// unique claim, repairing a reservation lost to failover/restart or a lost commit. The
-    /// durable record is the source of truth; each record is reconciled by exactly one node.
+    /// Reconcile every durable record this node owns (data-partition primary) against its unique
+    /// claim, repairing a reservation lost to failover/restart or a lost commit. Collects the work
+    /// read-only, then applies it — see `collect_unique_reconcile_work` / `apply_unique_reconcile_chunk`
+    /// for the split that lets the agent event loop release the controller lock between chunks.
     pub async fn reconcile_unique_claims(&mut self) {
-        let entities: Vec<String> = {
-            let mut set = std::collections::BTreeSet::new();
-            for constraint in self.stores.constraint_list_all() {
-                if constraint.constraint_type() == super::super::db::ConstraintType::Unique {
-                    set.insert(constraint.entity_str().to_string());
-                }
-            }
-            set.into_iter().collect()
-        };
+        let work = self.collect_unique_reconcile_work();
+        self.apply_unique_reconcile_chunk(&work).await;
+    }
 
-        for entity in &entities {
-            let unique_fields = self.stores.constraint_get_unique_fields(entity);
-            if unique_fields.is_empty() {
+    /// The set of entities carrying a unique constraint, sorted and deduped.
+    fn unique_constrained_entities(&self) -> Vec<String> {
+        let mut set = std::collections::BTreeSet::new();
+        for constraint in self.stores.constraint_list_all() {
+            if constraint.constraint_type() == super::super::db::ConstraintType::Unique {
+                set.insert(constraint.entity_str().to_string());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// First reconcile pass: gather the keys of durable records this node owns (data-partition
+    /// primary) for unique-constrained entities, WITHOUT parsing them. Cheap per record (no JSON
+    /// parse — the scan's dominant cost), so the whole-store read-lock hold is brief; the parse is
+    /// deferred to `project_unique_reconcile_work` in bounded chunks.
+    #[must_use]
+    pub(crate) fn collect_unique_reconcile_keys(&self) -> Vec<UniqueReassertKey> {
+        let mut keys = Vec::new();
+        for entity in &self.unique_constrained_entities() {
+            if self.stores.constraint_get_unique_fields(entity).is_empty() {
                 continue;
             }
-            let records = self.stores.db_data.list(entity);
-            for record in records {
+            self.stores.db_data.for_each_record(entity, |record| {
                 let data_partition = record.partition();
                 if self.partition_map.primary(data_partition) != Some(self.node_id) {
-                    continue;
+                    return;
                 }
-                let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&record.data) else {
-                    continue;
-                };
-                let record_id = record.id_str().to_string();
-                for field in &unique_fields {
-                    let value = match parsed.get(field) {
-                        Some(v) => serde_json::to_vec(v).unwrap_or_default(),
-                        None => continue,
-                    };
+                keys.push(UniqueReassertKey {
+                    entity: entity.clone(),
+                    record_id: record.id_str().to_string(),
+                    data_partition,
+                });
+            });
+        }
+        keys
+    }
 
-                    let unique_part = super::super::db::unique_partition(entity, field, &value);
-                    match self.partition_map.primary(unique_part) {
-                        Some(primary) if primary == self.node_id => {
-                            self.reassert_unique_claim(
-                                entity,
-                                field,
-                                &value,
-                                &record_id,
-                                data_partition,
-                            )
-                            .await;
-                        }
-                        Some(target) => {
-                            self.send_unique_reassert_fire_and_forget(
-                                target,
-                                entity,
-                                field,
-                                &value,
-                                &record_id,
-                                data_partition,
-                            )
-                            .await;
-                        }
-                        None => {}
-                    }
-                }
+    /// Second reconcile pass: parse a chunk of gathered keys into reassert work (the JSON parse
+    /// deferred from key-gather). A record deleted since key-gather is skipped. Read-only.
+    #[must_use]
+    pub(crate) fn project_unique_reconcile_work(
+        &self,
+        keys: &[UniqueReassertKey],
+    ) -> Vec<UniqueReassertWork> {
+        let mut work = Vec::new();
+        // `collect_unique_reconcile_keys` emits keys grouped by entity, so cache the unique-field
+        // list per entity and refetch only when the entity changes, rather than once per record.
+        let mut cached_entity = String::new();
+        let mut unique_fields: Vec<String> = Vec::new();
+        for key in keys {
+            if key.entity != cached_entity {
+                unique_fields = self.stores.constraint_get_unique_fields(&key.entity);
+                cached_entity.clone_from(&key.entity);
             }
+            let Some(record) = self.stores.db_data.get(&key.entity, &key.record_id) else {
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&record.data) else {
+                continue;
+            };
+            for field in &unique_fields {
+                let value = match parsed.get(field) {
+                    Some(v) => serde_json::to_vec(v).unwrap_or_default(),
+                    None => continue,
+                };
+                work.push(UniqueReassertWork {
+                    entity: key.entity.clone(),
+                    field: field.clone(),
+                    value,
+                    record_id: key.record_id.clone(),
+                    data_partition: key.data_partition,
+                });
+            }
+        }
+        work
+    }
+
+    /// Scan this node's durable records (read-only) and project the unique-claim reassert work for
+    /// records whose *data* partition this node is primary of, so each record is reconciled by
+    /// exactly one node. Non-chunked convenience over `collect_unique_reconcile_keys` +
+    /// `project_unique_reconcile_work`; the event loop chunks the two passes to bound its lock hold.
+    #[must_use]
+    pub(crate) fn collect_unique_reconcile_work(&self) -> Vec<UniqueReassertWork> {
+        self.project_unique_reconcile_work(&self.collect_unique_reconcile_keys())
+    }
+
+    /// Apply a batch of reassert work. The controller lock may have been released since the work was
+    /// collected, so each item is re-checked against the current durable record: reasserting a
+    /// committed claim for a record that was since deleted or changed would wedge the value (TTL only
+    /// reclaims *uncommitted* claims), so a stale item is skipped.
+    pub(crate) async fn apply_unique_reconcile_chunk(&mut self, work: &[UniqueReassertWork]) {
+        for item in work {
+            if !self.record_owns_value(&item.entity, &item.record_id, &item.field, &item.value) {
+                continue;
+            }
+            let unique_part =
+                super::super::db::unique_partition(&item.entity, &item.field, &item.value);
+            match self.partition_map.primary(unique_part) {
+                Some(primary) if primary == self.node_id => {
+                    self.reassert_unique_claim(
+                        &item.entity,
+                        &item.field,
+                        &item.value,
+                        &item.record_id,
+                        item.data_partition,
+                    )
+                    .await;
+                }
+                Some(target) => {
+                    self.send_unique_reassert_fire_and_forget(
+                        target,
+                        &item.entity,
+                        &item.field,
+                        &item.value,
+                        &item.record_id,
+                        item.data_partition,
+                    )
+                    .await;
+                }
+                None => {}
+            }
+        }
+    }
+
+    /// Whether the durable record `entity/record_id` currently exists and its `field` still encodes
+    /// to `value` — the reconcile precondition that keeps a stale reassert from resurrecting a claim.
+    fn record_owns_value(&self, entity: &str, record_id: &str, field: &str, value: &[u8]) -> bool {
+        let Some(record) = self.stores.db_data.get(entity, record_id) else {
+            return false;
+        };
+        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&record.data) else {
+            return false;
+        };
+        match parsed.get(field) {
+            Some(v) => serde_json::to_vec(v).is_ok_and(|b| b == value),
+            None => false,
         }
     }
 }

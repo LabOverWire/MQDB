@@ -24,6 +24,25 @@ fn create_test_controller(
     )
 }
 
+/// Establish the unique quorum group by placing `primary` + `replicas` in the (replicated)
+/// partition map on partition 5 — the source `unique_quorum_group` now derives membership from.
+fn set_unique_group(
+    ctrl: &mut NodeController<MockTransport>,
+    primary: NodeId,
+    replicas: &[NodeId],
+) {
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        PartitionId::new(5).unwrap(),
+        crate::cluster::PartitionAssignment {
+            primary: Some(primary),
+            replicas: replicas.to_vec(),
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+}
+
 #[derive(Debug, Clone)]
 struct MockTransport {
     node_id: NodeId,
@@ -180,6 +199,7 @@ async fn unique_reserve_resolves_on_majority_ack() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
     ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
 
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
@@ -203,6 +223,7 @@ async fn unique_reserve_fails_closed_on_timeout() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
     ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
 
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
@@ -227,6 +248,7 @@ async fn remote_reserve_quorum_timeout_releases_local_reservation() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
     ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
 
     // A remote-coordinated reserve landed on the value-primary: it holds the reservation locally
@@ -276,6 +298,120 @@ async fn remote_reserve_quorum_timeout_releases_local_reservation() {
         sent_error,
         "the coordinator must receive an Error response so it fails the create closed"
     );
+}
+
+#[tokio::test]
+async fn reconcile_apply_skips_record_deleted_after_collection() {
+    use crate::cluster::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let mut map = crate::cluster::PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    ctrl.stores()
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let work = ctrl.collect_unique_reconcile_work();
+    assert_eq!(
+        work.len(),
+        1,
+        "one reassert work item for the durable record"
+    );
+
+    // The lock is released between collect and apply; the record is deleted in that window.
+    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    ctrl.apply_unique_reconcile_chunk(&work).await;
+
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_none(),
+        "a reassert for a record deleted since collection must not resurrect a committed claim"
+    );
+}
+
+#[tokio::test]
+async fn project_reconcile_work_skips_key_deleted_after_gather() {
+    use crate::cluster::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let mut map = crate::cluster::PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let p = PartitionId::new(i).unwrap();
+        ctrl.become_primary(p, Epoch::new(1));
+        map.set(
+            p,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.stores()
+        .db_constraints
+        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .unwrap();
+    ctrl.stores()
+        .db_data
+        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
+        .unwrap();
+
+    let keys = ctrl.collect_unique_reconcile_keys();
+    assert_eq!(keys.len(), 1, "one owned durable record gathered");
+
+    // The read lock is released between key-gather and the per-chunk parse; the record is deleted in
+    // that window, so projecting the stale key must yield no work rather than parse a gone record.
+    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    let work = ctrl.project_unique_reconcile_work(&keys);
+    assert!(
+        work.is_empty(),
+        "a key whose record was deleted after gather projects to no reassert work"
+    );
+}
+
+#[tokio::test]
+async fn unique_quorum_group_derives_from_map_not_heartbeat_growth() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+
+    // Membership comes from the replicated partition map: {node1, node2}.
+    set_unique_group(&mut ctrl, node1, &[node2]);
+    assert_eq!(ctrl.unique_quorum_group(), vec![node1, node2]);
+
+    // A previously-unknown node appearing in the heartbeat-discovered set must NOT expand the quorum
+    // basis — that local, divergent growth was the disjoint-majority oversell source.
+    ctrl.register_peer(node3);
+    assert_eq!(
+        ctrl.unique_quorum_group(),
+        vec![node1, node2],
+        "the quorum group derives from the replicated map, not the heartbeat-discovered node set"
+    );
+
+    // node3 joins the group only once consensus (the map) places it there.
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
+    assert_eq!(ctrl.unique_quorum_group(), vec![node1, node2, node3]);
 }
 
 #[tokio::test]
@@ -352,6 +488,7 @@ async fn unsealed_partition_fails_reserve_closed() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
 
     let entity = "users";
     ctrl.stores()
@@ -417,6 +554,7 @@ async fn unique_seal_reaches_majority_on_response() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
     let p = PartitionId::new(5).unwrap();
 
     ctrl.become_primary(p, Epoch::new(2));
