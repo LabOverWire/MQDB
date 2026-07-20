@@ -277,6 +277,22 @@ impl UniqueReleaseRequest {
         PartitionId::new(self.data_partition)
     }
 
+    /// Decode across the version-1 → version-2 wire change. A version-1 sender omits the trailing
+    /// `data_partition` (u16) + `data_partition_epoch` (u64), so zero-fill them (epoch 0 = unfenced,
+    /// never bumps the fence) instead of dropping the message during a rolling upgrade.
+    #[must_use]
+    pub fn decode_compat(bytes: &[u8]) -> Option<Self> {
+        let decode = |b: &[u8]| Self::try_from_be_bytes(b).ok().map(|(r, _)| r);
+        if bytes.first().copied() == Some(1) {
+            let mut padded = Vec::with_capacity(bytes.len() + 10);
+            padded.extend_from_slice(bytes);
+            padded.extend_from_slice(&[0u8; 10]);
+            decode(&padded)
+        } else {
+            decode(bytes)
+        }
+    }
+
     #[must_use]
     pub fn entity_str(&self) -> &str {
         std::str::from_utf8(&self.entity).unwrap_or("")
@@ -386,6 +402,22 @@ impl UniqueReassertRequest {
     #[must_use]
     pub fn data_partition(&self) -> Option<PartitionId> {
         PartitionId::new(self.data_partition)
+    }
+
+    /// Decode across the version-1 → version-2 wire change. A version-1 sender omits the trailing
+    /// `data_partition_epoch` (u64), so zero-fill it (epoch 0 = unfenced) instead of dropping the
+    /// message during a rolling upgrade.
+    #[must_use]
+    pub fn decode_compat(bytes: &[u8]) -> Option<Self> {
+        let decode = |b: &[u8]| Self::try_from_be_bytes(b).ok().map(|(r, _)| r);
+        if bytes.first().copied() == Some(1) {
+            let mut padded = Vec::with_capacity(bytes.len() + 8);
+            padded.extend_from_slice(bytes);
+            padded.extend_from_slice(&[0u8; 8]);
+            decode(&padded)
+        } else {
+            decode(bytes)
+        }
     }
 }
 

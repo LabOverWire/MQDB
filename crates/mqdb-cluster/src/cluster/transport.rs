@@ -316,7 +316,7 @@ impl ClusterMessage {
                 Some(Self::UniqueCommitResponse(resp))
             }
             84 => {
-                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(data).ok()?;
+                let req = UniqueReleaseRequest::decode_compat(data)?;
                 Some(Self::UniqueReleaseRequest(req))
             }
             85 => {
@@ -324,7 +324,7 @@ impl ClusterMessage {
                 Some(Self::UniqueReleaseResponse(resp))
             }
             86 => {
-                let (req, _) = UniqueReassertRequest::try_from_be_bytes(data).ok()?;
+                let req = UniqueReassertRequest::decode_compat(data)?;
                 Some(Self::UniqueReassertRequest(req))
             }
             87 => {

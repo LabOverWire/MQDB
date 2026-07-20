@@ -348,6 +348,48 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
 }
 
 #[tokio::test]
+async fn reassert_replicated_rejects_stale_epoch_below_the_fence() {
+    use crate::cluster::db::ReassertResult;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+
+    // The value site has seen data-partition epoch 3 (e.g. a release from the current primary).
+    ctrl.stores().db_unique.fence_bump(p, 3);
+
+    // A reassert stamped with epoch 2 (< 3) is from a superseded primary: dropped, no claim, no write.
+    let (result, write) = ctrl
+        .stores()
+        .reassert_replicated("users", "email", &value, "u1", p, 2, 1000);
+    assert_eq!(
+        result,
+        ReassertResult::Pending,
+        "stale-epoch reassert is fenced out"
+    );
+    assert!(
+        write.is_none(),
+        "a fenced-out reassert emits no replication write"
+    );
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_none(),
+        "a stale reassert must not establish a committed claim"
+    );
+
+    // A current-epoch reassert (3 >= 3) passes the fence and establishes the claim.
+    let (result, write) = ctrl
+        .stores()
+        .reassert_replicated("users", "email", &value, "u1", p, 3, 1000);
+    assert_eq!(result, ReassertResult::Established);
+    assert!(write.is_some());
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_some(),
+        "a current-epoch reassert establishes the claim"
+    );
+}
+
+#[tokio::test]
 async fn project_reconcile_work_skips_key_deleted_after_gather() {
     use crate::cluster::db::ClusterConstraint;
 

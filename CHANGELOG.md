@@ -12,7 +12,9 @@ Each entry lists the date and the crate versions that were released.
 
 ### Changed
 
-- **Unique reassert/release carry a data-partition epoch fence.** Across a data-partition-primary failover, a deposed primary's in-flight reassert could reorder past the new primary's release and re-establish a committed claim for a deleted record. `UniqueReassertRequest`/`UniqueReleaseRequest` now carry the data-partition epoch (wire version 2); the value site keeps a per-data-partition high-water mark and rejects reasserts below it, while releases always apply (they only touch their own record's claim) and bump the mark. The design is model-checked in `specs/ClusterUniqueReconcilerFence.tla`. A mixed-version cluster during a rolling upgrade is a known limitation.
+- **Unique reassert/release carry a data-partition epoch fence.** Across a data-partition-primary failover, a deposed primary's in-flight reassert could reorder past the new primary's release and re-establish a committed claim for a deleted record. `UniqueReassertRequest`/`UniqueReleaseRequest` now carry the data-partition epoch (wire version 2); the value site keeps a per-data-partition high-water mark and rejects reasserts below it, while releases always apply (they only touch their own record's claim) and bump the mark. The design is model-checked in `specs/ClusterUniqueReconcilerFence.tla`. For rolling upgrades, a version-2 node decodes a version-1 sender's reassert/release by treating it as unfenced (epoch 0), so mixed-version messages are applied rather than dropped.
+
+## 2026-07-12 — mqdb-cli 0.8.16, mqdb-cluster 0.4.1, mqdb-core 0.7.5
 
 ### Fixed
 
