@@ -850,7 +850,7 @@ impl<T: ClusterTransport> NodeController<T> {
         match self.db_delete_prepare(entity, id) {
             Ok((db_entity, write)) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data);
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone());
                 let outbox = build_change_event_outbox(&event);
                 if let Some(cas) = cascade {
                     self.db_commit_with_cascade(write, outbox.clone(), cas)
@@ -858,6 +858,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 } else {
                     self.db_commit(write, outbox.clone()).await;
                 }
+                self.release_unique_for_deleted_record(entity, id, &data)
+                    .await;
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
                 if let Some(cas) = cascade {
@@ -978,9 +980,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
                         let data: Value =
                             serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                        let event = ChangeEvent::delete(entity.clone(), id.clone(), data);
+                        let event = ChangeEvent::delete(entity.clone(), id.clone(), data.clone());
                         let outbox = build_change_event_outbox(&event);
                         self.db_commit(write, outbox.clone()).await;
+                        self.release_unique_for_deleted_record(entity, id, &data)
+                            .await;
                         self.publish_and_deliver_change_event(event, &outbox.operation_id)
                             .await;
                     }
@@ -1045,9 +1049,12 @@ impl<T: ClusterTransport> NodeController<T> {
                         if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
                             let data: Value =
                                 serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                            let event = ChangeEvent::delete(entity.clone(), id.clone(), data);
+                            let event =
+                                ChangeEvent::delete(entity.clone(), id.clone(), data.clone());
                             let outbox = build_change_event_outbox(&event);
                             self.db_commit(write, outbox.clone()).await;
+                            self.release_unique_for_deleted_record(entity, id, &data)
+                                .await;
                             self.publish_and_deliver_change_event(event, &outbox.operation_id)
                                 .await;
                         }
@@ -1541,7 +1548,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         for (f, v, target) in remote_reserved {
-            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id)
+            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id, None)
                 .await;
         }
     }

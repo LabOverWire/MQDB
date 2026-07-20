@@ -173,6 +173,12 @@ pub struct UniqueReserveParams<'a> {
 pub struct UniqueStore {
     node_id: NodeId,
     reservations: RwLock<HashMap<String, UniqueReservation>>,
+    /// Per data-partition high-water mark of the highest data-partition epoch this value site has
+    /// applied. A reassert stamped with an epoch below the mark is from a deposed data-partition
+    /// primary (superseded by a failover) and is rejected, closing the reassert/release reorder
+    /// wedge. Releases always apply (they only touch their own record's claim) but still bump the
+    /// mark. Keyed by `PartitionId::get()`; bounded by the fixed partition count.
+    fence_epochs: RwLock<HashMap<u16, u64>>,
 }
 
 impl UniqueStore {
@@ -181,6 +187,31 @@ impl UniqueStore {
         Self {
             node_id,
             reservations: RwLock::new(HashMap::new()),
+            fence_epochs: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Whether a reassert stamped with `epoch` for `data_partition` is current (>= the high-water
+    /// mark). A stale reassert from a superseded primary is rejected.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn fence_accepts(&self, data_partition: PartitionId, epoch: u64) -> bool {
+        let fences = self.fence_epochs.read().unwrap();
+        epoch >= fences.get(&data_partition.get()).copied().unwrap_or(0)
+    }
+
+    /// Raise the high-water mark for `data_partition` to `epoch` if higher. Called on every applied
+    /// reassert and every release.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn fence_bump(&self, data_partition: PartitionId, epoch: u64) {
+        let mut fences = self.fence_epochs.write().unwrap();
+        let slot = fences.entry(data_partition.get()).or_insert(0);
+        if epoch > *slot {
+            *slot = epoch;
         }
     }
 
@@ -1028,6 +1059,35 @@ mod tests {
         let r = store.get("users", "email", b"a@x.com").unwrap();
         assert!(r.is_committed());
         assert_eq!(r.record_id_str(), "u1");
+    }
+
+    #[test]
+    fn fence_rejects_stale_epoch_per_data_partition() {
+        let store = UniqueStore::new(node(1));
+        let p = partition(5);
+        let other = partition(6);
+
+        assert!(
+            store.fence_accepts(p, 1),
+            "an unseen partition accepts any epoch"
+        );
+        store.fence_bump(p, 2);
+        assert!(
+            !store.fence_accepts(p, 1),
+            "an epoch below the high-water mark is from a superseded data-partition primary"
+        );
+        assert!(store.fence_accepts(p, 2), "the current epoch is accepted");
+        assert!(store.fence_accepts(p, 3), "a newer epoch is accepted");
+        assert!(
+            store.fence_accepts(other, 1),
+            "the fence is tracked independently per data-partition"
+        );
+
+        store.fence_bump(p, 1);
+        assert!(
+            !store.fence_accepts(p, 1),
+            "the high-water mark never regresses"
+        );
     }
 
     #[test]

@@ -209,7 +209,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         for (f, v, target) in confirmed_remotes {
-            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id)
+            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id, None)
                 .await;
         }
     }
@@ -295,16 +295,32 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    /// Release every unique claim held by a record being deleted, so the value is reusable. The
+    /// data-partition is derived from the record id and the record id is the release key (committed
+    /// claims are keyed by `record_id`). A no-op if the entity has no unique fields. Call at every
+    /// record-delete site — direct, binary, cascade parent, and cascade child.
+    pub(crate) async fn release_unique_for_deleted_record(
+        &mut self,
+        entity: &str,
+        id: &str,
+        data: &serde_json::Value,
+    ) {
+        let partition = super::super::db::data_partition(entity, id);
+        self.release_unique_constraints(entity, id, data, partition, id, Self::current_time_ms())
+            .await;
+    }
+
     pub async fn release_unique_constraints(
         &mut self,
         entity: &str,
         _id: &str,
         data: &serde_json::Value,
-        _data_partition: PartitionId,
+        data_partition: PartitionId,
         request_id: &str,
         _now_ms: u64,
     ) {
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
+        let epoch = self.partition_map.epoch(data_partition).get();
 
         for field in &unique_fields {
             let value = match data.get(field) {
@@ -322,6 +338,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 {
                     self.write_or_forward(w).await;
                 }
+                // Releasing a committed claim raises the value site's fence so a stale reassert from
+                // a superseded data-partition primary is rejected (see ClusterUniqueReconcilerFence).
+                self.stores.db_unique.fence_bump(data_partition, epoch);
             } else if let Some(target_node) = primary {
                 self.send_unique_release_fire_and_forget(
                     target_node,
@@ -329,6 +348,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     field,
                     &value,
                     request_id,
+                    Some(data_partition),
                 )
                 .await;
             }
@@ -449,6 +469,15 @@ impl<T: ClusterTransport> NodeController<T> {
         {
             self.write_or_forward(w).await;
         }
+        // A committed-claim release (epoch > 0) raises the fence so a later stale reassert from a
+        // superseded data-partition primary is rejected; uncommitted releases stamp epoch 0.
+        if req.data_partition_epoch > 0
+            && let Some(dp) = req.data_partition()
+        {
+            self.stores
+                .db_unique
+                .fence_bump(dp, req.data_partition_epoch);
+        }
 
         let response = super::UniqueReleaseResponse::create(req.request_id, true);
         let _ = self
@@ -467,6 +496,7 @@ impl<T: ClusterTransport> NodeController<T> {
             &req.value,
             req.record_id_str(),
             data_partition,
+            req.data_partition_epoch,
         )
         .await;
     }
@@ -478,6 +508,7 @@ impl<T: ClusterTransport> NodeController<T> {
         value: &[u8],
         record_id: &str,
         data_partition: PartitionId,
+        epoch: u64,
     ) {
         let (result, write) = self.stores.reassert_replicated(
             entity,
@@ -485,6 +516,7 @@ impl<T: ClusterTransport> NodeController<T> {
             value,
             record_id,
             data_partition,
+            epoch,
             Self::current_time_ms(),
         );
         if let Some(w) = write {
@@ -565,8 +597,24 @@ impl<T: ClusterTransport> NodeController<T> {
         field: &str,
         value: &[u8],
         idempotency_key: &str,
+        fence: Option<PartitionId>,
     ) {
-        let request = UniqueReleaseRequest::create(0, entity, field, value, idempotency_key);
+        // A committed-claim release carries its data-partition + epoch so the value site raises its
+        // fence high-water mark; an uncommitted-reservation release (fence = None) stamps epoch 0,
+        // which never bumps the fence and needs no reassert protection.
+        let (data_partition, epoch) = match fence {
+            Some(dp) => (dp.get(), self.partition_map.epoch(dp).get()),
+            None => (0, 0),
+        };
+        let request = UniqueReleaseRequest::create(
+            0,
+            entity,
+            field,
+            value,
+            idempotency_key,
+            PartitionId::new(data_partition).unwrap_or(PartitionId::ZERO),
+            epoch,
+        );
 
         let _ = self
             .transport
@@ -1068,8 +1116,15 @@ impl<T: ClusterTransport> NodeController<T> {
         record_id: &str,
         data_partition: PartitionId,
     ) {
-        let request =
-            UniqueReassertRequest::create(0, entity, field, value, record_id, data_partition);
+        let request = UniqueReassertRequest::create(
+            0,
+            entity,
+            field,
+            value,
+            record_id,
+            data_partition,
+            self.partition_map.epoch(data_partition).get(),
+        );
 
         let _ = self
             .transport
@@ -1185,12 +1240,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 super::super::db::unique_partition(&item.entity, &item.field, &item.value);
             match self.partition_map.primary(unique_part) {
                 Some(primary) if primary == self.node_id => {
+                    let epoch = self.partition_map.epoch(item.data_partition).get();
                     self.reassert_unique_claim(
                         &item.entity,
                         &item.field,
                         &item.value,
                         &item.record_id,
                         item.data_partition,
+                        epoch,
                     )
                     .await;
                 }

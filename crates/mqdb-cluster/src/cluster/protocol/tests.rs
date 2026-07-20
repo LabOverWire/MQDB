@@ -411,7 +411,15 @@ fn unique_commit_response_roundtrip() {
 
 #[test]
 fn unique_release_request_roundtrip() {
-    let req = UniqueReleaseRequest::create(777, "orders", "order_id", b"ORD-001", "req-xyz");
+    let req = UniqueReleaseRequest::create(
+        777,
+        "orders",
+        "order_id",
+        b"ORD-001",
+        "req-xyz",
+        PartitionId::new(11).unwrap(),
+        4,
+    );
 
     let bytes = req.to_be_bytes();
     let (decoded, _) = UniqueReleaseRequest::try_from_be_bytes(&bytes).unwrap();
@@ -421,6 +429,8 @@ fn unique_release_request_roundtrip() {
     assert_eq!(decoded.field_str(), "order_id");
     assert_eq!(decoded.value, b"ORD-001");
     assert_eq!(decoded.idempotency_key_str(), "req-xyz");
+    assert_eq!(decoded.data_partition(), PartitionId::new(11));
+    assert_eq!(decoded.data_partition_epoch, 4);
 }
 
 #[test]
@@ -465,6 +475,7 @@ fn unique_reassert_request_roundtrip() {
         b"a@x.com",
         "u1",
         PartitionId::new(7).unwrap(),
+        6,
     );
 
     let bytes = req.to_be_bytes();
@@ -475,5 +486,73 @@ fn unique_reassert_request_roundtrip() {
     assert_eq!(decoded.field_str(), "email");
     assert_eq!(decoded.value, b"a@x.com");
     assert_eq!(decoded.record_id_str(), "u1");
+    assert_eq!(decoded.data_partition_epoch, 6);
     assert_eq!(decoded.data_partition(), PartitionId::new(7));
+}
+
+#[test]
+fn unique_release_request_decode_compat_reads_v1() {
+    let v2 = UniqueReleaseRequest::create(
+        9,
+        "users",
+        "email",
+        b"a@x.com",
+        "req-1",
+        PartitionId::new(3).unwrap(),
+        7,
+    );
+
+    // A version-1 sender's bytes are the version-2 layout minus the trailing data_partition + epoch.
+    let mut v1 = v2.to_be_bytes();
+    v1.truncate(v1.len() - 10);
+    v1[0] = 1;
+
+    let decoded =
+        UniqueReleaseRequest::decode_compat(&v1).expect("a v1 release must decode, not drop");
+    assert_eq!(decoded.entity_str(), "users");
+    assert_eq!(decoded.field_str(), "email");
+    assert_eq!(decoded.value, b"a@x.com");
+    assert_eq!(decoded.idempotency_key_str(), "req-1");
+    assert_eq!(
+        decoded.data_partition_epoch, 0,
+        "a v1 sender is treated as unfenced"
+    );
+    assert_eq!(decoded.data_partition, 0);
+
+    // A version-2 message still decodes with its fields intact.
+    let d2 = UniqueReleaseRequest::decode_compat(&v2.to_be_bytes()).unwrap();
+    assert_eq!(d2.data_partition_epoch, 7);
+    assert_eq!(d2.data_partition, 3);
+}
+
+#[test]
+fn unique_reassert_request_decode_compat_reads_v1() {
+    let v2 = UniqueReassertRequest::create(
+        5,
+        "users",
+        "email",
+        b"a@x.com",
+        "u1",
+        PartitionId::new(4).unwrap(),
+        6,
+    );
+
+    // A version-1 reassert already carried data_partition; only the trailing epoch is missing.
+    let mut v1 = v2.to_be_bytes();
+    v1.truncate(v1.len() - 8);
+    v1[0] = 1;
+
+    let decoded =
+        UniqueReassertRequest::decode_compat(&v1).expect("a v1 reassert must decode, not drop");
+    assert_eq!(decoded.entity_str(), "users");
+    assert_eq!(decoded.record_id_str(), "u1");
+    assert_eq!(
+        decoded.data_partition(),
+        PartitionId::new(4),
+        "a v1 sender's data_partition is preserved"
+    );
+    assert_eq!(
+        decoded.data_partition_epoch, 0,
+        "a v1 sender is treated as unfenced"
+    );
 }

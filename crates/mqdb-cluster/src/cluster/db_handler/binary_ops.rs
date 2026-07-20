@@ -13,6 +13,7 @@ use super::super::node_controller::NodeController;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use bebytes::BeBytes;
+use serde_json::Value;
 
 #[allow(clippy::unused_self)]
 impl DbRequestHandler {
@@ -161,7 +162,13 @@ impl DbRequestHandler {
         }
 
         match controller.db_delete(entity, id).await {
-            Ok(db_entity) => DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes(),
+            Ok(db_entity) => {
+                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+                controller
+                    .release_unique_for_deleted_record(entity, id, &data)
+                    .await;
+                DbResponse::ok(&db_entity.to_be_bytes()).to_be_bytes()
+            }
             Err(db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()
             }

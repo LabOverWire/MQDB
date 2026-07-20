@@ -238,10 +238,12 @@ pub struct UniqueReleaseRequest {
     pub idempotency_key_len: u16,
     #[FromField(idempotency_key_len)]
     pub idempotency_key: Vec<u8>,
+    pub data_partition: u16,
+    pub data_partition_epoch: u64,
 }
 
 impl UniqueReleaseRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -251,6 +253,8 @@ impl UniqueReleaseRequest {
         field: &str,
         value: &[u8],
         idempotency_key: &str,
+        data_partition: PartitionId,
+        data_partition_epoch: u64,
     ) -> Self {
         Self {
             version: Self::VERSION,
@@ -263,6 +267,29 @@ impl UniqueReleaseRequest {
             value: value.to_vec(),
             idempotency_key_len: idempotency_key.len() as u16,
             idempotency_key: idempotency_key.as_bytes().to_vec(),
+            data_partition: data_partition.get(),
+            data_partition_epoch,
+        }
+    }
+
+    #[must_use]
+    pub fn data_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.data_partition)
+    }
+
+    /// Decode across the version-1 → version-2 wire change. A version-1 sender omits the trailing
+    /// `data_partition` (u16) + `data_partition_epoch` (u64), so zero-fill them (epoch 0 = unfenced,
+    /// never bumps the fence) instead of dropping the message during a rolling upgrade.
+    #[must_use]
+    pub fn decode_compat(bytes: &[u8]) -> Option<Self> {
+        let decode = |b: &[u8]| Self::try_from_be_bytes(b).ok().map(|(r, _)| r);
+        if bytes.first().copied() == Some(1) {
+            let mut padded = Vec::with_capacity(bytes.len() + 10);
+            padded.extend_from_slice(bytes);
+            padded.extend_from_slice(&[0u8; 10]);
+            decode(&padded)
+        } else {
+            decode(bytes)
         }
     }
 
@@ -324,10 +351,11 @@ pub struct UniqueReassertRequest {
     #[FromField(record_id_len)]
     pub record_id: Vec<u8>,
     pub data_partition: u16,
+    pub data_partition_epoch: u64,
 }
 
 impl UniqueReassertRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -338,6 +366,7 @@ impl UniqueReassertRequest {
         value: &[u8],
         record_id: &str,
         data_partition: PartitionId,
+        data_partition_epoch: u64,
     ) -> Self {
         Self {
             version: Self::VERSION,
@@ -351,6 +380,7 @@ impl UniqueReassertRequest {
             record_id_len: record_id.len() as u16,
             record_id: record_id.as_bytes().to_vec(),
             data_partition: data_partition.get(),
+            data_partition_epoch,
         }
     }
 
@@ -372,6 +402,22 @@ impl UniqueReassertRequest {
     #[must_use]
     pub fn data_partition(&self) -> Option<PartitionId> {
         PartitionId::new(self.data_partition)
+    }
+
+    /// Decode across the version-1 → version-2 wire change. A version-1 sender omits the trailing
+    /// `data_partition_epoch` (u64), so zero-fill it (epoch 0 = unfenced) instead of dropping the
+    /// message during a rolling upgrade.
+    #[must_use]
+    pub fn decode_compat(bytes: &[u8]) -> Option<Self> {
+        let decode = |b: &[u8]| Self::try_from_be_bytes(b).ok().map(|(r, _)| r);
+        if bytes.first().copied() == Some(1) {
+            let mut padded = Vec::with_capacity(bytes.len() + 8);
+            padded.extend_from_slice(bytes);
+            padded.extend_from_slice(&[0u8; 8]);
+            decode(&padded)
+        } else {
+            decode(bytes)
+        }
     }
 }
 
