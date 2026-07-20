@@ -13,6 +13,7 @@ impl StoreManager {
     /// Reconcile a durable record against its unique claim (record-driven repair). On a
     /// state change (`Established`/`Repaired`), returns the write to persist + replicate.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn reassert_replicated(
         &self,
         entity: &str,
@@ -20,8 +21,16 @@ impl StoreManager {
         value: &[u8],
         record_id: &str,
         data_partition: PartitionId,
+        epoch: u64,
         now: u64,
     ) -> (ReassertResult, Option<ReplicationWrite>) {
+        // Reject a reassert stamped with an epoch below the fence: it is from a data-partition
+        // primary that a failover has superseded, and applying it could re-Establish a committed
+        // claim for a record the new primary has since deleted (see ClusterUniqueReconcilerFence).
+        if !self.db_unique.fence_accepts(data_partition, epoch) {
+            return (ReassertResult::Pending, None);
+        }
+        self.db_unique.fence_bump(data_partition, epoch);
         let result = self
             .db_unique
             .reassert(entity, field, value, record_id, data_partition, now);

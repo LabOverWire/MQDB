@@ -238,10 +238,12 @@ pub struct UniqueReleaseRequest {
     pub idempotency_key_len: u16,
     #[FromField(idempotency_key_len)]
     pub idempotency_key: Vec<u8>,
+    pub data_partition: u16,
+    pub data_partition_epoch: u64,
 }
 
 impl UniqueReleaseRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -251,6 +253,8 @@ impl UniqueReleaseRequest {
         field: &str,
         value: &[u8],
         idempotency_key: &str,
+        data_partition: PartitionId,
+        data_partition_epoch: u64,
     ) -> Self {
         Self {
             version: Self::VERSION,
@@ -263,7 +267,14 @@ impl UniqueReleaseRequest {
             value: value.to_vec(),
             idempotency_key_len: idempotency_key.len() as u16,
             idempotency_key: idempotency_key.as_bytes().to_vec(),
+            data_partition: data_partition.get(),
+            data_partition_epoch,
         }
+    }
+
+    #[must_use]
+    pub fn data_partition(&self) -> Option<PartitionId> {
+        PartitionId::new(self.data_partition)
     }
 
     #[must_use]
@@ -324,10 +335,11 @@ pub struct UniqueReassertRequest {
     #[FromField(record_id_len)]
     pub record_id: Vec<u8>,
     pub data_partition: u16,
+    pub data_partition_epoch: u64,
 }
 
 impl UniqueReassertRequest {
-    pub const VERSION: u8 = 1;
+    pub const VERSION: u8 = 2;
 
     #[must_use]
     #[allow(clippy::cast_possible_truncation)]
@@ -338,6 +350,7 @@ impl UniqueReassertRequest {
         value: &[u8],
         record_id: &str,
         data_partition: PartitionId,
+        data_partition_epoch: u64,
     ) -> Self {
         Self {
             version: Self::VERSION,
@@ -351,6 +364,7 @@ impl UniqueReassertRequest {
             record_id_len: record_id.len() as u16,
             record_id: record_id.as_bytes().to_vec(),
             data_partition: data_partition.get(),
+            data_partition_epoch,
         }
     }
 

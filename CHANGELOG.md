@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-07-12 — mqdb-cli 0.8.16, mqdb-cluster 0.4.1, mqdb-core 0.7.5
+## 2026-07-19 — mqdb-cli 0.8.17, mqdb-cluster 0.4.2
+
+### Fixed
+
+- **Deleting a record now releases its unique claim (cluster mode).** A cluster-mode record delete removed only the durable record and the FK reverse index, never the record's committed unique claim, so the value was leaked permanently — a new create for it hit a conflict forever (TTL only reclaims *uncommitted* claims, and the record-driven reconciler never revisits a deleted record). Agent mode already released on delete; this closes the parity gap. Every record-delete site — direct, binary, the db_ops parent delete, and FK cascade children — now releases via a shared `release_unique_for_deleted_record` helper.
+
+### Changed
+
+- **Unique reassert/release carry a data-partition epoch fence.** Across a data-partition-primary failover, a deposed primary's in-flight reassert could reorder past the new primary's release and re-establish a committed claim for a deleted record. `UniqueReassertRequest`/`UniqueReleaseRequest` now carry the data-partition epoch (wire version 2); the value site keeps a per-data-partition high-water mark and rejects reasserts below it, while releases always apply (they only touch their own record's claim) and bump the mark. The design is model-checked in `specs/ClusterUniqueReconcilerFence.tla`. A mixed-version cluster during a rolling upgrade is a known limitation.
 
 ### Fixed
 

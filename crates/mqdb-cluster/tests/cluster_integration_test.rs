@@ -4290,6 +4290,7 @@ async fn unique_reassert_request_cross_node_establishes() {
         &value,
         "product-9",
         PartitionId::new(5).unwrap(),
+        1,
     );
 
     let node2_id = cluster.nodes[1].id;

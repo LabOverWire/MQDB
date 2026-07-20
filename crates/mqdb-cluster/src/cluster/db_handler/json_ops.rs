@@ -991,7 +991,7 @@ impl DbRequestHandler {
         match controller.db_delete_prepare(entity, id) {
             Ok((db_entity, write)) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data)
+                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone())
                     .with_sender(sender.map(str::to_string))
                     .with_client_id(client_id.map(str::to_string))
                     .with_scope(pre_delete_scope);
@@ -1003,6 +1003,9 @@ impl DbRequestHandler {
                 } else {
                     controller.db_commit(write, outbox.clone()).await;
                 }
+                controller
+                    .release_unique_for_deleted_record(entity, id, &data)
+                    .await;
                 self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                     .await;
                 if let Some(cas) = cascade {

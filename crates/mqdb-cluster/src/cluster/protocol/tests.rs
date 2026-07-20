@@ -411,7 +411,15 @@ fn unique_commit_response_roundtrip() {
 
 #[test]
 fn unique_release_request_roundtrip() {
-    let req = UniqueReleaseRequest::create(777, "orders", "order_id", b"ORD-001", "req-xyz");
+    let req = UniqueReleaseRequest::create(
+        777,
+        "orders",
+        "order_id",
+        b"ORD-001",
+        "req-xyz",
+        PartitionId::new(11).unwrap(),
+        4,
+    );
 
     let bytes = req.to_be_bytes();
     let (decoded, _) = UniqueReleaseRequest::try_from_be_bytes(&bytes).unwrap();
@@ -421,6 +429,8 @@ fn unique_release_request_roundtrip() {
     assert_eq!(decoded.field_str(), "order_id");
     assert_eq!(decoded.value, b"ORD-001");
     assert_eq!(decoded.idempotency_key_str(), "req-xyz");
+    assert_eq!(decoded.data_partition(), PartitionId::new(11));
+    assert_eq!(decoded.data_partition_epoch, 4);
 }
 
 #[test]
@@ -465,6 +475,7 @@ fn unique_reassert_request_roundtrip() {
         b"a@x.com",
         "u1",
         PartitionId::new(7).unwrap(),
+        6,
     );
 
     let bytes = req.to_be_bytes();
@@ -475,5 +486,6 @@ fn unique_reassert_request_roundtrip() {
     assert_eq!(decoded.field_str(), "email");
     assert_eq!(decoded.value, b"a@x.com");
     assert_eq!(decoded.record_id_str(), "u1");
+    assert_eq!(decoded.data_partition_epoch, 6);
     assert_eq!(decoded.data_partition(), PartitionId::new(7));
 }

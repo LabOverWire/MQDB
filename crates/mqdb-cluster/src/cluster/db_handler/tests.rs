@@ -546,6 +546,51 @@ async fn json_delete_allowed_for_owner() {
 }
 
 #[tokio::test]
+async fn delete_releases_unique_claim() {
+    use super::super::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+        .await
+        .unwrap();
+
+    // A durable record owning a committed unique claim, as it would be after a create+commit.
+    let data_bytes = serde_json::to_vec(&serde_json::json!({"email": "a@x.com"})).unwrap();
+    let rec = ctrl
+        .db_create("users", "u1", &data_bytes, 1000)
+        .await
+        .unwrap();
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+    ctrl.stores()
+        .db_unique
+        .reassert("users", "email", &value, "u1", rec.partition(), 1000);
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_some(),
+        "committed claim exists before delete"
+    );
+
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let resp = handler
+        .handle_publish(&mut ctrl, "$DB/users/u1/delete", &[], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&resp.payload)["data"]["deleted"], true);
+
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_none(),
+        "deleting the record must release its committed unique claim, else the value is wedged \
+         forever (TTL never reclaims a committed claim)"
+    );
+}
+
+#[tokio::test]
 async fn json_update_bypasses_ownership_when_no_sender() {
     let node1 = NodeId::validated(1).unwrap();
     let ownership = ownership_config("diagrams", "userId");
@@ -1295,6 +1340,73 @@ async fn fk_delete_cascade_removes_children() {
     assert!(ctrl.db_get("users", "u1").is_none());
     assert!(ctrl.db_get("posts", "p1").is_none());
     assert!(ctrl.db_get("posts", "p2").is_none());
+}
+
+#[tokio::test]
+async fn cascade_delete_releases_child_unique_claim() {
+    use super::super::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    ctrl.db_create(
+        "users",
+        "u1",
+        &serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap(),
+        1000,
+    )
+    .await
+    .unwrap();
+
+    let post = serde_json::to_vec(
+        &serde_json::json!({"title": "P1", "author_id": "u1", "slug": "post-1"}),
+    )
+    .unwrap();
+    let rec = ctrl.db_create("posts", "p1", &post, 1000).await.unwrap();
+
+    // The child post owns a committed unique claim on its slug, as it would after create+commit.
+    let slug = serde_json::to_vec(&serde_json::json!("post-1")).unwrap();
+    ctrl.stores()
+        .db_unique
+        .reassert("posts", "slug", &slug, "p1", rec.partition(), 1000);
+    assert!(ctrl.stores().unique_get("posts", "slug", &slug).is_some());
+
+    ctrl.constraint_add(&ClusterConstraint::unique("posts", "posts_slug", "slug"))
+        .await
+        .unwrap();
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    ))
+    .await
+    .unwrap();
+
+    let resp = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/users/u1/delete",
+            &[],
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&resp.payload)["data"]["deleted"], true);
+
+    assert!(ctrl.db_get("posts", "p1").is_none(), "child cascaded away");
+    assert!(
+        ctrl.stores().unique_get("posts", "slug", &slug).is_none(),
+        "cascade-deleting a child must release its committed unique claim, else its value is wedged"
+    );
 }
 
 #[tokio::test]

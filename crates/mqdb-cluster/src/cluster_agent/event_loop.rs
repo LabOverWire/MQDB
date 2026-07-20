@@ -901,13 +901,15 @@ async fn execute_local_cascade_work(
                         let event = mqdb_core::events::ChangeEvent::delete(
                             entity.clone(),
                             id.clone(),
-                            data,
+                            data.clone(),
                         );
                         let outbox =
                             crate::cluster::node_controller::db_ops::build_change_event_outbox(
                                 &event,
                             );
                         ctrl.db_commit(write, outbox.clone()).await;
+                        ctrl.release_unique_for_deleted_record(entity, id, &data)
+                            .await;
                         ctrl.publish_and_deliver_change_event(event, &outbox.operation_id)
                             .await;
                     }
