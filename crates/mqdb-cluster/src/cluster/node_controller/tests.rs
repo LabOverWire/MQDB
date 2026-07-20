@@ -25,7 +25,7 @@ fn create_test_controller(
 }
 
 /// Establish the unique quorum group by placing `primary` + `replicas` in the (replicated)
-/// partition map on partition 5 — the source `unique_quorum_group` now derives membership from.
+/// partition map on partition 5 — the source `unique_fanout_group` now derives membership from.
 fn set_unique_group(
     ctrl: &mut NodeController<MockTransport>,
     primary: NodeId,
@@ -432,7 +432,7 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
 }
 
 #[tokio::test]
-async fn unique_quorum_group_derives_from_map_not_heartbeat_growth() {
+async fn unique_fanout_group_derives_from_map_not_heartbeat_growth() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
@@ -440,20 +440,126 @@ async fn unique_quorum_group_derives_from_map_not_heartbeat_growth() {
 
     // Membership comes from the replicated partition map: {node1, node2}.
     set_unique_group(&mut ctrl, node1, &[node2]);
-    assert_eq!(ctrl.unique_quorum_group(), vec![node1, node2]);
+    assert_eq!(ctrl.unique_fanout_group(), vec![node1, node2]);
 
     // A previously-unknown node appearing in the heartbeat-discovered set must NOT expand the quorum
     // basis — that local, divergent growth was the disjoint-majority oversell source.
     ctrl.register_peer(node3);
     assert_eq!(
-        ctrl.unique_quorum_group(),
+        ctrl.unique_fanout_group(),
         vec![node1, node2],
         "the quorum group derives from the replicated map, not the heartbeat-discovered node set"
     );
 
     // node3 joins the group only once consensus (the map) places it there.
     set_unique_group(&mut ctrl, node1, &[node2, node3]);
-    assert_eq!(ctrl.unique_quorum_group(), vec![node1, node2, node3]);
+    assert_eq!(ctrl.unique_fanout_group(), vec![node1, node2, node3]);
+}
+
+#[tokio::test]
+async fn unique_voter_group_falls_back_to_fanout_before_founding() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
+
+    // With no voter set established yet, the voter group falls back to the full fan-out group.
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2, node3]);
+    assert_eq!(ctrl.unique_majority(), 2);
+    assert!(ctrl.is_unique_voter(node3));
+}
+
+#[tokio::test]
+async fn unique_voter_group_lags_membership_when_seeded() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
+
+    // A lagged voter set excludes the newly-joined node3: the seal/majority denominator stays {1,2}
+    // so node3 cannot dilute a majority away from an existing reservation's holders.
+    ctrl.seed_unique_voters([node1, node2].into_iter().collect());
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
+    assert_eq!(ctrl.unique_majority(), 2);
+    assert!(ctrl.is_unique_voter(node1));
+    assert!(!ctrl.is_unique_voter(node3));
+}
+
+#[tokio::test]
+async fn manage_unique_voters_founds_then_paces_growth() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    set_unique_group(&mut ctrl, node1, &[node2]);
+
+    // Founding takes the whole current membership at once.
+    ctrl.manage_unique_voters(true, 1, 1_000);
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
+
+    // node3 joins the membership; within the change interval the voter set does NOT grow.
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
+    ctrl.manage_unique_voters(true, 1, 2_000);
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
+
+    // After the interval it promotes exactly one learner.
+    ctrl.manage_unique_voters(
+        true,
+        1,
+        1_000 + super::unique::UNIQUE_VOTER_CHANGE_INTERVAL_MS + 1,
+    );
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2, node3]);
+}
+
+#[tokio::test]
+async fn manage_unique_voters_removes_departed_voter() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    set_unique_group(&mut ctrl, node1, &[node2, node3]);
+    ctrl.manage_unique_voters(true, 1, 1_000);
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2, node3]);
+
+    // node3 leaves the membership; after the interval it is dropped from the voter set.
+    set_unique_group(&mut ctrl, node1, &[node2]);
+    ctrl.manage_unique_voters(
+        true,
+        1,
+        1_000 + super::unique::UNIQUE_VOTER_CHANGE_INTERVAL_MS + 1,
+    );
+    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
+}
+
+#[tokio::test]
+async fn followers_do_not_manage_voters() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    set_unique_group(&mut ctrl, node1, &[node2]);
+
+    // A non-leader never establishes a voter set of its own; it adopts the leader's via heartbeat.
+    ctrl.manage_unique_voters(false, 1, 1_000);
+    ctrl.seed_unique_voters([node1].into_iter().collect());
+    ctrl.manage_unique_voters(false, 1, 2_000);
+    assert_eq!(ctrl.unique_voter_group(), vec![node1]);
+}
+
+#[test]
+fn heartbeat_round_trips_voter_set() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut hb = Heartbeat::create(node1, 1234);
+    hb.set_voters(7, 3, &[node1, node2]);
+    let bytes = hb.to_be_bytes();
+    let (decoded, consumed) = Heartbeat::try_from_be_bytes(&bytes).unwrap();
+    assert_eq!(consumed, bytes.len());
+    assert!(decoded.carries_voters());
+    assert_eq!(decoded.voter_term(), 7);
+    assert_eq!(decoded.voter_seq(), 3);
+    assert_eq!(decoded.voters(), vec![node1, node2]);
 }
 
 #[tokio::test]
