@@ -13,6 +13,10 @@ use tokio::sync::oneshot;
 const UNIQUE_RESERVE_TIMEOUT_SECS: u64 = 5;
 const UNIQUE_QUORUM_TIMEOUT_MS: u64 = 5000;
 const UNIQUE_SEAL_TIMEOUT_MS: u64 = 5000;
+/// Minimum spacing between single-node unique-voter changes. Longer than the reserve quorum timeout
+/// so any reservation outstanding across one voter change has committed (or failed) before the next,
+/// keeping every single add/remove within the "one uncarried change preserves the majority" bound.
+pub(crate) const UNIQUE_VOTER_CHANGE_INTERVAL_MS: u64 = 2 * UNIQUE_QUORUM_TIMEOUT_MS;
 
 /// One record/field reassert the reconciler will apply: enough to re-check the durable record and
 /// route the reassert to the value-partition primary.
@@ -622,13 +626,12 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    /// The quorum group for the `DB_UNIQUE` keyspace: every node that appears in the replicated
-    /// partition map (plus self). The map is consensus-agreed, so all nodes derive the same group
-    /// and it changes only through raft rebalance — unlike the heartbeat-discovered node set, which
-    /// grows locally and divergently on first contact (a source of disjoint-majority oversell). An
-    /// uninitialised map yields just this node, which is its own majority.
+    /// Every node that must RECEIVE unique writes (reserve/replicate/commit/release/seal): the full
+    /// partition-map membership (consensus-agreed, so all nodes derive the same set) plus self.
+    /// Learners are included here so they stay caught up and can be promoted — but they do NOT count
+    /// toward the majority/seal (see `unique_voter_group`). An uninitialised map yields just this node.
     #[must_use]
-    pub(crate) fn unique_quorum_group(&self) -> Vec<NodeId> {
+    pub(crate) fn unique_fanout_group(&self) -> Vec<NodeId> {
         let mut group = self.partition_map.all_nodes();
         if !group.contains(&self.node_id) {
             group.push(self.node_id);
@@ -637,10 +640,105 @@ impl<T: ClusterTransport> NodeController<T> {
         group
     }
 
-    /// Majority size for the current quorum group.
+    /// The unique VOTER set — the denominator for durability and seal quorums. A reservation is
+    /// majority-durable and a seal learns it only against these nodes, so a newly-joined node is
+    /// excluded until the leader has carried outstanding reservations to it and promoted it. Filtered
+    /// to current membership so a not-yet-removed departed voter cannot inflate the denominator.
+    /// Before the leader establishes a voter set (empty), falls back to the full fan-out group —
+    /// pre-founding there are no reservations to protect, and the leader installs the lagged set
+    /// within a tick.
+    #[must_use]
+    pub(crate) fn unique_voter_group(&self) -> Vec<NodeId> {
+        let voters = self.heartbeat.voters();
+        if voters.is_empty() {
+            return self.unique_fanout_group();
+        }
+        let members = self.partition_map.all_nodes();
+        let mut group: Vec<NodeId> = voters
+            .iter()
+            .copied()
+            .filter(|n| *n == self.node_id || members.contains(n))
+            .collect();
+        group.sort_unstable_by_key(|n| n.get());
+        group
+    }
+
+    /// Whether `node` counts toward unique quorums — a voter, or (before the voter set is
+    /// established) any fan-out member.
+    #[must_use]
+    pub(crate) fn is_unique_voter(&self, node: NodeId) -> bool {
+        self.unique_voter_group().contains(&node)
+    }
+
+    /// Majority size for the current voter group.
     #[must_use]
     pub(crate) fn unique_majority(&self) -> usize {
-        self.unique_quorum_group().len() / 2 + 1
+        self.unique_voter_group().len() / 2 + 1
+    }
+
+    /// Seed the unique-voter set directly at a fresh timestamp — test setup that bypasses the leader
+    /// tick which normally establishes voters via `manage_unique_voters`.
+    #[cfg(test)]
+    pub(crate) fn seed_unique_voters(&mut self, voters: std::collections::BTreeSet<NodeId>) {
+        let (term, seq) = self.heartbeat.voter_stamp();
+        self.heartbeat.set_voters(term.max(1), seq + 1, voters);
+    }
+
+    /// Leader-driven unique-voter management, called each tick with the current raft status. The
+    /// leader converges the voter set toward the current membership ONE node per interval: a single
+    /// add or remove keeps every outstanding reservation a majority of the voter set (so a seal still
+    /// intersects the holders), and the interval exceeds the reserve quorum timeout, so a reservation
+    /// from before a change has resolved before the next. The set is stamped `(raft_term, seq)` and
+    /// gossiped by heartbeat; followers ignore this and adopt the leader's set. Founding takes the
+    /// whole membership at once — a fresh cluster has no outstanding reservations to carry.
+    pub(crate) fn manage_unique_voters(&mut self, is_leader: bool, raft_term: u64, now: u64) {
+        if !is_leader {
+            return;
+        }
+        let members: std::collections::BTreeSet<NodeId> =
+            self.partition_map.all_nodes().into_iter().collect();
+        if members.is_empty() {
+            return;
+        }
+        let (_, stamp_seq) = self.heartbeat.voter_stamp();
+        let current: std::collections::BTreeSet<NodeId> = self.heartbeat.voters().clone();
+
+        if current.is_empty() {
+            let founding: Vec<u16> = members.iter().map(|n| n.get()).collect();
+            self.heartbeat.set_voters(raft_term, stamp_seq + 1, members);
+            self.last_voter_change_ms = now;
+            tracing::info!(term = raft_term, voters = ?founding, "founded unique voters");
+            return;
+        }
+
+        if now.saturating_sub(self.last_voter_change_ms) < UNIQUE_VOTER_CHANGE_INTERVAL_MS {
+            return;
+        }
+
+        if let Some(&departed) = current.difference(&members).next() {
+            let mut next = current;
+            next.remove(&departed);
+            self.heartbeat.set_voters(raft_term, stamp_seq + 1, next);
+            self.last_voter_change_ms = now;
+            tracing::info!(
+                term = raft_term,
+                node = departed.get(),
+                "removed unique voter"
+            );
+            return;
+        }
+
+        if let Some(&learner) = members.difference(&current).next() {
+            let mut next = current;
+            next.insert(learner);
+            self.heartbeat.set_voters(raft_term, stamp_seq + 1, next);
+            self.last_voter_change_ms = now;
+            tracing::info!(
+                term = raft_term,
+                node = learner.get(),
+                "promoted unique voter"
+            );
+        }
     }
 
     /// Stamp `write` with the value-partition epoch, bump this node's promised epoch, and fan the
@@ -670,7 +768,7 @@ impl<T: ClusterTransport> NodeController<T> {
             *promised = epoch;
         }
 
-        for node in self.unique_quorum_group() {
+        for node in self.unique_fanout_group() {
             if node != self.node_id {
                 let _ = self
                     .transport
@@ -709,7 +807,9 @@ impl<T: ClusterTransport> NodeController<T> {
         self.send_unique_replicate(write, request_id).await;
 
         let mut acks = std::collections::HashSet::new();
-        acks.insert(self.node_id);
+        if self.is_unique_voter(self.node_id) {
+            acks.insert(self.node_id);
+        }
         if acks.len() >= needed {
             let _ = tx.send(true);
         } else {
@@ -748,7 +848,9 @@ impl<T: ClusterTransport> NodeController<T> {
             claim,
         };
         let mut acks = std::collections::HashSet::new();
-        acks.insert(self.node_id);
+        if self.is_unique_voter(self.node_id) {
+            acks.insert(self.node_id);
+        }
         if acks.len() >= needed {
             self.fire_unique_quorum_completion(completion, true).await;
         } else {
@@ -853,9 +955,12 @@ impl<T: ClusterTransport> NodeController<T> {
     /// Record a group member's ack for a tracked reserve; complete it once a majority
     /// (including this node) holds the reservation.
     pub(crate) async fn record_unique_quorum_ack(&mut self, from: NodeId, request_id: u64) {
+        let from_is_voter = self.is_unique_voter(from);
         let reached = match self.pending_unique_quorum.get_mut(&request_id) {
             Some(tracker) => {
-                tracker.acks.insert(from);
+                if from_is_voter {
+                    tracker.acks.insert(from);
+                }
                 tracker.acks.len() >= tracker.needed
             }
             None => false,
@@ -986,15 +1091,18 @@ impl<T: ClusterTransport> NodeController<T> {
         let needed = self.unique_majority();
         let request_id = self.next_unique_quorum_id();
         let mut requests = Vec::new();
-        for node in self.unique_quorum_group() {
+        for node in self.unique_fanout_group() {
             if node != self.node_id {
                 let req = UniqueSealRequest::create(request_id, partition, epoch.get());
                 requests.push((node, ClusterMessage::UniqueSealRequest(req)));
             }
         }
 
+        // Only VOTER acceptances count toward the seal quorum; self counts iff it is a voter.
         let mut responses = std::collections::HashSet::new();
-        responses.insert(self.node_id);
+        if self.is_unique_voter(self.node_id) {
+            responses.insert(self.node_id);
+        }
         if responses.len() >= needed {
             self.mark_unique_sealed(partition, epoch);
         } else {
@@ -1059,14 +1167,18 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
         // Learn any reservation this promoting primary was missing before it is allowed to serve.
+        // Merge from any responder (learners may hold reservations too); only voters count to quorum.
         if !resp.reservations.is_empty()
             && let Err(e) = self.stores.db_unique.merge_for_seal(&resp.reservations)
         {
             tracing::warn!(error = ?e, "failed to merge reservations from seal response");
         }
+        let from_is_voter = self.is_unique_voter(from);
         let reached = match self.pending_unique_seals.get_mut(&resp.request_id) {
             Some(tracker) => {
-                tracker.responses.insert(from);
+                if from_is_voter {
+                    tracker.responses.insert(from);
+                }
                 tracker.responses.len() >= tracker.needed
             }
             None => false,

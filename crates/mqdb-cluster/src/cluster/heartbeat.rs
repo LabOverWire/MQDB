@@ -4,7 +4,7 @@
 use super::protocol::Heartbeat;
 use super::transport::{ClusterMessage, TransportConfig};
 use super::{NodeId, PartitionMap, PartitionRole};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -28,6 +28,9 @@ pub struct HeartbeatManager {
     nodes: HashMap<u16, NodeState>,
     last_sent: Option<u64>,
     partition_map: PartitionMap,
+    voter_term: u64,
+    voter_seq: u64,
+    voters: BTreeSet<NodeId>,
 }
 
 impl HeartbeatManager {
@@ -39,7 +42,42 @@ impl HeartbeatManager {
             nodes: HashMap::new(),
             last_sent: None,
             partition_map: PartitionMap::default(),
+            voter_term: 0,
+            voter_seq: 0,
+            voters: BTreeSet::new(),
         }
+    }
+
+    /// Install the leader-authoritative unique-voter set at `(term, seq)`, replacing the current one
+    /// iff the stamp is at least as new. Only the raft leader calls this; followers converge via the
+    /// gossip in `adopt_voters`.
+    pub fn set_voters(&mut self, term: u64, seq: u64, voters: BTreeSet<NodeId>) {
+        if (term, seq) >= (self.voter_term, self.voter_seq) {
+            self.voter_term = term;
+            self.voter_seq = seq;
+            self.voters = voters;
+        }
+    }
+
+    /// Adopt a peer's gossiped voter set iff its `(term, seq)` is strictly newer than ours. Only the
+    /// leader ever raises `(term, seq)`, so the freshest stamp cluster-wide is always the current
+    /// leader's, and every node re-gossips it each heartbeat.
+    fn adopt_voters(&mut self, term: u64, seq: u64, voters: BTreeSet<NodeId>) {
+        if (term, seq) > (self.voter_term, self.voter_seq) {
+            self.voter_term = term;
+            self.voter_seq = seq;
+            self.voters = voters;
+        }
+    }
+
+    #[must_use]
+    pub fn voters(&self) -> &BTreeSet<NodeId> {
+        &self.voters
+    }
+
+    #[must_use]
+    pub fn voter_stamp(&self) -> (u64, u64) {
+        (self.voter_term, self.voter_seq)
     }
 
     pub fn register_node(&mut self, node_id: NodeId) {
@@ -97,6 +135,9 @@ impl HeartbeatManager {
             }
         }
 
+        let voters: Vec<NodeId> = self.voters.iter().copied().collect();
+        hb.set_voters(self.voter_term, self.voter_seq, &voters);
+
         ClusterMessage::Heartbeat(hb)
     }
 
@@ -121,6 +162,11 @@ impl HeartbeatManager {
                     missed_count: 0,
                 },
             );
+        }
+
+        if heartbeat.carries_voters() {
+            let voters: BTreeSet<NodeId> = heartbeat.voters().into_iter().collect();
+            self.adopt_voters(heartbeat.voter_term(), heartbeat.voter_seq(), voters);
         }
 
         self.update_partition_map_from_heartbeat(from, heartbeat);

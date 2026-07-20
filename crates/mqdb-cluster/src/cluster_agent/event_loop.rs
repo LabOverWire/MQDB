@@ -240,6 +240,9 @@ impl ClusteredAgent {
                 );
             }
         }
+        let raft_status = self.rx_raft_status.borrow().clone();
+        ctrl.manage_unique_voters(raft_status.is_leader, raft_status.current_term, now);
+
         ctrl.transport().log_queue_stats();
         ctrl.pending_constraints().sweep_closed();
         ctrl.sweep_unique_quorum(now).await;
