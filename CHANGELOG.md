@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-21 — mqdb-cli 0.8.18, mqdb-cluster 0.4.3
+
+### Fixed
+
+- **Membership-change unique oversell closed with raft-gated voters.** A cluster membership change between a unique reserve and a post-failover seal could shift the seal majority off the reservation's holders and oversell the value — the residual documented under the prior "Unique quorum group is now consensus-consistent" entry. The unique majority/seal quorum now uses a leader-authoritative **voter set** rather than the raw partition-map membership: a newly-joined node is a learner (it receives every reserve/replicate/seal write so it stays caught up) and does not count toward the majority/seal until the leader promotes it. The leader converges the voter set toward the current membership one node per interval (longer than the reserve quorum timeout), so any single membership change keeps every outstanding reservation a majority of the voter set. Modeled in `specs/ClusterUniqueReconfigV4/V5/V6.tla` (paced single-step admission is safe; eager re-replication and unpaced changes oversell).
+- **Correlated multi-node loss fails closed instead of overselling.** A departed voter is kept in the majority/seal denominator until the leader paces it out one node per interval, rather than being dropped the instant it leaves the partition map. Dropping it immediately could shrink the denominator by more than one node at once under a correlated failure (e.g. a dual-AZ outage stripping a reservation's holder majority within one window), letting a seal reach a majority that misses the holders. A departed voter cannot ack a reserve or seal, so keeping it counted only raises the quorum bar — the seal fails closed until pacing removes the surplus.
+
+### Changed
+
+- **Heartbeat wire bumped to version 3.** Heartbeats now carry the leader's unique-voter set (`voter_term`, `voter_seq`, and the voter node ids); receivers adopt a set with a strictly newer `(term, seq)`. For rolling upgrades, the trailer is appended after the existing bitmaps and the frame is self-delimited, so a version-2 node ignores it and a version-3 node reading a version-2 heartbeat treats it as carrying no voter set (falling back to the full membership) rather than dropping it.
+
 ## 2026-07-19 — mqdb-cli 0.8.17, mqdb-cluster 0.4.2
 
 ### Fixed

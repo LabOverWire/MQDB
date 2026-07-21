@@ -1051,19 +1051,27 @@ All cluster messages follow this format (`crates/mqdb-cluster/src/cluster/mqtt_t
 | 92 | `FkReverseLookupRequest` | FK reverse lookup (delete) |
 | 93 | `FkReverseLookupResponse` | FK reverse lookup response |
 
-### 2.3 Heartbeat Message (75 bytes)
+### 2.3 Heartbeat Message (75 bytes + voter trailer, version 3)
 
-`crates/mqdb-cluster/src/cluster/protocol.rs` - BeBytes serialization:
+`crates/mqdb-cluster/src/cluster/protocol/heartbeat.rs` - hand-rolled BE serialization:
 
 ```rust
 struct Heartbeat {
-    version: u8,              // 1 byte, = 1
+    version: u8,              // 1 byte, = 3
     node_id: u16,             // 2 bytes, sender BE
     timestamp_ms: u64,        // 8 bytes, current time BE
     primary_bitmap: [u64; 4], // 32 bytes, bit N = primary for partition N (256 bits)
     replica_bitmap: [u64; 4], // 32 bytes, bit N = replica for partition N (256 bits)
+    // --- version 3 voter trailer (unique-constraint voter gossip) ---
+    voter_term: u64,          // 8 bytes, raft term the voter set was stamped at
+    voter_seq: u64,           // 8 bytes, per-term sequence; adopt strictly-newer (term, seq)
+    voter_count: u16,         // 2 bytes, number of voter node ids
+    voters: [u16; voter_count], // 2 bytes each, the leader-authoritative unique-voter set
 }
-// Total: 1 + 2 + 8 + 32 + 32 = 75 bytes
+// Fixed prefix (through the two bitmaps): 1 + 2 + 8 + 32 + 32 = 75 bytes (this is the v2 size and the
+// minimum a v3 reader accepts). A version-2 heartbeat stops here; a version-3 heartbeat appends the
+// 18-byte voter header + 2 bytes per voter. The frame is self-delimited, so a v2 reader ignores the
+// trailer and a v3 reader treats a v2 (75-byte) heartbeat as carrying no voter set.
 ```
 
 ### 2.4 ReplicationWrite Message (variable)
@@ -1218,11 +1226,15 @@ struct SnapshotComplete {
 
 ```rust
 struct Heartbeat {
-    version: u8,              // Protocol version
+    version: u8,              // Protocol version (currently 3)
     node_id: u16,             // Sender node ID
     timestamp_ms: u64,        // Sender timestamp
     primary_bitmap: [u64; 4], // 256 bits, bit N = this node is primary for partition N
     replica_bitmap: [u64; 4], // 256 bits, bit N = this node is replica for partition N
+    // version 3 trailer: leader-authoritative unique-voter gossip (see §2.3)
+    voter_term: u64,          // raft term the voter set was stamped at
+    voter_seq: u64,           // per-term sequence; receivers adopt a strictly-newer (term, seq)
+    voters: Vec<u16>,         // the unique-constraint voter set (length-prefixed u16 node ids)
 }
 ```
 

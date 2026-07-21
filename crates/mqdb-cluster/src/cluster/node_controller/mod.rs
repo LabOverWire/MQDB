@@ -651,6 +651,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
+    /// Synchronous tick used only by tests (`send_tick_output` drives the collected output). The
+    /// production cluster-agent event loop uses its own async `handle_tick`, which additionally runs
+    /// `manage_unique_voters`, `sweep_unique_quorum`, and `sweep_unique_seals` — this path does NOT,
+    /// so a test exercising unique voter management must invoke those explicitly.
     pub fn tick(&mut self, now: u64) -> TickOutput {
         let start = std::time::Instant::now();
 

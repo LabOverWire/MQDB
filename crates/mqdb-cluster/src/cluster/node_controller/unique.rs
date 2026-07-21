@@ -642,23 +642,23 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// The unique VOTER set — the denominator for durability and seal quorums. A reservation is
     /// majority-durable and a seal learns it only against these nodes, so a newly-joined node is
-    /// excluded until the leader has carried outstanding reservations to it and promoted it. Filtered
-    /// to current membership so a not-yet-removed departed voter cannot inflate the denominator.
+    /// excluded until the leader has carried outstanding reservations to it and promoted it. The set
+    /// is the leader-managed voter set verbatim: it is NOT filtered to current membership, because a
+    /// departed voter must stay in the denominator until the leader paces it out one node per
+    /// interval. Filtering it out on departure would shrink the denominator by more than one node at
+    /// once under correlated loss, defeating the single-step safety invariant (see
+    /// `ClusterUniqueReconfigV6.tla`: unpaced removal oversells). A departed voter cannot ack a
+    /// reserve or seal (it is absent from `unique_fanout_group`), so keeping it counted only raises
+    /// the quorum bar — a correlated loss fails closed rather than overselling.
     /// Before the leader establishes a voter set (empty), falls back to the full fan-out group —
-    /// pre-founding there are no reservations to protect, and the leader installs the lagged set
-    /// within a tick.
+    /// pre-founding there are no reservations to protect, and the leader installs the set within a tick.
     #[must_use]
     pub(crate) fn unique_voter_group(&self) -> Vec<NodeId> {
         let voters = self.heartbeat.voters();
         if voters.is_empty() {
             return self.unique_fanout_group();
         }
-        let members = self.partition_map.all_nodes();
-        let mut group: Vec<NodeId> = voters
-            .iter()
-            .copied()
-            .filter(|n| *n == self.node_id || members.contains(n))
-            .collect();
+        let mut group: Vec<NodeId> = voters.iter().copied().collect();
         group.sort_unstable_by_key(|n| n.get());
         group
     }

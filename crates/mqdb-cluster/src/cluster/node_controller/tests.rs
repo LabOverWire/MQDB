@@ -534,6 +534,53 @@ async fn manage_unique_voters_removes_departed_voter() {
 }
 
 #[tokio::test]
+async fn correlated_removal_does_not_collapse_voter_majority() {
+    // Finding-2 regression guard. A correlated multi-node loss must NOT instantly shrink the voter
+    // majority/seal denominator: removal is paced one node per interval (single-step safety, V6). If
+    // the denominator collapsed by 2 at once, a seal could reach a majority that misses a
+    // reservation's holder-majority and oversell (V6 unpaced). Departed voters stay counted until
+    // paced removal, so a seal must reach a majority of the FULL set — which still intersects any
+    // holder-majority — or fail closed.
+    let n = |i: u16| NodeId::validated(i).unwrap();
+    let mut ctrl = create_test_controller(n(1), MockTransport::new(n(1)));
+    set_unique_group(&mut ctrl, n(1), &[n(2), n(3), n(4), n(5)]);
+    ctrl.seed_unique_voters([n(1), n(2), n(3), n(4), n(5)].into_iter().collect());
+    assert_eq!(ctrl.unique_majority(), 3);
+    assert_eq!(
+        ctrl.unique_voter_group(),
+        vec![n(1), n(2), n(3), n(4), n(5)]
+    );
+
+    // Nodes 4 and 5 leave the partition map together (correlated failure), before the leader's paced
+    // removal has run. The voter denominator must stay at 5 (majority 3), not collapse to {1,2,3}.
+    set_unique_group(&mut ctrl, n(1), &[n(2), n(3)]);
+    assert_eq!(
+        ctrl.unique_majority(),
+        3,
+        "a correlated 2-node loss must not instantly collapse the voter majority"
+    );
+    assert_eq!(
+        ctrl.unique_voter_group(),
+        vec![n(1), n(2), n(3), n(4), n(5)],
+        "departed voters remain in the denominator until paced removal (fail-closed, not oversell)"
+    );
+
+    // The leader then paces them out one node per interval, converging to the surviving membership.
+    ctrl.manage_unique_voters(true, 1, super::unique::UNIQUE_VOTER_CHANGE_INTERVAL_MS + 1);
+    assert_eq!(
+        ctrl.unique_voter_group().len(),
+        4,
+        "exactly one departed voter is removed per interval"
+    );
+    ctrl.manage_unique_voters(
+        true,
+        1,
+        2 * super::unique::UNIQUE_VOTER_CHANGE_INTERVAL_MS + 2,
+    );
+    assert_eq!(ctrl.unique_voter_group(), vec![n(1), n(2), n(3)]);
+}
+
+#[tokio::test]
 async fn followers_do_not_manage_voters() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
