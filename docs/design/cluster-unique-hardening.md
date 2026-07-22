@@ -350,20 +350,33 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   re-check and by `project` skipping keys whose record was deleted. Tests:
   `reconcile_apply_skips_record_deleted_after_collection`,
   `project_reconcile_work_skips_key_deleted_after_gather`.
-- **Dynamic reconfiguration — quorum-group source FIXED; membership-change intersection still OPEN.**
-  `unique_quorum_group()` now derives from the **replicated partition map** (`PartitionMap::all_nodes()`
-  ∪ self), not `HeartbeatManager::registered_nodes()`. The map is consensus-agreed, so every node
-  derives the **same** group and it changes only through raft rebalance — closing the silent, divergent
-  heartbeat growth (`receive_heartbeat` inserting a previously-unknown sender) that was the disjoint-
-  majority source. `registered_nodes()` is removed. At a failover the map already holds every other
-  partition's assignment, so `all_nodes()` is the full membership when `become_primary` computes the
-  seal majority (the formation-time small-group seal is benign: no prior reservations to learn, no
-  superseded primary to fence). Tests: `unique_quorum_group_derives_from_map_not_heartbeat_growth`,
-  `PartitionMap::all_nodes` unit test.
-  **Still open:** a membership *change* that alters the majority between a reserve and its seal can in
-  principle disjoin the two majorities. Fully closing it needs joint-consensus / epoch-versioned
-  reconfiguration (overlapping old+new majorities during a transition) — the TLA models use a fixed
-  `Nodes` constant, so this transition case remains unmodeled.
+- **Dynamic reconfiguration — quorum-group source FIXED; membership-change intersection FIXED via raft-gated voters.**
+  The unique quorum was first moved off the heartbeat-discovered node set onto the **replicated partition
+  map** (`PartitionMap::all_nodes()` ∪ self), which is consensus-agreed so every node derives the same
+  group — closing the silent, divergent heartbeat growth that was the disjoint-majority source.
+  **A membership *change* between a reserve and its seal is now also closed** by gating the voter set: the
+  majority/seal denominator is a **leader-authoritative unique-voter set** (`unique_voter_group()`), a
+  subset of the fan-out membership. Writes still fan out to the whole membership (`unique_fanout_group()`),
+  so a newly-joined node stays caught up as a learner, but it does **not** count toward the majority/seal
+  until the leader promotes it. The leader converges the voter set toward the membership **one node per
+  `UNIQUE_VOTER_CHANGE_INTERVAL_MS`** (> the reserve quorum timeout), so any single membership change keeps
+  every outstanding reservation a majority of the voter set (single-step safety). The voter set is stamped
+  `(raft_term, seq)` and gossiped in the heartbeat (wire version 3); receivers adopt a strictly-newer stamp.
+  A departed voter is kept in the denominator until it is paced out (not dropped the instant it leaves the
+  map), so a correlated multi-node loss fails closed rather than collapsing the denominator and overselling.
+  Modeled: `specs/ClusterUniqueReconfigV4.tla` (the hazard survives raft liveness), `V5` (lazy admission is
+  safe, eager re-replication oversells), `V6` (the shipped paced single-step mechanism is safe, unpaced
+  oversells). Tests: the voter-set unit tests in `node_controller/tests.rs`
+  (`manage_unique_voters_*`, `unique_voter_group_*`, `correlated_removal_does_not_collapse_voter_majority`).
+  **Remaining (narrow, documented):** the voter set is in-memory only. During the window where a node's
+  voter set is empty — a fresh cluster, or a node between process restart and adopting the first
+  voter-bearing heartbeat — `unique_voter_group()` falls back to the full fan-out membership (there is
+  nothing yet to protect on a fresh cluster; a restarted node adopts the founded set within a heartbeat,
+  well inside the 3–5 s election timeout). A promoting primary that seals from that fallback while a
+  reservation is held on a smaller established voter set could in principle disjoin — a narrow, unmodeled
+  transient. Committed claims are backstopped by the record-driven reconciler; the residual is the
+  uncommitted window. Hardening options if needed: persist the voter set, or fail a seal closed on an empty
+  voter set instead of falling back. Tracked as future work, not a routine hazard.
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
@@ -412,9 +425,11 @@ partitions) ∪ `local_node` — with `unique_majority()` = `⌊|group|/2⌋ + 1
 so all nodes derive the same group and it changes only through raft rebalance; no new cross-task
 plumbing is needed (`NodeController` already holds `partition_map`). This replaces the earlier
 heartbeat-derived `registered_nodes()`, which grew locally and divergently when `receive_heartbeat` saw
-a previously-unknown sender — the disjoint-majority source. **Residual:** a membership *change* that
-shifts the majority between a reserve and its seal still needs joint-consensus / epoch-versioned
-reconfiguration to guarantee intersection — see "Open follow-ups → Dynamic reconfiguration".
+a previously-unknown sender — the disjoint-majority source. **Membership change (implemented):** a
+membership *change* that shifts the majority between a reserve and its seal is closed by the
+leader-authoritative unique-VOTER set that gates the majority/seal denominator, converged one node per
+interval so single-step changes preserve intersection — see "Open follow-ups → Dynamic reconfiguration"
+for the full mechanism and the narrow in-memory-voter fallback residual.
 
 ## 5. The hard part — abandonment vs record existence, and why B needs prevention
 
