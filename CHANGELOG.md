@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-22 — mqdb-cli 0.8.19, mqdb-cluster 0.4.4
+
+### Fixed
+
+- **Unique seal fails closed on an empty voter set (multi-node).** When a node had no established unique-voter set — a fresh cluster before the leader founds it, or a node between a process restart and adopting the gossiped set — the majority/seal denominator fell back to the full partition-map membership. A restarted promoting primary could then seal over a membership larger than the established voter set a reservation was made a majority of, miss the reservation's holders, and oversell. A multi-node cluster with no established voter set now fails closed (reserves and seals wait until the set is founded or adopted, which happens within a tick / a heartbeat) rather than falling back to the full membership. A single-node cluster still self-serves — it is trivially its own voter set, so no larger membership can hold a conflicting reservation. Modeled in `specs/ClusterUniqueReconfigV7.tla` (the full-membership fallback oversells; failing closed is safe).
+
 ## 2026-07-21 — mqdb-cli 0.8.18, mqdb-cluster 0.4.3
 
 ### Fixed

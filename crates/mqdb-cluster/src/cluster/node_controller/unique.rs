@@ -650,36 +650,53 @@ impl<T: ClusterTransport> NodeController<T> {
     /// `ClusterUniqueReconfigV6.tla`: unpaced removal oversells). A departed voter cannot ack a
     /// reserve or seal (it is absent from `unique_fanout_group`), so keeping it counted only raises
     /// the quorum bar — a correlated loss fails closed rather than overselling.
-    /// Before the leader establishes a voter set (empty), falls back to the full fan-out group —
-    /// pre-founding there are no reservations to protect, and the leader installs the set within a tick.
+    /// When the voter set is EMPTY (a fresh cluster before the leader founds it, or a node between
+    /// restart and adopting the gossiped set): a cluster where this node is the ONLY member is
+    /// trivially its own voter set — no larger membership can hold a conflicting reservation — so it
+    /// self-serves while the leader founds the set. A MULTI-node cluster with no established voter set
+    /// FAILS CLOSED (returns empty): it must not fall back to the full membership and let a restarted
+    /// promoting primary seal over a group larger than the established voter set, missing a
+    /// reservation's holders (`ClusterUniqueReconfigV7.tla`: the multi-node fallback oversells). The
+    /// leader founds the set within a tick and a restarted node adopts it within a heartbeat.
     #[must_use]
     pub(crate) fn unique_voter_group(&self) -> Vec<NodeId> {
         let voters = self.heartbeat.voters();
         if voters.is_empty() {
-            return self.unique_fanout_group();
+            let fanout = self.unique_fanout_group();
+            // `unique_fanout_group` always contains self, so len == 1 means this node is the sole
+            // member (single-node cluster); len > 1 means a multi-node cluster with no founded set.
+            return if fanout.len() <= 1 {
+                fanout
+            } else {
+                Vec::new()
+            };
         }
         let mut group: Vec<NodeId> = voters.iter().copied().collect();
         group.sort_unstable_by_key(|n| n.get());
         group
     }
 
-    /// Whether `node` counts toward unique quorums — a voter, or (before the voter set is
-    /// established) any fan-out member.
+    /// Whether `node` counts toward unique quorums (a current voter).
     #[must_use]
     pub(crate) fn is_unique_voter(&self, node: NodeId) -> bool {
         self.unique_voter_group().contains(&node)
     }
 
-    /// Majority size for the current voter group.
+    /// Majority size for the current voter group. An empty voter set has NO achievable majority
+    /// (`usize::MAX`), so reserves and seals fail closed until the set is founded or adopted.
     #[must_use]
     pub(crate) fn unique_majority(&self) -> usize {
-        self.unique_voter_group().len() / 2 + 1
+        let voters = self.unique_voter_group().len();
+        if voters == 0 {
+            usize::MAX
+        } else {
+            voters / 2 + 1
+        }
     }
 
-    /// Seed the unique-voter set directly at a fresh timestamp — test setup that bypasses the leader
-    /// tick which normally establishes voters via `manage_unique_voters`.
-    #[cfg(test)]
-    pub(crate) fn seed_unique_voters(&mut self, voters: std::collections::BTreeSet<NodeId>) {
+    /// Seed the unique-voter set directly — setup/testing that bypasses the leader tick which normally
+    /// establishes voters via `manage_unique_voters`. Stamps a strictly-newer `(term, seq)`.
+    pub fn seed_unique_voters(&mut self, voters: std::collections::BTreeSet<NodeId>) {
         let (term, seq) = self.heartbeat.voter_stamp();
         self.heartbeat.set_voters(term.max(1), seq + 1, voters);
     }
@@ -1077,6 +1094,14 @@ impl<T: ClusterTransport> NodeController<T> {
             return Vec::new();
         }
         if self.epoch(partition) != Some(epoch) {
+            return Vec::new();
+        }
+        // Fail closed on an empty voter set: a promoting primary must not seal against the full
+        // membership before it has founded or adopted the voter set (that fallback could seal over a
+        // group larger than the reservation's established voter set and miss its holders —
+        // `ClusterUniqueReconfigV7.tla`). Re-queue so the seal retries once the set arrives.
+        if self.unique_voter_group().is_empty() {
+            self.queue_unique_seal(partition, epoch);
             return Vec::new();
         }
 

@@ -41,6 +41,15 @@ fn set_unique_group(
         },
     );
     ctrl.update_partition_map(map);
+    // Found the voter set to the initial group on first setup (mirrors the leader founding voters =
+    // membership); later membership changes do not re-found, so tests that manipulate the voter set
+    // separately keep control of it. Without a voter set, reserves/seals fail closed.
+    if ctrl.unique_voter_group().is_empty() {
+        let group: std::collections::BTreeSet<NodeId> = std::iter::once(primary)
+            .chain(replicas.iter().copied())
+            .collect();
+        ctrl.seed_unique_voters(group);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -457,17 +466,46 @@ async fn unique_fanout_group_derives_from_map_not_heartbeat_growth() {
 }
 
 #[tokio::test]
-async fn unique_voter_group_falls_back_to_fanout_before_founding() {
+async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
-    let node3 = NodeId::validated(3).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
-    set_unique_group(&mut ctrl, node1, &[node2, node3]);
 
-    // With no voter set established yet, the voter group falls back to the full fan-out group.
-    assert_eq!(ctrl.unique_voter_group(), vec![node1, node2, node3]);
-    assert_eq!(ctrl.unique_majority(), 2);
-    assert!(ctrl.is_unique_voter(node3));
+    // A MULTI-node partition map exists but no voter set has been founded/adopted yet — set the map
+    // directly so the founding in `set_unique_group` does not run. With an empty voter set in a
+    // multi-node cluster the group is empty and the majority is unreachable, so reserves and seals
+    // fail closed — it does NOT fall back to the full membership (which would let a restarted
+    // promoting primary seal over a group larger than the established set and miss its holders).
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        PartitionId::new(5).unwrap(),
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node2],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    assert!(ctrl.unique_voter_group().is_empty());
+    assert_eq!(ctrl.unique_majority(), usize::MAX);
+    assert!(!ctrl.is_unique_voter(node1));
+
+    // A single-node cluster (this node is the only member) still self-serves — it is trivially its
+    // own voter set, so there is no larger membership to miss a reservation on.
+    let mut solo_ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let mut solo_map = crate::cluster::PartitionMap::default();
+    solo_map.set(
+        PartitionId::new(5).unwrap(),
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    solo_ctrl.update_partition_map(solo_map);
+    assert_eq!(solo_ctrl.unique_voter_group(), vec![node1]);
+    assert_eq!(solo_ctrl.unique_majority(), 1);
 }
 
 #[tokio::test]
@@ -767,6 +805,61 @@ async fn unique_seal_reaches_majority_on_response() {
         ctrl.unique_sealed.get(&p.get()),
         Some(&Epoch::new(2)),
         "self + one accepting member is a majority of three"
+    );
+}
+
+#[tokio::test]
+async fn empty_voter_seal_re_queues_then_completes_after_founding() {
+    // Proof that the empty-voter fail-closed seal RECOVERS (does not wedge): with no founded voter
+    // set a multi-node primary must not seal; once the leader founds the set the re-queued seal must
+    // complete. Guards against a poisoned `usize::MAX`-needed tracker leaking from the empty attempt.
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    let p = PartitionId::new(5).unwrap();
+
+    // Multi-node membership set directly so no voter set is founded (unlike `set_unique_group`).
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        p,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node2, node3],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "fail closed: a multi-node primary must not seal with no established voter set"
+    );
+    assert!(
+        !ctrl.unique_partition_sealed(p),
+        "and it must not report itself sealed while failing closed"
+    );
+
+    // The leader founds the voter set; the re-queued seal must now proceed and reach a majority.
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "the re-queued seal now runs but still needs a majority of the founded set"
+    );
+
+    let resp = UniqueSealResponse::create(1, p, 2, true, Vec::new());
+    ctrl.handle_unique_seal_response(node2, &resp);
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "the re-queued seal recovers: self + one voter is a majority of three"
     );
 }
 
