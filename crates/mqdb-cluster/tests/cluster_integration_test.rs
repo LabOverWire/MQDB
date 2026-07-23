@@ -3811,6 +3811,13 @@ async fn unique_constraint_cross_node_message_flow() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
+    // Establish the unique-voter set (what the leader founds from membership) so reserves/seals use a
+    // concrete majority; without it a multi-node cluster fails closed until the set is founded.
+    let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
+    for node in &mut cluster.nodes {
+        node.controller.seed_unique_voters(voters.clone());
+    }
+
     for node in &mut cluster.nodes {
         {
             let output = node.controller.tick(0);
@@ -3904,6 +3911,13 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         cluster.nodes[2]
             .controller
             .become_replica(p, Epoch::new(1), 0);
+    }
+
+    // Establish the unique-voter set (what the leader founds from membership) so the promotion seal
+    // has a concrete majority to reach; without it a multi-node cluster fails closed.
+    let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
+    for node in &mut cluster.nodes {
+        node.controller.seed_unique_voters(voters.clone());
     }
 
     let value = json_value_bytes("sku-1");

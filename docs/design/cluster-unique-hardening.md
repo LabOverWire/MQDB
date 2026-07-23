@@ -368,15 +368,18 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   safe, eager re-replication oversells), `V6` (the shipped paced single-step mechanism is safe, unpaced
   oversells). Tests: the voter-set unit tests in `node_controller/tests.rs`
   (`manage_unique_voters_*`, `unique_voter_group_*`, `correlated_removal_does_not_collapse_voter_majority`).
-  **Remaining (narrow, documented):** the voter set is in-memory only. During the window where a node's
-  voter set is empty — a fresh cluster, or a node between process restart and adopting the first
-  voter-bearing heartbeat — `unique_voter_group()` falls back to the full fan-out membership (there is
-  nothing yet to protect on a fresh cluster; a restarted node adopts the founded set within a heartbeat,
-  well inside the 3–5 s election timeout). A promoting primary that seals from that fallback while a
-  reservation is held on a smaller established voter set could in principle disjoin — a narrow, unmodeled
-  transient. Committed claims are backstopped by the record-driven reconciler; the residual is the
-  uncommitted window. Hardening options if needed: persist the voter set, or fail a seal closed on an empty
-  voter set instead of falling back. Tracked as future work, not a routine hazard.
+  **Empty-voter window — CLOSED (fail closed).** The voter set is in-memory only, so it is empty during
+  a window — a fresh cluster before the leader founds it, or a node between a process restart and adopting
+  the first voter-bearing heartbeat. `unique_voter_group()` previously fell back to the full fan-out
+  membership during that window; a restarted promoting primary could then seal over a membership larger
+  than the established voter set a reservation was a majority of, miss its holders, and oversell
+  (`ClusterUniqueReconfigV7.tla`: the fallback oversells). Now a MULTI-node cluster with an empty voter
+  set FAILS CLOSED — `unique_voter_group()` returns empty, `unique_majority()` is unreachable, and
+  `prepare_unique_seal` re-queues — so reserves and seals wait until the set is founded (within a tick) or
+  adopted (within a heartbeat, well inside the 3–5 s election timeout). A SINGLE-node cluster still
+  self-serves: it is trivially its own voter set, so no larger membership can hold a conflicting
+  reservation. V7 verifies fail-closed is safe. The only residual is a bounded liveness delay at
+  startup/restart (no clients/reservations on a fresh cluster; ~one heartbeat on a restart).
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
