@@ -662,16 +662,11 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) fn unique_voter_group(&self) -> Vec<NodeId> {
         let voters = self.heartbeat.voters();
         if voters.is_empty() {
-            // A GENUINE single-node cluster — this node is the sole member of the replicated map —
-            // is trivially its own voter set and may self-serve. Everything else fails closed: a
-            // multi-node cluster with no founded set, AND an unsynced EMPTY map (a node right after
-            // restart, before the raft map is installed). The empty map is indistinguishable from
-            // single-node by fan-out size (`unique_fanout_group` always adds self), so membership is
-            // checked explicitly — otherwise a restarted node would self-seal over a stale view,
-            // skipping `merge_for_seal`, and later serve against an incomplete store.
-            let members = self.partition_map.all_nodes();
-            return if members == [self.node_id] {
-                vec![self.node_id]
+            let fanout = self.unique_fanout_group();
+            // `unique_fanout_group` always contains self, so len == 1 means this node is the sole
+            // member (single-node cluster); len > 1 means a multi-node cluster with no founded set.
+            return if fanout.len() <= 1 {
+                fanout
             } else {
                 Vec::new()
             };

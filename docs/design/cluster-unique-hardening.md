@@ -368,26 +368,30 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   safe, eager re-replication oversells), `V6` (the shipped paced single-step mechanism is safe, unpaced
   oversells). Tests: the voter-set unit tests in `node_controller/tests.rs`
   (`manage_unique_voters_*`, `unique_voter_group_*`, `correlated_removal_does_not_collapse_voter_majority`).
-  **Empty-voter / unsynced-map window — CLOSED (fail closed).** The voter set is in-memory only, so it is
-  empty during a window — a fresh cluster before the leader founds it, or a node between a process restart
-  and adopting the first voter-bearing heartbeat — and a restarted node's local partition map is also empty
-  until `update_partition_map` installs the raft map. `unique_voter_group()` previously fell back to the
-  full fan-out membership whenever the voter set was empty; a promoting primary could then seal over a
-  membership larger than the established voter set a reservation was a majority of, miss its holders, and
-  oversell (`ClusterUniqueReconfigV7.tla`: the fallback oversells). Two paths reached that fallback: the
-  async seal, and the SYNCHRONOUS `seal_or_queue_unique` self-seal (which fired when an empty/unsynced map
-  made a multi-node node look single-node — `all_nodes()` empty ⇒ fan-out `{self}` ⇒ majority 1 ⇒ self-seal,
-  skipping `merge_for_seal`). Both now FAIL CLOSED: with an empty voter set, `unique_voter_group()` returns
-  `{self}` ONLY when the replicated map names this node the sole member (`all_nodes() == {self}`, a genuine
-  single-node cluster); otherwise — a multi-node cluster with no founded set, OR an unsynced empty map — it
-  returns empty, `unique_majority()` is unreachable, and both `seal_or_queue_unique` (majority ≠ 1 ⇒ queue)
-  and `prepare_unique_seal` (empty ⇒ re-queue) defer. Reserves and seals wait until the set is founded
-  (within a tick) or adopted (within a heartbeat, well inside the 3–5 s election timeout), then complete via
-  the queue/drain path — with `merge_for_seal` — so nothing wedges. A GENUINE single-node cluster still
-  self-serves. V7 verifies fail-closed is safe; the single-node self-serve exception is trivially safe (a
-  sole member has no other node that can hold a conflicting reservation). The only residual is a bounded
-  liveness delay at startup/restart (no clients on a fresh cluster; ~one tick for a single-node leader,
-  ~one heartbeat for a restarted follower).
+  **Empty-voter window — CLOSED (fail closed).** The voter set is in-memory only, so it is empty during
+  a window — a fresh cluster before the leader founds it, or a node between a process restart and adopting
+  the first voter-bearing heartbeat. `unique_voter_group()` previously fell back to the full fan-out
+  membership during that window; a restarted promoting primary could then seal over a membership larger
+  than the established voter set a reservation was a majority of, miss its holders, and oversell
+  (`ClusterUniqueReconfigV7.tla`: the fallback oversells). Now a MULTI-node cluster with an empty voter
+  set FAILS CLOSED — `unique_voter_group()` returns empty, `unique_majority()` is unreachable, and
+  `prepare_unique_seal` re-queues — so reserves and seals wait until the set is founded (within a tick) or
+  adopted (within a heartbeat, well inside the 3–5 s election timeout). A SINGLE-node cluster still
+  self-serves: it is trivially its own voter set, so no larger membership can hold a conflicting
+  reservation. V7 verifies fail-closed is safe. The only residual is a bounded liveness delay at
+  startup/restart (no clients/reservations on a fresh cluster; ~one heartbeat on a restart).
+  **Open follow-up — empty-MAP sync self-seal.** The above closes the empty-VOTER fallback. A related
+  hole is NOT yet closed: the SYNCHRONOUS `seal_or_queue_unique` self-seals when `unique_majority()==1`,
+  and an empty/unsynced local partition map (a node right after restart, before `update_partition_map`
+  installs the raft map) makes a multi-node node look single-node (`all_nodes()` empty ⇒ fan-out `{self}`
+  ⇒ majority 1 ⇒ self-seal, skipping `merge_for_seal`) — a narrow, restart-only oversell path. A guard
+  distinguishing a genuine single-node cluster (`all_nodes() == {self}`) from an empty map closes it, but
+  removing the fast self-seal exposed a real bootstrap-serving slowdown (a real 3-node cluster took
+  ~60–80 s to fully accept unique creates, because a partition can only seal once its primary has a
+  non-empty voter set, and founding is paced up from `{leader}` over ~20 s plus formation epoch churn).
+  Closing this properly needs the guard PLUS a bootstrap speed-up (safely found `voters = full membership`
+  at once on a fresh cluster — safe because there are no reservations yet — instead of pacing). Deferred
+  to a focused follow-up with its own model + real-cluster smoke.
 
 - **P2.a — Quorum group + majority helpers.** `unique_quorum_group() -> Vec<NodeId>` and
   `unique_majority(n)`. Land together with their first consumer (P2.b) to avoid dead code.
