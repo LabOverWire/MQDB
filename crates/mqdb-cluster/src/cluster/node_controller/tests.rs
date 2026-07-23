@@ -651,6 +651,10 @@ fn heartbeat_round_trips_voter_set() {
 async fn unique_reserve_completes_immediately_for_single_node_group() {
     let node1 = NodeId::validated(1).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    // A genuine single-node cluster: the replicated map names node1 the sole member (and founds the
+    // voter set), so it is its own majority. (Bare `become_primary` with no map = unsynced restart,
+    // which now fails closed.)
+    set_unique_group(&mut ctrl, node1, &[]);
     ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
 
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
@@ -670,21 +674,8 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
 
     let node1 = NodeId::validated(1).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
-    // Single-node group: become_primary seals every partition synchronously.
-    let mut map = crate::cluster::PartitionMap::default();
-    for i in 0..NUM_PARTITIONS {
-        let p = PartitionId::new(i).unwrap();
-        ctrl.become_primary(p, Epoch::new(1));
-        map.set(
-            p,
-            crate::cluster::PartitionAssignment {
-                primary: Some(node1),
-                replicas: vec![],
-                epoch: Epoch::new(1),
-            },
-        );
-    }
-    ctrl.update_partition_map(map);
+    // Single-node group (map installed before become_primary so the seal sees {self}).
+    setup_all_partitions_primary(&mut ctrl, node1);
     ctrl.stores()
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email"))
@@ -769,6 +760,8 @@ async fn unique_seal_completes_for_single_node() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     let p = PartitionId::new(5).unwrap();
 
+    // A genuine single-node cluster (map names node1 the sole member) is its own majority.
+    set_unique_group(&mut ctrl, node1, &[]);
     ctrl.become_primary(p, Epoch::new(2));
     ctrl.drain_pending_seals().await;
 
@@ -805,6 +798,83 @@ async fn unique_seal_reaches_majority_on_response() {
         ctrl.unique_sealed.get(&p.get()),
         Some(&Epoch::new(2)),
         "self + one accepting member is a majority of three"
+    );
+}
+
+#[tokio::test]
+async fn empty_voter_seal_re_queues_then_completes_after_founding() {
+    // Proof that the empty-voter fail-closed seal RECOVERS (does not wedge): with no founded voter
+    // set a multi-node primary must not seal; once the leader founds the set the re-queued seal must
+    // complete. Guards against a poisoned `usize::MAX`-needed tracker leaking from the empty attempt.
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.register_peer(node2);
+    ctrl.register_peer(node3);
+    let p = PartitionId::new(5).unwrap();
+
+    // Multi-node membership set directly so no voter set is founded (unlike `set_unique_group`).
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        p,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node2, node3],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "fail closed: a multi-node primary must not seal with no established voter set"
+    );
+    assert!(
+        !ctrl.unique_partition_sealed(p),
+        "and it must not report itself sealed while failing closed"
+    );
+
+    // The leader founds the voter set; the re-queued seal must now proceed and reach a majority.
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
+    ctrl.drain_pending_seals().await;
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "the re-queued seal now runs but still needs a majority of the founded set"
+    );
+
+    let resp = UniqueSealResponse::create(1, p, 2, true, Vec::new());
+    ctrl.handle_unique_seal_response(node2, &resp);
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        Some(&Epoch::new(2)),
+        "the re-queued seal recovers: self + one voter is a majority of three"
+    );
+}
+
+#[tokio::test]
+async fn empty_map_node_does_not_self_seal() {
+    // Finding-4 guard: a node whose partition map is not yet synced (empty `all_nodes()`, e.g. right
+    // after a restart before the raft map is installed) must NOT treat itself as a single-node group
+    // and self-seal (which would skip `merge_for_seal` and later serve against an incomplete store).
+    // A genuine single-node cluster (all_nodes() == {self}) still self-seals. An empty map is
+    // indistinguishable from single-node by fan-out size alone, so it must be checked explicitly.
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let p = PartitionId::new(5).unwrap();
+
+    // No partition map installed (all_nodes() is empty) and no voter set founded.
+    ctrl.become_primary(p, Epoch::new(2));
+    ctrl.drain_pending_seals().await;
+
+    assert_eq!(
+        ctrl.unique_sealed.get(&p.get()),
+        None,
+        "an unsynced (empty-map) node must fail closed, not self-seal"
     );
 }
 
@@ -1505,7 +1575,6 @@ fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: 
     let mut map = PartitionMap::new();
     for partition_id in 0..NUM_PARTITIONS {
         if let Some(p) = PartitionId::new(partition_id) {
-            ctrl.become_primary(p, Epoch::new(1));
             map.set(
                 p,
                 crate::cluster::PartitionAssignment {
@@ -1516,7 +1585,14 @@ fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: 
             );
         }
     }
+    // Install the map BEFORE `become_primary` so `all_nodes()` reflects the single-node membership
+    // when the seal computes its majority — otherwise the seal fails closed against the empty map.
     ctrl.update_partition_map(map);
+    for partition_id in 0..NUM_PARTITIONS {
+        if let Some(p) = PartitionId::new(partition_id) {
+            ctrl.become_primary(p, Epoch::new(1));
+        }
+    }
 }
 
 async fn setup_unique_entity_with_constraint(
