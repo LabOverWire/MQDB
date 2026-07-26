@@ -7,6 +7,32 @@ use super::{
 use crate::types::WasmBatch;
 use mqdb_core::keys::{WASM_INDEX_PREFIX, encode_constraint_key, encode_index_definition_key};
 
+fn reject_incompatible_set_null(
+    inner: &crate::types::DatabaseInner,
+    source_entity: &str,
+    source_field: &str,
+) -> Result<(), JsValue> {
+    if inner
+        .schemas
+        .get(source_entity)
+        .is_some_and(|schema| schema.fields.contains_key(source_field))
+    {
+        return Err(JsValue::from_str(&format!(
+            "on_delete=set_null requires a nullable field; '{source_field}' is declared in the '{source_entity}' schema"
+        )));
+    }
+    if inner
+        .not_null_constraints
+        .get(source_entity)
+        .is_some_and(|fields| fields.iter().any(|f| f == source_field))
+    {
+        return Err(JsValue::from_str(&format!(
+            "cannot set on_delete=set_null on {source_entity}.{source_field}: a not-null constraint exists on the field"
+        )));
+    }
+    Ok(())
+}
+
 #[wasm_bindgen(js_class = "Database")]
 impl WasmDatabase {
     /// Adds a unique constraint on the specified fields.
@@ -43,6 +69,15 @@ impl WasmDatabase {
     #[wasm_bindgen(js_name = "addNotNull")]
     pub fn add_not_null(&self, entity: String, field: String) -> Result<(), JsValue> {
         let mut inner = self.borrow_inner_mut()?;
+        if inner.foreign_keys.iter().any(|fk| {
+            fk.source_entity == entity
+                && fk.source_field == field
+                && fk.on_delete == OnDeleteAction::SetNull
+        }) {
+            return Err(JsValue::from_str(&format!(
+                "cannot add not-null constraint on {entity}.{field}: a set-null foreign key exists on the field"
+            )));
+        }
         inner
             .not_null_constraints
             .entry(entity)
@@ -71,6 +106,9 @@ impl WasmDatabase {
         };
 
         let mut inner = self.borrow_inner_mut()?;
+        if on_delete == OnDeleteAction::SetNull {
+            reject_incompatible_set_null(&inner, &source_entity, &source_field)?;
+        }
         inner.foreign_keys.push(ForeignKeyEntry {
             source_entity,
             source_field,
@@ -125,6 +163,15 @@ impl WasmDatabase {
     pub async fn add_not_null_async(&self, entity: String, field: String) -> Result<(), JsValue> {
         {
             let mut inner = self.borrow_inner_mut()?;
+            if inner.foreign_keys.iter().any(|fk| {
+                fk.source_entity == entity
+                    && fk.source_field == field
+                    && fk.on_delete == OnDeleteAction::SetNull
+            }) {
+                return Err(JsValue::from_str(&format!(
+                    "cannot add not-null constraint on {entity}.{field}: a set-null foreign key exists on the field"
+                )));
+            }
             inner
                 .not_null_constraints
                 .entry(entity.clone())
@@ -163,6 +210,9 @@ impl WasmDatabase {
 
         {
             let mut inner = self.borrow_inner_mut()?;
+            if on_delete_action == OnDeleteAction::SetNull {
+                reject_incompatible_set_null(&inner, &source_entity, &source_field)?;
+            }
             inner.foreign_keys.push(ForeignKeyEntry {
                 source_entity: source_entity.clone(),
                 source_field: source_field.clone(),
@@ -488,9 +538,9 @@ impl WasmDatabase {
         entity: &str,
         id: &str,
     ) -> Result<Vec<(String, String)>, JsValue> {
-        let fks: Vec<ForeignKeyEntry> = {
+        let (fks, schemas) = {
             let inner = self.borrow_inner()?;
-            inner.foreign_keys.clone()
+            (inner.foreign_keys.clone(), inner.schemas.clone())
         };
 
         let mut cascade_deletes = Vec::new();
@@ -522,6 +572,15 @@ impl WasmDatabase {
                             }
                         }
                         OnDeleteAction::SetNull => {
+                            if schemas
+                                .get(&fk.source_entity)
+                                .is_some_and(|s| s.fields.contains_key(&fk.source_field))
+                            {
+                                return Err(JsValue::from_str(&format!(
+                                    "on_delete=set_null would write null into typed field '{}' of '{}'; delete blocked",
+                                    fk.source_field, fk.source_entity
+                                )));
+                            }
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
                                 let data_key = format!("data/{}/{}", fk.source_entity, source_id);
                                 let existing_raw = self
@@ -658,9 +717,9 @@ impl WasmDatabase {
         entity: &str,
         id: &str,
     ) -> Result<Vec<(String, String)>, JsValue> {
-        let fks: Vec<ForeignKeyEntry> = {
+        let (fks, schemas) = {
             let inner = self.borrow_inner()?;
-            inner.foreign_keys.clone()
+            (inner.foreign_keys.clone(), inner.schemas.clone())
         };
 
         let mut cascade_deletes = Vec::new();
@@ -692,6 +751,15 @@ impl WasmDatabase {
                             }
                         }
                         OnDeleteAction::SetNull => {
+                            if schemas
+                                .get(&fk.source_entity)
+                                .is_some_and(|s| s.fields.contains_key(&fk.source_field))
+                            {
+                                return Err(JsValue::from_str(&format!(
+                                    "on_delete=set_null would write null into typed field '{}' of '{}'; delete blocked",
+                                    fk.source_field, fk.source_entity
+                                )));
+                            }
                             if let Some(source_id) = value.get("id").and_then(|v| v.as_str()) {
                                 let data_key = format!("data/{}/{}", fk.source_entity, source_id);
                                 let existing_raw =

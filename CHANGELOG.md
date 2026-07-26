@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-25 — mqdb-cli 0.8.20, mqdb-core 0.7.6, mqdb-agent 0.8.13, mqdb-cluster 0.4.5, mqdb-wasm 0.3.5
+
+### Fixed
+
+- **`on_delete=set_null` foreign keys can no longer null a typed field and corrupt the surviving record.** A `SetNull` cascade writes `null` straight into the referencing field during a parent delete, skipping schema and constraint validation. On a typed field (e.g. a `String` `author_id`) that stores a value violating the field's own schema, which then makes the surviving record un-updatable — every later update re-validates the whole record and fails on the lingering `null`. Combined with a `NotNull` constraint on the same field, the delete silently violated the constraint. Because the schema type system has no nullable flag, `set_null` on any typed field is inherently unsafe. This is now closed on every path that writes the null:
+  - **Agent — definition time.** `add_foreign_key` rejects `on_delete=set_null` on a field with a concrete (non-null) schema type or an existing `NotNull` constraint, and `add_not_null` rejects a field that already carries a `set_null` foreign key.
+  - **Agent — delete time.** The ownership-aware cascade converts a cross-owned `Cascade` child into a `set_null` (to avoid deleting another user's record); that path is a legitimate `Cascade` foreign key, so the definition-time guard cannot see it. The delete now fails closed when any `set_null` operation it produces would write `null` into a typed field, mirroring the existing `NotNull` cascade guard.
+  - **Cluster — definition time and delete time.** The cluster constraint API rejects a `set_null` foreign key on a typed field (cluster mode has no `NotNull` constraint, so only the type guard applies), and the cascade side-effect preparation fails the delete closed when a `set_null` (direct or cross-owned) would target a typed field.
+  - **WASM.** `addForeignKey`/`addForeignKeyAsync` reject `set_null` on a schema-declared field or one with a `NotNull` constraint, and `addNotNull`/`addNotNullAsync` reject a field that already carries a `set_null` foreign key.
+
+  `set_null` remains allowed on null-typed and schema-less fields, where writing `null` is valid.
+
 ## 2026-07-22 — mqdb-cli 0.8.19, mqdb-cluster 0.4.4
 
 ### Fixed

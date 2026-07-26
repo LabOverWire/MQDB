@@ -166,11 +166,23 @@ impl Database {
     /// Returns an error if field validation or persisting the constraint fails.
     #[tracing::instrument(skip(self), fields(entity = %entity, field = %field))]
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
-        use mqdb_core::constraint::{Constraint, NotNullConstraint};
+        use mqdb_core::constraint::{Constraint, NotNullConstraint, OnDeleteAction};
+        use mqdb_core::error::Error;
 
         let schema_registry = self.schema_registry.read().await;
         schema_registry.validate_fields_exist(&entity, &[field.as_str()], "not-null constraint")?;
         drop(schema_registry);
+
+        let constraint_manager = self.constraint_manager.read().await;
+        let conflicting_set_null_fk = constraint_manager.get_constraints(&entity).iter().any(
+            |c| matches!(c, Constraint::ForeignKey(fk) if fk.source_field == field && fk.on_delete == OnDeleteAction::SetNull),
+        );
+        drop(constraint_manager);
+        if conflicting_set_null_fk {
+            return Err(Error::ConstraintViolation(format!(
+                "cannot add not-null constraint on {entity}.{field}: a set-null foreign key exists on the field"
+            )));
+        }
 
         let constraint = Constraint::NotNull(NotNullConstraint::new(entity, field));
 
@@ -199,7 +211,9 @@ impl Database {
         target_field: String,
         on_delete: mqdb_core::constraint::OnDeleteAction,
     ) -> Result<()> {
-        use mqdb_core::constraint::{Constraint, ForeignKeyConstraint};
+        use mqdb_core::constraint::{Constraint, ForeignKeyConstraint, OnDeleteAction};
+        use mqdb_core::error::Error;
+        use mqdb_core::schema::FieldType;
 
         let schema_registry = self.schema_registry.read().await;
         schema_registry.validate_fields_exist(
@@ -212,7 +226,37 @@ impl Database {
             &[target_field.as_str()],
             "foreign key",
         )?;
+
+        if on_delete == OnDeleteAction::SetNull
+            && let Some(schema) = schema_registry.get_schema(&source_entity)
+            && let Some(field_def) = schema.fields.get(&source_field)
+            && field_def.field_type != FieldType::Null
+        {
+            let field_type = field_def.field_type.clone();
+            drop(schema_registry);
+            return Err(Error::SchemaViolation {
+                entity: source_entity.clone(),
+                field: source_field.clone(),
+                reason: format!(
+                    "on_delete=set_null requires a nullable (null-typed) field; '{source_field}' is typed {field_type:?}"
+                ),
+            });
+        }
         drop(schema_registry);
+
+        if on_delete == OnDeleteAction::SetNull {
+            let constraint_manager = self.constraint_manager.read().await;
+            let conflicting_not_null = constraint_manager
+                .get_constraints(&source_entity)
+                .iter()
+                .any(|c| matches!(c, Constraint::NotNull(nn) if nn.field == source_field));
+            drop(constraint_manager);
+            if conflicting_not_null {
+                return Err(Error::ConstraintViolation(format!(
+                    "cannot set on_delete=set_null on {source_entity}.{source_field}: a not-null constraint exists on the field"
+                )));
+            }
+        }
 
         let constraint = Constraint::ForeignKey(ForeignKeyConstraint::new(
             source_entity,

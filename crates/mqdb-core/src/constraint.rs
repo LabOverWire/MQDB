@@ -333,6 +333,7 @@ impl ConstraintManager {
         entity: &Entity,
         storage: &Storage,
         ownership_ctx: Option<&OwnershipContext<'_>>,
+        schema_registry: &crate::schema::SchemaRegistry,
     ) -> Result<Vec<DeleteOperation>> {
         use std::collections::HashSet;
         let mut all_operations = Vec::new();
@@ -354,7 +355,33 @@ impl ConstraintManager {
             ownership_ctx,
         )?;
 
+        for operation in &all_operations {
+            if let DeleteOperation::SetNull(op) = operation
+                && Self::set_null_violates_schema(schema_registry, &op.entity, &op.field)
+            {
+                return Err(Error::SchemaViolation {
+                    entity: op.entity.clone(),
+                    field: op.field.clone(),
+                    reason: format!(
+                        "on_delete=set_null would write null into typed field '{}'; delete blocked",
+                        op.field
+                    ),
+                });
+            }
+        }
+
         Ok(all_operations)
+    }
+
+    fn set_null_violates_schema(
+        schema_registry: &crate::schema::SchemaRegistry,
+        entity: &str,
+        field: &str,
+    ) -> bool {
+        schema_registry
+            .get_schema(entity)
+            .and_then(|schema| schema.fields.get(field))
+            .is_some_and(|field_def| field_def.field_type != crate::schema::FieldType::Null)
     }
 
     #[allow(clippy::too_many_arguments)]

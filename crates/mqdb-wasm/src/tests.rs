@@ -611,3 +611,101 @@ fn test_get_schema_preserves_default_values() {
     let status = fields.iter().find(|f| f["name"] == "status").unwrap();
     assert_eq!(status["default"], "pending");
 }
+
+#[wasm_bindgen_test]
+fn test_set_null_rejected_on_typed_field() {
+    let db = WasmDatabase::new();
+    let schema_js = json_to_js(&serde_json::json!({
+        "fields": [
+            {"name": "title", "type": "string"},
+            {"name": "author_id", "type": "string"}
+        ]
+    }));
+    db.add_schema("posts".into(), schema_js).unwrap();
+
+    let result = db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        "set_null",
+    );
+    assert!(
+        result.is_err(),
+        "set_null on a schema-declared field must be rejected"
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_set_null_rejected_when_not_null_exists() {
+    let db = WasmDatabase::new();
+    db.add_not_null("posts".into(), "author_id".into()).unwrap();
+
+    let result = db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        "set_null",
+    );
+    assert!(
+        result.is_err(),
+        "set_null must be rejected when a not-null constraint exists on the field"
+    );
+}
+
+#[wasm_bindgen_test]
+fn test_not_null_rejected_when_set_null_fk_exists() {
+    let db = WasmDatabase::new();
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        "set_null",
+    )
+    .unwrap();
+
+    let result = db.add_not_null("posts".into(), "author_id".into());
+    assert!(
+        result.is_err(),
+        "not-null must be rejected when a set-null foreign key exists on the field"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn test_set_null_delete_blocked_when_field_typed_after_fk() {
+    let db = WasmDatabase::new();
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        "set_null",
+    )
+    .unwrap();
+    let schema_js = json_to_js(&serde_json::json!({
+        "fields": [{"name": "author_id", "type": "string"}]
+    }));
+    db.add_schema("posts".into(), schema_js).unwrap();
+
+    let user =
+        serde_wasm_bindgen::to_value(&serde_json::json!({"id": "u1", "name": "Alice"})).unwrap();
+    db.create("users".into(), user).await.unwrap();
+    let post =
+        serde_wasm_bindgen::to_value(&serde_json::json!({"id": "p1", "author_id": "u1"})).unwrap();
+    db.create("posts".into(), post).await.unwrap();
+
+    let result = db.delete("users".into(), "u1".into()).await;
+    assert!(
+        result.is_err(),
+        "delete-time guard must block set_null into a typed field even when the FK predates the schema"
+    );
+
+    let stored = db.read("posts".into(), "p1".into()).await.unwrap();
+    let val: serde_json::Value = serde_wasm_bindgen::from_value(stored).unwrap();
+    assert_eq!(
+        val["author_id"], "u1",
+        "field must not be nulled by a blocked delete"
+    );
+}
