@@ -2090,7 +2090,7 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
         "a cross-owned-only cascade result must survive filtering"
     );
 
-    let effects = ctrl.prepare_fk_side_effects(&filtered);
+    let effects = ctrl.prepare_fk_side_effects(&filtered).unwrap();
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -2104,6 +2104,43 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
             CascadeSideEffect::LocalDelete { id, .. } if id == "post-bob"
         )),
         "post-bob must never be deleted"
+    );
+}
+
+#[tokio::test]
+async fn cross_owned_set_null_blocked_on_typed_field() {
+    use super::fk::{FkReverseLookupResult, filter_and_extract_cascade};
+    use crate::cluster::db::OnDeleteAction;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+    setup_owned_posts_referencing_user(&mut ctrl, node1).await;
+
+    let schema = mqdb_core::schema::Schema::new("posts").add_field(
+        mqdb_core::schema::FieldDefinition::new("author_id", mqdb_core::schema::FieldType::String),
+    );
+    ctrl.schema_register("posts", &serde_json::to_vec(&schema).unwrap())
+        .await
+        .unwrap();
+
+    let reply = FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: Vec::new(),
+        cross_owned_ids: vec!["post-bob".to_string()],
+        target_id: "u1".to_string(),
+    };
+
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(("users".to_string(), "u1".to_string()));
+    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+
+    assert!(
+        ctrl.prepare_fk_side_effects(&filtered).is_err(),
+        "cross-owned set-null on a typed field must be blocked"
     );
 }
 
@@ -2175,7 +2212,7 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
     let all = ctrl
         .collect_local_cascade("users", "u1", local_results, Some("alice"))
         .unwrap();
-    let effects = ctrl.prepare_fk_side_effects(&all);
+    let effects = ctrl.prepare_fk_side_effects(&all).unwrap();
     let has = |pred: &dyn Fn(&CascadeSideEffect) -> bool| effects.iter().any(pred);
 
     assert!(

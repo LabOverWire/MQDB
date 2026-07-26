@@ -360,11 +360,15 @@ impl Database {
             });
 
         let constraint_manager = self.constraint_manager.read().await;
-        let delete_ops = constraint_manager.validate_delete(
-            &existing_entity,
-            &self.storage,
-            ownership_ctx.as_ref(),
-        )?;
+        let delete_ops = {
+            let schema_registry = self.schema_registry.read().await;
+            constraint_manager.validate_delete(
+                &existing_entity,
+                &self.storage,
+                ownership_ctx.as_ref(),
+                &schema_registry,
+            )?
+        };
 
         let mut batch = self.storage.batch();
 

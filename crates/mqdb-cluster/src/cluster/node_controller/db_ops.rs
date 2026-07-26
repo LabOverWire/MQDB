@@ -829,7 +829,10 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(results) => results,
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
-        let effects = self.prepare_fk_side_effects(&all_results);
+        let effects = match self.prepare_fk_side_effects(&all_results) {
+            Ok(effects) => effects,
+            Err(msg) => return (Self::json_error(409, &msg), None),
+        };
         let (cascade, ack_receivers) = self
             .execute_fk_side_effects(&effects, request.sender.as_deref())
             .await;
@@ -886,7 +889,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) fn prepare_fk_side_effects(
         &self,
         results: &[super::fk::FkReverseLookupResult],
-    ) -> Vec<CascadeSideEffect> {
+    ) -> Result<Vec<CascadeSideEffect>, String> {
         use crate::cluster::db::{OnDeleteAction, data_partition};
         let mut effects = Vec::new();
         for r in results {
@@ -908,18 +911,42 @@ impl<T: ClusterTransport> NodeController<T> {
                             });
                         }
                     }
+                    if !r.cross_owned_ids.is_empty() {
+                        self.reject_typed_set_null(&r.source_entity, &r.source_field)?;
+                    }
                     for cross_id in &r.cross_owned_ids {
                         self.push_set_null_effect(&mut effects, r, cross_id);
                     }
                 }
                 OnDeleteAction::SetNull => {
+                    if !r.referencing_ids.is_empty() {
+                        self.reject_typed_set_null(&r.source_entity, &r.source_field)?;
+                    }
                     for child_id in &r.referencing_ids {
                         self.push_set_null_effect(&mut effects, r, child_id);
                     }
                 }
             }
         }
-        effects
+        Ok(effects)
+    }
+
+    fn reject_typed_set_null(&self, entity: &str, field: &str) -> Result<(), String> {
+        let Some(cluster_schema) = self.schema_get(entity) else {
+            return Ok(());
+        };
+        let Ok(schema) = serde_json::from_slice::<mqdb_core::schema::Schema>(&cluster_schema.data)
+        else {
+            return Ok(());
+        };
+        if let Some(field_def) = schema.fields.get(field)
+            && field_def.field_type != mqdb_core::schema::FieldType::Null
+        {
+            return Err(format!(
+                "on_delete=set_null would write null into typed field '{field}' of '{entity}'; delete blocked"
+            ));
+        }
+        Ok(())
     }
 
     fn push_set_null_effect(
@@ -1770,7 +1797,24 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
 
-        let effects = self.prepare_fk_side_effects(&side_effects);
+        let effects = match self.prepare_fk_side_effects(&side_effects) {
+            Ok(effects) => effects,
+            Err(msg) => {
+                if !response_topic.is_empty() {
+                    let response = JsonDbResponse::new(
+                        0,
+                        Self::json_error(409, &msg),
+                        response_topic,
+                        correlation_data,
+                    );
+                    let _ = self
+                        .transport
+                        .send(from, ClusterMessage::JsonDbResponse(response))
+                        .await;
+                }
+                return;
+            }
+        };
         let (cascade, ack_receivers) = self
             .execute_fk_side_effects(&effects, sender.as_deref())
             .await;

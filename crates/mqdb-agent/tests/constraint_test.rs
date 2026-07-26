@@ -1809,3 +1809,191 @@ async fn test_owner_aware_cascade_mixed_ownership_multilevel() {
         "alice's subtask should cascade from alice's task"
     );
 }
+
+#[tokio::test]
+async fn set_null_fk_rejected_on_typed_field() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let posts_schema = Schema::new("posts")
+        .add_field(FieldDefinition::new("title", FieldType::String))
+        .add_field(FieldDefinition::new("author_id", FieldType::String));
+    db.add_schema(posts_schema).await.unwrap();
+
+    let result = db
+        .add_foreign_key(
+            "posts".into(),
+            "author_id".into(),
+            "users".into(),
+            "id".into(),
+            OnDeleteAction::SetNull,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::SchemaViolation { .. })),
+        "set_null on a String-typed field must be rejected at definition time; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn set_null_fk_allowed_on_null_typed_field() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let posts_schema = Schema::new("posts")
+        .add_field(FieldDefinition::new("title", FieldType::String))
+        .add_field(FieldDefinition::new("author_id", FieldType::Null));
+    db.add_schema(posts_schema).await.unwrap();
+
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        OnDeleteAction::SetNull,
+    )
+    .await
+    .expect("set_null is compatible with a null-typed field");
+}
+
+#[tokio::test]
+async fn set_null_fk_allowed_on_schemaless_entity() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        OnDeleteAction::SetNull,
+    )
+    .await
+    .expect("set_null is allowed when the source entity has no schema");
+}
+
+#[tokio::test]
+async fn set_null_fk_rejected_when_not_null_exists() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    db.add_not_null("posts".into(), "author_id".into())
+        .await
+        .unwrap();
+
+    let result = db
+        .add_foreign_key(
+            "posts".into(),
+            "author_id".into(),
+            "users".into(),
+            "id".into(),
+            OnDeleteAction::SetNull,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(Error::ConstraintViolation(_))),
+        "set_null must be rejected when a not-null constraint exists on the field; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn not_null_rejected_when_set_null_fk_exists() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    db.add_foreign_key(
+        "posts".into(),
+        "author_id".into(),
+        "users".into(),
+        "id".into(),
+        OnDeleteAction::SetNull,
+    )
+    .await
+    .unwrap();
+
+    let result = db.add_not_null("posts".into(), "author_id".into()).await;
+
+    assert!(
+        matches!(result, Err(Error::ConstraintViolation(_))),
+        "not-null must be rejected when a set-null foreign key exists on the field; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn cross_owned_cascade_setnull_blocked_on_typed_field() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+
+    let ownership = OwnershipConfig::parse("projects=userId,tasks=userId").unwrap();
+
+    let tasks_schema = Schema::new("tasks")
+        .add_field(FieldDefinition::new("name", FieldType::String))
+        .add_field(FieldDefinition::new("userId", FieldType::String))
+        .add_field(FieldDefinition::new("projectId", FieldType::String));
+    db.add_schema(tasks_schema).await.unwrap();
+
+    let project = json!({"name": "P1", "userId": "alice"});
+    let created_project = db
+        .create(
+            "projects".into(),
+            project,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let project_id = created_project["id"].as_str().unwrap().to_string();
+
+    db.add_foreign_key(
+        "tasks".into(),
+        "projectId".into(),
+        "projects".into(),
+        "id".into(),
+        OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+
+    let task = json!({"name": "T1", "userId": "bob", "projectId": project_id.clone()});
+    let created_task = db
+        .create(
+            "tasks".into(),
+            task,
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    let task_id = created_task["id"].as_str().unwrap().to_string();
+
+    let result = db
+        .delete(
+            "projects".into(),
+            project_id.clone(),
+            Some("alice"),
+            None,
+            &ScopeConfig::default(),
+            &ownership,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(Error::SchemaViolation { .. })),
+        "cross-owned cascade must not null a typed field; delete must be blocked, got {result:?}"
+    );
+
+    let surviving = db
+        .read("tasks".into(), task_id, vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(
+        surviving["projectId"],
+        json!(project_id),
+        "cross-owned task's FK field must be untouched after the blocked delete"
+    );
+}

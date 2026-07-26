@@ -351,6 +351,20 @@ impl ClusteredAgent {
         )
     }
 
+    async fn set_null_schema_conflict(&self, entity: &str, field: &str) -> Option<String> {
+        let cluster_schema = self.controller.read().await.schema_get(entity)?;
+        let schema: mqdb_core::schema::Schema =
+            serde_json::from_slice(&cluster_schema.data).ok()?;
+        let field_def = schema.fields.get(field)?;
+        if field_def.field_type == mqdb_core::schema::FieldType::Null {
+            return None;
+        }
+        Some(format!(
+            "on_delete=set_null requires a nullable (null-typed) field; '{field}' is typed {:?}",
+            field_def.field_type
+        ))
+    }
+
     async fn handle_constraint_add(&self, entity: &str, payload: &[u8]) -> Response {
         let constraint_def: serde_json::Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
@@ -429,6 +443,13 @@ impl ClusteredAgent {
                         format!("invalid on_delete value: {on_delete_str}"),
                     );
                 };
+
+                if on_delete == crate::cluster::db::OnDeleteAction::SetNull
+                    && let Some(msg) = self.set_null_schema_conflict(entity, field).await
+                {
+                    return Response::error(ErrorCode::BadRequest, msg);
+                }
+
                 let constraint = crate::cluster::db::ClusterConstraint::foreign_key(
                     entity,
                     name,
