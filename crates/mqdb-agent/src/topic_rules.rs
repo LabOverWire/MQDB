@@ -46,6 +46,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
+        pattern: "$DB/u/#",
+        tier: ProtectionTier::ReadOnly,
+    },
+    TopicRule {
         pattern: "$SYS/mqdb/cluster/#",
         tier: ProtectionTier::AdminRequired,
     },
@@ -371,6 +375,26 @@ mod tests {
         assert_eq!(
             check_topic_access("$DB/users/events/created", true, true),
             Err(BlockReason::ReadOnlyTopic)
+        );
+    }
+
+    #[test]
+    fn check_access_user_namespace_read_only() {
+        assert_eq!(
+            check_topic_access("$DB/u/bob/events/created", true, false),
+            Err(BlockReason::ReadOnlyTopic)
+        );
+        assert_eq!(
+            check_topic_access("$DB/u/bob/events/diagrams/1", true, false),
+            Err(BlockReason::ReadOnlyTopic)
+        );
+        assert_eq!(
+            check_topic_access("$DB/u/bob/events/created", true, true),
+            Err(BlockReason::ReadOnlyTopic)
+        );
+        assert_eq!(
+            check_topic_access("$DB/u/bob/events/created", false, false),
+            Ok(())
         );
     }
 
