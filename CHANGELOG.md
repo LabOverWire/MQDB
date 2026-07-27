@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-26 — mqdb-cli 0.8.21, mqdb-agent 0.8.14
+
+### Fixed
+
+- **Per-user event namespace `$DB/u/#` is now publish-protected unconditionally.** The per-user publish/subscribe guards were gated on `--scoped-events`; with the flag off, no rule matched `$DB/u/...` and any authenticated user could publish to (or subscribe to) another user's `$DB/u/{anyone}/events/#`. A static `$DB/u/#` read-only rule now blocks all publishes to the namespace regardless of the flag (the internal service still publishes there); the cross-user subscribe restriction remains flag-gated, since scoped events are the only feature that uses the namespace.
+- **Grantees are notified when a resource is shared or unshared (scoped events).** Under `--scoped-events`, sharing a diagram with a user emitted no event the grantee could see — the `_shares` change event is a Global entity and broadcast to the admin-only `$DB/_shares/events/...` topic. Share grant/revoke events are now scoped to the affected grantee's `$DB/u/{grantee}/events/_shares/{id}` namespace (a `_shares` event's recipient is its grantee), so a client learns of gained or lost access without polling. With scoped events off, `_shares` events stay admin-only as before.
+
 ## 2026-07-25 — mqdb-cli 0.8.20, mqdb-core 0.7.6, mqdb-agent 0.8.13, mqdb-cluster 0.4.5, mqdb-wasm 0.3.5
 
 ### Fixed

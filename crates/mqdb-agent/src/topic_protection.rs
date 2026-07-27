@@ -605,4 +605,29 @@ mod tests {
                 .await
         );
     }
+
+    #[tokio::test]
+    async fn user_namespace_publish_blocked_even_with_scoped_events_off() {
+        let provider = create_test_provider(HashSet::new());
+        assert!(
+            !provider
+                .authorize_publish("c", Some("alice"), "$DB/u/bob/events/diagrams/1")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_publish("c", Some("alice"), "$DB/u/alice/events/diagrams/1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_service_publishes_user_namespace_with_scoped_events_off() {
+        let provider = create_test_provider_with_internal("mqdb-internal");
+        assert!(
+            provider
+                .authorize_publish("c", Some("mqdb-internal"), "$DB/u/alice/events/diagrams/1")
+                .await
+        );
+    }
 }

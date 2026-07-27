@@ -369,6 +369,16 @@ impl Database {
         id: &str,
         data: Option<&Value>,
     ) -> Result<Option<Vec<String>>> {
+        if entity == SHARES_ENTITY {
+            let grantee = data
+                .and_then(|d| d.get("grantee"))
+                .and_then(Value::as_str)
+                .filter(|g| !g.is_empty());
+            return Ok(Some(
+                grantee.map(|g| vec![g.to_string()]).unwrap_or_default(),
+            ));
+        }
+
         let (res_entity, res_id, owner) = if let Some(owner_field) = ownership.owner_field(entity) {
             let owner = data
                 .and_then(|d| d.get(owner_field))

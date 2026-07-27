@@ -2724,6 +2724,51 @@ async fn test_event_recipients_owner_grantees_and_global() {
 }
 
 #[tokio::test]
+async fn test_share_events_route_to_grantee_namespace() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+    let recipients = db
+        .event_recipients(
+            &ownership,
+            mqdb_core::types::SHARES_ENTITY,
+            "share-1",
+            Some(&json!({
+                "resource_entity": "diagrams",
+                "resource_id": "d1",
+                "grantee": "bob",
+                "permission": "view",
+            })),
+        )
+        .await
+        .unwrap()
+        .expect("a share grant/revoke is scoped to its grantee");
+    assert_eq!(
+        recipients,
+        vec!["bob".to_string()],
+        "share event must reach only the grantee's per-user namespace"
+    );
+
+    let pending = db
+        .event_recipients(
+            &ownership,
+            mqdb_core::types::SHARES_ENTITY,
+            "share-2",
+            Some(&json!({"resource_entity": "diagrams", "resource_id": "d1", "grantee": ""})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        pending,
+        Some(vec![]),
+        "a share with no resolved grantee has no recipients and is not broadcast"
+    );
+}
+
+#[tokio::test]
 async fn test_cascade_delete_events_carry_recipients() {
     use mqdb_core::{OnDeleteAction, Request, Response};
     use std::collections::HashMap;
