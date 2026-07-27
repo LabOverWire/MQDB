@@ -477,10 +477,12 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | Tier | Topics | Behavior |
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
-| ReadOnly | `$SYS/#` | Subscribe allowed, publish denied |
+| ReadOnly | `$SYS/#`, `$DB/+/events/#`, `$DB/u/#` | Subscribe allowed, publish denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_verify/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user or explicit ACL grant |
 
 Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_auth/*` are accessible to any authenticated user. For `AdminRequired` topics, non-admin users with an explicit ACL grant for the specific topic are also allowed access. This enables operator-provisioned service accounts (e.g., an email verifier with ACL grants for `$DB/_verify/#`) without requiring full admin privileges.
+
+`$DB/u/#` is the reserved per-user scoped-events namespace (`--scoped-events`). Publishing is service-only — blocked for all external users regardless of the flag — so only the internal event publisher writes there. Subscribing is allowed by the ReadOnly tier, and when scoped events are enabled a user may only subscribe to their own `$DB/u/{me}/events/#`. Because the top-level `u` segment is reserved, `u` cannot be used as a regular entity name.
 
 #### Admin User Configuration
 
