@@ -71,7 +71,7 @@ impl DbRequestHandler {
             return DbResponse::error(DbStatus::InvalidPartition).to_be_bytes();
         }
 
-        let id = self.generate_id_for_partition(entity, partition, &request.data);
+        let id = crate::cluster::db::generate_id_for_partition(entity, partition);
 
         match controller
             .db_create(entity, &id, &request.data, request.timestamp_ms)

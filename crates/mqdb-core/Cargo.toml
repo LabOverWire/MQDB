@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-core"
-version = "0.7.6"
+version = "0.7.7"
 edition.workspace = true
 license = "Apache-2.0"
 authors.workspace = true
@@ -26,7 +26,7 @@ ring = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-uuid = { version = "1.18.1", features = ["v4", "js"] }
+uuid = { version = "1.18.1", features = ["v4", "js", "v7"] }
 
 [features]
 default = ["fjall-backend", "native"]

@@ -1320,7 +1320,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let id = if let Some(client_id) = data.get("id").and_then(serde_json::Value::as_str) {
             client_id.to_string()
         } else {
-            self.generate_id_for_partition(entity, partition, payload)
+            crate::cluster::db::generate_id_for_partition(entity, partition)
         };
         let request_id = uuid::Uuid::new_v4().to_string();
         let now_ms = Self::current_time_ms();
@@ -1898,15 +1898,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(u64::MAX)
-    }
-
-    fn generate_id_for_partition(
-        &self,
-        entity: &str,
-        partition: PartitionId,
-        data: &[u8],
-    ) -> String {
-        super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
 
     #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]

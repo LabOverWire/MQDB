@@ -1,7 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::super::PartitionId;
 use super::DbRequestHandler;
 use serde_json::{Value, json};
 
@@ -22,15 +21,6 @@ impl DbRequestHandler {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(u64::MAX)
-    }
-
-    pub(super) fn generate_id_for_partition(
-        &self,
-        entity: &str,
-        partition: PartitionId,
-        data: &[u8],
-    ) -> String {
-        super::super::db::generate_id_for_partition(self.node_id.get(), entity, partition, data)
     }
 }
 

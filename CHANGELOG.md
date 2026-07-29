@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-27 — mqdb-cli 0.8.22, mqdb-core 0.7.7, mqdb-agent 0.8.15, mqdb-cluster 0.4.6
+
+### Changed
+
+- **Server-generated ids are now UUID v7 (time-ordered).** `generate_id_for_partition` used a `DefaultHasher` over entity/data/node/timestamp, producing ids that were not time-ordered — prefix scans over `data/{entity}/` returned records in hash order. The base is now a UUID v7 (48-bit millisecond timestamp prefix + random), so ids sort lexicographically by creation time and prefix scans return records in insertion order. The partition-targeting suffix loop is unchanged, so an id still maps to its intended partition. Existing hash-based ids remain valid; they simply do not sort chronologically alongside new ids. The `node_id`/`data` parameters are dropped from `generate_id_for_partition` (UUID v7 randomness supplies uniqueness), a breaking change to that `mqdb-core` function.
+
+### Fixed
+
+- **Stale index-entry self-heal scans only the indexed-field subtrees.** When a `list` read found an index entry pointing to a deleted row, `purge_stale_index_entries` scanned the entire `idx/{entity}/` prefix. It now scans only `idx/{entity}/{field}/` for each registered indexed field (falling back to the entity-wide prefix when no index is registered), shrinking the search space on entities with many indexed fields. Behaviour is unchanged; only the scanned key range is narrower.
+
 ## 2026-07-26 — mqdb-cli 0.8.21, mqdb-agent 0.8.14
 
 ### Fixed
