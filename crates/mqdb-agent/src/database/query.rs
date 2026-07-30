@@ -247,7 +247,7 @@ impl Database {
                     }
                 }
                 Err(Error::NotFound { .. }) => {
-                    match self.purge_stale_index_entries(entity_name, id).await {
+                    match self.purge_stale_index_entries(entity_name, id) {
                         Ok(0) => tracing::debug!(
                             entity = entity_name,
                             id = %id,
@@ -273,55 +273,36 @@ impl Database {
         Ok(results)
     }
 
-    async fn purge_stale_index_entries(&self, entity_name: &str, id: &str) -> Result<usize> {
+    fn purge_stale_index_entries(&self, entity_name: &str, id: &str) -> Result<usize> {
         let data_key = keys::encode_data_key(entity_name, id);
         if self.storage.get(&data_key)?.is_some() {
             return Ok(0);
         }
 
+        let mut entity_index_prefix =
+            Vec::with_capacity(keys::INDEX_PREFIX.len() + 1 + entity_name.len() + 1);
+        entity_index_prefix.extend_from_slice(keys::INDEX_PREFIX);
+        entity_index_prefix.push(keys::SEPARATOR);
+        entity_index_prefix.extend_from_slice(entity_name.as_bytes());
+        entity_index_prefix.push(keys::SEPARATOR);
+
         let mut id_suffix = Vec::with_capacity(1 + id.len());
         id_suffix.push(keys::SEPARATOR);
         id_suffix.extend_from_slice(id.as_bytes());
 
-        let scan_prefixes = self.stale_index_scan_prefixes(entity_name).await;
-
+        let candidate_keys = self.storage.prefix_scan_keys(&entity_index_prefix)?;
         let mut batch = self.storage.batch();
         let mut removed = 0usize;
-        for prefix in scan_prefixes {
-            for key in self.storage.prefix_scan_keys(&prefix)? {
-                if key.ends_with(&id_suffix) {
-                    batch.remove(key);
-                    removed += 1;
-                }
+        for key in candidate_keys {
+            if key.ends_with(&id_suffix) {
+                batch.remove(key);
+                removed += 1;
             }
         }
         if removed > 0 {
             batch.commit()?;
         }
         Ok(removed)
-    }
-
-    /// The index key subtrees to scan when self-healing stale entries for an entity.
-    /// Narrows to each registered indexed field's `idx/{entity}/{field}/` subtree when
-    /// the index definition is known, falling back to the entity-wide `idx/{entity}/`
-    /// prefix for an entity with no registered index.
-    async fn stale_index_scan_prefixes(&self, entity_name: &str) -> Vec<Vec<u8>> {
-        let manager = self.index_manager.read().await;
-        match manager.get_indexed_fields(entity_name) {
-            Some(fields) if !fields.is_empty() => fields
-                .iter()
-                .map(|field| keys::encode_index_prefix(entity_name, field, Some(&[])))
-                .collect(),
-            _ => {
-                let mut prefix =
-                    Vec::with_capacity(keys::INDEX_PREFIX.len() + 1 + entity_name.len() + 1);
-                prefix.extend_from_slice(keys::INDEX_PREFIX);
-                prefix.push(keys::SEPARATOR);
-                prefix.extend_from_slice(entity_name.as_bytes());
-                prefix.push(keys::SEPARATOR);
-                vec![prefix]
-            }
-        }
     }
 
     /// # Errors
@@ -578,38 +559,11 @@ mod stale_index_tests {
         batch.insert(stray_key.clone(), Vec::new());
         batch.commit().unwrap();
 
-        let removed = db
-            .purge_stale_index_entries("users", "ghost")
-            .await
-            .unwrap();
+        let removed = db.purge_stale_index_entries("users", "ghost").unwrap();
         assert_eq!(removed, 0, "must not purge when data row still exists");
         assert!(
             db.storage.get(&stray_key).unwrap().is_some(),
             "stray entry must remain when row exists (race-safe)",
-        );
-    }
-
-    #[tokio::test]
-    async fn purge_falls_back_to_entity_wide_scan_without_registered_index() {
-        let (_tmp, db) = test_db().await;
-
-        let stray_value = keys::encode_value_for_index(&json!("ghost@x.com")).unwrap();
-        let stray_key = keys::encode_index_key("users", "email", &stray_value, "ghost");
-        let mut batch = db.storage.batch();
-        batch.insert(stray_key.clone(), Vec::new());
-        batch.commit().unwrap();
-
-        let removed = db
-            .purge_stale_index_entries("users", "ghost")
-            .await
-            .unwrap();
-        assert_eq!(
-            removed, 1,
-            "entity-wide fallback must purge the stale entry"
-        );
-        assert!(
-            db.storage.get(&stray_key).unwrap().is_none(),
-            "stale entry must be purged even with no registered index",
         );
     }
 }
