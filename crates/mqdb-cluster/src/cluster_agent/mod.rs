@@ -174,6 +174,13 @@ impl ClusteredAgent {
         let _ = self.shutdown_tx.send(());
     }
 
+    /// A handle that can trigger graceful shutdown from another task while `run`
+    /// holds `&mut self`.
+    #[must_use]
+    pub fn shutdown_handle(&self) -> broadcast::Sender<()> {
+        self.shutdown_tx.clone()
+    }
+
     #[must_use]
     pub fn node_id(&self) -> NodeId {
         self.node_id

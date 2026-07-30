@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-30 — mqdb-cli 0.8.23, mqdb-agent 0.8.16, mqdb-cluster 0.4.7
+
+### Fixed
+
+- **Agent and cluster nodes shut down gracefully on SIGINT/SIGTERM, and wipe temp secret files.** Neither `mqdb agent start` nor `mqdb cluster start` installed signal handlers, so `Ctrl-C`/`docker stop`/`systemctl stop` killed the process immediately — skipping graceful shutdown, and leaving inline-secret temp files (passwd/ACL/SCRAM/JWT/QUIC content passed via `MQDB_*` env vars, written to `${TMPDIR}/mqdb-env-secrets-{pid}/` with `0o600`) on disk until reboot. Both commands now handle `Ctrl-C` (all platforms) and `SIGTERM` (unix): they signal the agent's existing shutdown channel, await graceful task drain, and remove the process-scoped temp secret directory. The agent's `run`/`start` also now race the broker against the shutdown channel, so `MqdbAgent::shutdown()` actually stops the broker instead of only signalling the auxiliary tasks. `ClusteredAgent` gains a `shutdown_handle()` so a signal task can trigger shutdown while `run(&mut self)` is executing.
+
 ## 2026-07-27 — mqdb-cli 0.8.22, mqdb-core 0.7.7, mqdb-agent 0.8.15, mqdb-cluster 0.4.6
 
 ### Changed

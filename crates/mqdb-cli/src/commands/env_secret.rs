@@ -11,6 +11,15 @@ fn secret_dir() -> PathBuf {
     std::env::temp_dir().join(format!("mqdb-env-secrets-{}", std::process::id()))
 }
 
+/// Remove the process-scoped temp directory holding inline secret files written
+/// from `MQDB_*` env vars, if it was created. Best-effort; called on shutdown.
+pub(crate) fn cleanup() {
+    let dir = secret_dir();
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 pub(crate) fn write_temp_file(
     name: &str,
     content: &str,
@@ -82,4 +91,26 @@ pub(crate) fn resolve_federated_jwt_content(
 ) -> Option<String> {
     data.map(String::from)
         .or_else(|| file.as_ref().and_then(|p| std::fs::read_to_string(p).ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_removes_process_secret_dir() {
+        let dir = secret_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        cleanup();
+        assert!(!dir.exists(), "cleanup on an absent dir must be a no-op");
+
+        let path = write_temp_file("shutdown-cleanup-test", "value").unwrap();
+        assert!(dir.exists(), "secret dir must exist after write_temp_file");
+        assert!(path.exists());
+
+        cleanup();
+        assert!(!dir.exists(), "cleanup must remove the secret dir");
+        assert!(!path.exists());
+    }
 }

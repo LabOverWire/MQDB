@@ -207,7 +207,17 @@ pub(crate) async fn cmd_agent_start(
     }
 
     let agent = Arc::new(agent);
-    agent.run().await.map_err(|e| e.to_string())?;
+    let signal_agent = Arc::clone(&agent);
+    let signal_task = tokio::spawn(async move {
+        crate::commands::wait_for_shutdown_signal().await;
+        tracing::info!("shutdown signal received, stopping agent");
+        signal_agent.shutdown();
+    });
+
+    let run_result = agent.run().await;
+    signal_task.abort();
+    crate::commands::env_secret::cleanup();
+    run_result.map_err(|e| e.to_string())?;
 
     Ok(())
 }
