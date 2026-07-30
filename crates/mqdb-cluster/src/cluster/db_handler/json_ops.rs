@@ -291,7 +291,7 @@ impl DbRequestHandler {
             (data_partition(entity, client_id), client_id.to_string())
         } else {
             let p = controller.pick_partition_for_create();
-            (p, self.generate_id_for_partition(entity, p, payload))
+            (p, crate::cluster::db::generate_id_for_partition(entity, p))
         };
 
         let vault_crypto = self.resolve_vault_crypto(entity, sender);

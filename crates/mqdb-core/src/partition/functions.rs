@@ -47,35 +47,24 @@ pub fn schema_partition(entity: &str) -> PartitionId {
     PartitionId::new((hash % u32::from(NUM_PARTITIONS)) as u16).unwrap()
 }
 
+/// Generate a server-side id that maps to `partition`.
+///
+/// The base is a UUID v7 (48-bit millisecond timestamp prefix + random), so ids
+/// are lexicographically time-ordered — prefix scans over `data/{entity}/` return
+/// records in insertion order. The suffix loop preserves partition targeting: it
+/// appends a 16-bit suffix until `data_partition(entity, id)` matches `partition`.
 #[must_use]
-pub fn generate_id_for_partition(
-    node_id: u16,
-    entity: &str,
-    partition: PartitionId,
-    data: &[u8],
-) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    entity.hash(&mut hasher);
-    data.hash(&mut hasher);
-    node_id.hash(&mut hasher);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
-        .hash(&mut hasher);
-
-    let base_id = hasher.finish();
+pub fn generate_id_for_partition(entity: &str, partition: PartitionId) -> String {
+    let base = uuid::Uuid::now_v7();
 
     for suffix in 0..1000_u16 {
-        let id = format!("{base_id:016x}-{suffix:04x}");
+        let id = format!("{base}-{suffix:04x}");
         if data_partition(entity, &id) == partition {
             return id;
         }
     }
 
-    format!("{base_id:016x}-p{}", partition.get())
+    format!("{base}-p{}", partition.get())
 }
 
 #[cfg(test)]
@@ -125,5 +114,26 @@ mod tests {
             let p = data_partition(&entity, &id);
             assert!(p.get() < NUM_PARTITIONS);
         }
+    }
+
+    #[test]
+    fn generate_id_uses_time_ordered_uuid_v7_base() {
+        let partition = data_partition("users", "seed");
+        let id = generate_id_for_partition("users", partition);
+        let base = id.rsplitn(2, '-').last().unwrap();
+        let uuid = uuid::Uuid::parse_str(base).expect("id base must be a valid uuid");
+        assert_eq!(
+            uuid.get_version_num(),
+            7,
+            "id base must be a time-ordered uuid v7"
+        );
+    }
+
+    #[test]
+    fn generate_id_is_unique_across_calls() {
+        let partition = data_partition("users", "seed");
+        let a = generate_id_for_partition("users", partition);
+        let b = generate_id_for_partition("users", partition);
+        assert_ne!(a, b, "generated ids must be unique");
     }
 }
