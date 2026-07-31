@@ -630,4 +630,44 @@ mod tests {
                 .await
         );
     }
+
+    #[tokio::test]
+    async fn non_admin_can_publish_sub_channel() {
+        let provider = create_test_provider(HashSet::new());
+        assert!(
+            provider
+                .authorize_publish("c", Some("alice"), "$DB/_sub/subscribe")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_publish("c", Some("alice"), "$DB/_sub/abc123/heartbeat")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn non_admin_cannot_subscribe_sub_channel() {
+        let provider = create_test_provider(HashSet::new());
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), "$DB/_sub/subscribe")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), "$DB/_sub/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_service_can_consume_sub_channel() {
+        let provider = create_test_provider_with_internal("mqdb-internal");
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("mqdb-internal"), "$DB/_sub/subscribe")
+                .await
+        );
+    }
 }
