@@ -955,6 +955,8 @@ docker run -d \
   mqdb:latest agent start
 ```
 
+**Graceful shutdown.** `agent start` and `cluster start` handle `SIGINT` (Ctrl-C) and `SIGTERM` (`docker stop`, `systemctl stop`, Kubernetes pod termination): the node drains its tasks and shuts down cleanly instead of being killed mid-operation. Inline secrets (the `MQDB_*` variables above, without the `_FILE` suffix) are written to a process-scoped `${TMPDIR}/mqdb-env-secrets-{pid}/` directory with `0600` permissions and removed on shutdown. A `SIGKILL` (e.g. exceeding the orchestrator's termination grace period) cannot be intercepted, so leave enough grace time for a clean stop; any temp secret files left by a hard kill are reaped by the OS temp cleaner.
+
 ### Authentication in CLI Commands
 
 When the broker requires authentication, every CLI command needs credentials. Pass them with `--user` and `--pass`, or set `MQDB_USER` and `MQDB_PASS` to avoid repeating them:
