@@ -7,6 +7,7 @@ use std::fmt;
 pub enum ProtectionTier {
     BlockAll,
     ReadOnly,
+    WriteOnly,
     AdminRequired,
 }
 
@@ -50,6 +51,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
+        pattern: "$DB/_sub/#",
+        tier: ProtectionTier::WriteOnly,
+    },
+    TopicRule {
         pattern: "$SYS/mqdb/cluster/#",
         tier: ProtectionTier::AdminRequired,
     },
@@ -67,6 +72,7 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
 pub enum BlockReason {
     InternalTopicBlocked,
     ReadOnlyTopic,
+    WriteOnlyTopic,
     AdminRequired,
     InternalEntityAccess,
 }
@@ -76,6 +82,7 @@ impl fmt::Display for BlockReason {
         match self {
             Self::InternalTopicBlocked => write!(f, "internal topic blocked"),
             Self::ReadOnlyTopic => write!(f, "read-only topic"),
+            Self::WriteOnlyTopic => write!(f, "write-only topic"),
             Self::AdminRequired => write!(f, "admin role required"),
             Self::InternalEntityAccess => write!(f, "internal entity access denied"),
         }
@@ -171,6 +178,13 @@ pub fn check_topic_access(
                     Err(BlockReason::ReadOnlyTopic)
                 } else {
                     Ok(())
+                }
+            }
+            ProtectionTier::WriteOnly => {
+                if is_publish {
+                    Ok(())
+                } else {
+                    Err(BlockReason::WriteOnlyTopic)
                 }
             }
             ProtectionTier::AdminRequired => {
@@ -395,6 +409,30 @@ mod tests {
         assert_eq!(
             check_topic_access("$DB/u/bob/events/created", false, false),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn check_access_sub_channel_write_only() {
+        assert_eq!(
+            check_topic_access("$DB/_sub/subscribe", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_sub/abc123/heartbeat", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_sub/abc123/unsubscribe", true, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$DB/_sub/subscribe", false, false),
+            Err(BlockReason::WriteOnlyTopic)
+        );
+        assert_eq!(
+            check_topic_access("$DB/_sub/subscribe", false, true),
+            Err(BlockReason::WriteOnlyTopic)
         );
     }
 

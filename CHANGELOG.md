@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-07-31 — mqdb-cli 0.8.24, mqdb-agent 0.8.17
+
+### Fixed
+
+- **`mqdb subscribe` works for non-admin users.** `$DB/_sub/subscribe` (and the `$DB/_sub/{id}/heartbeat` / `unsubscribe` control topics the `mqdb subscribe` command publishes) were treated as internal `$DB/_*` topics, so any non-admin publish was rejected with `internal entity access denied`. The `$DB/_sub/#` channel is now a new **WriteOnly** protection tier: any authenticated user may **publish** subscribe requests (subject to ACL, like a normal topic), but **subscribing** to `$DB/_sub/#` is denied for non-service clients so one user cannot snoop another's requests or response topics. The server (internal service) bypasses topic protection and still consumes the requests.
+
 ## 2026-07-30 — mqdb-cli 0.8.23, mqdb-agent 0.8.16, mqdb-cluster 0.4.7
 
 ### Fixed
