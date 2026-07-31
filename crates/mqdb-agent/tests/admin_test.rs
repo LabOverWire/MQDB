@@ -363,3 +363,24 @@ async fn test_list_query_complexity_limits_via_mqtt() {
     client.disconnect().await.unwrap();
     agent_handle.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_run_task_stops_on_shutdown() {
+    let port = next_test_port();
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(addr)
+        .with_anonymous(true);
+    let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
+    let _ = ready_rx.changed().await;
+
+    let _ = shutdown.send(());
+
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("run task must return after shutdown instead of blocking on the broker")
+        .expect("run task must not panic");
+    drop(tmp);
+}

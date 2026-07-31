@@ -214,7 +214,17 @@ pub(crate) async fn cmd_cluster_start(
     }
 
     let mut agent = ClusteredAgent::new(config)?;
-    Box::pin(agent.run()).await.map_err(|e| e.to_string())?;
+    let shutdown = agent.shutdown_handle();
+    let signal_task = tokio::spawn(async move {
+        crate::commands::wait_for_shutdown_signal().await;
+        tracing::info!("shutdown signal received, stopping cluster node");
+        let _ = shutdown.send(());
+    });
+
+    let run_result = Box::pin(agent.run()).await;
+    signal_task.abort();
+    crate::commands::env_secret::cleanup();
+    run_result.map_err(|e| e.to_string())?;
 
     Ok(())
 }
