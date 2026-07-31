@@ -250,6 +250,11 @@ impl MqdbAgent {
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Subscribe before any startup await so a shutdown() racing the startup
+        // window (e.g. a SIGTERM during a slow bind/cert load) is buffered rather
+        // than lost by the broadcast channel.
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+
         let (mut config, service_username, service_password, needs_composite, admin_users) =
             self.build_broker_config().await?;
 
@@ -302,7 +307,6 @@ impl MqdbAgent {
         };
         let license_task = self.spawn_license_check_task();
 
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
         tokio::select! {
             result = broker.run() => result?,
             _ = shutdown_rx.recv() => info!("MQDB Agent shutting down"),

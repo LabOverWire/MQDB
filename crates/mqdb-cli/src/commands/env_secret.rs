@@ -15,8 +15,13 @@ fn secret_dir() -> PathBuf {
 /// from `MQDB_*` env vars, if it was created. Best-effort; called on shutdown.
 pub(crate) fn cleanup() {
     let dir = secret_dir();
-    if dir.exists() {
-        let _ = std::fs::remove_dir_all(&dir);
+    if dir.exists()
+        && let Err(e) = std::fs::remove_dir_all(&dir)
+    {
+        tracing::warn!(
+            "failed to remove temp secret directory {}: {e}; secret files may remain on disk",
+            dir.display()
+        );
     }
 }
 
