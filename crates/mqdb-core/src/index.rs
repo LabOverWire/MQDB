@@ -33,8 +33,24 @@ impl IndexManager {
         }
     }
 
+    /// Register indexed fields for an entity, **merging** into any existing
+    /// definition rather than replacing it. An entity's index definition is the
+    /// union of every field ever indexed on it (index entries are stored per
+    /// field), so registering a second index/unique field must not de-register
+    /// the first.
     pub fn add_index(&mut self, definition: IndexDefinition) {
-        self.indexes.insert(definition.entity.clone(), definition);
+        match self.indexes.get_mut(&definition.entity) {
+            Some(existing) => {
+                for field in definition.fields {
+                    if !existing.fields.contains(&field) {
+                        existing.fields.push(field);
+                    }
+                }
+            }
+            None => {
+                self.indexes.insert(definition.entity.clone(), definition);
+            }
+        }
     }
 
     #[allow(clippy::must_use_candidate)]
@@ -113,6 +129,26 @@ impl IndexManager {
         let value = serde_json::to_vec(definition)?;
         batch.insert(key, value);
         Ok(())
+    }
+
+    /// Compute the merged index definition for `entity` — the union of its
+    /// currently registered fields and `new_fields` — **without** mutating
+    /// in-memory state. Callers persist and commit this before applying
+    /// [`add_index`](Self::add_index), so a failed commit leaves the in-memory
+    /// registry and disk consistent (both without the new fields).
+    #[must_use]
+    pub fn merged_definition(&self, entity: &str, new_fields: Vec<String>) -> IndexDefinition {
+        let mut fields = self
+            .indexes
+            .get(entity)
+            .map(|d| d.fields.clone())
+            .unwrap_or_default();
+        for field in new_fields {
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+        IndexDefinition::new(entity.to_string(), fields)
     }
 
     /// # Errors
@@ -233,6 +269,82 @@ mod tests {
         assert!(mgr.is_field_indexed("users", "name"));
         assert!(!mgr.is_field_indexed("users", "email"));
         assert!(!mgr.is_field_indexed("posts", "age"));
+    }
+
+    #[test]
+    fn add_index_merges_fields_instead_of_replacing() {
+        let mut mgr = IndexManager::new();
+        mgr.add_index(IndexDefinition::new("users".into(), vec!["email".into()]));
+        mgr.add_index(IndexDefinition::new(
+            "users".into(),
+            vec!["username".into()],
+        ));
+
+        assert!(
+            mgr.is_field_indexed("users", "email"),
+            "first field must survive"
+        );
+        assert!(
+            mgr.is_field_indexed("users", "username"),
+            "second field must be added"
+        );
+        assert_eq!(
+            mgr.get_indexed_fields("users").unwrap(),
+            &vec!["email".to_string(), "username".to_string()]
+        );
+
+        // idempotent: re-adding an existing field does not duplicate it
+        mgr.add_index(IndexDefinition::new("users".into(), vec!["email".into()]));
+        assert_eq!(mgr.get_indexed_fields("users").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merged_definition_unions_without_mutating() {
+        let mut mgr = IndexManager::new();
+        mgr.add_index(IndexDefinition::new("users".into(), vec!["email".into()]));
+
+        let merged = mgr.merged_definition("users", vec!["username".into()]);
+        assert_eq!(
+            merged.fields,
+            vec!["email".to_string(), "username".to_string()]
+        );
+        // must NOT mutate in-memory state (persist/commit happens first)
+        assert_eq!(
+            mgr.get_indexed_fields("users").unwrap(),
+            &vec!["email".to_string()]
+        );
+        // dedups against existing fields
+        assert_eq!(
+            mgr.merged_definition("users", vec!["email".into()]).fields,
+            vec!["email".to_string()]
+        );
+    }
+
+    #[test]
+    fn persist_merged_then_reload_has_all_fields() {
+        // Mirrors the agent's safe order: compute merged -> persist -> commit -> apply.
+        let storage = Storage::memory();
+        let mut mgr = IndexManager::new();
+
+        let d1 = mgr.merged_definition("users", vec!["email".into()]);
+        let mut b1 = storage.batch();
+        mgr.persist_index(&mut b1, &d1).unwrap();
+        b1.commit().unwrap();
+        mgr.add_index(d1);
+
+        let d2 = mgr.merged_definition("users", vec!["username".into()]);
+        let mut b2 = storage.batch();
+        mgr.persist_index(&mut b2, &d2).unwrap();
+        b2.commit().unwrap();
+        mgr.add_index(d2);
+
+        let mut loaded = IndexManager::new();
+        loaded.load_indexes(&storage).unwrap();
+        assert_eq!(
+            loaded.get_indexed_fields("users").unwrap(),
+            &vec!["email".to_string(), "username".to_string()],
+            "restart must reload every indexed field, not just the last"
+        );
     }
 
     fn setup_indexed_entities(ages: &[i64]) -> (Storage, IndexManager) {
