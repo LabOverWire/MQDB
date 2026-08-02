@@ -280,3 +280,160 @@ impl Database {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use mqdb_core::config::DatabaseConfig;
+    use mqdb_core::error::{Error, Result};
+    use mqdb_core::keys;
+    use mqdb_core::storage::{BatchOperations, MemoryBackend, StorageBackend};
+    use mqdb_core::types::ScopeConfig;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Wraps an in-memory backend but can be told to fail every `commit()`.
+    struct FailingBackend {
+        inner: MemoryBackend,
+        fail_commit: Arc<AtomicBool>,
+    }
+
+    impl StorageBackend for FailingBackend {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.inner.insert(key, value)
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.inner.remove(key)
+        }
+        fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan(prefix)
+        }
+        fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+            self.inner.prefix_count(prefix)
+        }
+        fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+            self.inner.prefix_scan_keys(prefix)
+        }
+        fn prefix_scan_batch(
+            &self,
+            prefix: &[u8],
+            batch_size: usize,
+            after_key: Option<&[u8]>,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan_batch(prefix, batch_size, after_key)
+        }
+        fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.range_scan(start, end)
+        }
+        fn batch(&self) -> Box<dyn BatchOperations> {
+            Box::new(FailingBatch {
+                inner: self.inner.batch(),
+                fail_commit: Arc::clone(&self.fail_commit),
+            })
+        }
+        fn flush(&self) -> Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    struct FailingBatch {
+        inner: Box<dyn BatchOperations>,
+        fail_commit: Arc<AtomicBool>,
+    }
+
+    impl BatchOperations for FailingBatch {
+        fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+            self.inner.insert(key, value);
+        }
+        fn remove(&mut self, key: Vec<u8>) {
+            self.inner.remove(key);
+        }
+        fn expect_value(&mut self, key: Vec<u8>, expected_value: Vec<u8>) {
+            self.inner.expect_value(key, expected_value);
+        }
+        fn expect_absent(&mut self, key: Vec<u8>) {
+            self.inner.expect_absent(key);
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            if self.fail_commit.load(Ordering::SeqCst) {
+                return Err(Error::Internal("injected commit failure".to_string()));
+            }
+            self.inner.commit()
+        }
+    }
+
+    // Guards the persist-before-mutate ordering: because the in-memory merge is
+    // applied only AFTER a successful commit, a commit failure during add_index
+    // must leave the index registry and disk consistent (the new field unindexed).
+    #[tokio::test]
+    async fn add_index_commit_failure_leaves_registry_consistent() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(FailingBackend {
+            inner: MemoryBackend::new(),
+            fail_commit: Arc::clone(&fail),
+        });
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        let db = Database::open_with_backend(backend, config).await.unwrap();
+
+        db.add_index("users".to_string(), vec!["email".to_string()])
+            .await
+            .unwrap();
+
+        fail.store(true, Ordering::SeqCst);
+        let result = db
+            .add_index("users".to_string(), vec!["username".to_string()])
+            .await;
+        assert!(result.is_err(), "add_index must fail when its commit fails");
+        fail.store(false, Ordering::SeqCst);
+
+        db.create(
+            "users".to_string(),
+            json!({ "id": "u1", "email": "a@x.com", "username": "alice" }),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        let email_value = keys::encode_value_for_index(&json!("a@x.com")).unwrap();
+        let email_key = keys::encode_index_key("users", "email", &email_value, "u1");
+        assert!(
+            db.storage.get(&email_key).unwrap().is_some(),
+            "email must remain indexed after the failed add_index"
+        );
+        let username_value = keys::encode_value_for_index(&json!("alice")).unwrap();
+        let username_key = keys::encode_index_key("users", "username", &username_value, "u1");
+        assert!(
+            db.storage.get(&username_key).unwrap().is_none(),
+            "username must not be indexed after a failed add_index commit"
+        );
+
+        // Recoverable: a later successful add_index registers and indexes it.
+        db.add_index("users".to_string(), vec!["username".to_string()])
+            .await
+            .unwrap();
+        db.create(
+            "users".to_string(),
+            json!({ "id": "u2", "email": "b@x.com", "username": "bob" }),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let bob_value = keys::encode_value_for_index(&json!("bob")).unwrap();
+        let bob_key = keys::encode_index_key("users", "username", &bob_value, "u2");
+        assert!(
+            db.storage.get(&bob_key).unwrap().is_some(),
+            "username must be indexed after a successful re-add"
+        );
+    }
+}
