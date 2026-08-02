@@ -50,7 +50,7 @@ impl Database {
         }
     }
 
-    async fn delete_grants(&self, filters: Vec<Filter>) -> Result<()> {
+    async fn delete_grants(&self, filters: Vec<Filter>, ownership: &OwnershipConfig) -> Result<()> {
         let records = self
             .list_core(
                 SHARES_ENTITY.to_string(),
@@ -62,7 +62,6 @@ impl Database {
             )
             .await?;
         let scope = ScopeConfig::default();
-        let ownership = OwnershipConfig::default();
         for rec in &records {
             if let Some(sid) = rec.get("id").and_then(Value::as_str) {
                 self.delete(
@@ -71,7 +70,7 @@ impl Database {
                     None,
                     None,
                     &scope,
-                    &ownership,
+                    ownership,
                 )
                 .await?;
             }
@@ -79,10 +78,16 @@ impl Database {
         Ok(())
     }
 
-    async fn clear_grant(&self, entity: &str, id: &str, grantee_key: &str) -> Result<()> {
+    async fn clear_grant(
+        &self,
+        entity: &str,
+        id: &str,
+        grantee_key: &str,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
         let mut filters = Self::resource_filters(entity, id);
         filters.push(eq_filter("grantee_key", grantee_key));
-        self.delete_grants(filters).await
+        self.delete_grants(filters, ownership).await
     }
 
     /// Remove every grant on a resource. Called when the resource itself is deleted
@@ -90,8 +95,14 @@ impl Database {
     ///
     /// # Errors
     /// Returns an error if scanning or deleting the share records fails.
-    pub(crate) async fn clear_all_resource_grants(&self, entity: &str, id: &str) -> Result<()> {
-        self.delete_grants(Self::resource_filters(entity, id)).await
+    pub(crate) async fn clear_all_resource_grants(
+        &self,
+        entity: &str,
+        id: &str,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        self.delete_grants(Self::resource_filters(entity, id), ownership)
+            .await
     }
 
     async fn write_grant(
@@ -101,8 +112,9 @@ impl Database {
         grantee: &str,
         level: AccessLevel,
         granted_by: &str,
+        ownership: &OwnershipConfig,
     ) -> Result<()> {
-        self.clear_grant(entity, id, grantee).await?;
+        self.clear_grant(entity, id, grantee, ownership).await?;
         let record = json!({
             "resource_entity": entity,
             "resource_id": id,
@@ -201,7 +213,7 @@ impl Database {
             });
         }
         let granted_by = sender.unwrap_or_default();
-        self.write_grant(entity, id, grantee, level, granted_by)
+        self.write_grant(entity, id, grantee, level, granted_by, ownership)
             .await?;
         let mut shared = 1usize;
         if cascade {
@@ -211,7 +223,7 @@ impl Database {
                 }
                 let existing = self.share_level(entity, &ref_id, grantee).await?;
                 if existing.is_none_or(|current| current < level) {
-                    self.write_grant(entity, &ref_id, grantee, level, granted_by)
+                    self.write_grant(entity, &ref_id, grantee, level, granted_by, ownership)
                         .await?;
                 }
                 shared += 1;
@@ -241,13 +253,14 @@ impl Database {
         cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
-        self.clear_grant(entity, id, grantee).await?;
+        self.clear_grant(entity, id, grantee, ownership).await?;
         if cascade {
             for ref_id in self.referenced_closure(entity, id).await? {
                 if ref_id == id {
                     continue;
                 }
-                self.clear_grant(entity, &ref_id, grantee).await?;
+                self.clear_grant(entity, &ref_id, grantee, ownership)
+                    .await?;
             }
         }
         Ok(json!({ "status": "unshared", "grantee": grantee }))
@@ -370,13 +383,32 @@ impl Database {
         data: Option<&Value>,
     ) -> Result<Option<Vec<String>>> {
         if entity == SHARES_ENTITY {
-            let grantee = data
+            let mut recipients: Vec<String> = Vec::new();
+            if let Some(grantee) = data
                 .and_then(|d| d.get("grantee"))
                 .and_then(Value::as_str)
-                .filter(|g| !g.is_empty());
-            return Ok(Some(
-                grantee.map(|g| vec![g.to_string()]).unwrap_or_default(),
-            ));
+                .filter(|g| !g.is_empty())
+            {
+                recipients.push(grantee.to_string());
+            }
+            // Notify the resource owner too (e.g. when an admin shares on their
+            // behalf), unless the owner performed the share themselves.
+            if let Some(res_entity) = data
+                .and_then(|d| d.get("resource_entity"))
+                .and_then(Value::as_str)
+                && let Some(res_id) = data
+                    .and_then(|d| d.get("resource_id"))
+                    .and_then(Value::as_str)
+                && let Some(owner) = self.record_owner(res_entity, res_id, ownership)?
+            {
+                let granted_by = data
+                    .and_then(|d| d.get("granted_by"))
+                    .and_then(Value::as_str);
+                if granted_by != Some(owner.as_str()) && !recipients.contains(&owner) {
+                    recipients.push(owner);
+                }
+            }
+            return Ok(Some(recipients));
         }
 
         let (res_entity, res_id, owner) = if let Some(owner_field) = ownership.owner_field(entity) {
