@@ -42,12 +42,12 @@ impl Database {
         drop(schema_registry);
 
         {
-            let definition = mqdb_core::index::IndexDefinition::new(entity.clone(), fields);
             let mut batch = self.storage.batch();
             let mut manager = self.index_manager.write().await;
-            manager.persist_index(&mut batch, &definition)?;
+            let merged = manager.merged_definition(&entity, fields);
+            manager.persist_index(&mut batch, &merged)?;
             batch.commit()?;
-            manager.add_index(definition);
+            manager.add_index(merged);
             drop(manager);
         }
 

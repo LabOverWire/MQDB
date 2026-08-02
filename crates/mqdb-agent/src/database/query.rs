@@ -475,6 +475,45 @@ mod stale_index_tests {
     }
 
     #[tokio::test]
+    async fn second_add_index_keeps_first_field_indexed() {
+        let (_tmp, db) = test_db().await;
+        db.add_index("users".to_string(), vec!["email".to_string()])
+            .await
+            .unwrap();
+        db.add_index("users".to_string(), vec!["username".to_string()])
+            .await
+            .unwrap();
+
+        db.create(
+            "users".to_string(),
+            json!({ "id": "u1", "email": "a@x.com", "username": "alice" }),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        // A row created after BOTH add_index calls must be indexed on the FIRST
+        // field too — under the old replace-not-merge bug, `email` was de-registered
+        // and only `username` would be indexed for new rows.
+        let email_value = keys::encode_value_for_index(&json!("a@x.com")).unwrap();
+        let email_key = keys::encode_index_key("users", "email", &email_value, "u1");
+        assert!(
+            db.storage.get(&email_key).unwrap().is_some(),
+            "first indexed field must remain indexed after a second add_index"
+        );
+
+        let username_value = keys::encode_value_for_index(&json!("alice")).unwrap();
+        let username_key = keys::encode_index_key("users", "username", &username_value, "u1");
+        assert!(
+            db.storage.get(&username_key).unwrap().is_some(),
+            "second indexed field must be indexed"
+        );
+    }
+
+    #[tokio::test]
     async fn list_purges_stale_index_entry_for_missing_row() {
         let (_tmp, db) = test_db().await;
         db.add_index("users".to_string(), vec!["email".to_string()])

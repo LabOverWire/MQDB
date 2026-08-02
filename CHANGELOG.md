@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-01 — mqdb-cli 0.8.25, mqdb-core 0.7.8, mqdb-agent 0.8.18
+
+### Fixed
+
+- **Indexing a second field on an entity no longer de-registers the first (agent mode).** `IndexManager::add_index` replaced an entity's index definition instead of merging it, and the agent persisted only the newly-added fields. So registering a second indexed/unique field on the same entity (e.g. a `email` unique constraint followed by a `username` unique constraint) silently dropped the first field from the index registry: its `idx/{entity}/{field}/…` entries were orphaned, equality/range filters on it quietly fell back to full scans, and rows created afterward were never indexed on it. `add_index` now merges fields into the existing definition (an entity's index is the union of every field ever indexed on it, since entries are stored per field), and the agent persists the merged definition (computed, persisted, and committed before the in-memory registry is updated, so a failed commit leaves memory and disk consistent). This also removes the blocker for a future narrowed stale-index self-heal (#90). Migration note: a database created before this fix persisted only the last-registered field, so any earlier field lost to the old bug stays de-registered on upgrade — re-run `add index` (or re-declare the unique constraint) for that field to re-register and reindex it; its orphaned entries are otherwise inert and never produce wrong results.
+
 ## 2026-07-31 — mqdb-cli 0.8.24, mqdb-agent 0.8.17
 
 ### Fixed
