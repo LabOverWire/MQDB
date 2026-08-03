@@ -391,8 +391,6 @@ impl Database {
             {
                 recipients.push(grantee.to_string());
             }
-            // Notify the resource owner too (e.g. when an admin shares on their
-            // behalf), unless the owner performed the share themselves.
             if let Some(res_entity) = data
                 .and_then(|d| d.get("resource_entity"))
                 .and_then(Value::as_str)
