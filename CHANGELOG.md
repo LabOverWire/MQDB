@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-02 — mqdb-cli 0.8.26, mqdb-agent 0.8.19
+
+### Fixed
+
+- **A resource owner is notified when an admin shares or unshares their resource (scoped events).** Share/unshare already delivered a `_shares` event to the affected grantee's `$DB/u/{grantee}/events/#` namespace, but the resource owner was not told when someone else (e.g. an admin acting on their behalf) changed their resource's share set. `event_recipients` now also routes a `_shares` event to the resource owner, skipping the owner when they performed the share themselves (no self-notification for the ordinary owner-initiated flow).
+
 ## 2026-08-01 — mqdb-cli 0.8.25, mqdb-core 0.7.8, mqdb-agent 0.8.18
 
 ### Fixed

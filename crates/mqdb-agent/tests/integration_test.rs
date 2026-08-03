@@ -2769,6 +2769,267 @@ async fn test_share_events_route_to_grantee_namespace() {
 }
 
 #[tokio::test]
+async fn test_share_events_notify_owner_when_admin_shares() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "alice", "title": "D"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let mut recipients = db
+        .event_recipients(
+            &ownership,
+            mqdb_core::types::SHARES_ENTITY,
+            "share-1",
+            Some(&json!({
+                "resource_entity": "diagrams",
+                "resource_id": "d1",
+                "grantee": "bob",
+                "granted_by": "admin",
+                "permission": "view",
+            })),
+        )
+        .await
+        .unwrap()
+        .expect("recipients");
+    recipients.sort();
+    assert_eq!(
+        recipients,
+        vec!["alice".to_string(), "bob".to_string()],
+        "an admin-initiated share must notify both the grantee and the resource owner"
+    );
+}
+
+#[tokio::test]
+async fn test_share_events_skip_owner_self_notification() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "alice", "title": "D"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let recipients = db
+        .event_recipients(
+            &ownership,
+            mqdb_core::types::SHARES_ENTITY,
+            "share-1",
+            Some(&json!({
+                "resource_entity": "diagrams",
+                "resource_id": "d1",
+                "grantee": "bob",
+                "granted_by": "alice",
+                "permission": "view",
+            })),
+        )
+        .await
+        .unwrap()
+        .expect("recipients");
+    assert_eq!(
+        recipients,
+        vec!["bob".to_string()],
+        "an owner-initiated share must notify only the grantee (no self-notification)"
+    );
+}
+
+#[tokio::test]
+async fn test_unshare_by_admin_notifies_owner() {
+    use mqdb_core::Request;
+    use std::collections::HashSet;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_admin_users(HashSet::from(["admin".to_string()]));
+    let scope = ScopeConfig::default();
+
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "alice", "title": "D"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: "d1".into(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some("admin"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut receiver = db.event_receiver();
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: "d1".into(),
+            grantee: "bob".into(),
+            cascade: false,
+        },
+        Some("admin"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut recipients = loop {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv()).await
+        else {
+            panic!("unshare did not emit a shares delete event");
+        };
+        if event.entity == mqdb_core::types::SHARES_ENTITY {
+            break event
+                .recipients
+                .expect("shares delete event missing recipients");
+        }
+    };
+    recipients.sort();
+    assert_eq!(
+        recipients,
+        vec!["alice".to_string(), "bob".to_string()],
+        "an admin-initiated unshare must notify both the owner and the grantee"
+    );
+}
+
+#[tokio::test]
+async fn test_cascade_unshare_notifies_per_record_owner() {
+    use mqdb_core::{Request, Response};
+    use std::collections::{HashMap, HashSet};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_admin_users(HashSet::from(["admin".to_string()]));
+    let scope = ScopeConfig::default();
+
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+
+    let make = async |title: &str, owner: &str, parent: Option<&str>| match db
+        .execute(Request::Create {
+            entity: "diagrams".into(),
+            data: match parent {
+                Some(p) => json!({"userId": owner, "title": title, "parent_id": p}),
+                None => json!({"userId": owner, "title": title}),
+            },
+        })
+        .await
+    {
+        Response::Ok { data } => data["id"].as_str().unwrap().to_string(),
+        Response::Error { code, message } => panic!("create failed {code}: {message}"),
+    };
+    let d2 = make("D2", "carol", None).await;
+    let d1 = make("D1", "alice", Some(&d2)).await;
+
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: d1.clone(),
+            grantee: "bob".into(),
+            permission: "view".into(),
+            cascade: true,
+        },
+        Some("admin"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut receiver = db.event_receiver();
+
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: d1.clone(),
+            grantee: "bob".into(),
+            cascade: true,
+        },
+        Some("admin"),
+        None,
+        &ownership,
+        &scope,
+        None,
+    )
+    .await;
+
+    let mut by_owner: HashMap<String, Vec<String>> = HashMap::new();
+    while by_owner.len() < 2 {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv()).await
+        else {
+            break;
+        };
+        if event.entity == mqdb_core::types::SHARES_ENTITY {
+            let res_id = event
+                .data
+                .as_ref()
+                .and_then(|d| d.get("resource_id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+                .to_string();
+            let mut r = event.recipients.expect("recipients");
+            r.sort();
+            by_owner.insert(res_id, r);
+        }
+    }
+    assert_eq!(
+        by_owner.get(&d1),
+        Some(&vec!["alice".to_string(), "bob".to_string()]),
+        "d1 unshare notifies its owner alice + grantee bob"
+    );
+    assert_eq!(
+        by_owner.get(&d2),
+        Some(&vec!["bob".to_string(), "carol".to_string()]),
+        "d2 unshare notifies its own owner carol (not root owner) + grantee bob"
+    );
+}
+
+#[tokio::test]
 async fn test_cascade_delete_events_carry_recipients() {
     use mqdb_core::{OnDeleteAction, Request, Response};
     use std::collections::HashMap;
