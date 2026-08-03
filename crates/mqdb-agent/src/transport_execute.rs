@@ -319,30 +319,45 @@ impl Database {
                 entity,
                 id,
                 grantee,
+                grantee_key,
                 permission,
                 cascade,
-            } => match self
-                .share_grant(
-                    &entity,
-                    &id,
-                    &grantee,
-                    &permission,
-                    sender,
-                    ownership,
-                    cascade,
-                )
-                .await
-            {
-                Ok(v) => Response::ok(v),
-                Err(e) => e.into(),
-            },
+            } => {
+                let key = grantee_key.as_deref().unwrap_or(grantee.as_str());
+                let resolved = (!grantee.trim().is_empty()).then_some(grantee.as_str());
+                match self
+                    .share_grant(
+                        &entity,
+                        &id,
+                        key,
+                        resolved,
+                        &permission,
+                        sender,
+                        ownership,
+                        cascade,
+                    )
+                    .await
+                {
+                    Ok(v) => Response::ok(v),
+                    Err(e) => e.into(),
+                }
+            }
             Request::Unshare {
                 entity,
                 id,
                 grantee,
+                grantee_key,
                 cascade,
             } => match self
-                .share_revoke(&entity, &id, &grantee, sender, ownership, cascade)
+                .share_revoke(
+                    &entity,
+                    &id,
+                    &grantee,
+                    grantee_key.as_deref(),
+                    sender,
+                    ownership,
+                    cascade,
+                )
                 .await
             {
                 Ok(v) => Response::ok(v),

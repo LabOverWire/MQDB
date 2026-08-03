@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-03 — mqdb-cli 0.8.27, mqdb-core 0.7.9, mqdb-agent 0.8.20
+
+### Added
+
+- **Sharing a resource with an unregistered email now stores a pending grant instead of returning 404 (agent mode, identity deployments).** Diagram sharing previously resolved a grantee email to a canonical id only for already-registered users. A share is now keyed by a stable `grantee_key` (the lowercased input identifier — email in identity mode, username in password mode) separate from the resolved `grantee` (the canonical id, or `null` while pending). A grant to an unregistered email is stored with `grantee = null`, which matches no one, so the grant is inert until the recipient first signs in. On that first verified sign-in, `_shares` is swept by `grantee_key` and each pending grant's `grantee` is filled with the new canonical id, granting access without re-sharing. Pending grants can be re-shared (updated in place) and revoked by email before they are filled, and cascade shares create pending rows across the whole reference closure that a single sign-in sweep fills together. Unshare revokes by both the input identifier and any resolved canonical id, so grants created before this change (which stored the canonical id as the key) are still revocable. Password-mode deployments are unaffected (grantee equals grantee_key and grants are active immediately).
+
 ## 2026-08-02 — mqdb-cli 0.8.26, mqdb-agent 0.8.19
 
 ### Fixed

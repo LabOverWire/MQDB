@@ -87,19 +87,22 @@ pub(crate) async fn resolve_grantee_email(
         .map(String::from)
 }
 
-/// For `Share`/`Unshare` in identity (OAuth) deployments, rewrite the grantee email
-/// to its canonical id. A `Share` for an unregistered email is rejected (`Err(email)`);
-/// an `Unshare` for an unknown email is left as-is (a harmless no-op revoke).
-/// When no identity crypto is configured (password mode), the grantee is used verbatim.
+/// For `Share`/`Unshare` in identity (OAuth) deployments, split the grantee email
+/// into a stable `grantee_key` (the lowercased input identifier) and a resolved
+/// `grantee`. A registered email resolves to its canonical id; an unregistered email
+/// becomes a **pending** grant (empty `grantee`, `grantee_key = email`) that stays
+/// inert until the recipient first signs in. `Unshare` carries the lowercased email as
+/// the primary key plus any resolved canonical id for dual-key revoke. When no identity
+/// crypto is configured (password mode), the request is used verbatim.
 #[cfg(feature = "http-api")]
 async fn resolve_share_request(
     db: &Database,
     crypto: Option<&Arc<crate::http::IdentityCrypto>>,
     request: mqdb_core::transport::Request,
-) -> Result<mqdb_core::transport::Request, String> {
+) -> mqdb_core::transport::Request {
     use mqdb_core::transport::Request;
     let Some(crypto) = crypto else {
-        return Ok(request);
+        return request;
     };
     match request {
         Request::Share {
@@ -108,33 +111,47 @@ async fn resolve_share_request(
             grantee,
             permission,
             cascade,
-        } => match resolve_grantee_email(db, crypto, &grantee).await {
-            Some(canonical_id) => Ok(Request::Share {
+            ..
+        } => {
+            let trimmed = grantee.trim();
+            if trimmed.is_empty() {
+                return Request::Share {
+                    entity,
+                    id,
+                    grantee,
+                    grantee_key: None,
+                    permission,
+                    cascade,
+                };
+            }
+            let key = trimmed.to_lowercase();
+            let resolved = resolve_grantee_email(db, crypto, trimmed).await;
+            Request::Share {
                 entity,
                 id,
-                grantee: canonical_id,
+                grantee: resolved.unwrap_or_default(),
+                grantee_key: Some(key),
                 permission,
                 cascade,
-            }),
-            None => Err(grantee),
-        },
+            }
+        }
         Request::Unshare {
             entity,
             id,
             grantee,
             cascade,
+            ..
         } => {
-            let resolved = resolve_grantee_email(db, crypto, &grantee)
-                .await
-                .unwrap_or(grantee);
-            Ok(Request::Unshare {
+            let resolved = resolve_grantee_email(db, crypto, grantee.trim()).await;
+            Request::Unshare {
                 entity,
                 id,
-                grantee: resolved,
+                grantee: grantee.trim().to_lowercase(),
+                grantee_key: resolved,
                 cascade,
-            })
+            }
         }
-        other => Ok(other),
+        other => other,
     }
 }
 
@@ -246,27 +263,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     };
 
     #[cfg(feature = "http-api")]
-    let request = match resolve_share_request(db, ctx.identity_crypto, request).await {
-        Ok(resolved) => resolved,
-        Err(unknown_email) => {
-            if let Some(response_topic) = &message.properties.response_topic {
-                let response = Response::error(
-                    mqdb_core::ErrorCode::NotFound,
-                    format!("unknown user '{unknown_email}'"),
-                );
-                if let Ok(payload) = serde_json::to_vec(&response) {
-                    publish_response(
-                        client,
-                        response_topic,
-                        message.properties.correlation_data.as_deref(),
-                        payload,
-                    )
-                    .await;
-                }
-            }
-            return;
-        }
-    };
+    let request = resolve_share_request(db, ctx.identity_crypto, request).await;
 
     let span = info_span!(
         "database_operation",

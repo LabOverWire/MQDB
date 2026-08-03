@@ -64,6 +64,8 @@ pub enum Request {
         entity: String,
         id: String,
         grantee: String,
+        #[serde(default)]
+        grantee_key: Option<String>,
         permission: String,
         #[serde(default = "default_cascade")]
         cascade: bool,
@@ -72,6 +74,8 @@ pub enum Request {
         entity: String,
         id: String,
         grantee: String,
+        #[serde(default)]
+        grantee_key: Option<String>,
         #[serde(default = "default_cascade")]
         cascade: bool,
     },

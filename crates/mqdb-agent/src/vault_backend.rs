@@ -66,6 +66,12 @@ pub trait DbAccess: Send + Sync {
         entity: &'a str,
         data: serde_json::Value,
     ) -> VaultFuture<'a, Result<serde_json::Value, mqdb_core::error::Error>>;
+
+    fn resolve_pending_grants<'a>(
+        &'a self,
+        grantee_key: &'a str,
+        canonical_id: &'a str,
+    ) -> VaultFuture<'a, Result<usize, mqdb_core::error::Error>>;
 }
 
 pub trait VaultBackend: Send + Sync {
@@ -181,6 +187,13 @@ impl DbAccess for NoopDbAccess {
                 "NoopDbAccess: create_entity not supported for {entity}"
             )))
         })
+    }
+    fn resolve_pending_grants<'a>(
+        &'a self,
+        _grantee_key: &'a str,
+        _canonical_id: &'a str,
+    ) -> VaultFuture<'a, Result<usize, mqdb_core::error::Error>> {
+        Box::pin(async { Ok(0) })
     }
 }
 

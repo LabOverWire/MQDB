@@ -339,6 +339,15 @@ impl DbAccess for Database {
     ) -> VaultFuture<'a, Result<Value, Error>> {
         Box::pin(async move { create_entity_db(self, entity, &data).await })
     }
+    fn resolve_pending_grants<'a>(
+        &'a self,
+        grantee_key: &'a str,
+        canonical_id: &'a str,
+    ) -> VaultFuture<'a, Result<usize, Error>> {
+        Box::pin(
+            async move { Database::resolve_pending_grants(self, grantee_key, canonical_id).await },
+        )
+    }
 }
 
 pub struct MqttDbAccess {
@@ -381,5 +390,12 @@ impl DbAccess for MqttDbAccess {
         data: Value,
     ) -> VaultFuture<'a, Result<Value, Error>> {
         Box::pin(async move { create_entity_mqtt(&self.client, entity, &data).await })
+    }
+    fn resolve_pending_grants<'a>(
+        &'a self,
+        _grantee_key: &'a str,
+        _canonical_id: &'a str,
+    ) -> VaultFuture<'a, Result<usize, Error>> {
+        Box::pin(async move { Ok(0) })
     }
 }

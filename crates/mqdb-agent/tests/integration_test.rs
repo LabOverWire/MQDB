@@ -1760,6 +1760,7 @@ async fn test_share_grant_gates_read_update_delete() {
                 entity: "diagrams".into(),
                 id: diagram_id.clone(),
                 grantee: "bob".into(),
+                grantee_key: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -1863,6 +1864,7 @@ async fn test_share_endpoints_and_protection() {
                 entity: "diagrams".into(),
                 id: diagram_id.clone(),
                 grantee: grantee.into(),
+                grantee_key: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -1956,6 +1958,7 @@ async fn test_share_endpoints_and_protection() {
             entity: "diagrams".into(),
             id: diagram_id.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             cascade: false,
         },
         Some("alice"),
@@ -2060,6 +2063,7 @@ async fn test_share_cascade_follows_references() {
                 entity: "diagrams".into(),
                 id: a.clone(),
                 grantee: "bob".into(),
+                grantee_key: None,
                 permission: "edit".into(),
                 cascade: true,
             },
@@ -2109,6 +2113,7 @@ async fn test_share_cascade_follows_references() {
             entity: "diagrams".into(),
             id: a.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             cascade: true,
         },
         Some("alice"),
@@ -2168,6 +2173,7 @@ async fn test_shares_index_path_correct_and_idempotent() {
                 entity: "diagrams".into(),
                 id: id.clone(),
                 grantee: "bob".into(),
+                grantee_key: None,
                 permission: "view".into(),
                 cascade: false,
             },
@@ -2263,6 +2269,7 @@ async fn test_delete_clears_shares_no_inheritance() {
             entity: "diagrams".into(),
             id: id.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2404,6 +2411,7 @@ async fn test_child_enforcement_derives_from_parent() {
                 entity: "diagrams".into(),
                 id: diagram_id.clone(),
                 grantee: "bob".into(),
+                grantee_key: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -2526,6 +2534,7 @@ async fn test_child_reparent_blocked() {
             entity: "diagrams".into(),
             id: d1.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "edit".into(),
             cascade: false,
         },
@@ -2676,6 +2685,7 @@ async fn test_event_recipients_owner_grantees_and_global() {
             entity: "diagrams".into(),
             id: diagram_id.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2883,6 +2893,7 @@ async fn test_unshare_by_admin_notifies_owner() {
             entity: "diagrams".into(),
             id: "d1".into(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2901,6 +2912,7 @@ async fn test_unshare_by_admin_notifies_owner() {
             entity: "diagrams".into(),
             id: "d1".into(),
             grantee: "bob".into(),
+            grantee_key: None,
             cascade: false,
         },
         Some("admin"),
@@ -2969,6 +2981,7 @@ async fn test_cascade_unshare_notifies_per_record_owner() {
             entity: "diagrams".into(),
             id: d1.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "view".into(),
             cascade: true,
         },
@@ -2987,6 +3000,7 @@ async fn test_cascade_unshare_notifies_per_record_owner() {
             entity: "diagrams".into(),
             id: d1.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             cascade: true,
         },
         Some("admin"),
@@ -3027,6 +3041,358 @@ async fn test_cascade_unshare_notifies_per_record_owner() {
         Some(&vec!["bob".to_string(), "carol".to_string()]),
         "d2 unshare notifies its own owner carol (not root owner) + grantee bob"
     );
+}
+
+async fn read_as(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    sender: &str,
+    id: &str,
+) -> mqdb_core::Response {
+    use mqdb_core::Request;
+    db.execute_with_sender(
+        Request::Read {
+            entity: "diagrams".into(),
+            id: id.to_string(),
+            includes: vec![],
+            projection: None,
+        },
+        Some(sender),
+        None,
+        ownership,
+        &ScopeConfig::default(),
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_pending_grant_inert_then_swept() {
+    use mqdb_agent::vault_backend::DbAccess;
+    use mqdb_core::Response;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "owner1", "title": "D"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    let resp = db
+        .share_grant(
+            "diagrams",
+            "d1",
+            "alice@x.com",
+            None,
+            "view",
+            Some("owner1"),
+            &ownership,
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp["status"], "pending",
+        "unregistered email is stored pending, not 404"
+    );
+
+    let grants = db
+        .list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    assert!(
+        grants[0]
+            .get("grantee")
+            .is_none_or(serde_json::Value::is_null),
+        "pending grant has null grantee"
+    );
+    assert_eq!(grants[0]["grantee_key"], "alice@x.com");
+
+    assert!(
+        matches!(
+            read_as(&db, &ownership, "cid-alice", "d1").await,
+            Response::Error { code: 403, .. }
+        ),
+        "pending grant is inert: the eventual canonical id has no access yet"
+    );
+    assert!(
+        db.list_shared_with("diagrams", Some("cid-alice"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let filled = DbAccess::resolve_pending_grants(&db, "alice@x.com", "cid-alice")
+        .await
+        .unwrap();
+    assert_eq!(filled, 1);
+
+    assert!(
+        matches!(
+            read_as(&db, &ownership, "cid-alice", "d1").await,
+            Response::Ok { .. }
+        ),
+        "after sweep the filled grantee has access"
+    );
+    assert_eq!(
+        db.list_shared_with("diagrams", Some("cid-alice"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        DbAccess::resolve_pending_grants(&db, "alice@x.com", "cid-alice")
+            .await
+            .unwrap(),
+        0,
+        "sweep is idempotent"
+    );
+}
+
+#[tokio::test]
+async fn test_unshare_pending_by_email_and_legacy_dual_key() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "owner1", "title": "D"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "alice@x.com",
+        None,
+        "view",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    db.share_revoke(
+        "diagrams",
+        "d1",
+        "alice@x.com",
+        None,
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        db.list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+            .await
+            .unwrap()
+            .is_empty(),
+        "unshare-by-email removes a pending grant"
+    );
+
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "cid-bob",
+        Some("cid-bob"),
+        "view",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    db.share_revoke(
+        "diagrams",
+        "d1",
+        "bob@x.com",
+        Some("cid-bob"),
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        db.list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+            .await
+            .unwrap()
+            .is_empty(),
+        "dual-key unshare removes a legacy grant keyed by canonical id"
+    );
+}
+
+#[tokio::test]
+async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
+    use mqdb_core::Response;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "owner1", "title": "D"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "alice@x.com",
+        None,
+        "view",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "alice@x.com",
+        None,
+        "edit",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    let grants = db
+        .list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1, "re-share updates in place");
+    assert_eq!(grants[0]["permission"], "edit");
+    assert!(
+        grants[0]
+            .get("grantee")
+            .is_none_or(serde_json::Value::is_null)
+    );
+
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "bob",
+        Some("bob"),
+        "view",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            read_as(&db, &ownership, "bob", "d1").await,
+            Response::Ok { .. }
+        ),
+        "password-mode grant (grantee == grantee_key) is immediately active"
+    );
+}
+
+#[tokio::test]
+async fn test_cascade_pending_sweep_fills_closure() {
+    use mqdb_agent::vault_backend::DbAccess;
+    use mqdb_core::Response;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d2", "userId": "owner1", "title": "D2"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "owner1", "title": "D1", "parent_id": "d2"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    db.share_grant(
+        "diagrams",
+        "d1",
+        "alice@x.com",
+        None,
+        "view",
+        Some("owner1"),
+        &ownership,
+        true,
+    )
+    .await
+    .unwrap();
+    for id in ["d1", "d2"] {
+        assert!(
+            matches!(
+                read_as(&db, &ownership, "cid-alice", id).await,
+                Response::Error { code: 403, .. }
+            ),
+            "pending cascade grant is inert across the closure"
+        );
+    }
+
+    let filled = DbAccess::resolve_pending_grants(&db, "alice@x.com", "cid-alice")
+        .await
+        .unwrap();
+    assert_eq!(
+        filled, 2,
+        "one sweep fills every pending grant in the closure"
+    );
+    for id in ["d1", "d2"] {
+        assert!(
+            matches!(
+                read_as(&db, &ownership, "cid-alice", id).await,
+                Response::Ok { .. }
+            ),
+            "after sweep the grantee reaches the whole closure"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3081,6 +3447,7 @@ async fn test_cascade_delete_events_carry_recipients() {
             entity: "diagrams".into(),
             id: diagram_id.clone(),
             grantee: "bob".into(),
+            grantee_key: None,
             permission: "view".into(),
             cascade: false,
         },
