@@ -403,7 +403,9 @@ async fn resolve_or_create_identity(
     Ok(canonical_id)
 }
 
-/// Fill any pending share grants keyed by this now-verified email.
+/// Fill any pending share grants keyed by this now-verified email. The lookup key is
+/// the blind index of the email (matching how the share path stores `grantee_key`), so
+/// the plaintext email is never used as a query term.
 async fn sweep_pending_grants(
     state: &ServerState,
     identity: &ProviderIdentity,
@@ -415,7 +417,10 @@ async fn sweep_pending_grants(
     let Some(email) = identity.email.as_deref() else {
         return;
     };
-    let key = email.to_lowercase();
+    let Some(crypto) = state.identity_crypto.as_deref() else {
+        return;
+    };
+    let key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, &email.to_lowercase());
     if let Err(e) = state
         .db_access
         .resolve_pending_grants(&key, canonical_id)

@@ -20,6 +20,19 @@ fn eq_filter(field: &str, value: &str) -> Filter {
     )
 }
 
+/// The grantee of a share in the forms the share machinery needs. `key` is the
+/// stable lookup/dedup identifier stored as `grantee_key` (a blind index of the
+/// email in identity mode, or the username in password mode). `resolved` is the
+/// match-identity written to `grantee` (canonical id / username), or `None` while
+/// the grant is pending; it also serves as the secondary key for revoke. `display`
+/// is the encrypted email retained for owner display (identity mode only).
+#[derive(Clone, Copy)]
+pub struct GranteeIdentity<'a> {
+    pub key: &'a str,
+    pub resolved: Option<&'a str>,
+    pub display: Option<&'a str>,
+}
+
 impl Database {
     fn resource_filters(entity: &str, id: &str) -> Vec<Filter> {
         vec![
@@ -105,23 +118,27 @@ impl Database {
             .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn write_grant(
         &self,
         entity: &str,
         id: &str,
-        grantee_key: &str,
-        grantee: Option<&str>,
+        grantee: GranteeIdentity<'_>,
         level: AccessLevel,
         granted_by: &str,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
-        self.clear_grant(entity, id, grantee_key, ownership).await?;
+        self.clear_grant(entity, id, grantee.key, ownership).await?;
+        if let Some(resolved) = grantee.resolved
+            && resolved != grantee.key
+        {
+            self.clear_grant(entity, id, resolved, ownership).await?;
+        }
         let record = json!({
             "resource_entity": entity,
             "resource_id": id,
-            "grantee": grantee,
-            "grantee_key": grantee_key,
+            "grantee": grantee.resolved,
+            "grantee_key": grantee.key,
+            "grantee_email": grantee.display,
             "permission": level.as_str(),
             "granted_by": granted_by,
         });
@@ -195,15 +212,14 @@ impl Database {
         &self,
         entity: &str,
         id: &str,
-        grantee_key: &str,
-        grantee: Option<&str>,
+        grantee: GranteeIdentity<'_>,
         permission: &str,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
         cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
-        if grantee_key.trim().is_empty() {
+        if grantee.key.trim().is_empty() {
             return Err(Error::Validation("grantee is required".to_string()));
         }
         let level = AccessLevel::parse(permission)
@@ -216,16 +232,8 @@ impl Database {
             });
         }
         let granted_by = sender.unwrap_or_default();
-        self.write_grant(
-            entity,
-            id,
-            grantee_key,
-            grantee,
-            level,
-            granted_by,
-            ownership,
-        )
-        .await?;
+        self.write_grant(entity, id, grantee, level, granted_by, ownership)
+            .await?;
         let mut shared = 1usize;
         if cascade {
             for ref_id in self.referenced_closure(entity, id).await? {
@@ -233,27 +241,18 @@ impl Database {
                     continue;
                 }
                 let existing = self
-                    .existing_grant_level(entity, &ref_id, grantee_key)
+                    .existing_grant_level(entity, &ref_id, grantee.key)
                     .await?;
                 if existing.is_none_or(|current| current < level) {
-                    self.write_grant(
-                        entity,
-                        &ref_id,
-                        grantee_key,
-                        grantee,
-                        level,
-                        granted_by,
-                        ownership,
-                    )
-                    .await?;
+                    self.write_grant(entity, &ref_id, grantee, level, granted_by, ownership)
+                        .await?;
                 }
                 shared += 1;
             }
         }
         Ok(json!({
-            "status": if grantee.is_none() { "pending" } else { "shared" },
-            "grantee": grantee,
-            "grantee_key": grantee_key,
+            "status": if grantee.resolved.is_none() { "pending" } else { "shared" },
+            "grantee": grantee.resolved,
             "permission": level.as_str(),
             "resources_shared": shared,
         }))
@@ -267,21 +266,19 @@ impl Database {
     /// # Errors
     /// Returns `Forbidden` if the sender is not the owner/admin, or `Validation` for a
     /// non-shareable entity.
-    #[allow(clippy::too_many_arguments)]
     pub async fn share_revoke(
         &self,
         entity: &str,
         id: &str,
-        grantee_key: &str,
-        resolved_key: Option<&str>,
+        grantee: GranteeIdentity<'_>,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
         cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
-        let mut keys: Vec<&str> = vec![grantee_key];
-        if let Some(resolved) = resolved_key
-            && resolved != grantee_key
+        let mut keys: Vec<&str> = vec![grantee.key];
+        if let Some(resolved) = grantee.resolved
+            && resolved != grantee.key
         {
             keys.push(resolved);
         }
@@ -299,7 +296,7 @@ impl Database {
                 }
             }
         }
-        Ok(json!({ "status": "unshared", "grantee": grantee_key }))
+        Ok(json!({ "status": "unshared", "grantee": grantee.key }))
     }
 
     /// Highest access level already granted on a resource for a given input

@@ -320,17 +320,20 @@ impl Database {
                 id,
                 grantee,
                 grantee_key,
+                grantee_email,
                 permission,
                 cascade,
             } => {
-                let key = grantee_key.as_deref().unwrap_or(grantee.as_str());
-                let resolved = (!grantee.trim().is_empty()).then_some(grantee.as_str());
+                let grantee_id = crate::database::GranteeIdentity {
+                    key: grantee_key.as_deref().unwrap_or(grantee.as_str()),
+                    resolved: (!grantee.trim().is_empty()).then_some(grantee.as_str()),
+                    display: grantee_email.as_deref(),
+                };
                 match self
                     .share_grant(
                         &entity,
                         &id,
-                        key,
-                        resolved,
+                        grantee_id,
                         &permission,
                         sender,
                         ownership,
@@ -348,21 +351,20 @@ impl Database {
                 grantee,
                 grantee_key,
                 cascade,
-            } => match self
-                .share_revoke(
-                    &entity,
-                    &id,
-                    &grantee,
-                    grantee_key.as_deref(),
-                    sender,
-                    ownership,
-                    cascade,
-                )
-                .await
-            {
-                Ok(v) => Response::ok(v),
-                Err(e) => e.into(),
-            },
+            } => {
+                let grantee_id = crate::database::GranteeIdentity {
+                    key: &grantee,
+                    resolved: grantee_key.as_deref(),
+                    display: None,
+                };
+                match self
+                    .share_revoke(&entity, &id, grantee_id, sender, ownership, cascade)
+                    .await
+                {
+                    Ok(v) => Response::ok(v),
+                    Err(e) => e.into(),
+                }
+            }
             Request::Shares { entity, id } => {
                 match self
                     .list_resource_shares(&entity, &id, sender, ownership)

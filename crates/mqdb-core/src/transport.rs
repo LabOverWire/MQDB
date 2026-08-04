@@ -66,6 +66,8 @@ pub enum Request {
         grantee: String,
         #[serde(default)]
         grantee_key: Option<String>,
+        #[serde(default)]
+        grantee_email: Option<String>,
         permission: String,
         #[serde(default = "default_cascade")]
         cascade: bool,

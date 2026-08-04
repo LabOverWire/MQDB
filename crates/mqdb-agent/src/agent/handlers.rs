@@ -91,9 +91,11 @@ pub(crate) async fn resolve_grantee_email(
 /// into a stable `grantee_key` (the lowercased input identifier) and a resolved
 /// `grantee`. A registered email resolves to its canonical id; an unregistered email
 /// becomes a **pending** grant (empty `grantee`, `grantee_key = email`) that stays
-/// inert until the recipient first signs in. `Unshare` carries the lowercased email as
-/// the primary key plus any resolved canonical id for dual-key revoke. When no identity
-/// crypto is configured (password mode), the request is used verbatim.
+/// inert until the recipient first signs in. The stored `grantee_key` is a blind index
+/// of the lowercased email (never the plaintext), and the plaintext email is retained
+/// only encrypted in `grantee_email` for owner display. `Unshare` carries the blind
+/// index as the primary key plus any resolved canonical id for dual-key revoke. When no
+/// identity crypto is configured (password mode), the request is used verbatim.
 #[cfg(feature = "http-api")]
 async fn resolve_share_request(
     db: &Database,
@@ -120,17 +122,23 @@ async fn resolve_share_request(
                     id,
                     grantee,
                     grantee_key: None,
+                    grantee_email: None,
                     permission,
                     cascade,
                 };
             }
-            let key = trimmed.to_lowercase();
+            let email = trimmed.to_lowercase();
+            let key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, &email);
+            let encrypted_email = crypto
+                .encrypt_field(mqdb_core::types::SHARES_ENTITY, &email)
+                .ok();
             let resolved = resolve_grantee_email(db, crypto, trimmed).await;
             Request::Share {
                 entity,
                 id,
                 grantee: resolved.unwrap_or_default(),
                 grantee_key: Some(key),
+                grantee_email: encrypted_email,
                 permission,
                 cascade,
             }
@@ -142,16 +150,34 @@ async fn resolve_share_request(
             cascade,
             ..
         } => {
+            let email = grantee.trim().to_lowercase();
+            let key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, &email);
             let resolved = resolve_grantee_email(db, crypto, grantee.trim()).await;
             Request::Unshare {
                 entity,
                 id,
-                grantee: grantee.trim().to_lowercase(),
+                grantee: key,
                 grantee_key: resolved,
                 cascade,
             }
         }
         other => other,
+    }
+}
+
+/// Decrypt the stored `grantee_email` on each record of a `Shares` listing so the
+/// resource owner sees the plaintext email (it is encrypted at rest).
+#[cfg(feature = "http-api")]
+fn decrypt_shares_grantee_email(
+    crypto: &Arc<crate::http::IdentityCrypto>,
+    response: &mut mqdb_core::transport::Response,
+) {
+    if let mqdb_core::transport::Response::Ok { data } = response
+        && let Some(records) = data.as_array_mut()
+    {
+        for record in records {
+            crypto.decrypt_json_fields(mqdb_core::types::SHARES_ENTITY, record, &["grantee_email"]);
+        }
     }
 }
 
@@ -315,6 +341,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                 &mut response,
             )
             .await;
+    }
+
+    #[cfg(feature = "http-api")]
+    if matches!(op.operation, mqdb_core::protocol::DbOp::Shares)
+        && let Some(crypto) = ctx.identity_crypto
+    {
+        decrypt_shares_grantee_email(crypto, &mut response);
     }
 
     if let Some(response_topic) = &message.properties.response_topic {
@@ -1747,6 +1780,59 @@ mod tests {
         assert_eq!(
             resolve_grantee_email(&db, &crypto, "nobody@example.com").await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_share_request_blind_indexes_and_encrypts_email() {
+        use super::resolve_share_request;
+        use mqdb_core::transport::Request;
+        use mqdb_core::types::SHARES_ENTITY;
+        use std::sync::Arc;
+
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = Arc::new(crypto);
+
+        let req = resolve_share_request(
+            &db,
+            Some(&crypto),
+            Request::Share {
+                entity: "diagrams".into(),
+                id: "d1".into(),
+                grantee: "Alice@X.com".into(),
+                grantee_key: None,
+                grantee_email: None,
+                permission: "view".into(),
+                cascade: false,
+            },
+        )
+        .await;
+
+        let Request::Share {
+            grantee,
+            grantee_key,
+            grantee_email,
+            ..
+        } = req
+        else {
+            panic!("expected Share");
+        };
+        assert_eq!(grantee, "", "an unregistered email is stored pending");
+        assert_eq!(
+            grantee_key.as_deref(),
+            Some(crypto.blind_index(SHARES_ENTITY, "alice@x.com").as_str()),
+            "grantee_key is the blind index of the lowercased email, never plaintext"
+        );
+        let enc = grantee_email.expect("encrypted email retained for display");
+        assert_ne!(enc, "alice@x.com", "the email is not stored in plaintext");
+        assert_eq!(
+            crypto.decrypt_field(SHARES_ENTITY, &enc).unwrap(),
+            "alice@x.com",
+            "grantee_email decrypts back to the lowercased email"
         );
     }
 }

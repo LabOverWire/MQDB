@@ -353,6 +353,7 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 id,
                 grantee,
                 grantee_key: None,
+                grantee_email: None,
                 permission,
                 cascade,
             })

@@ -396,6 +396,12 @@ impl DbAccess for MqttDbAccess {
         _grantee_key: &'a str,
         _canonical_id: &'a str,
     ) -> VaultFuture<'a, Result<usize, Error>> {
-        Box::pin(async move { Ok(0) })
+        Box::pin(async move {
+            tracing::warn!(
+                "pending-grant sweep is not supported over the MQTT DB path; pending share \
+                 grants activate on sign-in only in agent mode until cluster parity (#75)"
+            );
+            Ok(0)
+        })
     }
 }

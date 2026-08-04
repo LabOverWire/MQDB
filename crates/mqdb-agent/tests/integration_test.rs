@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use mqdb_agent::Database;
-use mqdb_agent::database::CallerContext;
+use mqdb_agent::database::{CallerContext, GranteeIdentity};
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
@@ -1761,6 +1761,7 @@ async fn test_share_grant_gates_read_update_delete() {
                 id: diagram_id.clone(),
                 grantee: "bob".into(),
                 grantee_key: None,
+                grantee_email: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -1865,6 +1866,7 @@ async fn test_share_endpoints_and_protection() {
                 id: diagram_id.clone(),
                 grantee: grantee.into(),
                 grantee_key: None,
+                grantee_email: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -2064,6 +2066,7 @@ async fn test_share_cascade_follows_references() {
                 id: a.clone(),
                 grantee: "bob".into(),
                 grantee_key: None,
+                grantee_email: None,
                 permission: "edit".into(),
                 cascade: true,
             },
@@ -2174,6 +2177,7 @@ async fn test_shares_index_path_correct_and_idempotent() {
                 id: id.clone(),
                 grantee: "bob".into(),
                 grantee_key: None,
+                grantee_email: None,
                 permission: "view".into(),
                 cascade: false,
             },
@@ -2270,6 +2274,7 @@ async fn test_delete_clears_shares_no_inheritance() {
             id: id.clone(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2412,6 +2417,7 @@ async fn test_child_enforcement_derives_from_parent() {
                 id: diagram_id.clone(),
                 grantee: "bob".into(),
                 grantee_key: None,
+                grantee_email: None,
                 permission: permission.into(),
                 cascade: false,
             },
@@ -2535,6 +2541,7 @@ async fn test_child_reparent_blocked() {
             id: d1.clone(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "edit".into(),
             cascade: false,
         },
@@ -2686,6 +2693,7 @@ async fn test_event_recipients_owner_grantees_and_global() {
             id: diagram_id.clone(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2894,6 +2902,7 @@ async fn test_unshare_by_admin_notifies_owner() {
             id: "d1".into(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "view".into(),
             cascade: false,
         },
@@ -2982,6 +2991,7 @@ async fn test_cascade_unshare_notifies_per_record_owner() {
             id: d1.clone(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "view".into(),
             cascade: true,
         },
@@ -3043,6 +3053,14 @@ async fn test_cascade_unshare_notifies_per_record_owner() {
     );
 }
 
+fn gi<'a>(key: &'a str, resolved: Option<&'a str>) -> GranteeIdentity<'a> {
+    GranteeIdentity {
+        key,
+        resolved,
+        display: None,
+    }
+}
+
 async fn read_as(
     db: &Database,
     ownership: &OwnershipConfig,
@@ -3092,8 +3110,7 @@ async fn test_pending_grant_inert_then_swept() {
         .share_grant(
             "diagrams",
             "d1",
-            "alice@x.com",
-            None,
+            gi("alice@x.com", None),
             "view",
             Some("owner1"),
             &ownership,
@@ -3137,6 +3154,21 @@ async fn test_pending_grant_inert_then_swept() {
         .await
         .unwrap();
     assert_eq!(filled, 1);
+
+    let swept = db
+        .list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+        .await
+        .unwrap();
+    assert_eq!(swept.len(), 1);
+    assert_eq!(swept[0]["grantee"], "cid-alice", "sweep fills the grantee");
+    assert_eq!(
+        swept[0]["grantee_key"], "alice@x.com",
+        "the sweep's partial update preserves grantee_key"
+    );
+    assert_eq!(
+        swept[0]["permission"], "view",
+        "the sweep's partial update preserves permission"
+    );
 
     assert!(
         matches!(
@@ -3183,8 +3215,7 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
     db.share_grant(
         "diagrams",
         "d1",
-        "alice@x.com",
-        None,
+        gi("alice@x.com", None),
         "view",
         Some("owner1"),
         &ownership,
@@ -3195,8 +3226,7 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
     db.share_revoke(
         "diagrams",
         "d1",
-        "alice@x.com",
-        None,
+        gi("alice@x.com", None),
         Some("owner1"),
         &ownership,
         false,
@@ -3214,8 +3244,7 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
     db.share_grant(
         "diagrams",
         "d1",
-        "cid-bob",
-        Some("cid-bob"),
+        gi("cid-bob", Some("cid-bob")),
         "view",
         Some("owner1"),
         &ownership,
@@ -3226,8 +3255,7 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
     db.share_revoke(
         "diagrams",
         "d1",
-        "bob@x.com",
-        Some("cid-bob"),
+        gi("bob@x.com", Some("cid-bob")),
         Some("owner1"),
         &ownership,
         false,
@@ -3240,6 +3268,94 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
             .unwrap()
             .is_empty(),
         "dual-key unshare removes a legacy grant keyed by canonical id"
+    );
+}
+
+#[tokio::test]
+async fn test_reshare_legacy_grant_no_duplicate_and_demotes() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "owner1", "title": "D"}),
+        None,
+        None,
+        None,
+        &scope,
+    )
+    .await
+    .unwrap();
+
+    // legacy phase-1 shape: grantee_key == canonical id, granted at edit
+    db.share_grant(
+        "diagrams",
+        "d1",
+        gi("cid-bob", Some("cid-bob")),
+        "edit",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+
+    // re-share as the now-registered user (email key + resolved canonical), demoting to view
+    db.share_grant(
+        "diagrams",
+        "d1",
+        gi("bob@x.com", Some("cid-bob")),
+        "view",
+        Some("owner1"),
+        &ownership,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let grants = db
+        .list_resource_shares("diagrams", "d1", Some("owner1"), &ownership)
+        .await
+        .unwrap();
+    assert_eq!(
+        grants.len(),
+        1,
+        "re-share dual-clears the legacy canonical-keyed row (no duplicate)"
+    );
+    assert_eq!(
+        grants[0]["permission"], "view",
+        "the demotion takes effect (no stale higher-level row wins the MAX)"
+    );
+
+    assert!(
+        matches!(
+            read_as(&db, &ownership, "cid-bob", "d1").await,
+            Response::Ok { .. }
+        ),
+        "view access still works after demotion"
+    );
+    let update = db
+        .execute_with_sender(
+            Request::Update {
+                entity: "diagrams".into(),
+                id: "d1".into(),
+                fields: json!({"title": "hijack"}),
+            },
+            Some("cid-bob"),
+            None,
+            &ownership,
+            &scope,
+            None,
+        )
+        .await;
+    assert!(
+        matches!(update, Response::Error { code: 403, .. }),
+        "demotion to view revokes edit: the stale edit grant no longer applies"
     );
 }
 
@@ -3267,8 +3383,7 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
     db.share_grant(
         "diagrams",
         "d1",
-        "alice@x.com",
-        None,
+        gi("alice@x.com", None),
         "view",
         Some("owner1"),
         &ownership,
@@ -3279,8 +3394,7 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
     db.share_grant(
         "diagrams",
         "d1",
-        "alice@x.com",
-        None,
+        gi("alice@x.com", None),
         "edit",
         Some("owner1"),
         &ownership,
@@ -3303,8 +3417,7 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
     db.share_grant(
         "diagrams",
         "d1",
-        "bob",
-        Some("bob"),
+        gi("bob", Some("bob")),
         "view",
         Some("owner1"),
         &ownership,
@@ -3358,8 +3471,7 @@ async fn test_cascade_pending_sweep_fills_closure() {
     db.share_grant(
         "diagrams",
         "d1",
-        "alice@x.com",
-        None,
+        gi("alice@x.com", None),
         "view",
         Some("owner1"),
         &ownership,
@@ -3448,6 +3560,7 @@ async fn test_cascade_delete_events_carry_recipients() {
             id: diagram_id.clone(),
             grantee: "bob".into(),
             grantee_key: None,
+            grantee_email: None,
             permission: "view".into(),
             cascade: false,
         },
