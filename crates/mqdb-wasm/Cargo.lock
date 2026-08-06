@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-core"
-version = "0.7.8"
+version = "0.7.9"
 dependencies = [
  "arc-swap",
  "bebytes",

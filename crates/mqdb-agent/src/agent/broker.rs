@@ -30,13 +30,19 @@ impl MqdbAgent {
         if self.ownership_config.is_empty() {
             return;
         }
-        let fields = vec!["resource_id".to_string(), "grantee".to_string()];
-        if let Err(e) = self
-            .db
-            .ensure_index(mqdb_core::types::SHARES_ENTITY.to_string(), fields)
-            .await
-        {
-            tracing::warn!(error = %e, "failed to register _shares indexes");
+        let index_sets = [
+            vec!["resource_id".to_string(), "grantee".to_string()],
+            vec!["grantee_key".to_string()],
+            vec!["resource_id".to_string(), "grantee_key".to_string()],
+        ];
+        for fields in index_sets {
+            if let Err(e) = self
+                .db
+                .ensure_index(mqdb_core::types::SHARES_ENTITY.to_string(), fields)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to register _shares indexes");
+            }
         }
     }
 

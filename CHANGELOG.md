@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-03 — mqdb-cli 0.8.27, mqdb-core 0.7.9, mqdb-agent 0.8.20
+
+### Added
+
+- **Sharing a resource with an unregistered email now stores a pending grant instead of returning 404 (agent mode, identity deployments).** Diagram sharing previously resolved a grantee email to a canonical id only for already-registered users. A share is now keyed by a stable `grantee_key` separate from the resolved `grantee` (the canonical id, or `null` while pending). A grant to an unregistered email is stored with `grantee = null`, which matches no one, so the grant is inert until the recipient first signs in. On that first verified sign-in, `_shares` is swept by `grantee_key` and each pending grant's `grantee` is filled with the new canonical id, granting access without re-sharing. Pending grants can be re-shared (updated in place) and revoked before they are filled, and cascade shares create pending rows across the whole reference closure that a single sign-in sweep fills together. Password-mode deployments are unaffected (grantee equals grantee_key and grants are active immediately).
+- **Grantee emails are no longer stored in plaintext in `_shares` (identity mode).** `grantee_key` holds a blind index of the lowercased email (matching the identity subsystem's `email_hash` pattern), and the email itself is retained only encrypted in `grantee_email`, decrypted on the fly when the owner lists a resource's grants. Nothing persists the grantee email in the clear.
+- **Re-sharing no longer leaves a duplicate `_shares` row or a stale higher-level grant.** A re-share clears the grant under every known key (the current key and any resolved canonical id) before writing, so a grant created under an older key shape is replaced in place. Previously a re-share could leave a second row whose higher permission won the effective level, silently defeating a demotion.
+- The sign-in sweep runs only in agent mode; over the cluster/MQTT DB path it logs a warning and is a no-op (cluster parity is tracked in #75).
+
 ## 2026-08-02 — mqdb-cli 0.8.26, mqdb-agent 0.8.19
 
 ### Fixed
