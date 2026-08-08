@@ -1835,4 +1835,47 @@ mod tests {
             "grantee_email decrypts back to the lowercased email"
         );
     }
+
+    #[tokio::test]
+    async fn shares_listing_decrypts_grantee_email_for_owner() {
+        use super::decrypt_shares_grantee_email;
+        use mqdb_core::transport::Response;
+        use mqdb_core::types::SHARES_ENTITY;
+        use std::sync::Arc;
+
+        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = Arc::new(crypto);
+        let enc = crypto.encrypt_field(SHARES_ENTITY, "alice@x.com").unwrap();
+        assert_ne!(enc, "alice@x.com");
+
+        let mut response = Response::Ok {
+            data: json!([
+                {
+                    "grantee_key": "some-blind-index",
+                    "grantee": serde_json::Value::Null,
+                    "grantee_email": enc,
+                    "permission": "view",
+                },
+                {
+                    "grantee_key": "u",
+                    "grantee": "u",
+                    "grantee_email": serde_json::Value::Null,
+                    "permission": "edit",
+                }
+            ]),
+        };
+        decrypt_shares_grantee_email(&crypto, &mut response);
+
+        let Response::Ok { data } = response else {
+            panic!("expected ok");
+        };
+        assert_eq!(
+            data[0]["grantee_email"], "alice@x.com",
+            "owner listing decrypts the encrypted grantee_email back to plaintext"
+        );
+        assert!(
+            data[1]["grantee_email"].is_null(),
+            "a null grantee_email (password mode) is left untouched"
+        );
+    }
 }
