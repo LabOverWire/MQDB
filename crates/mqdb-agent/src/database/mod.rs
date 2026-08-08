@@ -10,6 +10,7 @@ mod sharing;
 mod subscriptions;
 
 pub use crud::CallerContext;
+pub use sharing::GranteeIdentity;
 
 use crate::consumer_group::ConsumerGroup;
 use crate::dispatcher::EventDispatcher;

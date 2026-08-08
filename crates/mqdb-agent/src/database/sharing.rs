@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::Database;
+use super::{CallerContext, Database};
 use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::keys;
@@ -18,6 +18,19 @@ fn eq_filter(field: &str, value: &str) -> Filter {
         FilterOp::Eq,
         Value::String(value.to_string()),
     )
+}
+
+/// The grantee of a share in the forms the share machinery needs. `key` is the
+/// stable lookup/dedup identifier stored as `grantee_key` (a blind index of the
+/// email in identity mode, or the username in password mode). `resolved` is the
+/// match-identity written to `grantee` (canonical id / username), or `None` while
+/// the grant is pending; it also serves as the secondary key for revoke. `display`
+/// is the encrypted email retained for owner display (identity mode only).
+#[derive(Clone, Copy)]
+pub struct GranteeIdentity<'a> {
+    pub key: &'a str,
+    pub resolved: Option<&'a str>,
+    pub display: Option<&'a str>,
 }
 
 impl Database {
@@ -109,17 +122,23 @@ impl Database {
         &self,
         entity: &str,
         id: &str,
-        grantee: &str,
+        grantee: GranteeIdentity<'_>,
         level: AccessLevel,
         granted_by: &str,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
-        self.clear_grant(entity, id, grantee, ownership).await?;
+        self.clear_grant(entity, id, grantee.key, ownership).await?;
+        if let Some(resolved) = grantee.resolved
+            && resolved != grantee.key
+        {
+            self.clear_grant(entity, id, resolved, ownership).await?;
+        }
         let record = json!({
             "resource_entity": entity,
             "resource_id": id,
-            "grantee": grantee,
-            "grantee_key": grantee,
+            "grantee": grantee.resolved,
+            "grantee_key": grantee.key,
+            "grantee_email": grantee.display,
             "permission": level.as_str(),
             "granted_by": granted_by,
         });
@@ -193,14 +212,14 @@ impl Database {
         &self,
         entity: &str,
         id: &str,
-        grantee: &str,
+        grantee: GranteeIdentity<'_>,
         permission: &str,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
         cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
-        if grantee.trim().is_empty() {
+        if grantee.key.trim().is_empty() {
             return Err(Error::Validation("grantee is required".to_string()));
         }
         let level = AccessLevel::parse(permission)
@@ -221,7 +240,9 @@ impl Database {
                 if ref_id == id {
                     continue;
                 }
-                let existing = self.share_level(entity, &ref_id, grantee).await?;
+                let existing = self
+                    .existing_grant_level(entity, &ref_id, grantee.key)
+                    .await?;
                 if existing.is_none_or(|current| current < level) {
                     self.write_grant(entity, &ref_id, grantee, level, granted_by, ownership)
                         .await?;
@@ -230,15 +251,17 @@ impl Database {
             }
         }
         Ok(json!({
-            "status": "shared",
-            "grantee": grantee,
+            "status": if grantee.resolved.is_none() { "pending" } else { "shared" },
+            "grantee": grantee.resolved,
             "permission": level.as_str(),
             "resources_shared": shared,
         }))
     }
 
-    /// Revoke `grantee`'s grant on a resource, and (when `cascade` is set) across
-    /// every diagram reachable via self-references.
+    /// Revoke a grantee's grant on a resource, and (when `cascade` is set) across
+    /// every diagram reachable via self-references. Revokes by every known key so a
+    /// grant survives regardless of whether it was stored under the input identifier
+    /// (email/username) or a resolved canonical id.
     ///
     /// # Errors
     /// Returns `Forbidden` if the sender is not the owner/admin, or `Validation` for a
@@ -247,23 +270,111 @@ impl Database {
         &self,
         entity: &str,
         id: &str,
-        grantee: &str,
+        grantee: GranteeIdentity<'_>,
         sender: Option<&str>,
         ownership: &OwnershipConfig,
         cascade: bool,
     ) -> Result<Value> {
         self.require_owner_or_admin(ownership, entity, id, sender)?;
-        self.clear_grant(entity, id, grantee, ownership).await?;
+        let mut keys: Vec<&str> = vec![grantee.key];
+        if let Some(resolved) = grantee.resolved
+            && resolved != grantee.key
+        {
+            keys.push(resolved);
+        }
+        for revoke_key in &keys {
+            self.clear_grant(entity, id, revoke_key, ownership).await?;
+        }
         if cascade {
             for ref_id in self.referenced_closure(entity, id).await? {
                 if ref_id == id {
                     continue;
                 }
-                self.clear_grant(entity, &ref_id, grantee, ownership)
-                    .await?;
+                for revoke_key in &keys {
+                    self.clear_grant(entity, &ref_id, revoke_key, ownership)
+                        .await?;
+                }
             }
         }
-        Ok(json!({ "status": "unshared", "grantee": grantee }))
+        Ok(json!({ "status": "unshared", "grantee": grantee.key }))
+    }
+
+    /// Highest access level already granted on a resource for a given input
+    /// identifier (`grantee_key`), independent of whether the grant is resolved or
+    /// still pending. Used by cascade to avoid downgrading an existing grant.
+    async fn existing_grant_level(
+        &self,
+        entity: &str,
+        id: &str,
+        grantee_key: &str,
+    ) -> Result<Option<AccessLevel>> {
+        let mut filters = Self::resource_filters(entity, id);
+        filters.push(eq_filter("grantee_key", grantee_key));
+        let records = self
+            .list_core(
+                SHARES_ENTITY.to_string(),
+                filters,
+                vec![],
+                None,
+                vec![],
+                None,
+            )
+            .await?;
+        Ok(records
+            .iter()
+            .filter_map(|r| r.get("permission").and_then(Value::as_str))
+            .filter_map(AccessLevel::parse)
+            .max())
+    }
+
+    /// Fill pending grants for a now-verified identity. Sweeps `_shares` by
+    /// `grantee_key` and sets `grantee = canonical_id` on every row whose `grantee`
+    /// is still null. Idempotent — a second sweep fills nothing. Returns the count
+    /// of grants filled.
+    ///
+    /// # Errors
+    /// Returns an error if scanning or updating the share records fails.
+    pub(crate) async fn resolve_pending_grants(
+        &self,
+        grantee_key: &str,
+        canonical_id: &str,
+    ) -> Result<usize> {
+        let filters = vec![eq_filter("grantee_key", grantee_key)];
+        let rows = self
+            .list_core(
+                SHARES_ENTITY.to_string(),
+                filters,
+                vec![],
+                None,
+                vec![],
+                None,
+            )
+            .await?;
+        let scope = ScopeConfig::default();
+        let mut filled = 0;
+        for row in &rows {
+            let is_pending = row.get("grantee").is_none_or(Value::is_null);
+            if !is_pending {
+                continue;
+            }
+            if let Some(sid) = row.get("id").and_then(Value::as_str) {
+                let caller = CallerContext {
+                    sender: None,
+                    client_id: None,
+                    scope_config: &scope,
+                };
+                self.update(
+                    SHARES_ENTITY.to_string(),
+                    sid.to_string(),
+                    json!({ "grantee": canonical_id }),
+                    None,
+                    &caller,
+                )
+                .await?;
+                filled += 1;
+            }
+        }
+        Ok(filled)
     }
 
     /// List the grants on a resource (owner/admin only).

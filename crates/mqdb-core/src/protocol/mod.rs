@@ -352,6 +352,8 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 entity: op.entity,
                 id,
                 grantee,
+                grantee_key: None,
+                grantee_email: None,
                 permission,
                 cascade,
             })
@@ -368,6 +370,7 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
                 entity: op.entity,
                 id,
                 grantee,
+                grantee_key: None,
                 cascade,
             })
         }
@@ -544,6 +547,7 @@ mod tests {
                 grantee,
                 permission,
                 cascade,
+                ..
             } => {
                 assert_eq!(entity, "diagrams");
                 assert_eq!(id, "abc");
