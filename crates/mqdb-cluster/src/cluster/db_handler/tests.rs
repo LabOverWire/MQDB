@@ -2181,6 +2181,69 @@ async fn cluster_shared_lists_grants_for_grantee() {
 }
 
 #[tokio::test]
+async fn cluster_share_and_read_forward_to_resource_primary() {
+    use super::super::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::clone(&ownership));
+
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    ctrl.set_ownership(Arc::clone(&ownership));
+
+    // node2 is primary for the resource's partition; node1 is not.
+    let rp = data_partition("diagrams", "d1");
+    let mut map = PartitionMap::default();
+    map.set(
+        rp,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node2),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    // A graded read of a non-local resource is forwarded to its primary (never
+    // graded/served locally on a non-primary), and so is a share.
+    let read = handler
+        .handle_publish(&mut ctrl, "$DB/diagrams/d1", &[], &share_ctx("bob"))
+        .await;
+    assert!(read.is_none(), "graded read forwards, no local response");
+    let share = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/diagrams/d1/share",
+            &grant_payload("bob", "view"),
+            &share_ctx("alice"),
+        )
+        .await;
+    assert!(share.is_none(), "share forwards, no local response");
+
+    let sent = outbox.lock().unwrap();
+    assert_eq!(sent.len(), 2, "both forwarded");
+    let ops: Vec<JsonDbOp> = sent
+        .iter()
+        .filter_map(|(to, m)| {
+            assert_eq!(*to, node2, "forwarded to the resource primary");
+            match m {
+                ClusterMessage::JsonDbRequest { request, .. } => Some(request.op),
+                _ => None,
+            }
+        })
+        .collect();
+    assert!(ops.contains(&JsonDbOp::Read), "read was forwarded");
+    assert!(ops.contains(&JsonDbOp::Share), "share was forwarded");
+}
+
+#[tokio::test]
 async fn cluster_cascade_share_grants_closure() {
     use super::super::db::{ClusterConstraint, OnDeleteAction};
 

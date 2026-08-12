@@ -230,6 +230,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut visited: HashSet<String> = HashSet::from([root_id.to_string()]);
         let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
         let mut granted = 0;
+        let mut skipped_remote = 0;
         while let Some(cur) = queue.pop_front() {
             if visited.len() > MAX_CASCADE_RESOURCES {
                 break;
@@ -257,8 +258,19 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                     granted += 1;
                     queue.push_back(child);
+                } else {
+                    skipped_remote += 1;
                 }
             }
+        }
+        if skipped_remote > 0 {
+            tracing::warn!(
+                entity,
+                root_id,
+                skipped_remote,
+                "cascade share is incomplete: {skipped_remote} closure member(s) live on other \
+                 partitions and were not granted (cross-partition cascade is tracked in #122)"
+            );
         }
         granted
     }
