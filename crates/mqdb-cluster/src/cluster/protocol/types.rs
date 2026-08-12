@@ -121,6 +121,10 @@ pub enum JsonDbOp {
     Delete = 2,
     List = 3,
     Create = 4,
+    Share = 5,
+    Unshare = 6,
+    Shares = 7,
+    Shared = 8,
 }
 
 impl JsonDbOp {
@@ -132,6 +136,10 @@ impl JsonDbOp {
             2 => Some(Self::Delete),
             3 => Some(Self::List),
             4 => Some(Self::Create),
+            5 => Some(Self::Share),
+            6 => Some(Self::Unshare),
+            7 => Some(Self::Shares),
+            8 => Some(Self::Shared),
             _ => None,
         }
     }

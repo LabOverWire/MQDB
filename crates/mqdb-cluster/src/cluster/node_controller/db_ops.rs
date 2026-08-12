@@ -10,7 +10,7 @@ use super::{
 use crate::cluster::replication::ReplicaState;
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipDecision};
+use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -359,12 +359,42 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stores.constraint_get_unique_fields(entity)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_json_db_request(
         &mut self,
         from: NodeId,
         partition: PartitionId,
         request: &JsonDbRequest,
     ) -> Option<super::PendingConstraintWork> {
+        // The server-internal `shared` scatter lists `_shares` across primaries; it
+        // is only reachable via inter-node transport (external clients hit the
+        // client-side guard), so exempt it while still blocking forwarded direct CRUD.
+        let internal_shares_scatter =
+            request.op == JsonDbOp::List && request.response_topic.starts_with("_mqdb/scatter/");
+        if request.entity == mqdb_core::types::SHARES_ENTITY
+            && !internal_shares_scatter
+            && matches!(
+                request.op,
+                JsonDbOp::Create
+                    | JsonDbOp::Read
+                    | JsonDbOp::Update
+                    | JsonDbOp::Delete
+                    | JsonDbOp::List
+            )
+        {
+            let response = JsonDbResponse::new(
+                request.request_id,
+                Self::json_error(403, "direct access to shares is not permitted"),
+                request.response_topic.clone(),
+                request.correlation_data.clone(),
+            );
+            let _ = self
+                .transport
+                .send(from, ClusterMessage::JsonDbResponse(response))
+                .await;
+            return None;
+        }
+
         if let Some(err) = self.check_forwarded_ownership(request) {
             let response = JsonDbResponse::new(
                 request.request_id,
@@ -409,6 +439,43 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             JsonDbOp::List => (
                 self.handle_json_list_local(&request.entity, &request.payload),
+                None,
+            ),
+            JsonDbOp::Share => {
+                let id = request.id.as_deref().unwrap_or("");
+                (
+                    self.handle_share_local(
+                        &request.entity,
+                        id,
+                        &request.payload,
+                        request.sender.as_deref(),
+                    )
+                    .await,
+                    None,
+                )
+            }
+            JsonDbOp::Unshare => {
+                let id = request.id.as_deref().unwrap_or("");
+                (
+                    self.handle_unshare_local(
+                        &request.entity,
+                        id,
+                        &request.payload,
+                        request.sender.as_deref(),
+                    )
+                    .await,
+                    None,
+                )
+            }
+            JsonDbOp::Shares => {
+                let id = request.id.as_deref().unwrap_or("");
+                (
+                    self.handle_shares_local(&request.entity, id, request.sender.as_deref()),
+                    None,
+                )
+            }
+            JsonDbOp::Shared => (
+                Self::json_error(500, "shared is resolved on the client node"),
                 None,
             ),
         };
@@ -537,11 +604,26 @@ impl<T: ClusterTransport> NodeController<T> {
         let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
-        let owner_value = data.get(owner_field).and_then(serde_json::Value::as_str);
-        if owner_value != Some(uid) {
-            return Some(Self::json_error(403, "permission denied"));
+        if data.get(owner_field).and_then(serde_json::Value::as_str) == Some(uid) {
+            return None;
         }
-        None
+        // Non-owner: Delete stays owner-only; Read/Update may be satisfied by a
+        // share grant on the co-located `_shares` (this primary owns the resource
+        // partition, so the grant scan is local — the access decision resolves on
+        // the primary, per the #75 read-routing decision).
+        let required = match request.op {
+            JsonDbOp::Read => AccessLevel::View,
+            JsonDbOp::Update => AccessLevel::Edit,
+            _ => return Some(Self::json_error(403, "permission denied")),
+        };
+        if self
+            .cluster_share_level(&request.entity, id, uid)
+            .is_some_and(|granted| granted >= required)
+        {
+            None
+        } else {
+            Some(Self::json_error(403, "permission denied"))
+        }
     }
 
     fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
@@ -865,6 +947,9 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
                 self.publish_and_deliver_change_event(event, &outbox.operation_id)
                     .await;
+                if self.ownership.owner_field(entity).is_some() {
+                    self.clear_all_resource_grants(entity, id).await;
+                }
                 if let Some(cas) = cascade {
                     spawn_cascade_ack_waiter(
                         self.stores.cluster_outbox().cloned(),
@@ -1950,7 +2035,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 JsonDbOp::Read => Some("read"),
                 JsonDbOp::Update => Some("update"),
                 JsonDbOp::Delete => Some("delete"),
-                JsonDbOp::List => None,
+                JsonDbOp::List
+                | JsonDbOp::Share
+                | JsonDbOp::Unshare
+                | JsonDbOp::Shares
+                | JsonDbOp::Shared => None,
             };
             if let Some(op_str) = op_str {
                 self.pending_vault_decrypts.insert(

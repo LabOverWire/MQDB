@@ -13,7 +13,9 @@ use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use super::helpers::{self, parse_projection};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::{MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision};
+use mqdb_core::types::{
+    AccessLevel, MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision, SHARES_ENTITY,
+};
 use serde_json::{Value, json};
 
 pub(super) enum JsonOpResult {
@@ -105,6 +107,25 @@ impl DbRequestHandler {
         let correlation_data = mqtt_ctx.correlation_data;
         let sender = mqtt_ctx.sender;
 
+        // `_shares` is server-managed: reject direct generic CRUD so grants are
+        // only ever written through the share ops (preserves co-location and
+        // prevents forged grants). Mirrors the agent guard in transport_execute.
+        match operation {
+            DbTopicOperation::JsonCreate { entity }
+            | DbTopicOperation::JsonRead { entity, .. }
+            | DbTopicOperation::JsonUpdate { entity, .. }
+            | DbTopicOperation::JsonDelete { entity, .. }
+            | DbTopicOperation::JsonList { entity }
+                if entity == SHARES_ENTITY =>
+            {
+                return JsonOpResult::Response(Self::json_error(
+                    403,
+                    "direct access to shares is not permitted",
+                ));
+            }
+            _ => {}
+        }
+
         match operation {
             DbTopicOperation::JsonCreate { entity } => {
                 let result = self
@@ -118,27 +139,64 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonRead { entity, id } => {
-                if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = self.ownership.evaluate(entity, sender)
-                    && let Some(err) =
-                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                if let OwnershipDecision::Check { owner_field, .. } =
+                    self.ownership.evaluate(entity, sender)
                 {
-                    return JsonOpResult::Response(err);
+                    let partition = data_partition(entity, id);
+                    if controller.is_primary_for_partition(partition) {
+                        if let Some(err) = controller.check_local_share_access(
+                            entity,
+                            id,
+                            owner_field,
+                            sender,
+                            AccessLevel::View,
+                        ) {
+                            return JsonOpResult::Response(err);
+                        }
+                    } else {
+                        // Not the resource primary: forward so the access decision
+                        // is graded on the primary against co-located grants,
+                        // never served from a stale replica (#75 read-routing).
+                        let forwarded = controller
+                            .forward_json_db_request(
+                                partition,
+                                JsonDbOp::Read,
+                                entity,
+                                Some(id),
+                                payload,
+                                response_topic,
+                                correlation_data,
+                                sender,
+                            )
+                            .await;
+                        return if forwarded {
+                            JsonOpResult::NoResponse
+                        } else {
+                            JsonOpResult::Response(Self::json_error(
+                                503,
+                                "partition not local and forwarding failed",
+                            ))
+                        };
+                    }
                 }
                 self.handle_json_read(controller, entity, id, payload, mqtt_ctx)
                     .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
                 let stripped_payload;
-                let effective_payload = if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = self.ownership.evaluate(entity, sender)
+                let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
+                    self.ownership.evaluate(entity, sender)
                 {
-                    if let Some(err) =
-                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                    // Grade Edit on the resource primary (grants are co-located);
+                    // when not primary, defer to the primary's forwarded check.
+                    if controller.is_primary_for_partition(data_partition(entity, id))
+                        && let Some(err) = controller.check_local_share_access(
+                            entity,
+                            id,
+                            owner_field,
+                            sender,
+                            AccessLevel::Edit,
+                        )
                     {
                         return JsonOpResult::Response(err);
                     }
@@ -227,7 +285,105 @@ impl DbRequestHandler {
                     None => JsonOpResult::NoResponse,
                 }
             }
+            DbTopicOperation::JsonShare { entity, id } => {
+                self.route_share_op(controller, JsonDbOp::Share, entity, id, payload, mqtt_ctx)
+                    .await
+            }
+            DbTopicOperation::JsonUnshare { entity, id } => {
+                self.route_share_op(controller, JsonDbOp::Unshare, entity, id, payload, mqtt_ctx)
+                    .await
+            }
+            DbTopicOperation::JsonShares { entity, id } => {
+                self.route_share_op(controller, JsonDbOp::Shares, entity, id, payload, mqtt_ctx)
+                    .await
+            }
+            DbTopicOperation::JsonShared { entity } => {
+                let Some(uid) = sender else {
+                    return JsonOpResult::Response(Self::json_error(
+                        403,
+                        "authentication required",
+                    ));
+                };
+                let filters = vec![
+                    mqdb_core::Filter::new(
+                        "resource_entity".to_string(),
+                        mqdb_core::FilterOp::Eq,
+                        Value::String(entity.clone()),
+                    ),
+                    mqdb_core::Filter::new(
+                        "grantee".to_string(),
+                        mqdb_core::FilterOp::Eq,
+                        Value::String(uid.to_string()),
+                    ),
+                ];
+                let shared_payload =
+                    serde_json::to_vec(&json!({ "filters": filters })).unwrap_or_default();
+                match self
+                    .handle_json_list(
+                        controller,
+                        SHARES_ENTITY,
+                        &shared_payload,
+                        response_topic,
+                        sender,
+                    )
+                    .await
+                {
+                    Some(p) => JsonOpResult::Response(p),
+                    None => JsonOpResult::NoResponse,
+                }
+            }
             _ => JsonOpResult::NoResponse,
+        }
+    }
+
+    async fn route_share_op<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        op: JsonDbOp,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+        mqtt_ctx: &super::MqttRequestContext<'_>,
+    ) -> JsonOpResult {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let sender = mqtt_ctx.sender;
+        let partition = data_partition(entity, id);
+        if controller.is_primary_for_partition(partition) {
+            let out = match op {
+                JsonDbOp::Share => {
+                    controller
+                        .handle_share_local(entity, id, payload, sender)
+                        .await
+                }
+                JsonDbOp::Unshare => {
+                    controller
+                        .handle_unshare_local(entity, id, payload, sender)
+                        .await
+                }
+                JsonDbOp::Shares => controller.handle_shares_local(entity, id, sender),
+                _ => Self::json_error(500, "not a share op"),
+            };
+            return JsonOpResult::Response(out);
+        }
+        let forwarded = controller
+            .forward_json_db_request(
+                partition,
+                op,
+                entity,
+                Some(id),
+                payload,
+                response_topic,
+                mqtt_ctx.correlation_data,
+                sender,
+            )
+            .await;
+        if forwarded {
+            JsonOpResult::NoResponse
+        } else {
+            JsonOpResult::Response(Self::json_error(
+                503,
+                "partition not local and forwarding failed",
+            ))
         }
     }
 
@@ -1011,6 +1167,9 @@ impl DbRequestHandler {
                     .await;
                 self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                     .await;
+                if self.ownership.owner_field(entity).is_some() {
+                    controller.clear_all_resource_grants(entity, id).await;
+                }
                 if let Some(cas) = cascade {
                     crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
                         controller.stores().cluster_outbox().cloned(),

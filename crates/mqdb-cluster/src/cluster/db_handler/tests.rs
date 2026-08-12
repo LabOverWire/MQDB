@@ -1,6 +1,10 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+// Multi-step share tests hold a NodeController across many awaits, so their
+// futures exceed the large-future threshold; irrelevant for one-shot test tasks.
+#![allow(clippy::large_futures)]
+
 use super::super::db::data_partition;
 use super::super::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use super::super::node_controller::NodeController;
@@ -1963,6 +1967,278 @@ async fn fk_create_with_multiple_constraints_validates_all() {
     let json = parse_json_response(&resp.payload);
     assert_eq!(json["status"], "error");
     assert_eq!(json["code"], 409);
+}
+
+fn share_ctx(sender: &'static str) -> MqttRequestContext<'static> {
+    MqttRequestContext {
+        response_topic: Some("$DB/_resp/c"),
+        correlation_data: None,
+        sender: Some(sender),
+        client_id: None,
+    }
+}
+
+async fn share_setup() -> (
+    DbRequestHandler,
+    NodeController<MockTransport>,
+    Arc<OwnershipConfig>,
+) {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::clone(&ownership));
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let data = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D"})).unwrap();
+    ctrl.db_create("diagrams", "d1", &data, 1000).await.unwrap();
+    (handler, ctrl, ownership)
+}
+
+fn grant_payload(grantee: &str, permission: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"grantee": grantee, "permission": permission})).unwrap()
+}
+
+async fn resp_json(
+    handler: &DbRequestHandler,
+    ctrl: &mut NodeController<MockTransport>,
+    topic: &str,
+    payload: &[u8],
+    sender: &'static str,
+) -> serde_json::Value {
+    let resp = handler
+        .handle_publish(ctrl, topic, payload, &share_ctx(sender))
+        .await
+        .unwrap();
+    parse_json_response(&resp.payload)
+}
+
+#[tokio::test]
+async fn cluster_share_grants_view_then_edit_then_revoke() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "bob").await["code"],
+        403
+    );
+    assert_eq!(
+        resp_json(
+            &handler,
+            &mut ctrl,
+            "$DB/diagrams/d1/share",
+            &grant_payload("bob", "view"),
+            "alice"
+        )
+        .await["status"],
+        "ok"
+    );
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "bob").await["status"],
+        "ok"
+    );
+    let upd = serde_json::to_vec(&serde_json::json!({"title": "x"})).unwrap();
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/update", &upd, "bob").await["code"],
+        403
+    );
+
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "edit"),
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/update", &upd, "bob").await["status"],
+        "ok"
+    );
+
+    let unshare = serde_json::to_vec(&serde_json::json!({"grantee": "bob"})).unwrap();
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/unshare",
+        &unshare,
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "bob").await["code"],
+        403
+    );
+}
+
+#[tokio::test]
+async fn cluster_shares_listing_owner_only() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "view"),
+        "alice",
+    )
+    .await;
+
+    let listed = resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/shares", &[], "alice").await;
+    assert_eq!(listed["status"], "ok");
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"][0]["grantee"], "bob");
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/shares", &[], "bob").await["code"],
+        403
+    );
+}
+
+#[tokio::test]
+async fn cluster_non_owner_cannot_share() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    assert_eq!(
+        resp_json(
+            &handler,
+            &mut ctrl,
+            "$DB/diagrams/d1/share",
+            &grant_payload("bob", "view"),
+            "carol"
+        )
+        .await["code"],
+        403
+    );
+}
+
+#[tokio::test]
+async fn cluster_delete_clears_grants() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "view"),
+        "alice",
+    )
+    .await;
+    assert_eq!(ctrl.db_list("_shares").len(), 1);
+    resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/delete", &[], "alice").await;
+    assert!(ctrl.db_list("_shares").is_empty(), "delete clears grants");
+}
+
+#[tokio::test]
+async fn cluster_direct_shares_crud_forbidden() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    for topic in [
+        "$DB/_shares/create",
+        "$DB/_shares/some-id",
+        "$DB/_shares/list",
+    ] {
+        assert_eq!(
+            resp_json(&handler, &mut ctrl, topic, b"{}", "alice").await["code"],
+            403,
+            "{topic} must be forbidden"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cluster_shared_lists_grants_for_grantee() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    let d2 = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D2"})).unwrap();
+    ctrl.db_create("diagrams", "d2", &d2, 1000).await.unwrap();
+
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "view"),
+        "alice",
+    )
+    .await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d2/share",
+        &grant_payload("bob", "edit"),
+        "alice",
+    )
+    .await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("carol", "view"),
+        "alice",
+    )
+    .await;
+
+    let shared = resp_json(&handler, &mut ctrl, "$DB/diagrams/shared", &[], "bob").await;
+    assert_eq!(shared["status"], "ok");
+    let rows = shared["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "bob sees only his own 2 grants");
+    let ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["resource_id"].as_str())
+        .collect();
+    assert!(ids.contains(&"d1") && ids.contains(&"d2"));
+}
+
+#[tokio::test]
+async fn cluster_cascade_share_grants_closure() {
+    use super::super::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::clone(&ownership));
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.set_ownership(Arc::clone(&ownership));
+
+    let fk = ClusterConstraint::foreign_key(
+        "diagrams",
+        "diagrams_parent_fk",
+        "parent_id",
+        "diagrams",
+        "id",
+        OnDeleteAction::Restrict,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+
+    for (id, parent) in [("d3", None), ("d2", Some("d3")), ("d1", Some("d2"))] {
+        let mut rec = serde_json::json!({"userId": "alice", "title": id});
+        if let Some(p) = parent {
+            rec["parent_id"] = serde_json::json!(p);
+        }
+        ctrl.db_create("diagrams", id, &serde_json::to_vec(&rec).unwrap(), 1000)
+            .await
+            .unwrap();
+    }
+
+    let payload = serde_json::to_vec(
+        &serde_json::json!({"grantee": "bob", "permission": "view", "cascade": true}),
+    )
+    .unwrap();
+    let r = resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &payload,
+        "alice",
+    )
+    .await;
+    assert_eq!(r["status"], "ok");
+    assert_eq!(r["data"]["resources_shared"], 3, "root + 2 referenced");
+
+    for id in ["d1", "d2", "d3"] {
+        assert_eq!(
+            resp_json(
+                &handler,
+                &mut ctrl,
+                &format!("$DB/diagrams/{id}"),
+                &[],
+                "bob"
+            )
+            .await["status"],
+            "ok",
+            "bob reads {id} via cascade"
+        );
+    }
 }
 
 #[tokio::test]
