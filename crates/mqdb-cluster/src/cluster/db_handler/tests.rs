@@ -2243,6 +2243,79 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
     assert!(ops.contains(&JsonDbOp::Share), "share was forwarded");
 }
 
+async fn forwarded_read_response(
+    ctrl: &mut NodeController<MockTransport>,
+    outbox: &Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
+    from: NodeId,
+    partition: PartitionId,
+    sender: &str,
+) -> serde_json::Value {
+    let req = super::super::protocol::JsonDbRequest {
+        request_id: 1,
+        op: super::super::protocol::JsonDbOp::Read,
+        entity: "diagrams".to_string(),
+        id: Some("d1".to_string()),
+        payload: vec![],
+        response_topic: "resp/t".to_string(),
+        correlation_data: None,
+        sender: Some(sender.to_string()),
+    };
+    ctrl.handle_json_db_request(from, partition, &req).await;
+    let (_, msg) = outbox.lock().unwrap().pop().expect("a response was sent");
+    match msg {
+        ClusterMessage::JsonDbResponse(r) => parse_json_response(&r.payload),
+        other => panic!("expected JsonDbResponse, got {other:?}"),
+    }
+}
+
+/// A Read that arrives at the resource primary via forwarding is graded there
+/// against co-located grants (`check_forwarded_ownership`) — the actual cross-node
+/// grantee-read path.
+#[tokio::test]
+async fn cluster_forwarded_read_graded_against_grant_on_primary() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    ctrl.set_ownership(Arc::clone(&ownership));
+
+    let rp = data_partition("diagrams", "d1");
+    ctrl.become_primary(rp, Epoch::new(1));
+    let mut map = PartitionMap::default();
+    map.set(
+        rp,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let data = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D"})).unwrap();
+    ctrl.db_create("diagrams", "d1", &data, 1000).await.unwrap();
+    ctrl.handle_share_local(
+        "diagrams",
+        "d1",
+        &grant_payload("bob", "view"),
+        Some("alice"),
+    )
+    .await;
+
+    let bob = forwarded_read_response(&mut ctrl, &outbox, node2, rp, "bob").await;
+    assert_eq!(bob["status"], "ok", "grantee read graded ok on the primary");
+
+    let carol = forwarded_read_response(&mut ctrl, &outbox, node2, rp, "carol").await;
+    assert_eq!(carol["code"], 403, "non-grantee denied on the primary");
+}
+
 #[tokio::test]
 async fn cluster_cascade_share_grants_closure() {
     use super::super::db::{ClusterConstraint, OnDeleteAction};
