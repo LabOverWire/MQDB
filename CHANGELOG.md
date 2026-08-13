@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-12 — mqdb-cli 0.8.28, mqdb-cluster 0.4.8
+
+### Added
+
+- **Diagram sharing now works in cluster mode for password/username-mode deployments.** The cluster runs a separate data path from the agent, so the share API (`$DB/{e}/{id}/share|unshare|shares`, `$DB/{e}/shared`) had no effect there. Grants are now stored as a partitioned `_shares` entity **co-located with the resource** (a grant for `(entity, id)` is written on the resource's partition), so access checks scan only the local partition. Read requires a `view` grant, update requires `edit`, and delete stays owner-only; a resource delete clears its grants; direct CRUD on `_shares` is rejected; `share` is owner/admin-only. Cascade shares walk the self-reference closure held on the resource's primary. To avoid honoring a revoked grant from a stale replica, a share-gated access check is always resolved on the resource's **primary** (a revoked grant may still be honored within replication lag across a primary failover — a bounded, documented window). Identity/OAuth-mode grantee resolution, the pending-grant sign-in sweep, cross-partition cascade, and full `shared`-response resource hydration are not yet included (tracked as a follow-up).
+
 ## 2026-08-03 — mqdb-cli 0.8.27, mqdb-core 0.7.9, mqdb-agent 0.8.20
 
 ### Added

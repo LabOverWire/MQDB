@@ -10,6 +10,7 @@ mod query;
 mod replication_ops;
 mod retained;
 mod session_ops;
+mod sharing;
 mod snapshot;
 pub(crate) mod unique;
 

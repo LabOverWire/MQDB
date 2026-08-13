@@ -21,6 +21,10 @@ pub enum DbTopicOperation {
     JsonUpdate { entity: String, id: String },
     JsonDelete { entity: String, id: String },
     JsonList { entity: String },
+    JsonShare { entity: String, id: String },
+    JsonUnshare { entity: String, id: String },
+    JsonShares { entity: String, id: String },
+    JsonShared { entity: String },
 }
 
 impl DbTopicOperation {
@@ -211,6 +215,10 @@ impl ParsedDbTopic {
                         partition: None,
                         operation: DbTopicOperation::JsonList { entity },
                     }),
+                    "shared" => Some(Self {
+                        partition: None,
+                        operation: DbTopicOperation::JsonShared { entity },
+                    }),
                     id => Some(Self {
                         partition: None,
                         operation: DbTopicOperation::JsonRead {
@@ -230,6 +238,18 @@ impl ParsedDbTopic {
                     "delete" => Some(Self {
                         partition: None,
                         operation: DbTopicOperation::JsonDelete { entity, id },
+                    }),
+                    "share" => Some(Self {
+                        partition: None,
+                        operation: DbTopicOperation::JsonShare { entity, id },
+                    }),
+                    "unshare" => Some(Self {
+                        partition: None,
+                        operation: DbTopicOperation::JsonUnshare { entity, id },
+                    }),
+                    "shares" => Some(Self {
+                        partition: None,
+                        operation: DbTopicOperation::JsonShares { entity, id },
                     }),
                     _ => None,
                 }
