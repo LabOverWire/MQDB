@@ -2711,6 +2711,7 @@ async fn test_event_recipients_owner_grantees_and_global() {
             "diagrams",
             &diagram_id,
             Some(&json!({"userId": "alice"})),
+            None,
         )
         .await
         .unwrap()
@@ -2724,6 +2725,7 @@ async fn test_event_recipients_owner_grantees_and_global() {
             "nodes",
             "n1",
             Some(&json!({"diagramId": diagram_id})),
+            None,
         )
         .await
         .unwrap()
@@ -2732,7 +2734,7 @@ async fn test_event_recipients_owner_grantees_and_global() {
     assert_eq!(derived, vec!["alice".to_string(), "bob".to_string()]);
 
     let global = db
-        .event_recipients(&ownership, "widgets", "w1", Some(&json!({"k": "v"})))
+        .event_recipients(&ownership, "widgets", "w1", Some(&json!({"k": "v"})), None)
         .await
         .unwrap();
     assert!(
@@ -2760,6 +2762,7 @@ async fn test_share_events_route_to_grantee_namespace() {
                 "grantee": "bob",
                 "permission": "view",
             })),
+            None,
         )
         .await
         .unwrap()
@@ -2776,6 +2779,7 @@ async fn test_share_events_route_to_grantee_namespace() {
             mqdb_core::types::SHARES_ENTITY,
             "share-2",
             Some(&json!({"resource_entity": "diagrams", "resource_id": "d1", "grantee": ""})),
+            None,
         )
         .await
         .unwrap();
@@ -2817,6 +2821,7 @@ async fn test_share_events_notify_owner_when_admin_shares() {
                 "granted_by": "admin",
                 "permission": "view",
             })),
+            None,
         )
         .await
         .unwrap()
@@ -2860,6 +2865,7 @@ async fn test_share_events_skip_owner_self_notification() {
                 "granted_by": "alice",
                 "permission": "view",
             })),
+            None,
         )
         .await
         .unwrap()
@@ -2949,6 +2955,114 @@ async fn test_unshare_by_admin_notifies_owner() {
         recipients,
         vec!["alice".to_string(), "bob".to_string()],
         "an admin-initiated unshare must notify both the owner and the grantee"
+    );
+}
+
+async fn unshare_delete_recipients(
+    db: &Database,
+    ownership: &OwnershipConfig,
+    scope: &ScopeConfig,
+    share_by: &str,
+    unshare_by: &str,
+) -> Vec<String> {
+    use mqdb_core::Request;
+
+    db.create(
+        "diagrams".into(),
+        json!({"id": "d1", "userId": "alice", "title": "D"}),
+        None,
+        None,
+        None,
+        scope,
+    )
+    .await
+    .unwrap();
+    db.execute_with_sender(
+        Request::Share {
+            entity: "diagrams".into(),
+            id: "d1".into(),
+            grantee: "bob".into(),
+            grantee_key: None,
+            grantee_email: None,
+            permission: "view".into(),
+            cascade: false,
+        },
+        Some(share_by),
+        None,
+        ownership,
+        scope,
+        None,
+    )
+    .await;
+
+    let mut receiver = db.event_receiver();
+    db.execute_with_sender(
+        Request::Unshare {
+            entity: "diagrams".into(),
+            id: "d1".into(),
+            grantee: "bob".into(),
+            grantee_key: None,
+            cascade: false,
+        },
+        Some(unshare_by),
+        None,
+        ownership,
+        scope,
+        None,
+    )
+    .await;
+
+    let mut recipients = loop {
+        let Ok(Ok(event)) =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), receiver.recv()).await
+        else {
+            panic!("unshare did not emit a shares delete event");
+        };
+        if event.entity == mqdb_core::types::SHARES_ENTITY {
+            break event
+                .recipients
+                .expect("shares delete event missing recipients");
+        }
+    };
+    recipients.sort();
+    recipients
+}
+
+#[tokio::test]
+async fn test_owner_notified_when_admin_unshares_self_shared_grant() {
+    use std::collections::HashSet;
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_admin_users(HashSet::from(["admin".to_string()]));
+    let scope = ScopeConfig::default();
+
+    let recipients = unshare_delete_recipients(&db, &ownership, &scope, "alice", "admin").await;
+    assert_eq!(
+        recipients,
+        vec!["alice".to_string(), "bob".to_string()],
+        "owner is notified when a different actor unshares a grant the owner created"
+    );
+}
+
+#[tokio::test]
+async fn test_owner_not_notified_for_own_unshare() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let ownership = OwnershipConfig::parse("diagrams=userId").unwrap();
+    let scope = ScopeConfig::default();
+
+    let recipients = unshare_delete_recipients(&db, &ownership, &scope, "alice", "alice").await;
+    assert_eq!(
+        recipients,
+        vec!["bob".to_string()],
+        "the owner is not self-notified for their own unshare"
     );
 }
 
