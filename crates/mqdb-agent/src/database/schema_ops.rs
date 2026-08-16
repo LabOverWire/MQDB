@@ -41,7 +41,7 @@ impl Database {
         schema_registry.validate_fields_exist(&entity, &field_refs, "index")?;
         drop(schema_registry);
 
-        let _admin = self.index_admin_lock.lock().await;
+        let admin = self.index_admin_lock.lock().await;
 
         let (merged, previous) = {
             let mut manager = self.index_manager.write().await;
@@ -56,6 +56,8 @@ impl Database {
             manager.restore_definition(&entity, previous);
             return Err(e);
         }
+
+        drop(admin);
 
         Ok(())
     }
