@@ -318,7 +318,7 @@ async fn event_publish_topics(
                 &event.entity,
                 &event.id,
                 event.data.as_ref(),
-                None,
+                event.sender.as_deref(),
             )
             .await
         {
