@@ -136,11 +136,7 @@ impl IndexManager {
 
     /// # Errors
     /// Returns an error if serialization fails.
-    pub fn persist_index(
-        &self,
-        batch: &mut BatchWriter,
-        definition: &IndexDefinition,
-    ) -> Result<()> {
+    pub fn persist_index(batch: &mut BatchWriter, definition: &IndexDefinition) -> Result<()> {
         let key = keys::encode_index_definition_key(&definition.entity);
         let value = serde_json::to_vec(definition)?;
         batch.insert(key, value);
@@ -342,13 +338,13 @@ mod tests {
 
         let d1 = mgr.merged_definition("users", vec!["email".into()]);
         let mut b1 = storage.batch();
-        mgr.persist_index(&mut b1, &d1).unwrap();
+        IndexManager::persist_index(&mut b1, &d1).unwrap();
         b1.commit().unwrap();
         mgr.add_index(d1);
 
         let d2 = mgr.merged_definition("users", vec!["username".into()]);
         let mut b2 = storage.batch();
-        mgr.persist_index(&mut b2, &d2).unwrap();
+        IndexManager::persist_index(&mut b2, &d2).unwrap();
         b2.commit().unwrap();
         mgr.add_index(d2);
 
@@ -515,7 +511,7 @@ mod tests {
 
         for def in mgr.indexes.values() {
             let mut batch = storage.batch();
-            mgr.persist_index(&mut batch, def).unwrap();
+            IndexManager::persist_index(&mut batch, def).unwrap();
             batch.commit().unwrap();
         }
 

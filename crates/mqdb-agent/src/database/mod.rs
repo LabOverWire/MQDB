@@ -24,7 +24,7 @@ use mqdb_core::schema::SchemaRegistry;
 use mqdb_core::storage::Storage;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 
 const ENTITY_NAMES_KEY: &[u8] = b"meta/entity_names";
@@ -42,6 +42,7 @@ pub struct Database {
     dispatcher: Arc<EventDispatcher>,
     outbox: Arc<Outbox>,
     index_manager: Arc<RwLock<IndexManager>>,
+    index_admin_lock: Arc<Mutex<()>>,
     relationship_registry: Arc<RwLock<RelationshipRegistry>>,
     schema_registry: Arc<RwLock<SchemaRegistry>>,
     constraint_manager: Arc<RwLock<ConstraintManager>>,
@@ -169,6 +170,7 @@ impl Database {
             dispatcher,
             outbox,
             index_manager,
+            index_admin_lock: Arc::new(Mutex::new(())),
             relationship_registry,
             schema_registry,
             constraint_manager,

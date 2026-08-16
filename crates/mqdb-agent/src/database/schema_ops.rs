@@ -41,6 +41,8 @@ impl Database {
         schema_registry.validate_fields_exist(&entity, &field_refs, "index")?;
         drop(schema_registry);
 
+        let _admin = self.index_admin_lock.lock().await;
+
         let (merged, previous) = {
             let mut manager = self.index_manager.write().await;
             let previous = manager.definition_snapshot(&entity);
@@ -87,9 +89,7 @@ impl Database {
         }
 
         let mut batch = self.storage.batch();
-        let manager = self.index_manager.read().await;
-        manager.persist_index(&mut batch, merged)?;
-        drop(manager);
+        mqdb_core::index::IndexManager::persist_index(&mut batch, merged)?;
         batch.commit()?;
 
         Ok(())
@@ -531,5 +531,59 @@ mod tests {
             db.storage.get(&alice_key).unwrap().is_some(),
             "a later successful add_index backfills pre-existing rows"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_add_index_same_entity_keeps_memory_and_disk_consistent() {
+        use mqdb_core::index::IndexManager;
+
+        let backend = Arc::new(MemoryBackend::new());
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        let db = Database::open_with_backend(backend, config).await.unwrap();
+
+        for (id, email, username) in [("u1", "a@x.com", "alice"), ("u2", "b@x.com", "bob")] {
+            db.create(
+                "users".to_string(),
+                json!({ "id": id, "email": email, "username": username }),
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+        }
+
+        let (r1, r2) = tokio::join!(
+            db.add_index("users".to_string(), vec!["email".to_string()]),
+            db.add_index("users".to_string(), vec!["username".to_string()]),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        let mem_fields = db
+            .index_manager
+            .read()
+            .await
+            .get_indexed_fields("users")
+            .cloned()
+            .unwrap_or_default();
+        let mut reloaded = IndexManager::new();
+        reloaded.load_indexes(&db.storage).unwrap();
+        let disk_fields = reloaded
+            .get_indexed_fields("users")
+            .cloned()
+            .unwrap_or_default();
+
+        for field in ["email", "username"] {
+            assert!(
+                mem_fields.contains(&field.to_string()),
+                "in-memory definition must advertise {field} after concurrent adds, got {mem_fields:?}"
+            );
+            assert!(
+                disk_fields.contains(&field.to_string()),
+                "on-disk definition must persist {field} after concurrent adds, got {disk_fields:?}"
+            );
+        }
     }
 }
