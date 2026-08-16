@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-14 — mqdb-cli 0.8.29, mqdb-agent 0.8.21
+
+### Fixed
+
+- **The resource owner is now notified when someone else unshares a grant the owner created themselves (scoped events, agent mode).** Owner notification for `_shares` events suppressed the owner whenever the grant's stored `granted_by` was the owner — but on the unshare path `granted_by` is the grant's original creator, not the actor performing the unshare. So if an owner shared their own resource and an admin later revoked that grant, the owner was not told. The suppression now keys off the actual actor: the request sender is threaded through the unshare/delete path (`share_revoke` → `clear_grant` → `delete_grants` → `delete` → `event_recipients`) and the owner is skipped only when the owner is the one performing the change. The create path is unchanged (there the actor is the grant creator). This also corrects the reverse case (an owner revoking an admin-created grant is no longer needlessly self-notified). Cluster mode shares a separate data path and is tracked under the cluster-sharing follow-up.
+
 ## 2026-08-12 — mqdb-cli 0.8.28, mqdb-cluster 0.4.8
 
 ### Added

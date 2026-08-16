@@ -63,7 +63,12 @@ impl Database {
         }
     }
 
-    async fn delete_grants(&self, filters: Vec<Filter>, ownership: &OwnershipConfig) -> Result<()> {
+    async fn delete_grants(
+        &self,
+        filters: Vec<Filter>,
+        actor: Option<&str>,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
         let records = self
             .list_core(
                 SHARES_ENTITY.to_string(),
@@ -80,7 +85,7 @@ impl Database {
                 self.delete(
                     SHARES_ENTITY.to_string(),
                     sid.to_string(),
-                    None,
+                    actor,
                     None,
                     &scope,
                     ownership,
@@ -96,11 +101,12 @@ impl Database {
         entity: &str,
         id: &str,
         grantee_key: &str,
+        actor: Option<&str>,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
         let mut filters = Self::resource_filters(entity, id);
         filters.push(eq_filter("grantee_key", grantee_key));
-        self.delete_grants(filters, ownership).await
+        self.delete_grants(filters, actor, ownership).await
     }
 
     /// Remove every grant on a resource. Called when the resource itself is deleted
@@ -112,9 +118,10 @@ impl Database {
         &self,
         entity: &str,
         id: &str,
+        actor: Option<&str>,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
-        self.delete_grants(Self::resource_filters(entity, id), ownership)
+        self.delete_grants(Self::resource_filters(entity, id), actor, ownership)
             .await
     }
 
@@ -127,11 +134,14 @@ impl Database {
         granted_by: &str,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
-        self.clear_grant(entity, id, grantee.key, ownership).await?;
+        let actor = (!granted_by.is_empty()).then_some(granted_by);
+        self.clear_grant(entity, id, grantee.key, actor, ownership)
+            .await?;
         if let Some(resolved) = grantee.resolved
             && resolved != grantee.key
         {
-            self.clear_grant(entity, id, resolved, ownership).await?;
+            self.clear_grant(entity, id, resolved, actor, ownership)
+                .await?;
         }
         let record = json!({
             "resource_entity": entity,
@@ -283,7 +293,8 @@ impl Database {
             keys.push(resolved);
         }
         for revoke_key in &keys {
-            self.clear_grant(entity, id, revoke_key, ownership).await?;
+            self.clear_grant(entity, id, revoke_key, sender, ownership)
+                .await?;
         }
         if cascade {
             for ref_id in self.referenced_closure(entity, id).await? {
@@ -291,7 +302,7 @@ impl Database {
                     continue;
                 }
                 for revoke_key in &keys {
-                    self.clear_grant(entity, &ref_id, revoke_key, ownership)
+                    self.clear_grant(entity, &ref_id, revoke_key, sender, ownership)
                         .await?;
                 }
             }
@@ -492,6 +503,7 @@ impl Database {
         entity: &str,
         id: &str,
         data: Option<&Value>,
+        actor: Option<&str>,
     ) -> Result<Option<Vec<String>>> {
         if entity == SHARES_ENTITY {
             let mut recipients: Vec<String> = Vec::new();
@@ -510,10 +522,11 @@ impl Database {
                     .and_then(Value::as_str)
                 && let Some(owner) = self.record_owner(res_entity, res_id, ownership)?
             {
-                let granted_by = data
-                    .and_then(|d| d.get("granted_by"))
-                    .and_then(Value::as_str);
-                if granted_by != Some(owner.as_str()) && !recipients.contains(&owner) {
+                let performed_by = actor.or_else(|| {
+                    data.and_then(|d| d.get("granted_by"))
+                        .and_then(Value::as_str)
+                });
+                if performed_by != Some(owner.as_str()) && !recipients.contains(&owner) {
                     recipients.push(owner);
                 }
             }

@@ -240,7 +240,12 @@ impl Database {
                     Ok(()) => {
                         if shareable
                             && let Err(e) = self
-                                .clear_all_resource_grants(&entity_clone, &id_clone, ownership)
+                                .clear_all_resource_grants(
+                                    &entity_clone,
+                                    &id_clone,
+                                    sender,
+                                    ownership,
+                                )
                                 .await
                         {
                             tracing::warn!(

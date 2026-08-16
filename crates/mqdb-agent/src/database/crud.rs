@@ -492,7 +492,13 @@ impl Database {
 
         for event in &mut events {
             match self
-                .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
+                .event_recipients(
+                    ownership,
+                    &event.entity,
+                    &event.id,
+                    event.data.as_ref(),
+                    sender,
+                )
                 .await
             {
                 Ok(Some(recipients)) => event.recipients = Some(recipients),

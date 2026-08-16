@@ -313,7 +313,13 @@ async fn event_publish_topics(
         Some(precomputed)
     } else {
         match db
-            .event_recipients(ownership, &event.entity, &event.id, event.data.as_ref())
+            .event_recipients(
+                ownership,
+                &event.entity,
+                &event.id,
+                event.data.as_ref(),
+                event.sender.as_deref(),
+            )
             .await
         {
             Ok(recipients) => recipients,
