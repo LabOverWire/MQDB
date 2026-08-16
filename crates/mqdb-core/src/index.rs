@@ -8,7 +8,7 @@ use crate::storage::{BatchWriter, Storage};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
     pub entity: String,
     pub fields: Vec<String>,
@@ -56,6 +56,22 @@ impl IndexManager {
     #[allow(clippy::must_use_candidate)]
     pub fn get_indexed_fields(&self, entity: &str) -> Option<&Vec<String>> {
         self.indexes.get(entity).map(|idx| &idx.fields)
+    }
+
+    #[must_use]
+    pub fn definition_snapshot(&self, entity: &str) -> Option<IndexDefinition> {
+        self.indexes.get(entity).cloned()
+    }
+
+    pub fn restore_definition(&mut self, entity: &str, previous: Option<IndexDefinition>) {
+        match previous {
+            Some(def) => {
+                self.indexes.insert(entity.to_string(), def);
+            }
+            None => {
+                self.indexes.remove(entity);
+            }
+        }
     }
 
     pub fn update_indexes(
@@ -133,9 +149,7 @@ impl IndexManager {
 
     /// Compute the merged index definition for `entity` — the union of its
     /// currently registered fields and `new_fields` — **without** mutating
-    /// in-memory state. Callers persist and commit this before applying
-    /// [`add_index`](Self::add_index), so a failed commit leaves the in-memory
-    /// registry and disk consistent (both without the new fields).
+    /// in-memory state.
     #[must_use]
     pub fn merged_definition(&self, entity: &str, new_fields: Vec<String>) -> IndexDefinition {
         let mut fields = self

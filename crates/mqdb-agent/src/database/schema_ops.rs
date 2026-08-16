@@ -41,16 +41,28 @@ impl Database {
         schema_registry.validate_fields_exist(&entity, &field_refs, "index")?;
         drop(schema_registry);
 
-        {
-            let mut batch = self.storage.batch();
+        let (merged, previous) = {
             let mut manager = self.index_manager.write().await;
+            let previous = manager.definition_snapshot(&entity);
             let merged = manager.merged_definition(&entity, fields);
-            manager.persist_index(&mut batch, &merged)?;
-            batch.commit()?;
-            manager.add_index(merged);
-            drop(manager);
+            manager.add_index(merged.clone());
+            (merged, previous)
+        };
+
+        if let Err(e) = self.backfill_then_persist_index(&entity, &merged).await {
+            let mut manager = self.index_manager.write().await;
+            manager.restore_definition(&entity, previous);
+            return Err(e);
         }
 
+        Ok(())
+    }
+
+    async fn backfill_then_persist_index(
+        &self,
+        entity: &str,
+        merged: &mqdb_core::index::IndexDefinition,
+    ) -> Result<()> {
         let prefix = format!("data/{entity}/");
         let mut after_key: Option<Vec<u8>> = None;
         loop {
@@ -61,10 +73,10 @@ impl Database {
                 break;
             }
             let mut write_batch = self.storage.batch();
-            let manager = self.index_manager.write().await;
+            let manager = self.index_manager.read().await;
             for (key, value) in &batch_items {
                 if let Ok((_, id)) = keys::decode_data_key(key)
-                    && let Ok(entity_obj) = Entity::deserialize(entity.clone(), id, value)
+                    && let Ok(entity_obj) = Entity::deserialize(entity.to_string(), id, value)
                 {
                     manager.update_indexes(&mut write_batch, &entity_obj, None);
                 }
@@ -73,6 +85,12 @@ impl Database {
             write_batch.commit()?;
             after_key = batch_items.last().map(|(k, _)| k.clone());
         }
+
+        let mut batch = self.storage.batch();
+        let manager = self.index_manager.read().await;
+        manager.persist_index(&mut batch, merged)?;
+        drop(manager);
+        batch.commit()?;
 
         Ok(())
     }
@@ -367,9 +385,6 @@ mod tests {
         }
     }
 
-    // Guards the persist-before-mutate ordering: because the in-memory merge is
-    // applied only AFTER a successful commit, a commit failure during add_index
-    // must leave the index registry and disk consistent (the new field unindexed).
     #[tokio::test]
     async fn add_index_commit_failure_leaves_registry_consistent() {
         let fail = Arc::new(AtomicBool::new(false));
@@ -434,6 +449,87 @@ mod tests {
         assert!(
             db.storage.get(&bob_key).unwrap().is_some(),
             "username must be indexed after a successful re-add"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_index_crash_during_reindex_leaves_field_unadvertised() {
+        use mqdb_core::index::IndexManager;
+
+        let fail = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(FailingBackend {
+            inner: MemoryBackend::new(),
+            fail_commit: Arc::clone(&fail),
+        });
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        let db = Database::open_with_backend(backend, config).await.unwrap();
+
+        db.add_index("users".to_string(), vec!["email".to_string()])
+            .await
+            .unwrap();
+        for (id, email, username) in [("u1", "a@x.com", "alice"), ("u2", "b@x.com", "bob")] {
+            db.create(
+                "users".to_string(),
+                json!({ "id": id, "email": email, "username": username }),
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+        }
+
+        fail.store(true, Ordering::SeqCst);
+        let result = db
+            .add_index("users".to_string(), vec!["username".to_string()])
+            .await;
+        assert!(
+            result.is_err(),
+            "add_index must fail when a reindex or persist commit fails"
+        );
+        fail.store(false, Ordering::SeqCst);
+
+        let mut reloaded = IndexManager::new();
+        reloaded.load_indexes(&db.storage).unwrap();
+        let fields = reloaded
+            .get_indexed_fields("users")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            fields.contains(&"email".to_string()),
+            "email must stay advertised after the crash"
+        );
+        assert!(
+            !fields.contains(&"username".to_string()),
+            "username must be unadvertised on reload, forcing a full-scan fallback instead of silently-incomplete index results"
+        );
+
+        db.create(
+            "users".to_string(),
+            json!({ "id": "u3", "email": "c@x.com", "username": "carol" }),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+        let carol_value = keys::encode_value_for_index(&json!("carol")).unwrap();
+        let carol_key = keys::encode_index_key("users", "username", &carol_value, "u3");
+        assert!(
+            db.storage.get(&carol_key).unwrap().is_none(),
+            "the in-memory registry must roll back so a failed add_index does not index new writes"
+        );
+
+        db.add_index("users".to_string(), vec!["username".to_string()])
+            .await
+            .unwrap();
+        let alice_value = keys::encode_value_for_index(&json!("alice")).unwrap();
+        let alice_key = keys::encode_index_key("users", "username", &alice_value, "u1");
+        assert!(
+            db.storage.get(&alice_key).unwrap().is_some(),
+            "a later successful add_index backfills pre-existing rows"
         );
     }
 }
