@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-agent"
-version = "0.8.22"
+version = "0.8.23"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cli"
-version = "0.8.30"
+version = "0.8.31"
 dependencies = [
  "base64",
  "bebytes",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-core"
-version = "0.7.10"
+version = "0.7.11"
 dependencies = [
  "arc-swap",
  "bebytes",

@@ -27,6 +27,7 @@ async fn test_subscribe_shared_ordered_returns_partitions() {
             Some("orders".into()),
             "order-processors".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
@@ -49,6 +50,7 @@ async fn test_subscribe_shared_load_balanced_no_partitions() {
             Some("orders".into()),
             "workers".into(),
             SubscriptionMode::LoadBalanced,
+            None,
         )
         .await
         .unwrap();
@@ -69,6 +71,7 @@ async fn test_mixed_mode_rejected() {
             None,
             "workers".into(),
             SubscriptionMode::LoadBalanced,
+            None,
         )
         .await
         .unwrap();
@@ -79,6 +82,7 @@ async fn test_mixed_mode_rejected() {
             None,
             "workers".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await;
 
@@ -86,7 +90,7 @@ async fn test_mixed_mode_rejected() {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("already uses"));
 
-    db.unsubscribe(&r1.id).await.unwrap();
+    db.unsubscribe(&r1.id, None, false).await.unwrap();
     db.shutdown();
 }
 
@@ -100,6 +104,7 @@ async fn test_unsubscribe_cleans_consumer_group() {
             None,
             "workers".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
@@ -107,7 +112,7 @@ async fn test_unsubscribe_cleans_consumer_group() {
     assert!(r1.assigned_partitions.is_some());
     assert_eq!(r1.assigned_partitions.unwrap().len(), 8);
 
-    db.unsubscribe(&r1.id).await.unwrap();
+    db.unsubscribe(&r1.id, None, false).await.unwrap();
 
     let r2 = db
         .subscribe_shared(
@@ -115,6 +120,7 @@ async fn test_unsubscribe_cleans_consumer_group() {
             None,
             "workers".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
@@ -135,6 +141,7 @@ async fn test_ordered_partition_rebalance() {
             None,
             "processors".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
@@ -147,14 +154,15 @@ async fn test_ordered_partition_rebalance() {
             None,
             "processors".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
 
     assert_eq!(r2.assigned_partitions.unwrap().len(), 4);
 
-    db.unsubscribe(&r1.id).await.unwrap();
-    db.unsubscribe(&r2.id).await.unwrap();
+    db.unsubscribe(&r1.id, None, false).await.unwrap();
+    db.unsubscribe(&r2.id, None, false).await.unwrap();
     db.shutdown();
 }
 
@@ -168,14 +176,15 @@ async fn test_heartbeat_api() {
             None,
             "workers".into(),
             SubscriptionMode::Ordered,
+            None,
         )
         .await
         .unwrap();
 
-    let heartbeat_result = db.heartbeat(&r1.id).await;
+    let heartbeat_result = db.heartbeat(&r1.id, None, false).await;
     assert!(heartbeat_result.is_ok());
 
-    let invalid_heartbeat = db.heartbeat("non-existent-id").await;
+    let invalid_heartbeat = db.heartbeat("non-existent-id", None, false).await;
     assert!(invalid_heartbeat.is_err());
 
     db.shutdown();
@@ -191,6 +200,7 @@ async fn test_same_mode_allowed_in_group() {
             None,
             "lb-workers".into(),
             SubscriptionMode::LoadBalanced,
+            None,
         )
         .await
         .unwrap();
@@ -201,12 +211,59 @@ async fn test_same_mode_allowed_in_group() {
             None,
             "lb-workers".into(),
             SubscriptionMode::LoadBalanced,
+            None,
         )
         .await;
 
     assert!(r2.is_ok());
 
-    db.unsubscribe(&r1.id).await.unwrap();
-    db.unsubscribe(&r2.unwrap().id).await.unwrap();
+    db.unsubscribe(&r1.id, None, false).await.unwrap();
+    db.unsubscribe(&r2.unwrap().id, None, false).await.unwrap();
+    db.shutdown();
+}
+
+#[tokio::test]
+async fn test_subscription_ownership_blocks_cross_user_control() {
+    let db = setup_db().await;
+
+    let sub_id = db
+        .subscribe("orders/#".into(), Some("orders".into()), Some("alice"))
+        .await
+        .unwrap();
+
+    assert!(
+        db.unsubscribe(&sub_id, Some("bob"), false).await.is_err(),
+        "a non-owner must not be able to unsubscribe another user's subscription"
+    );
+    assert!(
+        db.heartbeat(&sub_id, Some("bob"), false).await.is_err(),
+        "a non-owner must not be able to heartbeat another user's subscription"
+    );
+    assert!(
+        db.get_subscription_info(&sub_id).await.is_some(),
+        "the subscription must survive rejected cross-user control attempts"
+    );
+
+    db.heartbeat(&sub_id, Some("bob"), true).await.unwrap();
+
+    db.unsubscribe(&sub_id, Some("alice"), false).await.unwrap();
+    assert!(db.get_subscription_info(&sub_id).await.is_none());
+
+    db.shutdown();
+}
+
+#[tokio::test]
+async fn test_ownerless_subscription_is_not_ownership_restricted() {
+    let db = setup_db().await;
+
+    let sub_id = db
+        .subscribe("orders/#".into(), Some("orders".into()), None)
+        .await
+        .unwrap();
+
+    db.heartbeat(&sub_id, Some("bob"), false).await.unwrap();
+    db.unsubscribe(&sub_id, Some("bob"), false).await.unwrap();
+    assert!(db.get_subscription_info(&sub_id).await.is_none());
+
     db.shutdown();
 }

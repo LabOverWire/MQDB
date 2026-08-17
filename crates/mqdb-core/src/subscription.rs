@@ -22,6 +22,8 @@ pub struct Subscription {
     pub share_group: Option<String>,
     #[serde(default)]
     pub mode: SubscriptionMode,
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl Subscription {
@@ -33,6 +35,7 @@ impl Subscription {
             entity,
             share_group: None,
             mode: SubscriptionMode::default(),
+            owner: None,
         }
     }
 
@@ -40,6 +43,12 @@ impl Subscription {
     pub fn with_share_group(mut self, group: String, mode: SubscriptionMode) -> Self {
         self.share_group = Some(group);
         self.mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub fn with_owner(mut self, owner: Option<String>) -> Self {
+        self.owner = owner;
         self
     }
 
