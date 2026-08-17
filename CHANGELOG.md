@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-16 — mqdb-cli 0.8.30, mqdb-core 0.7.10, mqdb-agent 0.8.22
+
+### Fixed
+
+- **`add_index` no longer leaves an index silently incomplete after a crash mid-backfill.** The index definition was persisted and committed to disk *before* the loop that backfills existing rows' entries. A crash between the two left the field advertised as indexed on restart while pre-existing rows had no entries, so an index-backed lookup returned silently incomplete results (a wrong-answer bug). The definition is now committed to disk **last**, after the backfill completes; the field is still advertised in-memory during the backfill (the reindex loop reads the live field set), and if anything fails before the definition is durably persisted the in-memory registry is rolled back to its prior state. A crash mid-backfill now leaves the field un-advertised on restart — a correct full-scan fallback instead of incomplete index results — while preserving the existing guarantee that a failed `add_index` leaves the registry and disk consistent.
+- **Concurrent `add_index` calls on the same entity can no longer leave the in-memory registry and the on-disk definition disagreeing.** Moving the definition commit after the backfill widened the window in which the definition mutation and its persist were no longer a single locked step, so two concurrent adds (or an add racing another add's rollback) could end with memory and disk advertising different field sets. `add_index` now serializes the whole operation under a per-database admin lock, restoring the atomicity the pre-refactor single-lock hold provided. The interleaving and the fix were checked with a TLA+ model (`specs/AddIndexConcurrency.tla`).
+
 ## 2026-08-14 — mqdb-cli 0.8.29, mqdb-agent 0.8.21
 
 ### Fixed
