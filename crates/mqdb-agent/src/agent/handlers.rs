@@ -457,14 +457,10 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
             handle_subscribe(ctx.db, &payload, extract_sender(ctx.message)).await
         }
         AdminOperation::Heartbeat { sub_id } => {
-            let caller = extract_sender(ctx.message);
-            let is_admin = caller.is_some_and(|c| ctx.ownership.is_admin(c));
-            handle_heartbeat(ctx.db, &sub_id, caller, is_admin).await
+            handle_heartbeat(ctx.db, &sub_id, extract_sender(ctx.message), ctx.ownership).await
         }
         AdminOperation::Unsubscribe { sub_id } => {
-            let caller = extract_sender(ctx.message);
-            let is_admin = caller.is_some_and(|c| ctx.ownership.is_admin(c));
-            handle_unsubscribe(ctx.db, &sub_id, caller, is_admin).await
+            handle_unsubscribe(ctx.db, &sub_id, extract_sender(ctx.message), ctx.ownership).await
         }
         AdminOperation::ConsumerGroupList => handle_consumer_group_list(ctx.db).await,
         AdminOperation::ConsumerGroupShow { name } => {
@@ -785,10 +781,10 @@ async fn handle_heartbeat(
     db: &Database,
     sub_id: &str,
     caller: Option<&str>,
-    is_admin: bool,
+    ownership: &OwnershipConfig,
 ) -> Response {
     use serde_json::json;
-    match db.heartbeat(sub_id, caller, is_admin).await {
+    match db.heartbeat(sub_id, caller, ownership).await {
         Ok(()) => Response::ok(json!({"ok": true})),
         Err(e) => e.into(),
     }
@@ -798,10 +794,10 @@ async fn handle_unsubscribe(
     db: &Database,
     sub_id: &str,
     caller: Option<&str>,
-    is_admin: bool,
+    ownership: &OwnershipConfig,
 ) -> Response {
     use serde_json::json;
-    match db.unsubscribe(sub_id, caller, is_admin).await {
+    match db.unsubscribe(sub_id, caller, ownership).await {
         Ok(()) => Response::ok(json!({"ok": true})),
         Err(e) => e.into(),
     }

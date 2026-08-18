@@ -5,6 +5,7 @@ use super::{Database, SubscriptionResult};
 use crate::consumer_group::{ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
 use mqdb_core::error::{Error, Result};
 use mqdb_core::subscription::{Subscription, SubscriptionMode};
+use mqdb_core::types::OwnershipConfig;
 
 impl Database {
     /// # Errors
@@ -102,15 +103,17 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if unregistration fails or the caller does not own the subscription.
+    /// Returns an error if unregistration fails.
     pub async fn unsubscribe(
         &self,
         sub_id: &str,
         caller: Option<&str>,
-        is_admin: bool,
+        ownership: &OwnershipConfig,
     ) -> Result<()> {
         if let Some(sub) = self.registry.get(sub_id).await {
-            authorize_subscription_access(&sub, caller, is_admin)?;
+            if !caller_may_control(&sub, caller, ownership) {
+                return Ok(());
+            }
             if let Some(group) = &sub.share_group {
                 let mut groups = self.consumer_groups.write().await;
                 if let Some(cg) = groups.get_mut(group) {
@@ -128,23 +131,23 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if the subscription is not found or the caller does not own it.
+    /// Returns `NotFound` if the subscription does not exist or the caller does not control it.
     pub async fn heartbeat(
         &self,
         sub_id: &str,
         caller: Option<&str>,
-        is_admin: bool,
+        ownership: &OwnershipConfig,
     ) -> Result<()> {
-        let sub = self
-            .registry
-            .get(sub_id)
-            .await
-            .ok_or_else(|| Error::NotFound {
-                entity: "subscription".into(),
-                id: sub_id.into(),
-            })?;
+        let not_found = || Error::NotFound {
+            entity: "subscription".into(),
+            id: sub_id.into(),
+        };
 
-        authorize_subscription_access(&sub, caller, is_admin)?;
+        let sub = self.registry.get(sub_id).await.ok_or_else(not_found)?;
+
+        if !caller_may_control(&sub, caller, ownership) {
+            return Err(not_found());
+        }
 
         if let Some(group) = &sub.share_group {
             let mut groups = self.consumer_groups.write().await;
@@ -181,15 +184,15 @@ impl Database {
     }
 }
 
-fn authorize_subscription_access(
+fn caller_may_control(
     sub: &Subscription,
     caller: Option<&str>,
-    is_admin: bool,
-) -> Result<()> {
+    ownership: &OwnershipConfig,
+) -> bool {
     match &sub.owner {
-        Some(owner) if !is_admin && caller != Some(owner.as_str()) => Err(Error::Forbidden(
-            "subscription is owned by another user".to_string(),
-        )),
-        _ => Ok(()),
+        Some(owner) => {
+            caller == Some(owner.as_str()) || caller.is_some_and(|c| ownership.is_admin(c))
+        }
+        None => true,
     }
 }

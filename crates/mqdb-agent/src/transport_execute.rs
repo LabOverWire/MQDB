@@ -319,13 +319,10 @@ impl Database {
                     Err(e) => e.into(),
                 },
             },
-            Request::Unsubscribe { id } => {
-                let is_admin = sender.is_some_and(|s| ownership.is_admin(s));
-                match self.unsubscribe(&id, sender, is_admin).await {
-                    Ok(()) => Response::ok(value_from_unit(())),
-                    Err(e) => e.into(),
-                }
-            }
+            Request::Unsubscribe { id } => match self.unsubscribe(&id, sender, ownership).await {
+                Ok(()) => Response::ok(value_from_unit(())),
+                Err(e) => e.into(),
+            },
             Request::Share {
                 entity,
                 id,

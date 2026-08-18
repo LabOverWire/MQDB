@@ -187,7 +187,9 @@ async fn test_reactive_subscriptions() {
     assert_eq!(event.entity, "users");
     assert_eq!(event.id, id);
 
-    db.unsubscribe(&sub_id, None, false).await.unwrap();
+    db.unsubscribe(&sub_id, None, &OwnershipConfig::default())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
