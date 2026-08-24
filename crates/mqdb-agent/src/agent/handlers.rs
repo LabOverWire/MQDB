@@ -453,9 +453,15 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
             "restore requires agent restart - use CLI with --restore flag",
         ),
         AdminOperation::BackupList => handle_backup_list(ctx.backup_dir).await,
-        AdminOperation::Subscribe => handle_subscribe(ctx.db, &payload).await,
-        AdminOperation::Heartbeat { sub_id } => handle_heartbeat(ctx.db, &sub_id).await,
-        AdminOperation::Unsubscribe { sub_id } => handle_unsubscribe(ctx.db, &sub_id).await,
+        AdminOperation::Subscribe => {
+            handle_subscribe(ctx.db, &payload, extract_sender(ctx.message)).await
+        }
+        AdminOperation::Heartbeat { sub_id } => {
+            handle_heartbeat(ctx.db, &sub_id, extract_sender(ctx.message), ctx.ownership).await
+        }
+        AdminOperation::Unsubscribe { sub_id } => {
+            handle_unsubscribe(ctx.db, &sub_id, extract_sender(ctx.message), ctx.ownership).await
+        }
         AdminOperation::ConsumerGroupList => handle_consumer_group_list(ctx.db).await,
         AdminOperation::ConsumerGroupShow { name } => {
             handle_consumer_group_show(ctx.db, &name).await
@@ -724,7 +730,7 @@ async fn handle_backup_list(backup_dir: &Path) -> Response {
     }
 }
 
-async fn handle_subscribe(db: &Database, payload: &Value) -> Response {
+async fn handle_subscribe(db: &Database, payload: &Value, caller: Option<&str>) -> Response {
     use mqdb_core::subscription::SubscriptionMode;
     use serde_json::json;
 
@@ -753,7 +759,10 @@ async fn handle_subscribe(db: &Database, payload: &Value) -> Response {
     };
 
     if let Some(group) = group {
-        match db.subscribe_shared(pattern, entity, group, mode).await {
+        match db
+            .subscribe_shared(pattern, entity, group, mode, caller)
+            .await
+        {
             Ok(result) => Response::ok(json!({
                 "id": result.id,
                 "partitions": result.assigned_partitions
@@ -761,26 +770,36 @@ async fn handle_subscribe(db: &Database, payload: &Value) -> Response {
             Err(e) => Response::error(mqdb_core::ErrorCode::Internal, e.to_string()),
         }
     } else {
-        match db.subscribe(pattern, entity).await {
+        match db.subscribe(pattern, entity, caller).await {
             Ok(id) => Response::ok(json!({"id": id})),
             Err(e) => Response::error(mqdb_core::ErrorCode::Internal, e.to_string()),
         }
     }
 }
 
-async fn handle_heartbeat(db: &Database, sub_id: &str) -> Response {
+async fn handle_heartbeat(
+    db: &Database,
+    sub_id: &str,
+    caller: Option<&str>,
+    ownership: &OwnershipConfig,
+) -> Response {
     use serde_json::json;
-    match db.heartbeat(sub_id).await {
+    match db.heartbeat(sub_id, caller, ownership).await {
         Ok(()) => Response::ok(json!({"ok": true})),
-        Err(e) => Response::error(mqdb_core::ErrorCode::NotFound, e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
-async fn handle_unsubscribe(db: &Database, sub_id: &str) -> Response {
+async fn handle_unsubscribe(
+    db: &Database,
+    sub_id: &str,
+    caller: Option<&str>,
+    ownership: &OwnershipConfig,
+) -> Response {
     use serde_json::json;
-    match db.unsubscribe(sub_id).await {
+    match db.unsubscribe(sub_id, caller, ownership).await {
         Ok(()) => Response::ok(json!({"ok": true})),
-        Err(e) => Response::error(mqdb_core::ErrorCode::Internal, e.to_string()),
+        Err(e) => e.into(),
     }
 }
 
@@ -1154,7 +1173,6 @@ async fn handle_acl_assignment_list(
     Response::ok(json!(roles))
 }
 
-#[cfg(feature = "http-api")]
 fn extract_sender(message: &Message) -> Option<&str> {
     message
         .properties

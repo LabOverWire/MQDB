@@ -303,7 +303,10 @@ impl Database {
                 mode,
             } => match (share_group, mode) {
                 (Some(group), Some(m)) => {
-                    match self.subscribe_shared(pattern, entity, group, m).await {
+                    match self
+                        .subscribe_shared(pattern, entity, group, m, sender)
+                        .await
+                    {
                         Ok(result) => Response::ok(serde_json::json!({
                             "id": result.id,
                             "assigned_partitions": result.assigned_partitions
@@ -311,12 +314,12 @@ impl Database {
                         Err(e) => e.into(),
                     }
                 }
-                _ => match self.subscribe(pattern, entity).await {
+                _ => match self.subscribe(pattern, entity, sender).await {
                     Ok(id) => Response::ok(value_from_string(id)),
                     Err(e) => e.into(),
                 },
             },
-            Request::Unsubscribe { id } => match self.unsubscribe(&id).await {
+            Request::Unsubscribe { id } => match self.unsubscribe(&id, sender, ownership).await {
                 Ok(()) => Response::ok(value_from_unit(())),
                 Err(e) => e.into(),
             },

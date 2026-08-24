@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-24 — mqdb-cli 0.8.31, mqdb-core 0.7.11, mqdb-agent 0.8.23
+
+### Fixed
+
+- **`$DB/_sub` control operations now verify subscription ownership.** Since `$DB/_sub/#` is publishable by any authenticated non-admin, a user who learned another user's `sub_id` could `unsubscribe` (cancel) or `heartbeat` it — cancelling another user's subscription or interfering with its consumer-group membership. Subscriptions now record the creating user as their owner. A caller who is neither the owner nor an admin is treated as if the subscription does not exist: `unsubscribe` is a no-op success and `heartbeat` returns not-found — identical to acting on an unknown id, so a caller cannot probe for another user's subscriptions. Ownerless subscriptions (e.g. anonymous / dev-insecure mode) remain unrestricted.
+
 ## 2026-08-16 — mqdb-cli 0.8.30, mqdb-core 0.7.10, mqdb-agent 0.8.22
 
 ### Fixed

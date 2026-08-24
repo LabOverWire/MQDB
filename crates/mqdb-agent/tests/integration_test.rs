@@ -161,7 +161,7 @@ async fn test_reactive_subscriptions() {
     let mut receiver = db.event_receiver();
 
     let sub_id = db
-        .subscribe("users/#".into(), Some("users".into()))
+        .subscribe("users/#".into(), Some("users".into()), None)
         .await
         .unwrap();
 
@@ -187,7 +187,9 @@ async fn test_reactive_subscriptions() {
     assert_eq!(event.entity, "users");
     assert_eq!(event.id, id);
 
-    db.unsubscribe(&sub_id).await.unwrap();
+    db.unsubscribe(&sub_id, None, &OwnershipConfig::default())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -198,7 +200,7 @@ async fn test_subscription_persistence() {
         let db = Database::open_without_background_tasks(tmp.path())
             .await
             .unwrap();
-        db.subscribe("users/#".into(), Some("users".into()))
+        db.subscribe("users/#".into(), Some("users".into()), None)
             .await
             .unwrap();
     }
@@ -239,10 +241,10 @@ async fn test_wildcard_subscriptions() {
 
     let mut receiver = db.event_receiver();
 
-    db.subscribe("users/+".into(), Some("users".into()))
+    db.subscribe("users/+".into(), Some("users".into()), None)
         .await
         .unwrap();
-    db.subscribe("posts/#".into(), Some("posts".into()))
+    db.subscribe("posts/#".into(), Some("posts".into()), None)
         .await
         .unwrap();
 
@@ -623,7 +625,7 @@ async fn test_ttl_expiration() {
 
     let mut receiver = db.event_receiver();
 
-    db.subscribe("temp/#".into(), Some("temp".into()))
+    db.subscribe("temp/#".into(), Some("temp".into()), None)
         .await
         .unwrap();
 

@@ -5,11 +5,17 @@ use super::{Database, SubscriptionResult};
 use crate::consumer_group::{ConsumerGroupDetails, ConsumerGroupInfo, ConsumerMemberInfo};
 use mqdb_core::error::{Error, Result};
 use mqdb_core::subscription::{Subscription, SubscriptionMode};
+use mqdb_core::types::OwnershipConfig;
 
 impl Database {
     /// # Errors
     /// Returns an error if the subscription limit is reached or registration fails.
-    pub async fn subscribe(&self, pattern: String, entity: Option<String>) -> Result<String> {
+    pub async fn subscribe(
+        &self,
+        pattern: String,
+        entity: Option<String>,
+        owner: Option<&str>,
+    ) -> Result<String> {
         if let Some(max_subs) = self.config.max_subscriptions {
             let current_count = self.registry.count().await;
             if current_count >= max_subs {
@@ -20,7 +26,8 @@ impl Database {
         }
 
         let sub_id = uuid::Uuid::new_v4().to_string();
-        let subscription = Subscription::new(sub_id.clone(), pattern, entity);
+        let subscription =
+            Subscription::new(sub_id.clone(), pattern, entity).with_owner(owner.map(String::from));
 
         self.registry.register(subscription).await?;
 
@@ -35,6 +42,7 @@ impl Database {
         entity: Option<String>,
         group: String,
         mode: SubscriptionMode,
+        owner: Option<&str>,
     ) -> Result<SubscriptionResult> {
         if let Some(max_subs) = self.config.max_subscriptions {
             let current_count = self.registry.count().await;
@@ -82,8 +90,9 @@ impl Database {
             }
         };
 
-        let subscription =
-            Subscription::new(sub_id.clone(), pattern, entity).with_share_group(group, mode);
+        let subscription = Subscription::new(sub_id.clone(), pattern, entity)
+            .with_share_group(group, mode)
+            .with_owner(owner.map(String::from));
 
         self.registry.register(subscription).await?;
 
@@ -95,15 +104,23 @@ impl Database {
 
     /// # Errors
     /// Returns an error if unregistration fails.
-    pub async fn unsubscribe(&self, sub_id: &str) -> Result<()> {
-        if let Some(sub) = self.registry.get(sub_id).await
-            && let Some(group) = &sub.share_group
-        {
-            let mut groups = self.consumer_groups.write().await;
-            if let Some(cg) = groups.get_mut(group) {
-                cg.remove_member(sub_id);
-                if cg.member_count() == 0 {
-                    groups.remove(group);
+    pub async fn unsubscribe(
+        &self,
+        sub_id: &str,
+        caller: Option<&str>,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        if let Some(sub) = self.registry.get(sub_id).await {
+            if !caller_may_control(&sub, caller, ownership) {
+                return Ok(());
+            }
+            if let Some(group) = &sub.share_group {
+                let mut groups = self.consumer_groups.write().await;
+                if let Some(cg) = groups.get_mut(group) {
+                    cg.remove_member(sub_id);
+                    if cg.member_count() == 0 {
+                        groups.remove(group);
+                    }
                 }
             }
         }
@@ -114,16 +131,23 @@ impl Database {
     }
 
     /// # Errors
-    /// Returns an error if the subscription is not found.
-    pub async fn heartbeat(&self, sub_id: &str) -> Result<()> {
-        let sub = self
-            .registry
-            .get(sub_id)
-            .await
-            .ok_or_else(|| Error::NotFound {
-                entity: "subscription".into(),
-                id: sub_id.into(),
-            })?;
+    /// Returns `NotFound` if the subscription does not exist or the caller does not control it.
+    pub async fn heartbeat(
+        &self,
+        sub_id: &str,
+        caller: Option<&str>,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        let not_found = || Error::NotFound {
+            entity: "subscription".into(),
+            id: sub_id.into(),
+        };
+
+        let sub = self.registry.get(sub_id).await.ok_or_else(not_found)?;
+
+        if !caller_may_control(&sub, caller, ownership) {
+            return Err(not_found());
+        }
 
         if let Some(group) = &sub.share_group {
             let mut groups = self.consumer_groups.write().await;
@@ -157,5 +181,18 @@ impl Database {
             members: cg.members().map(ConsumerMemberInfo::from).collect(),
             total_partitions: self.config.shared_subscription.num_partitions,
         })
+    }
+}
+
+fn caller_may_control(
+    sub: &Subscription,
+    caller: Option<&str>,
+    ownership: &OwnershipConfig,
+) -> bool {
+    match &sub.owner {
+        Some(owner) => {
+            caller == Some(owner.as_str()) || caller.is_some_and(|c| ownership.is_admin(c))
+        }
+        None => true,
     }
 }

@@ -170,7 +170,7 @@ async fn test_subscription_limit_enforcement_concurrent() {
         let db_clone = db.clone();
         let handle = tokio::spawn(async move {
             db_clone
-                .subscribe(format!("users/{i}"), Some("users".into()))
+                .subscribe(format!("users/{i}"), Some("users".into()), None)
                 .await
         });
         handles.push(handle);
