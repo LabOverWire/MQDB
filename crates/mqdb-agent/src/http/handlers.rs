@@ -249,7 +249,7 @@ pub async fn handle_callback(state: &ServerState, query: &str) -> HttpResponse {
     let (identity, token_response, provider) =
         match exchange_and_verify_callback(state, query).await {
             Ok(result) => result,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     let link_key = format!("{}:{}", identity.provider, identity.provider_sub);
@@ -305,29 +305,29 @@ async fn exchange_and_verify_callback(
         super::providers::ProviderTokenResponse,
         &'static str,
     ),
-    HttpResponse,
+    Box<HttpResponse>,
 > {
     let params = parse_query(query);
 
     let Some(code) = params.get("code") else {
         if let Some(err) = params.get("error") {
             let escaped = escape_html(err);
-            return Err(html_response(
+            return Err(Box::new(html_response(
                 400,
                 format!("<html><body><h1>OAuth Error</h1><p>{escaped}</p></body></html>"),
-            ));
+            )));
         }
-        return Err(json_response(
+        return Err(Box::new(json_response(
             400,
             &json!({"error": "missing code parameter"}),
-        ));
+        )));
     };
 
     let Some(oauth_state) = params.get("state") else {
-        return Err(json_response(
+        return Err(Box::new(json_response(
             400,
             &json!({"error": "missing state parameter"}),
-        ));
+        )));
     };
 
     let (code_verifier, provider_name) = {
@@ -336,46 +336,46 @@ async fn exchange_and_verify_callback(
     };
 
     let Some(code_verifier) = code_verifier else {
-        return Err(json_response(
+        return Err(Box::new(json_response(
             400,
             &json!({"error": "invalid or expired state"}),
-        ));
+        )));
     };
 
     let provider_name_str = provider_name.unwrap_or_default();
     let Some(provider) = state.provider_registry.get(&provider_name_str) else {
-        return Err(json_response(
+        return Err(Box::new(json_response(
             400,
             &json!({"error": "provider not found for this OAuth flow"}),
-        ));
+        )));
     };
 
     let token_response = match provider.exchange_code(code, &code_verifier).await {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "OAuth token exchange failed");
-            return Err(json_response(
+            return Err(Box::new(json_response(
                 502,
                 &json!({"error": "token exchange failed"}),
-            ));
+            )));
         }
     };
 
     let Some(id_token) = &token_response.id_token else {
-        return Err(json_response(
+        return Err(Box::new(json_response(
             502,
             &json!({"error": "no id_token in response"}),
-        ));
+        )));
     };
 
     let identity = match provider.verify_id_token(id_token).await {
         Ok(id) => id,
         Err(e) => {
             error!(error = %e, "ID token verification failed");
-            return Err(json_response(
+            return Err(Box::new(json_response(
                 401,
                 &json!({"error": "authentication failed"}),
-            ));
+            )));
         }
     };
 
@@ -384,10 +384,10 @@ async fn exchange_and_verify_callback(
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
     {
-        return Err(json_response(
+        return Err(Box::new(json_response(
             400,
             &json!({"error": "invalid subject identifier format"}),
-        ));
+        )));
     }
 
     Ok((identity, token_response, provider.name()))
@@ -658,7 +658,7 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
     let (canonical_id, provider_name, link_key, stored_data) =
         match validate_refresh_request(body, state).await {
             Ok(result) => result,
-            Err(resp) => return resp,
+            Err(resp) => return *resp,
         };
 
     if !state.refresh_rate_limiter.check_and_record(&canonical_id) {
@@ -720,7 +720,7 @@ pub async fn handle_refresh(state: &ServerState, body: &[u8]) -> HttpResponse {
 async fn validate_refresh_request(
     body: &[u8],
     state: &ServerState,
-) -> Result<(String, String, String, serde_json::Value), HttpResponse> {
+) -> Result<(String, String, String, serde_json::Value), Box<HttpResponse>> {
     let cors = state.cors_origin.as_deref();
 
     let body_value: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
@@ -741,11 +741,11 @@ async fn validate_refresh_request(
     if let Some(jti) = payload.get("jti").and_then(|v| v.as_str())
         && state.jti_revocation.is_revoked(jti)
     {
-        return Err(json_response_with_credentials(
+        return Err(Box::new(json_response_with_credentials(
             401,
             &json!({"error": "token has been revoked"}),
             cors,
-        ));
+        )));
     }
 
     let (canonical_id, provider_name, link_key) =
@@ -2296,7 +2296,7 @@ async fn verify_stored_password(
     canonical_id: &str,
     current_password: &str,
     cors: Option<&str>,
-) -> Result<(), HttpResponse> {
+) -> Result<(), Box<HttpResponse>> {
     let identity = read_entity(&state.mqtt_client, "_identities", canonical_id).await;
     let email_verified = identity
         .as_ref()
@@ -2304,35 +2304,35 @@ async fn verify_stored_password(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     if !email_verified {
-        return Err(json_response_with_credentials(
+        return Err(Box::new(json_response_with_credentials(
             403,
             &json!({"error": "email must be verified before changing password"}),
             cors,
-        ));
+        )));
     }
 
     let Some(cred) = read_entity(&state.mqtt_client, "_credentials", canonical_id).await else {
-        return Err(json_response_with_credentials(
+        return Err(Box::new(json_response_with_credentials(
             404,
             &json!({"error": "no credentials found (OAuth-only account)"}),
             cors,
-        ));
+        )));
     };
 
     let Some(stored_hash) = cred.get("password_hash").and_then(|v| v.as_str()) else {
-        return Err(json_response_with_credentials(
+        return Err(Box::new(json_response_with_credentials(
             500,
             &json!({"error": "credential record is corrupt"}),
             cors,
-        ));
+        )));
     };
 
     if !credentials::verify_password(stored_hash, current_password) {
-        return Err(json_response_with_credentials(
+        return Err(Box::new(json_response_with_credentials(
             401,
             &json!({"error": "incorrect current password"}),
             cors,
-        ));
+        )));
     }
 
     Ok(())
@@ -2395,7 +2395,7 @@ pub async fn handle_password_change(
     }
 
     if let Err(resp) = verify_stored_password(state, &canonical_id, current_password, cors).await {
-        return resp;
+        return *resp;
     }
 
     let new_hash = match credentials::hash_password(new_password) {
