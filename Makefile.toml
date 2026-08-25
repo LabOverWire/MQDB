@@ -116,14 +116,14 @@ description = "Lint all crates with pedantic warnings"
 dependencies = ["clippy-native", "clippy-no-default", "clippy-wasm"]
 
 [tasks.clippy-native]
-description = "Lint native crate"
+description = "Lint native crate (matches CI: all features, warnings denied)"
 command = "cargo"
 args = [
     "clippy",
     "--all-targets",
     "--all-features",
     "--",
-    "-W", "clippy::pedantic",
+    "-D", "warnings",
 ]
 
 [tasks.clippy-no-default]

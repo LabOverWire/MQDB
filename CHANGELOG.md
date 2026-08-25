@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-24 — mqdb-cli 0.8.32, mqdb-agent 0.8.24
+
+### Fixed
+
+- **Clippy now passes under the CI toolchain.** A Rust toolchain update surfaced `clippy::result_large_err` on three HTTP OAuth handlers that return an `HttpResponse` in the `Err` position; the `Err` variant is now boxed (`Box<HttpResponse>`), matching the pattern already used elsewhere in the module. The `cargo make clippy` task's native pass now runs `--all-features -D warnings` to match the CI clippy command exactly, so this class of failure is caught locally instead of only in CI.
+
 ## 2026-08-24 — mqdb-cli 0.8.31, mqdb-core 0.7.11, mqdb-agent 0.8.23
 
 ### Fixed
