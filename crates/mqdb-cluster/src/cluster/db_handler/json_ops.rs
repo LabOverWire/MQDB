@@ -317,7 +317,8 @@ impl DbRequestHandler {
                     ),
                 ];
                 let shared_payload =
-                    serde_json::to_vec(&json!({ "filters": filters })).unwrap_or_default();
+                    serde_json::to_vec(&json!({ "filters": filters, "hydrate_entity": entity }))
+                        .unwrap_or_default();
                 match self
                     .handle_json_list(
                         controller,
@@ -1212,6 +1213,11 @@ impl DbRequestHandler {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        let hydrate_entity = parsed_data
+            .as_ref()
+            .and_then(|d| d.get("hydrate_entity"))
+            .and_then(Value::as_str);
+
         if filters.len() > MAX_FILTERS {
             return Some(Self::json_error(
                 400,
@@ -1301,7 +1307,11 @@ impl DbRequestHandler {
                     entity,
                     &scatter_payload,
                     response_topic.to_string(),
-                    filters.clone(),
+                    if hydrate_entity.is_some() {
+                        Vec::new()
+                    } else {
+                        filters.clone()
+                    },
                     sorts,
                     projection.clone(),
                     pagination.clone(),
@@ -1318,6 +1328,15 @@ impl DbRequestHandler {
         let vault_skip = vault_crypto
             .as_ref()
             .map(|_| mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership));
+
+        let resource_vault_crypto = hydrate_entity
+            .and_then(|resource_entity| self.resolve_vault_crypto(resource_entity, sender));
+        let resource_vault_skip = resource_vault_crypto.as_ref().map(|_| {
+            mqdb_vault::transform::build_vault_skip_fields(
+                hydrate_entity.unwrap_or_default(),
+                &self.ownership,
+            )
+        });
 
         let entities = controller.db_list(entity);
         let mut items: Vec<Value> = entities
@@ -1336,14 +1355,35 @@ impl DbRequestHandler {
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
-                let data = if let Some(ref fields) = projection {
-                    mqdb_core::types::project_fields(data, fields)
+                let (item_id, item_data) = match hydrate_entity {
+                    Some(resource_entity) => {
+                        let resource_id = data.get("resource_id").and_then(Value::as_str)?;
+                        let resource = controller.db_get(resource_entity, resource_id)?;
+                        let mut resource_data: Value =
+                            serde_json::from_slice(&resource.data).ok()?;
+                        if let (Some(crypto), Some(skip)) =
+                            (&resource_vault_crypto, &resource_vault_skip)
+                        {
+                            mqdb_vault::transform::vault_decrypt_fields(
+                                crypto,
+                                resource_entity,
+                                resource_id,
+                                &mut resource_data,
+                                skip,
+                            );
+                        }
+                        (resource_id.to_string(), resource_data)
+                    }
+                    None => (e.id_str().to_string(), data),
+                };
+                let item_data = if let Some(ref fields) = projection {
+                    mqdb_core::types::project_fields(item_data, fields)
                 } else {
-                    data
+                    item_data
                 };
                 Some(json!({
-                    "id": e.id_str(),
-                    "data": data
+                    "id": item_id,
+                    "data": item_data
                 }))
             })
             .collect();

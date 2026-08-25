@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-25 — mqdb-cli 0.8.33, mqdb-cluster 0.4.9
+
+### Fixed
+
+- **Cluster `$DB/{entity}/shared` now returns the shared resource records, not raw grant rows** (parity with agent mode's `list_shared_with`). Each resource primary hydrates the co-located resource for every matching grant before returning it — the grant for a resource lives on the resource's own partition, so the hydration is a local read on the node that already holds the grant. Applies on both the single-node and the cross-partition scatter path, with the resource decrypted per its own vault configuration.
+
 ## 2026-08-24 — mqdb-cli 0.8.32, mqdb-agent 0.8.24
 
 ### Fixed

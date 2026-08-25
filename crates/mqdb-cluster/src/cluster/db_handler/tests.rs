@@ -2139,7 +2139,7 @@ async fn cluster_direct_shares_crud_forbidden() {
 }
 
 #[tokio::test]
-async fn cluster_shared_lists_grants_for_grantee() {
+async fn cluster_shared_hydrates_resources_for_grantee() {
     let (handler, mut ctrl, _o) = share_setup().await;
     let d2 = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D2"})).unwrap();
     ctrl.db_create("diagrams", "d2", &d2, 1000).await.unwrap();
@@ -2172,12 +2172,70 @@ async fn cluster_shared_lists_grants_for_grantee() {
     let shared = resp_json(&handler, &mut ctrl, "$DB/diagrams/shared", &[], "bob").await;
     assert_eq!(shared["status"], "ok");
     let rows = shared["data"].as_array().unwrap();
-    assert_eq!(rows.len(), 2, "bob sees only his own 2 grants");
-    let ids: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["resource_id"].as_str())
-        .collect();
+    assert_eq!(rows.len(), 2, "bob sees the 2 resources shared with him");
+    let ids: Vec<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
     assert!(ids.contains(&"d1") && ids.contains(&"d2"));
+    for row in rows {
+        assert!(
+            row["title"].is_string(),
+            "shared returns hydrated resource records, not grant rows: {row}"
+        );
+        assert!(
+            row["resource_id"].is_null(),
+            "hydrated rows must not carry grant fields: {row}"
+        );
+        assert_eq!(row["userId"], "alice");
+    }
+}
+
+#[tokio::test]
+async fn cluster_shared_scatter_primary_hydrates_co_located_resource() {
+    let (handler, mut ctrl, _o) = share_setup().await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "view"),
+        "alice",
+    )
+    .await;
+
+    let filters = vec![
+        mqdb_core::Filter::new(
+            "resource_entity".to_string(),
+            mqdb_core::FilterOp::Eq,
+            serde_json::json!("diagrams"),
+        ),
+        mqdb_core::Filter::new(
+            "grantee".to_string(),
+            mqdb_core::FilterOp::Eq,
+            serde_json::json!("bob"),
+        ),
+    ];
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "filters": filters,
+        "hydrate_entity": "diagrams",
+    }))
+    .unwrap();
+
+    let out = ctrl.handle_json_list_local(mqdb_core::types::SHARES_ENTITY, &payload);
+    let response: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let items = response["data"].as_array().unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "one grant for bob, hydrated to one resource"
+    );
+    assert_eq!(
+        items[0]["id"], "d1",
+        "hydrated item is keyed by resource id"
+    );
+    assert_eq!(items[0]["data"]["title"], "D");
+    assert!(
+        items[0]["data"]["resource_id"].is_null(),
+        "primary returns the resource record, not the grant row: {}",
+        items[0]
+    );
 }
 
 #[tokio::test]

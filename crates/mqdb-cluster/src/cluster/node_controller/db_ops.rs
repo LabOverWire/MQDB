@@ -1917,28 +1917,46 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(crate) fn handle_json_list_local(&self, entity: &str, payload: &[u8]) -> Vec<u8> {
-        let filters: Vec<mqdb_core::Filter> = if payload.is_empty() {
-            Vec::new()
-        } else if let Ok(data) = serde_json::from_slice::<serde_json::Value>(payload) {
-            data.get("filters")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default()
+        let payload_value: Option<serde_json::Value> = if payload.is_empty() {
+            None
         } else {
-            Vec::new()
+            serde_json::from_slice(payload).ok()
         };
+        let filters: Vec<mqdb_core::Filter> = payload_value
+            .as_ref()
+            .and_then(|d| d.get("filters"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let hydrate_entity = payload_value
+            .as_ref()
+            .and_then(|d| d.get("hydrate_entity"))
+            .and_then(serde_json::Value::as_str);
 
         let entities = self.db_list(entity);
         let mut items: Vec<serde_json::Value> = entities
             .iter()
             .filter_map(|e| {
                 let data: serde_json::Value = serde_json::from_slice(&e.data).ok()?;
-                if Self::matches_filters(&data, &filters) {
-                    Some(serde_json::json!({
+                if !Self::matches_filters(&data, &filters) {
+                    return None;
+                }
+                match hydrate_entity {
+                    Some(resource_entity) => {
+                        let resource_id = data
+                            .get("resource_id")
+                            .and_then(serde_json::Value::as_str)?;
+                        let resource = self.db_get(resource_entity, resource_id)?;
+                        let resource_data: serde_json::Value =
+                            serde_json::from_slice(&resource.data).ok()?;
+                        Some(serde_json::json!({
+                            "id": resource_id,
+                            "data": resource_data
+                        }))
+                    }
+                    None => Some(serde_json::json!({
                         "id": e.id_str(),
                         "data": data
-                    }))
-                } else {
-                    None
+                    })),
                 }
             })
             .collect();
