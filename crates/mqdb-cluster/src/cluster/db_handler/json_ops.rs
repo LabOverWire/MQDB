@@ -1329,15 +1329,6 @@ impl DbRequestHandler {
             .as_ref()
             .map(|_| mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership));
 
-        let resource_vault_crypto = hydrate_entity
-            .and_then(|resource_entity| self.resolve_vault_crypto(resource_entity, sender));
-        let resource_vault_skip = resource_vault_crypto.as_ref().map(|_| {
-            mqdb_vault::transform::build_vault_skip_fields(
-                hydrate_entity.unwrap_or_default(),
-                &self.ownership,
-            )
-        });
-
         let entities = controller.db_list(entity);
         let mut items: Vec<Value> = entities
             .iter()
@@ -1359,19 +1350,7 @@ impl DbRequestHandler {
                     Some(resource_entity) => {
                         let resource_id = data.get("resource_id").and_then(Value::as_str)?;
                         let resource = controller.db_get(resource_entity, resource_id)?;
-                        let mut resource_data: Value =
-                            serde_json::from_slice(&resource.data).ok()?;
-                        if let (Some(crypto), Some(skip)) =
-                            (&resource_vault_crypto, &resource_vault_skip)
-                        {
-                            mqdb_vault::transform::vault_decrypt_fields(
-                                crypto,
-                                resource_entity,
-                                resource_id,
-                                &mut resource_data,
-                                skip,
-                            );
-                        }
+                        let resource_data: Value = serde_json::from_slice(&resource.data).ok()?;
                         (resource_id.to_string(), resource_data)
                     }
                     None => (e.id_str().to_string(), data),
