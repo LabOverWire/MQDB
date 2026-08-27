@@ -74,6 +74,71 @@ pub(crate) async fn cmd_delete(
     Ok(())
 }
 
+pub(crate) async fn cmd_share(
+    entity: String,
+    id: String,
+    grantee: String,
+    permission: String,
+    no_cascade: bool,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/share");
+    let payload = json!({
+        "grantee": grantee,
+        "permission": permission,
+        "cascade": !no_cascade,
+    });
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
+    output_response(&response, &format);
+    check_response_status(&response)?;
+    Ok(())
+}
+
+pub(crate) async fn cmd_unshare(
+    entity: String,
+    id: String,
+    grantee: String,
+    no_cascade: bool,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/unshare");
+    let payload = json!({
+        "grantee": grantee,
+        "cascade": !no_cascade,
+    });
+    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
+    output_response(&response, &format);
+    check_response_status(&response)?;
+    Ok(())
+}
+
+pub(crate) async fn cmd_shares(
+    entity: String,
+    id: String,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/shares");
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
+    output_response(&response, &format);
+    check_response_status(&response)?;
+    Ok(())
+}
+
+pub(crate) async fn cmd_shared(
+    entity: String,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/shared");
+    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
+    output_response(&response, &format);
+    check_response_status(&response)?;
+    Ok(())
+}
+
 pub(crate) struct ListParams {
     pub entity: String,
     pub filters: Vec<String>,

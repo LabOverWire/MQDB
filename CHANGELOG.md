@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-27 — mqdb-cli 0.8.34
+
+### Added
+
+- **`mqdb share`, `unshare`, `shares`, and `shared` commands.** Diagram/resource sharing was previously reachable only by hand-publishing to the `$DB/{entity}/{id}/share` MQTT topics; there was no CLI surface for it. `mqdb share <entity> <id> <grantee> [--permission view|edit] [--no-cascade]` grants access, `mqdb unshare <entity> <id> <grantee>` revokes it, `mqdb shares <entity> <id>` lists the grants on a record you own, and `mqdb shared <entity>` lists records others have shared with you.
+
 ## 2026-08-26 — mqdb-cli 0.8.33, mqdb-cluster 0.4.9
 
 ### Fixed

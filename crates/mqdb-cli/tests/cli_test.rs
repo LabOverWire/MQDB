@@ -24,6 +24,25 @@ async fn start_agent_background(port: u16) -> (TempDir, tokio::task::JoinHandle<
     (tmp, handle)
 }
 
+async fn start_agent_with_ownership(
+    port: u16,
+    passwd: &std::path::Path,
+) -> (TempDir, tokio::task::JoinHandle<()>) {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open(tmp.path()).await.unwrap();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let ownership = mqdb_core::types::OwnershipConfig::parse("diagrams=userId").unwrap();
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(addr)
+        .with_password_file(passwd.to_path_buf())
+        .with_ownership_config(ownership);
+
+    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
+    let _ = ready_rx.changed().await;
+
+    (tmp, handle)
+}
+
 fn mqdb_bin() -> String {
     env!("CARGO_BIN_EXE_mqdb").to_string()
 }
@@ -49,6 +68,123 @@ fn parse_json(stdout: &str, stderr: &str) -> Value {
             stderr.len(),
         )
     })
+}
+
+#[tokio::test]
+async fn test_cli_share_lifecycle() {
+    let port = next_test_port();
+    let pw_dir = TempDir::new().unwrap();
+    let pw_path = pw_dir.path().join("passwd");
+    let pw_str = pw_path.to_str().unwrap().to_string();
+    for (user, pass) in [("alice", "alice"), ("bob", "bob")] {
+        run_mqdb(&["passwd", user, "-b", pass, "-f", &pw_str]).await;
+    }
+    let (_tmp, handle) = start_agent_with_ownership(port, &pw_path).await;
+    let broker = format!("127.0.0.1:{port}");
+
+    let (created, create_out, create_err) = run_mqdb(&[
+        "create",
+        "diagrams",
+        "-d",
+        r#"{"userId":"alice","title":"D1"}"#,
+        "--broker",
+        &broker,
+        "--user",
+        "alice",
+        "--pass",
+        "alice",
+        "--format",
+        "json",
+    ])
+    .await;
+    assert!(created, "create should succeed: {create_out}{create_err}");
+    let id = parse_json(&create_out, &create_err)["data"]["id"]
+        .as_str()
+        .expect("created id")
+        .to_string();
+
+    let (before, _, _) = run_mqdb(&[
+        "read", "diagrams", &id, "--broker", &broker, "--user", "bob", "--pass", "bob", "--format",
+        "json",
+    ])
+    .await;
+    assert!(!before, "bob must not read before a grant");
+
+    let (shared_ok, share_out, share_err) = run_mqdb(&[
+        "share",
+        "diagrams",
+        &id,
+        "bob",
+        "--permission",
+        "view",
+        "--broker",
+        &broker,
+        "--user",
+        "alice",
+        "--pass",
+        "alice",
+        "--format",
+        "json",
+    ])
+    .await;
+    assert!(shared_ok, "share should succeed: {share_out}{share_err}");
+    assert_eq!(parse_json(&share_out, &share_err)["status"], "ok");
+
+    let (after, read_out, _) = run_mqdb(&[
+        "read", "diagrams", &id, "--broker", &broker, "--user", "bob", "--pass", "bob", "--format",
+        "json",
+    ])
+    .await;
+    assert!(after, "bob must read after a view grant");
+    assert_eq!(parse_json(&read_out, "")["data"]["title"], "D1");
+
+    let (_, shares_out, _) = run_mqdb(&[
+        "shares", "diagrams", &id, "--broker", &broker, "--user", "alice", "--pass", "alice",
+        "--format", "json",
+    ])
+    .await;
+    let grants = parse_json(&shares_out, "")["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(grants.len(), 1, "one grant listed: {shares_out}");
+    assert_eq!(grants[0]["grantee"], "bob");
+    assert_eq!(grants[0]["permission"], "view");
+
+    let (_, shared_list_out, _) = run_mqdb(&[
+        "shared", "diagrams", "--broker", &broker, "--user", "bob", "--pass", "bob", "--format",
+        "json",
+    ])
+    .await;
+    let resources = parse_json(&shared_list_out, "")["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        resources.len(),
+        1,
+        "bob sees one shared resource: {shared_list_out}"
+    );
+    assert_eq!(
+        resources[0]["title"], "D1",
+        "shared returns the hydrated resource, not the grant row"
+    );
+
+    let (revoked, _, _) = run_mqdb(&[
+        "unshare", "diagrams", &id, "bob", "--broker", &broker, "--user", "alice", "--pass",
+        "alice", "--format", "json",
+    ])
+    .await;
+    assert!(revoked, "unshare should succeed");
+
+    let (after_revoke, _, _) = run_mqdb(&[
+        "read", "diagrams", &id, "--broker", &broker, "--user", "bob", "--pass", "bob", "--format",
+        "json",
+    ])
+    .await;
+    assert!(!after_revoke, "bob must not read after revoke");
+
+    handle.abort();
 }
 
 #[tokio::test]
