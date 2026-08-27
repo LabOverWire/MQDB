@@ -220,12 +220,14 @@ async fn test_cli_connect_timeout_against_silent_listener() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
     let port = listener.local_addr().unwrap().port();
 
+    let silent_hold = std::time::Duration::from_secs(30);
     let _detached = std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            std::thread::sleep(std::time::Duration::from_secs(6));
+            std::thread::sleep(silent_hold);
             drop(stream);
         }
     });
+    let max_wall = std::time::Duration::from_secs(10);
 
     let start = Instant::now();
     let (success, stdout, stderr) = run_mqdb(&[
@@ -253,8 +255,10 @@ async fn test_cli_connect_timeout_against_silent_listener() {
         "error message must mention timeout: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        elapsed.as_secs_f64() < 5.0,
-        "must exit within timeout window, took {elapsed:?}",
+        elapsed < max_wall,
+        "the 2s connect timeout must abort well within {max_wall:?} (generous over harness \
+         process overhead, far below the {silent_hold:?} silent hold); {elapsed:?} means \
+         --timeout was ignored or regressed",
     );
 }
 
