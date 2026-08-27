@@ -231,6 +231,18 @@ pub(crate) fn check_response_status(response: &Value) -> Result<(), String> {
     }
 }
 
+pub(crate) async fn send_request(
+    conn: &ConnectionArgs,
+    topic: &str,
+    payload: Value,
+    format: &OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let response = Box::pin(execute_request(conn, topic, payload)).await?;
+    output_response(&response, format);
+    check_response_status(&response)?;
+    Ok(())
+}
+
 pub(crate) fn output_response(response: &Value, format: &OutputFormat) {
     match format {
         OutputFormat::Json => {

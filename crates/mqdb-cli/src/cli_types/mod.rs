@@ -15,7 +15,7 @@ pub(crate) use agent::AgentAction;
 pub(crate) use agent::ClusterAction;
 pub(crate) use auth::{AclAction, AuthArgs, OAuthArgs};
 pub(crate) use base::{
-    Cli, Commands, ConnectionArgs, DurabilityArg, JwtAlgorithmArg, OutputFormat,
+    Cli, Commands, ConnectionArgs, DurabilityArg, JwtAlgorithmArg, OutputFormat, Permission,
     SubscriptionModeArg,
 };
 pub(crate) use bench::BenchAction;
