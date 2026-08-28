@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-28 — mqdb-cli 0.8.35
+
+### Added
+
+- **`mqdb dev test --sharing`** — a multi-node E2E suite for diagram sharing, modeled on the ownership runner. It spins up an authenticated, ownership-configured cluster and drives the `mqdb share/unshare/shares/shared` commands across nodes: view/edit grant grading, cross-node reads/updates (grantee connected to a node other than the resource primary), `shared` returning hydrated resources across the multi-node scatter, and revocation.
+
+### Fixed
+
+- **`mqdb dev test --ownership`/`--sharing` clusters now pass `--quic-ca`**, so inter-node mTLS forms and cross-node request forwarding works. The ownership suite never exercised cross-node ops, so the missing CA went unnoticed. The ownership suite's create-id parse was also corrected (`data.id`, not top-level `id`).
+
 ## 2026-08-27 — mqdb-cli 0.8.34
 
 ### Added
