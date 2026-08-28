@@ -136,6 +136,81 @@ Examples:
         format: OutputFormat,
     },
     #[command(
+        about = "Share a record with another user",
+        after_long_help = "\
+Examples:
+  mqdb share diagrams d1 bob
+  mqdb share diagrams d1 bob@example.com --permission edit
+  mqdb share diagrams d1 bob --no-cascade"
+    )]
+    Share {
+        #[arg(help = "Entity name")]
+        entity: String,
+        #[arg(help = "Record ID")]
+        id: String,
+        #[arg(help = "Grantee identifier (username or email)")]
+        grantee: String,
+        #[arg(long, default_value = "view", help = "Access level: view or edit")]
+        permission: Permission,
+        #[arg(long, help = "Do not cascade the grant to referenced records")]
+        no_cascade: bool,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    #[command(
+        about = "Revoke a user's access to a record",
+        after_long_help = "\
+Examples:
+  mqdb unshare diagrams d1 bob
+  mqdb unshare diagrams d1 bob@example.com --no-cascade"
+    )]
+    Unshare {
+        #[arg(help = "Entity name")]
+        entity: String,
+        #[arg(help = "Record ID")]
+        id: String,
+        #[arg(help = "Grantee identifier (username or email)")]
+        grantee: String,
+        #[arg(long, help = "Do not cascade the revoke to referenced records")]
+        no_cascade: bool,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    #[command(
+        about = "List the grants on a record you own",
+        after_long_help = "\
+Examples:
+  mqdb shares diagrams d1"
+    )]
+    Shares {
+        #[arg(help = "Entity name")]
+        entity: String,
+        #[arg(help = "Record ID")]
+        id: String,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    #[command(
+        about = "List records that others have shared with you",
+        after_long_help = "\
+Examples:
+  mqdb shared diagrams"
+    )]
+    Shared {
+        #[arg(help = "Entity name")]
+        entity: String,
+        #[command(flatten)]
+        conn: ConnectionArgs,
+        #[arg(long, default_value = "json")]
+        format: OutputFormat,
+    },
+    #[command(
         about = "List records with optional filtering and sorting",
         after_long_help = "\
 Examples:
@@ -313,4 +388,20 @@ pub(crate) enum JwtAlgorithmArg {
     Hs256,
     Rs256,
     Es256,
+}
+
+#[derive(Clone, Copy, Default, ValueEnum)]
+pub(crate) enum Permission {
+    #[default]
+    View,
+    Edit,
+}
+
+impl Permission {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Edit => "edit",
+        }
+    }
 }

@@ -1,10 +1,10 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::cli_types::{ConnectionArgs, OutputFormat, SubscriptionModeArg};
+use crate::cli_types::{ConnectionArgs, OutputFormat, Permission, SubscriptionModeArg};
 use crate::common::{
     check_response_status, connect_client, execute_request, matches_filters, output_response,
-    parse_filters,
+    parse_filters, send_request,
 };
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -20,10 +20,7 @@ pub(crate) async fn cmd_create(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/create");
-    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(&response, &format);
-    check_response_status(&response)?;
-    Ok(())
+    send_request(&conn, &topic, payload, &format).await
 }
 
 pub(crate) async fn cmd_read(
@@ -40,10 +37,7 @@ pub(crate) async fn cmd_read(
     } else {
         json!({})
     };
-    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(&response, &format);
-    check_response_status(&response)?;
-    Ok(())
+    send_request(&conn, &topic, payload, &format).await
 }
 
 pub(crate) async fn cmd_update(
@@ -55,10 +49,7 @@ pub(crate) async fn cmd_update(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let payload: Value = serde_json::from_str(&data)?;
     let topic = format!("$DB/{entity}/{id}/update");
-    let response = Box::pin(execute_request(&conn, &topic, payload)).await?;
-    output_response(&response, &format);
-    check_response_status(&response)?;
-    Ok(())
+    send_request(&conn, &topic, payload, &format).await
 }
 
 pub(crate) async fn cmd_delete(
@@ -68,10 +59,60 @@ pub(crate) async fn cmd_delete(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let topic = format!("$DB/{entity}/{id}/delete");
-    let response = Box::pin(execute_request(&conn, &topic, json!({}))).await?;
-    output_response(&response, &format);
-    check_response_status(&response)?;
-    Ok(())
+    send_request(&conn, &topic, json!({}), &format).await
+}
+
+pub(crate) async fn cmd_share(
+    entity: String,
+    id: String,
+    grantee: String,
+    permission: Permission,
+    no_cascade: bool,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/share");
+    let payload = json!({
+        "grantee": grantee,
+        "permission": permission.as_str(),
+        "cascade": !no_cascade,
+    });
+    send_request(&conn, &topic, payload, &format).await
+}
+
+pub(crate) async fn cmd_unshare(
+    entity: String,
+    id: String,
+    grantee: String,
+    no_cascade: bool,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/unshare");
+    let payload = json!({
+        "grantee": grantee,
+        "cascade": !no_cascade,
+    });
+    send_request(&conn, &topic, payload, &format).await
+}
+
+pub(crate) async fn cmd_shares(
+    entity: String,
+    id: String,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/{id}/shares");
+    send_request(&conn, &topic, json!({}), &format).await
+}
+
+pub(crate) async fn cmd_shared(
+    entity: String,
+    conn: ConnectionArgs,
+    format: OutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let topic = format!("$DB/{entity}/shared");
+    send_request(&conn, &topic, json!({}), &format).await
 }
 
 pub(crate) struct ListParams {

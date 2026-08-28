@@ -24,7 +24,8 @@ use commands::cluster::{
 use commands::crud::{
     ListParams, cmd_backup_create, cmd_backup_list, cmd_constraint_add, cmd_constraint_list,
     cmd_create, cmd_delete, cmd_index_add, cmd_list, cmd_read, cmd_restore, cmd_schema_get,
-    cmd_schema_set, cmd_subscribe, cmd_update, cmd_watch,
+    cmd_schema_set, cmd_share, cmd_shared, cmd_shares, cmd_subscribe, cmd_unshare, cmd_update,
+    cmd_watch,
 };
 
 use clap::Parser;
@@ -94,6 +95,10 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         | Commands::Read { .. }
         | Commands::Update { .. }
         | Commands::Delete { .. }
+        | Commands::Share { .. }
+        | Commands::Unshare { .. }
+        | Commands::Shares { .. }
+        | Commands::Shared { .. }
         | Commands::List { .. }
         | Commands::Watch { .. }
         | Commands::Subscribe { .. }) => dispatch_crud(crud).await?,
@@ -129,6 +134,39 @@ async fn dispatch_crud(command: Commands) -> Result<(), Box<dyn std::error::Erro
             conn,
             format,
         } => Box::pin(cmd_delete(entity, id, conn, format)).await?,
+        Commands::Share {
+            entity,
+            id,
+            grantee,
+            permission,
+            no_cascade,
+            conn,
+            format,
+        } => {
+            Box::pin(cmd_share(
+                entity, id, grantee, permission, no_cascade, conn, format,
+            ))
+            .await?
+        }
+        Commands::Unshare {
+            entity,
+            id,
+            grantee,
+            no_cascade,
+            conn,
+            format,
+        } => Box::pin(cmd_unshare(entity, id, grantee, no_cascade, conn, format)).await?,
+        Commands::Shares {
+            entity,
+            id,
+            conn,
+            format,
+        } => Box::pin(cmd_shares(entity, id, conn, format)).await?,
+        Commands::Shared {
+            entity,
+            conn,
+            format,
+        } => Box::pin(cmd_shared(entity, conn, format)).await?,
         Commands::List {
             entity,
             filter,
