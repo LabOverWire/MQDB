@@ -63,6 +63,7 @@ pub(crate) fn cmd_dev_test(
     retained: bool,
     lwt: bool,
     ownership: bool,
+    sharing: bool,
     stress_constraints: bool,
     all: bool,
     nodes: u8,
@@ -76,6 +77,7 @@ pub(crate) fn cmd_dev_test(
             && !retained
             && !lwt
             && !ownership
+            && !sharing
             && !stress_constraints);
 
     wait_for_cluster_ready(nodes, 10);
@@ -107,6 +109,10 @@ pub(crate) fn cmd_dev_test(
 
     if ownership {
         run_test_ownership(nodes, &ports, license);
+    }
+
+    if sharing {
+        run_test_sharing(nodes, &ports, license);
     }
 
     if stress_constraints {
@@ -603,6 +609,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
 
     let quic_cert = PathBuf::from("test_certs/server.pem");
     let quic_key = PathBuf::from("test_certs/server.key");
+    let quic_ca = PathBuf::from("test_certs/ca.pem");
 
     for node_id in 1..=nodes {
         let port = 1882 + u16::from(node_id);
@@ -647,6 +654,9 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
                 "--quic-key",
                 quic_key.to_str().unwrap_or(""),
             ]);
+            if quic_ca.exists() {
+                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+            }
             #[cfg(feature = "dev-insecure")]
             cmd.arg("--quic-insecure");
         }
@@ -703,7 +713,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
             let stdout = String::from_utf8_lossy(&o.stdout);
             serde_json::from_str::<serde_json::Value>(&stdout).ok()
         })
-        .and_then(|v| v["id"].as_str().map(String::from));
+        .and_then(|v| v["data"]["id"].as_str().map(String::from));
 
     if id.is_some() {
         println!("  Create as alice: ✓");
@@ -937,6 +947,339 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
         println!("  Delete as alice (owner): ✗");
         failed += 1;
     }
+
+    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+    let _ = std::fs::remove_file(passwd_path);
+
+    println!("\nResults: {passed} passed, {failed} failed\n");
+}
+
+fn record(passed: &mut u32, failed: &mut u32, label: &str, ok: bool) {
+    if ok {
+        println!("  {label}: ✓");
+        *passed += 1;
+    } else {
+        println!("  {label}: ✗");
+        *failed += 1;
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_test_sharing(nodes: u8, _ports: &[u16], license: Option<&Path>) {
+    println!("=== Cluster Diagram Sharing E2E ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    let passwd_path = "/tmp/mqdb-test-sharing-passwd";
+    let db_prefix = "/tmp/mqdb-test-share";
+
+    println!("  Setting up authenticated cluster with ownership...");
+    let _ = std::fs::remove_file(passwd_path);
+    for (user, pass) in [("alice", "alice"), ("bob", "bob"), ("admin", "admin")] {
+        let _ = Command::new(&exe)
+            .args(["passwd", user, "-b", pass, "-f", passwd_path])
+            .output();
+    }
+
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
+    let entity = format!("test_shared_{ts}");
+    let ownership_spec = format!("{entity}=userId");
+
+    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+    std::thread::sleep(Duration::from_secs(1));
+    for i in 1..=nodes {
+        let _ = std::fs::remove_dir_all(format!("{db_prefix}-{i}"));
+    }
+
+    let quic_cert = PathBuf::from("test_certs/server.pem");
+    let quic_key = PathBuf::from("test_certs/server.key");
+    let quic_ca = PathBuf::from("test_certs/ca.pem");
+
+    for node_id in 1..=nodes {
+        let port = 1882 + u16::from(node_id);
+        let db_path = format!("{db_prefix}-{node_id}");
+        let _ = std::fs::create_dir_all(&db_path);
+
+        let mut cmd = Command::new(&exe);
+        cmd.args([
+            "cluster",
+            "start",
+            "--node-id",
+            &node_id.to_string(),
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--db",
+            &db_path,
+            "--admin-users",
+            "admin",
+            "--passwd",
+            passwd_path,
+            "--ownership",
+            &ownership_spec,
+        ]);
+
+        if let Some(lic_path) = license
+            && let Some(lic_str) = lic_path.to_str()
+        {
+            cmd.args(["--license", lic_str]);
+        }
+
+        let peers: Vec<String> = (1..node_id)
+            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+            .collect();
+        if !peers.is_empty() {
+            cmd.args(["--peers", &peers.join(",")]);
+        }
+
+        if quic_cert.exists() && quic_key.exists() {
+            cmd.args([
+                "--quic-cert",
+                quic_cert.to_str().unwrap_or(""),
+                "--quic-key",
+                quic_key.to_str().unwrap_or(""),
+            ]);
+            if quic_ca.exists() {
+                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+            }
+            #[cfg(feature = "dev-insecure")]
+            cmd.arg("--quic-insecure");
+        }
+
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        );
+
+        if let Ok(log_file) = std::fs::File::create(format!("{db_path}/mqdb.log")) {
+            if let Ok(log_clone) = log_file.try_clone() {
+                cmd.stdout(log_clone);
+            }
+            cmd.stderr(log_file);
+        }
+
+        println!("  Starting node {node_id} on port {port} (auth + ownership)...");
+        let _ = cmd.spawn();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    println!("  Waiting for authenticated cluster...");
+    if !wait_for_auth_cluster(nodes, 15) {
+        println!("  Cluster failed to become ready");
+        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+        println!("\nResults: {passed} passed, {failed} failed\n");
+        return;
+    }
+    println!("  Authenticated cluster ready!\n");
+
+    let n1 = "127.0.0.1:1883";
+    let n2 = if nodes >= 2 { "127.0.0.1:1884" } else { n1 };
+    let n3 = if nodes >= 3 { "127.0.0.1:1885" } else { n1 };
+
+    let run = |args: &[&str]| -> (bool, String) {
+        Command::new(&exe).args(args).output().map_or_else(
+            |_| (false, String::new()),
+            |o| {
+                (
+                    o.status.success(),
+                    String::from_utf8_lossy(&o.stdout).to_string(),
+                )
+            },
+        )
+    };
+    let data_array_has = |out: &str, pred: &dyn Fn(&serde_json::Value) -> bool| -> bool {
+        serde_json::from_str::<serde_json::Value>(out)
+            .ok()
+            .and_then(|v| v["data"].as_array().map(|a| a.iter().any(pred)))
+            .unwrap_or(false)
+    };
+
+    let (created, create_out) = run(&[
+        "create",
+        &entity,
+        "-d",
+        r#"{"userId":"alice","title":"D1"}"#,
+        "--broker",
+        n1,
+        "--user",
+        "alice",
+        "--pass",
+        "alice",
+        "--format",
+        "json",
+    ]);
+    let id = serde_json::from_str::<serde_json::Value>(&create_out)
+        .ok()
+        .and_then(|v| v["data"]["id"].as_str().map(String::from));
+    record(
+        &mut passed,
+        &mut failed,
+        "create as alice",
+        created && id.is_some(),
+    );
+    let Some(id) = id else {
+        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+        let _ = std::fs::remove_file(passwd_path);
+        println!("\nResults: {passed} passed, {failed} failed\n");
+        return;
+    };
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (bob_before, _) = run(&[
+        "read", &entity, &id, "--broker", n2, "--user", "bob", "--pass", "bob", "--format", "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob read before share denied (cross-node)",
+        !bob_before,
+    );
+
+    let (share_view, share_out) = run(&[
+        "share",
+        &entity,
+        &id,
+        "bob",
+        "--permission",
+        "view",
+        "--broker",
+        n1,
+        "--user",
+        "alice",
+        "--pass",
+        "alice",
+        "--format",
+        "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "alice shares view with bob",
+        share_view && share_out.contains("shared"),
+    );
+
+    let (bob_view_read, bob_read_out) = run(&[
+        "read", &entity, &id, "--broker", n2, "--user", "bob", "--pass", "bob", "--format", "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob read after view grant (cross-node)",
+        bob_view_read && bob_read_out.contains("D1"),
+    );
+
+    let (bob_view_update, _) = run(&[
+        "update",
+        &entity,
+        &id,
+        "-d",
+        r#"{"title":"X"}"#,
+        "--broker",
+        n2,
+        "--user",
+        "bob",
+        "--pass",
+        "bob",
+        "--format",
+        "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob update with view-only denied (cross-node)",
+        !bob_view_update,
+    );
+
+    let (share_edit, _) = run(&[
+        "share",
+        &entity,
+        &id,
+        "bob",
+        "--permission",
+        "edit",
+        "--broker",
+        n1,
+        "--user",
+        "alice",
+        "--pass",
+        "alice",
+        "--format",
+        "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "alice upgrades bob to edit",
+        share_edit,
+    );
+
+    let (bob_edit_update, _) = run(&[
+        "update",
+        &entity,
+        &id,
+        "-d",
+        r#"{"title":"EditedByBob"}"#,
+        "--broker",
+        n3,
+        "--user",
+        "bob",
+        "--pass",
+        "bob",
+        "--format",
+        "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob update with edit grant (cross-node)",
+        bob_edit_update,
+    );
+
+    let (_, shares_out) = run(&[
+        "shares", &entity, &id, "--broker", n1, "--user", "alice", "--pass", "alice", "--format",
+        "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "alice shares lists bob's grant",
+        data_array_has(&shares_out, &|g| g["grantee"] == "bob"),
+    );
+
+    let (_, shared_out) = run(&[
+        "shared", &entity, "--broker", n3, "--user", "bob", "--pass", "bob", "--format", "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob shared lists hydrated resource (cross-node scatter)",
+        data_array_has(&shared_out, &|r| {
+            r["title"] == "EditedByBob" && r.get("resource_id").is_none()
+        }),
+    );
+
+    let (unshared, _) = run(&[
+        "unshare", &entity, &id, "bob", "--broker", n2, "--user", "alice", "--pass", "alice",
+        "--format", "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "alice unshares bob (cross-node)",
+        unshared,
+    );
+    std::thread::sleep(Duration::from_millis(300));
+
+    let (bob_after, _) = run(&[
+        "read", &entity, &id, "--broker", n3, "--user", "bob", "--pass", "bob", "--format", "json",
+    ]);
+    record(
+        &mut passed,
+        &mut failed,
+        "bob read after unshare denied (cross-node)",
+        !bob_after,
+    );
 
     let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
     let _ = std::fs::remove_file(passwd_path);

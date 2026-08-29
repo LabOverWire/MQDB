@@ -46,6 +46,8 @@ pub(crate) enum DevAction {
         lwt: bool,
         #[arg(long, help = "Run ownership tests")]
         ownership: bool,
+        #[arg(long, help = "Run diagram-sharing tests (needs a license)")]
+        sharing: bool,
         #[arg(long, help = "Run constraint stress tests")]
         stress_constraints: bool,
         #[arg(long, help = "Run all test suites")]
