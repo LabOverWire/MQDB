@@ -404,8 +404,9 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// Primary-side handler for `$DB/{entity}/{id}/shares` (owner/admin lists a
-    /// resource's grants). `grantee_email` stays encrypted here; the client node
-    /// decrypts it for display.
+    /// resource's grants). In identity/OAuth mode the primary decrypts each grant's
+    /// `grantee_email` for display; without identity crypto it is returned as
+    /// stored.
     pub(crate) fn handle_shares_local(
         &self,
         entity: &str,
@@ -433,29 +434,40 @@ impl<T: ClusterTransport> NodeController<T> {
 
 #[cfg(feature = "http-api")]
 impl<T: ClusterTransport> NodeController<T> {
-    /// Scan the locally-held `_identity_links` for the canonical id whose
-    /// `email_hash` matches. Identity records are partitioned, so a miss here only
-    /// means the link lives on another partition (resolve it via a scatter).
+    /// Look up the locally-held `_identity_links` record whose `email_hash` matches
+    /// and return its canonical id. Filters at the store rather than materializing
+    /// the whole entity (parity with the agent's filtered lookup). Identity records
+    /// are partitioned, so a miss here only means the link lives on another
+    /// partition (resolve it via a scatter).
     #[must_use]
     pub(crate) fn local_identity_canonical(&self, email_hash: &str) -> Option<String> {
-        self.db_list(crate::cluster::entity::IDENTITY_LINKS)
-            .into_iter()
-            .find_map(|e| {
-                let value: Value = serde_json::from_slice(&e.data).ok()?;
-                if value.get("email_hash").and_then(Value::as_str) == Some(email_hash) {
-                    value
-                        .get("canonical_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                } else {
-                    None
-                }
-            })
+        let payload = Self::email_hash_filter_payload(email_hash);
+        let results = self.handle_json_list_local(crate::cluster::entity::IDENTITY_LINKS, &payload);
+        let parsed: Value = serde_json::from_slice(&results).ok()?;
+        parsed
+            .get("data")?
+            .as_array()?
+            .first()?
+            .get("data")?
+            .get("canonical_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn email_hash_filter_payload(email_hash: &str) -> Vec<u8> {
+        let filter = mqdb_core::Filter::new(
+            "email_hash".to_string(),
+            mqdb_core::FilterOp::Eq,
+            Value::String(email_hash.to_string()),
+        );
+        serde_json::to_vec(&json!({ "filters": [filter] })).unwrap_or_default()
     }
 
     /// Fan out a `_identity_links` LIST filtered by `email_hash` to resolve an
     /// email grant's canonical grantee across partitions; the grant is written
-    /// when the scatter completes (`complete_share_resolution`).
+    /// when the scatter completes (`complete_share_resolution`). The caller only
+    /// scatters after `local_identity_canonical` confirmed a local miss, so this
+    /// node seeds no local contribution.
     pub(crate) async fn begin_identity_scatter(&mut self, cont: ShareResolveContinuation) {
         let remote_nodes: Vec<NodeId> = self
             .heartbeat
@@ -478,19 +490,11 @@ impl<T: ClusterTransport> NodeController<T> {
             mqdb_core::FilterOp::Eq,
             Value::String(cont.email_hash.clone()),
         );
-        let list_payload =
-            serde_json::to_vec(&json!({ "filters": [filter.clone()] })).unwrap_or_default();
-
-        let local_results =
-            self.handle_json_list_local(crate::cluster::entity::IDENTITY_LINKS, &list_payload);
-        let local_items: Vec<Value> = serde_json::from_slice::<Value>(&local_results)
-            .ok()
-            .and_then(|p| p.get("data").and_then(|d| d.as_array()).cloned())
-            .unwrap_or_default();
+        let list_payload = Self::email_hash_filter_payload(&cont.email_hash);
 
         let pending = PendingScatterRequest {
             expected_count: remote_nodes.len(),
-            received: local_items,
+            received: Vec::new(),
             client_response_topic: cont.response_topic.clone(),
             created_at_ms: self.current_time,
             filters: vec![filter],
@@ -525,21 +529,35 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Mark every in-flight resolution for `(entity, id, grantee_key)` as
-    /// invalidated so its completing write is skipped. Called when an unshare for
-    /// that grantee lands on this node while the share is still resolving — closes
-    /// the revoked-grant resurrection race (`specs/ShareResolveRace.tla`).
+    /// Mark in-flight resolutions for `(entity, id, grantee_key)` as invalidated so
+    /// their completing write is skipped. Called when an unshare for that grantee
+    /// lands on this node while the share is still resolving — closes the
+    /// revoked-grant resurrection race (`specs/ShareResolveRace.tla`).
+    ///
+    /// This runs before the primary-side owner/admin gate, so it authorizes the
+    /// `sender` here: only the user who issued the share, an admin, or the
+    /// resource owner (checked locally when the resource is co-located) may cancel
+    /// an in-flight share. Empty/anonymous senders never match.
     pub(crate) fn invalidate_share_resolutions(
         &mut self,
         entity: &str,
         id: &str,
         grantee_key: &str,
+        sender: Option<&str>,
     ) {
+        let Some(uid) = sender.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let sender_authorized = self.ownership.is_admin(uid)
+            || self
+                .share_owner_field(entity)
+                .is_some_and(|field| self.is_resource_owner(entity, id, &field, uid));
         for pending in self.pending_scatter_requests.values_mut() {
             if let Some(cont) = pending.continuation.as_mut()
                 && cont.entity == entity
                 && cont.id == id
                 && cont.grantee_key == grantee_key
+                && (sender_authorized || cont.granted_by == uid)
             {
                 cont.invalidated = true;
             }

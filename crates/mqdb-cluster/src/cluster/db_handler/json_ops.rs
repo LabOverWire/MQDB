@@ -462,7 +462,7 @@ impl DbRequestHandler {
         match op {
             JsonDbOp::Unshare => {
                 let grantee_key = crypto.blind_index(SHARES_ENTITY, &email);
-                controller.invalidate_share_resolutions(entity, id, &grantee_key);
+                controller.invalidate_share_resolutions(entity, id, &grantee_key, sender);
                 let mut rewritten = value;
                 rewritten["grantee"] = json!(grantee_key);
                 Some(ShareResolution::Rewrite(
@@ -472,7 +472,7 @@ impl DbRequestHandler {
             JsonDbOp::Share => {
                 let grantee_key = crypto.blind_index(SHARES_ENTITY, &email);
                 let grantee_email = crypto.encrypt_field(SHARES_ENTITY, &email).ok();
-                let email_hash = crypto.blind_index(crate::cluster::entity::IDENTITY_LINKS, &email);
+                let email_hash = crypto.blind_index(crate::cluster::entity::IDENTITY_LINKS, &raw);
                 let local = controller.local_identity_canonical(&email_hash);
                 if local.is_some() || !controller.has_remote_nodes() {
                     let mut rewritten = value;

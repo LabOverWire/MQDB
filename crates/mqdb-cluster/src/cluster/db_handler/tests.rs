@@ -2505,7 +2505,7 @@ async fn seed_identity_link(
     email: &str,
     canonical: &str,
 ) {
-    let email_hash = crypto.blind_index("_identity_links", &email.to_lowercase());
+    let email_hash = crypto.blind_index("_identity_links", email);
     let link = serde_json::to_vec(&serde_json::json!({
         "id": format!("google:{canonical}"),
         "canonical_id": canonical,
@@ -2526,7 +2526,7 @@ async fn seed_identity_link(
 #[tokio::test]
 async fn cluster_identity_share_resolves_canonical_grantee() {
     let (handler, mut ctrl, crypto) = identity_share_setup().await;
-    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+    seed_identity_link(&mut ctrl, &crypto, "User@Example.com", "canon-1").await;
 
     let out = resp_json(
         &handler,
@@ -2665,13 +2665,31 @@ async fn cluster_identity_unshare_invalidates_inflight_resolution() {
     seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
     let grantee_key = suspended_resolution(&mut ctrl, &crypto, 42, "user@example.com");
 
-    ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key);
+    ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key, Some("alice"));
     ctrl.handle_scatter_list_response(42, vec![resolved_link_item(&crypto, "user@example.com")])
         .await;
 
     assert_eq!(
         resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["code"],
         403
+    );
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_nonowner_cannot_invalidate_resolution() {
+    let (handler, mut ctrl, crypto) = identity_share_setup().await;
+    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+    let grantee_key = suspended_resolution(&mut ctrl, &crypto, 44, "user@example.com");
+
+    // a non-owner, non-admin attempt to cancel the owner's in-flight share is ignored
+    ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key, Some("mallory"));
+    ctrl.handle_scatter_list_response(44, vec![resolved_link_item(&crypto, "user@example.com")])
+        .await;
+
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["status"],
+        "ok"
     );
 }
 
