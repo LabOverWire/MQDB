@@ -2478,3 +2478,215 @@ async fn fk_delete_cascade_with_no_children_succeeds() {
     assert_eq!(json["data"]["deleted"], true);
     assert!(ctrl.db_get("users", "u1").is_none());
 }
+
+#[cfg(feature = "http-api")]
+async fn identity_share_setup() -> (
+    DbRequestHandler,
+    NodeController<MockTransport>,
+    Arc<mqdb_agent::http::IdentityCrypto>,
+) {
+    let node1 = NodeId::validated(1).unwrap();
+    let ownership = ownership_config("diagrams", "userId");
+    let handler = DbRequestHandler::new(node1).with_ownership(Arc::clone(&ownership));
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let crypto =
+        Arc::new(mqdb_agent::http::IdentityCrypto::from_external_key(&[0x42u8; 32]).unwrap());
+    ctrl.set_identity_crypto(Some(Arc::clone(&crypto)));
+    let data = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D"})).unwrap();
+    ctrl.db_create("diagrams", "d1", &data, 1000).await.unwrap();
+    (handler, ctrl, crypto)
+}
+
+#[cfg(feature = "http-api")]
+async fn seed_identity_link(
+    ctrl: &mut NodeController<MockTransport>,
+    crypto: &mqdb_agent::http::IdentityCrypto,
+    email: &str,
+    canonical: &str,
+) {
+    let email_hash = crypto.blind_index("_identity_links", &email.to_lowercase());
+    let link = serde_json::to_vec(&serde_json::json!({
+        "id": format!("google:{canonical}"),
+        "canonical_id": canonical,
+        "email_hash": email_hash,
+    }))
+    .unwrap();
+    ctrl.db_create(
+        "_identity_links",
+        &format!("google:{canonical}"),
+        &link,
+        1000,
+    )
+    .await
+    .unwrap();
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_share_resolves_canonical_grantee() {
+    let (handler, mut ctrl, crypto) = identity_share_setup().await;
+    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+
+    let out = resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("User@Example.com", "view"),
+        "alice",
+    )
+    .await;
+    assert_eq!(out["data"]["status"], "shared");
+    assert_eq!(out["data"]["grantee"], "canon-1");
+
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["status"],
+        "ok"
+    );
+
+    let shares = resp_json(&handler, &mut ctrl, "$DB/diagrams/d1/shares", &[], "alice").await;
+    let grant = &shares["data"][0];
+    assert_eq!(grant["grantee"], "canon-1");
+    assert_eq!(
+        grant["grantee_key"],
+        crypto.blind_index(mqdb_core::types::SHARES_ENTITY, "user@example.com")
+    );
+    assert_eq!(grant["grantee_email"], "user@example.com");
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_share_unresolved_is_pending() {
+    let (handler, mut ctrl, _crypto) = identity_share_setup().await;
+
+    let out = resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("ghost@example.com", "view"),
+        "alice",
+    )
+    .await;
+    assert_eq!(out["data"]["status"], "pending");
+    assert!(out["data"]["grantee"].is_null());
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_unshare_by_email_clears_grant() {
+    let (handler, mut ctrl, crypto) = identity_share_setup().await;
+    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("user@example.com", "view"),
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["status"],
+        "ok"
+    );
+
+    let unshare = serde_json::to_vec(&serde_json::json!({"grantee": "User@Example.com"})).unwrap();
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/unshare",
+        &unshare,
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["code"],
+        403
+    );
+}
+
+#[cfg(feature = "http-api")]
+fn suspended_resolution(
+    ctrl: &mut NodeController<MockTransport>,
+    crypto: &mqdb_agent::http::IdentityCrypto,
+    request_id: u64,
+    email: &str,
+) -> String {
+    use super::super::node_controller::{PendingScatterRequest, ShareResolveContinuation};
+
+    let grantee_key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, email);
+    let email_hash = crypto.blind_index("_identity_links", email);
+    let cont = ShareResolveContinuation {
+        email_hash: email_hash.clone(),
+        entity: "diagrams".into(),
+        id: "d1".into(),
+        grantee_key: grantee_key.clone(),
+        grantee_email: None,
+        permission: "view".into(),
+        cascade: false,
+        granted_by: "alice".into(),
+        response_topic: "$DB/_resp/c".into(),
+        correlation_data: None,
+        invalidated: false,
+    };
+    ctrl.pending_scatter_requests.insert(
+        request_id,
+        PendingScatterRequest {
+            expected_count: 1,
+            received: Vec::new(),
+            client_response_topic: "$DB/_resp/c".into(),
+            created_at_ms: 0,
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            projection: None,
+            pagination: None,
+            entity: "_identity_links".into(),
+            vault_sender: None,
+            continuation: Some(cont),
+        },
+    );
+    grantee_key
+}
+
+#[cfg(feature = "http-api")]
+fn resolved_link_item(crypto: &mqdb_agent::http::IdentityCrypto, email: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "google:canon-1",
+        "data": {
+            "canonical_id": "canon-1",
+            "email_hash": crypto.blind_index("_identity_links", email),
+        }
+    })
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_unshare_invalidates_inflight_resolution() {
+    let (handler, mut ctrl, crypto) = identity_share_setup().await;
+    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+    let grantee_key = suspended_resolution(&mut ctrl, &crypto, 42, "user@example.com");
+
+    ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key);
+    ctrl.handle_scatter_list_response(42, vec![resolved_link_item(&crypto, "user@example.com")])
+        .await;
+
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["code"],
+        403
+    );
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn cluster_identity_inflight_resolution_completes_when_not_unshared() {
+    let (handler, mut ctrl, crypto) = identity_share_setup().await;
+    seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
+    suspended_resolution(&mut ctrl, &crypto, 43, "user@example.com");
+
+    ctrl.handle_scatter_list_response(43, vec![resolved_link_item(&crypto, "user@example.com")])
+        .await;
+
+    assert_eq!(
+        resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["status"],
+        "ok"
+    );
+}

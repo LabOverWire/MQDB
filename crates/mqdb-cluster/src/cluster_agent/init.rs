@@ -156,6 +156,13 @@ impl ClusteredAgent {
         );
         controller.set_ownership(Arc::clone(&ownership_arc));
         controller.set_vault_key_store(Arc::clone(&vault_key_store));
+        #[cfg(feature = "http-api")]
+        controller.set_identity_crypto(
+            config
+                .http_config
+                .as_ref()
+                .and_then(|c| c.identity_crypto.clone()),
+        );
 
         if controller.stores().has_persistence() {
             match controller.stores().recover() {

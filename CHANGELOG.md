@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-08-29 — mqdb-cluster 0.4.10
+
+### Added
+
+- **Cluster identity/OAuth-mode grantee resolution for diagram sharing.** When the cluster runs with an OAuth identity key, sharing to an email now works cross-node, matching agent mode. On a `share`/`unshare`, the email is lowercased and blind-indexed into `grantee_key`, and for a share the email is also stored encrypted in `grantee_email`. A share resolves the email to its canonical identity id so the grant matches the signed-in grantee: the resource-entry node first checks its local `_identity_links`, and on a miss fans out a filtered `_identity_links` scatter to the other primaries, then writes the grant to the resolved canonical id (or as a pending grant when the email is not yet registered). `shares` listings decrypt `grantee_email` on the primary before returning. Password/username-mode sharing (no identity key) is unchanged and still routed verbatim.
+- **Resurrection guard for a revoked grant.** Because email resolution is asynchronous, an `unshare` issued while a share is still resolving could otherwise be undone when the resolution completes and writes the grant. An `unshare` now invalidates any in-flight resolution for the same `(resource, grantee)` on the node holding it, and a completing resolution that was invalidated writes nothing. The race and the guard are model-checked in `specs/ShareResolveRace.tla` (the unguarded model violates a no-resurrection invariant; the guarded model holds).
+
+### Notes
+
+- Every node in an OAuth-mode cluster must be started with the **same** identity key (`MQDB_IDENTITY_KEY` / `--identity-key-file`); otherwise blind indexes and encrypted fields differ per node and resolution cannot match across partitions. A start-time guard for a divergent/generated key, and the live multi-node email-path E2E, are follow-ups. The pending-grant sign-in sweep and cross-partition cascade remain tracked in #122.
+- The resurrection guard is enforced on the node holding the in-flight resolution, which is the same node a single owner's share and unshare both arrive on. An owner who issues the share and the unshare on two different nodes within the same resolution window is a narrower residual, in the same bounded-transient class as the documented failover access window.
+
 ## 2026-08-28 — mqdb-cli 0.8.35
 
 ### Added

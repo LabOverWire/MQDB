@@ -4,6 +4,8 @@
 use super::super::PartitionId;
 use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
+#[cfg(feature = "http-api")]
+use super::super::node_controller::ShareResolveContinuation;
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -24,6 +26,18 @@ pub(super) enum JsonOpResult {
     PendingUniqueCheck(Box<PendingUniqueWork>),
     PendingFkCheck(Box<PendingFkWork>),
     PendingFkDelete(Box<PendingFkDeleteWork>),
+}
+
+/// Outcome of resolving an identity-mode (email) grantee before a share/unshare
+/// is routed to the resource primary.
+#[cfg(feature = "http-api")]
+enum ShareResolution {
+    /// Continue routing with this crypto-rewritten payload (keys injected, and
+    /// for a share the canonical grantee resolved locally or left pending).
+    Rewrite(Vec<u8>),
+    /// A cross-partition scatter is resolving the grantee; the grant is written
+    /// and the client answered when it completes.
+    Suspended,
 }
 
 struct JsonOpContext<'a> {
@@ -348,6 +362,33 @@ impl DbRequestHandler {
     ) -> JsonOpResult {
         let response_topic = mqtt_ctx.response_topic.unwrap_or("");
         let sender = mqtt_ctx.sender;
+
+        #[cfg(feature = "http-api")]
+        let resolved_payload: Option<Vec<u8>> = match op {
+            JsonDbOp::Share | JsonDbOp::Unshare => {
+                match self
+                    .resolve_share_identity(
+                        controller,
+                        op,
+                        entity,
+                        id,
+                        payload,
+                        response_topic,
+                        mqtt_ctx.correlation_data,
+                        sender,
+                    )
+                    .await
+                {
+                    Some(ShareResolution::Suspended) => return JsonOpResult::NoResponse,
+                    Some(ShareResolution::Rewrite(p)) => Some(p),
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        #[cfg(feature = "http-api")]
+        let payload: &[u8] = resolved_payload.as_deref().unwrap_or(payload);
+
         let partition = data_partition(entity, id);
         if controller.is_primary_for_partition(partition) {
             let out = match op {
@@ -385,6 +426,92 @@ impl DbRequestHandler {
                 503,
                 "partition not local and forwarding failed",
             ))
+        }
+    }
+
+    /// Resolve an identity-mode (email) grantee before routing a share/unshare.
+    /// Returns `None` when there is no identity crypto or no grantee (verbatim
+    /// password-mode path). Otherwise rewrites the payload with the blind-indexed
+    /// `grantee_key` and encrypted `grantee_email`; a share resolves the canonical
+    /// grantee locally when possible, else suspends on a cross-partition scatter.
+    #[cfg(feature = "http-api")]
+    #[allow(clippy::too_many_arguments)]
+    async fn resolve_share_identity<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        op: JsonDbOp,
+        entity: &str,
+        id: &str,
+        payload: &[u8],
+        response_topic: &str,
+        correlation_data: Option<&[u8]>,
+        sender: Option<&str>,
+    ) -> Option<ShareResolution> {
+        let crypto = controller.identity_crypto()?.clone();
+        let value: Value = serde_json::from_slice(payload).ok()?;
+        let raw = value
+            .get("grantee")
+            .and_then(Value::as_str)?
+            .trim()
+            .to_string();
+        if raw.is_empty() {
+            return None;
+        }
+        let email = raw.to_lowercase();
+
+        match op {
+            JsonDbOp::Unshare => {
+                let grantee_key = crypto.blind_index(SHARES_ENTITY, &email);
+                controller.invalidate_share_resolutions(entity, id, &grantee_key);
+                let mut rewritten = value;
+                rewritten["grantee"] = json!(grantee_key);
+                Some(ShareResolution::Rewrite(
+                    serde_json::to_vec(&rewritten).ok()?,
+                ))
+            }
+            JsonDbOp::Share => {
+                let grantee_key = crypto.blind_index(SHARES_ENTITY, &email);
+                let grantee_email = crypto.encrypt_field(SHARES_ENTITY, &email).ok();
+                let email_hash = crypto.blind_index(crate::cluster::entity::IDENTITY_LINKS, &email);
+                let local = controller.local_identity_canonical(&email_hash);
+                if local.is_some() || !controller.has_remote_nodes() {
+                    let mut rewritten = value;
+                    rewritten["grantee_key"] = json!(grantee_key);
+                    if let Some(ref email_ct) = grantee_email {
+                        rewritten["grantee_email"] = json!(email_ct);
+                    }
+                    rewritten["grantee"] = json!(local);
+                    Some(ShareResolution::Rewrite(
+                        serde_json::to_vec(&rewritten).ok()?,
+                    ))
+                } else {
+                    let permission = value
+                        .get("permission")
+                        .and_then(Value::as_str)
+                        .unwrap_or("view")
+                        .to_string();
+                    let cascade = value
+                        .get("cascade")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let cont = ShareResolveContinuation {
+                        email_hash,
+                        entity: entity.to_string(),
+                        id: id.to_string(),
+                        grantee_key,
+                        grantee_email,
+                        permission,
+                        cascade,
+                        granted_by: sender.unwrap_or("").to_string(),
+                        response_topic: response_topic.to_string(),
+                        correlation_data: correlation_data.map(<[u8]>::to_vec),
+                        invalidated: false,
+                    };
+                    controller.begin_identity_scatter(cont).await;
+                    Some(ShareResolution::Suspended)
+                }
+            }
+            _ => None,
         }
     }
 

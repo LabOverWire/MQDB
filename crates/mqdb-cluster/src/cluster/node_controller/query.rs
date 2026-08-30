@@ -118,6 +118,8 @@ impl<T: ClusterTransport> NodeController<T> {
             pagination,
             entity: entity.to_string(),
             vault_sender: sender.map(str::to_string),
+            #[cfg(feature = "http-api")]
+            continuation: None,
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
@@ -175,6 +177,12 @@ impl<T: ClusterTransport> NodeController<T> {
         if pending.expected_count == 0
             && let Some(completed) = self.pending_scatter_requests.remove(&request_id)
         {
+            #[cfg(feature = "http-api")]
+            if let Some(cont) = completed.continuation {
+                self.complete_share_resolution(completed.received, cont)
+                    .await;
+                return;
+            }
             let mut seen_ids = std::collections::HashSet::new();
             let mut deduped: Vec<serde_json::Value> = completed
                 .received
