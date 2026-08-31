@@ -13,6 +13,11 @@ use mqdb_core::types::{AccessLevel, SHARES_ENTITY};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
+#[cfg(feature = "http-api")]
+use super::protocol::{JsonDbOp, JsonDbRequest};
+#[cfg(feature = "http-api")]
+use super::{ClusterMessage, NodeId, PartitionId, PendingScatterRequest, ShareResolveContinuation};
+
 const MAX_CASCADE_RESOURCES: usize = 256;
 
 #[derive(Clone, Copy)]
@@ -399,8 +404,9 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// Primary-side handler for `$DB/{entity}/{id}/shares` (owner/admin lists a
-    /// resource's grants). `grantee_email` stays encrypted here; the client node
-    /// decrypts it for display.
+    /// resource's grants). In identity/OAuth mode the primary decrypts each grant's
+    /// `grantee_email` for display; without identity crypto it is returned as
+    /// stored.
     pub(crate) fn handle_shares_local(
         &self,
         entity: &str,
@@ -410,11 +416,223 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(err) = self.require_owner_or_admin(entity, id, sender) {
             return err;
         }
-        let grants: Vec<Value> = self
+        #[cfg_attr(not(feature = "http-api"), allow(unused_mut))]
+        let mut grants: Vec<Value> = self
             .shares_for_resource(entity, id)
             .into_iter()
             .map(|(_, value)| value)
             .collect();
+        #[cfg(feature = "http-api")]
+        if let Some(crypto) = self.identity_crypto() {
+            for grant in &mut grants {
+                crypto.decrypt_json_fields(SHARES_ENTITY, grant, &["grantee_email"]);
+            }
+        }
         serde_json::to_vec(&json!({ "status": "ok", "data": grants })).unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "http-api")]
+impl<T: ClusterTransport> NodeController<T> {
+    /// Look up the locally-held `_identity_links` record whose `email_hash` matches
+    /// and return its canonical id. Filters at the store rather than materializing
+    /// the whole entity (parity with the agent's filtered lookup). Identity records
+    /// are partitioned, so a miss here only means the link lives on another
+    /// partition (resolve it via a scatter).
+    #[must_use]
+    pub(crate) fn local_identity_canonical(&self, email_hash: &str) -> Option<String> {
+        let payload = Self::email_hash_filter_payload(email_hash);
+        let results = self.handle_json_list_local(crate::cluster::entity::IDENTITY_LINKS, &payload);
+        let parsed: Value = serde_json::from_slice(&results).ok()?;
+        parsed
+            .get("data")?
+            .as_array()?
+            .first()?
+            .get("data")?
+            .get("canonical_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn email_hash_filter_payload(email_hash: &str) -> Vec<u8> {
+        let filter = mqdb_core::Filter::new(
+            "email_hash".to_string(),
+            mqdb_core::FilterOp::Eq,
+            Value::String(email_hash.to_string()),
+        );
+        serde_json::to_vec(&json!({ "filters": [filter] })).unwrap_or_default()
+    }
+
+    /// Fan out a `_identity_links` LIST filtered by `email_hash` to resolve an
+    /// email grant's canonical grantee across partitions; the grant is written
+    /// when the scatter completes (`complete_share_resolution`). The caller only
+    /// scatters after `local_identity_canonical` confirmed a local miss, so this
+    /// node seeds no local contribution.
+    pub(crate) async fn begin_identity_scatter(&mut self, cont: ShareResolveContinuation) {
+        let remote_nodes: Vec<NodeId> = self
+            .heartbeat
+            .alive_nodes()
+            .into_iter()
+            .filter(|&n| n != self.node_id)
+            .collect();
+        if remote_nodes.is_empty() {
+            self.complete_share_resolution(Vec::new(), cont).await;
+            return;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let request_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+
+        let filter = mqdb_core::Filter::new(
+            "email_hash".to_string(),
+            mqdb_core::FilterOp::Eq,
+            Value::String(cont.email_hash.clone()),
+        );
+        let list_payload = Self::email_hash_filter_payload(&cont.email_hash);
+
+        let pending = PendingScatterRequest {
+            expected_count: remote_nodes.len(),
+            received: Vec::new(),
+            client_response_topic: cont.response_topic.clone(),
+            created_at_ms: self.current_time,
+            filters: vec![filter],
+            sorts: Vec::new(),
+            projection: None,
+            pagination: None,
+            entity: crate::cluster::entity::IDENTITY_LINKS.to_string(),
+            vault_sender: None,
+            continuation: Some(cont),
+        };
+        self.pending_scatter_requests.insert(request_id, pending);
+
+        let scatter_response_topic = format!("_mqdb/scatter/{}/{request_id}", self.node_id.get());
+        for &target_node in &remote_nodes {
+            let request = JsonDbRequest {
+                request_id,
+                op: JsonDbOp::List,
+                entity: crate::cluster::entity::IDENTITY_LINKS.to_string(),
+                id: None,
+                payload: list_payload.clone(),
+                response_topic: scatter_response_topic.clone(),
+                correlation_data: None,
+                sender: None,
+            };
+            let msg = ClusterMessage::JsonDbRequest {
+                partition: PartitionId::ZERO,
+                request,
+            };
+            if let Err(e) = self.transport.send(target_node, msg).await {
+                tracing::warn!(?target_node, ?e, "failed to send identity resolve request");
+            }
+        }
+    }
+
+    /// Mark in-flight resolutions for `(entity, id, grantee_key)` as invalidated so
+    /// their completing write is skipped. Called when an unshare for that grantee
+    /// lands on this node while the share is still resolving — closes the
+    /// revoked-grant resurrection race (`specs/ShareResolveRace.tla`).
+    ///
+    /// This runs before the primary-side owner/admin gate, so it authorizes the
+    /// `sender` here: only the user who issued the share, an admin, or the
+    /// resource owner (checked locally when the resource is co-located) may cancel
+    /// an in-flight share. Empty/anonymous senders never match.
+    pub(crate) fn invalidate_share_resolutions(
+        &mut self,
+        entity: &str,
+        id: &str,
+        grantee_key: &str,
+        sender: Option<&str>,
+    ) {
+        let Some(uid) = sender.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let sender_authorized = self.ownership.is_admin(uid)
+            || self
+                .share_owner_field(entity)
+                .is_some_and(|field| self.is_resource_owner(entity, id, &field, uid));
+        for pending in self.pending_scatter_requests.values_mut() {
+            if let Some(cont) = pending.continuation.as_mut()
+                && cont.entity == entity
+                && cont.id == id
+                && cont.grantee_key == grantee_key
+                && (sender_authorized || cont.granted_by == uid)
+            {
+                cont.invalidated = true;
+            }
+        }
+    }
+
+    /// Complete a resolved (or unresolved) email share: pick the canonical id from
+    /// the gathered `_identity_links`, build the grant payload, and route it to the
+    /// resource primary. An unresolved grantee is written as a pending grant. A
+    /// resolution invalidated by an intervening unshare writes nothing.
+    pub(crate) async fn complete_share_resolution(
+        &mut self,
+        items: Vec<Value>,
+        cont: ShareResolveContinuation,
+    ) {
+        if cont.invalidated {
+            let body = serde_json::to_vec(&json!({
+                "status": "ok",
+                "data": { "status": "superseded", "resources_shared": 0 }
+            }))
+            .unwrap_or_default();
+            self.transport
+                .queue_local_publish(cont.response_topic, body, 0)
+                .await;
+            return;
+        }
+        let canonical = items.iter().find_map(|item| {
+            let data = item.get("data")?;
+            if data.get("email_hash").and_then(Value::as_str) == Some(cont.email_hash.as_str()) {
+                data.get("canonical_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        });
+
+        let mut record = json!({
+            "grantee_key": cont.grantee_key,
+            "permission": cont.permission,
+            "cascade": cont.cascade,
+        });
+        if let Some(ref email) = cont.grantee_email {
+            record["grantee_email"] = json!(email);
+        }
+        if let Some(ref id) = canonical {
+            record["grantee"] = json!(id);
+        }
+        let payload = serde_json::to_vec(&record).unwrap_or_default();
+
+        let partition = data_partition(&cont.entity, &cont.id);
+        if self.is_primary_for_partition(partition) {
+            let out = self
+                .handle_share_local(
+                    &cont.entity,
+                    &cont.id,
+                    &payload,
+                    Some(cont.granted_by.as_str()),
+                )
+                .await;
+            self.transport
+                .queue_local_publish(cont.response_topic, out, 0)
+                .await;
+        } else {
+            self.forward_json_db_request(
+                partition,
+                JsonDbOp::Share,
+                &cont.entity,
+                Some(&cont.id),
+                &payload,
+                &cont.response_topic,
+                cont.correlation_data.as_deref(),
+                Some(cont.granted_by.as_str()),
+            )
+            .await;
+        }
     }
 }

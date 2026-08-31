@@ -87,6 +87,31 @@ pub struct PendingScatterRequest {
     pub pagination: Option<mqdb_core::Pagination>,
     pub entity: String,
     pub vault_sender: Option<String>,
+    #[cfg(feature = "http-api")]
+    pub continuation: Option<ShareResolveContinuation>,
+}
+
+/// A share whose grantee is an email awaiting cross-partition identity
+/// resolution. Carried on the scatter that lists `_identity_links` by
+/// `email_hash`; on completion the grant is written to the resolved canonical id
+/// (or left pending when unresolved) and routed to the resource primary.
+#[cfg(feature = "http-api")]
+pub struct ShareResolveContinuation {
+    pub email_hash: String,
+    pub entity: String,
+    pub id: String,
+    pub grantee_key: String,
+    pub grantee_email: Option<String>,
+    pub permission: String,
+    pub cascade: bool,
+    pub granted_by: String,
+    pub response_topic: String,
+    pub correlation_data: Option<Vec<u8>>,
+    /// Set when an unshare/clear for this `(entity, id, grantee_key)` lands on
+    /// this node while the resolution is still in flight; the completing write
+    /// is then skipped so a revoked grant is not resurrected (see
+    /// `specs/ShareResolveRace.tla`).
+    pub invalidated: bool,
 }
 
 struct UniqueReservationParams<'a> {
@@ -430,6 +455,8 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
+    #[cfg(feature = "http-api")]
+    pub(super) identity_crypto: Option<Arc<mqdb_agent::http::IdentityCrypto>>,
 }
 
 impl<T: ClusterTransport> std::fmt::Debug for NodeController<T> {
@@ -503,6 +530,8 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            #[cfg(feature = "http-api")]
+            identity_crypto: None,
         }
     }
 
@@ -512,6 +541,26 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub fn set_vault_key_store(&mut self, store: Arc<VaultKeyStore>) {
         self.vault_key_store = store;
+    }
+
+    #[cfg(feature = "http-api")]
+    pub fn set_identity_crypto(&mut self, crypto: Option<Arc<mqdb_agent::http::IdentityCrypto>>) {
+        self.identity_crypto = crypto;
+    }
+
+    #[cfg(feature = "http-api")]
+    #[must_use]
+    pub(crate) fn identity_crypto(&self) -> Option<&Arc<mqdb_agent::http::IdentityCrypto>> {
+        self.identity_crypto.as_ref()
+    }
+
+    #[cfg(feature = "http-api")]
+    #[must_use]
+    pub(crate) fn has_remote_nodes(&self) -> bool {
+        self.heartbeat
+            .alive_nodes()
+            .into_iter()
+            .any(|n| n != self.node_id)
     }
 
     pub fn set_synced_retained_topics(
@@ -716,6 +765,19 @@ impl<T: ClusterTransport> NodeController<T> {
 
         for id in stale_ids {
             if let Some(pending) = self.pending_scatter_requests.remove(&id) {
+                #[cfg(feature = "http-api")]
+                if let Some(cont) = pending.continuation {
+                    tracing::warn!(
+                        request_id = id,
+                        entity = %cont.entity,
+                        "grantee resolution timed out; asking client to retry"
+                    );
+                    output.local_publishes.push((
+                        cont.response_topic,
+                        Self::json_error(504, "grantee resolution timed out"),
+                    ));
+                    continue;
+                }
                 tracing::warn!(
                     request_id = id,
                     expected = pending.expected_count,
