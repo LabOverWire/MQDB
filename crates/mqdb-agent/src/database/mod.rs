@@ -154,15 +154,16 @@ impl Database {
         registry.load().await?;
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let handles = Self::spawn_background_tasks(
-            &config,
-            &outbox,
-            &dispatcher,
-            &storage,
-            &index_manager,
-            &consumer_groups,
-            &shutdown_rx,
-        );
+        let handles = Self::spawn_background_tasks(&background::BackgroundDeps {
+            config: &config,
+            outbox: &outbox,
+            dispatcher: &dispatcher,
+            storage: &storage,
+            index_manager: &index_manager,
+            constraint_manager: &constraint_manager,
+            consumer_groups: &consumer_groups,
+            shutdown_rx: &shutdown_rx,
+        });
 
         Ok(Self {
             storage,

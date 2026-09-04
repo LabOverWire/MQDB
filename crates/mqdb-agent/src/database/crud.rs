@@ -941,6 +941,115 @@ mod concurrency_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn ttl_sweep_releases_unique_guard_and_reclaims_seat() {
+        let (_tmp, db) = test_db().await;
+        db.add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await
+            .unwrap();
+        let scope = ScopeConfig::default();
+
+        db.create(
+            "hold".to_string(),
+            json!({ "id": "a", "seat_id": "S1", "ttl_secs": 1 }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            db.create(
+                "hold".to_string(),
+                json!({ "id": "b", "seat_id": "S1" }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .is_err(),
+            "the live hold must block a duplicate claim"
+        );
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 100;
+        assert_eq!(db.ttl_cleanup_pass_for_test(now).await, 1);
+
+        db.create(
+            "hold".to_string(),
+            json!({ "id": "c", "seat_id": "S1" }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .expect("seat must be reclaimable after the TTL sweep reaps the expired hold");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ttl_reap_skips_row_renewed_after_scan() {
+        let (_tmp, db) = test_db().await;
+        db.add_unique_constraint("hold".to_string(), vec!["seat_id".to_string()])
+            .await
+            .unwrap();
+        let scope = ScopeConfig::default();
+
+        db.create(
+            "hold".to_string(),
+            json!({ "id": "a", "seat_id": "S1", "ttl_secs": 1 }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let (key, stale_value, stale_entity) = db.raw_row_for_test("hold", "a").unwrap();
+
+        let caller = CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &scope,
+        };
+        db.update(
+            "hold".to_string(),
+            "a".to_string(),
+            json!({ "note": "renewed" }),
+            None,
+            &caller,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !db.reap_one_for_test(&key, &stale_value, &stale_entity)
+                .await,
+            "a row renewed after the scan must not be reaped"
+        );
+
+        assert!(
+            db.create(
+                "hold".to_string(),
+                json!({ "id": "b", "seat_id": "S1" }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .is_err(),
+            "the renewed hold must still hold the seat"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn add_unique_constraint_rejects_existing_duplicates() {
         let (_tmp, db) = test_db().await;
         let scope = ScopeConfig::default();
