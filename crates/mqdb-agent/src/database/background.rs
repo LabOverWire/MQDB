@@ -187,8 +187,6 @@ impl Database {
     }
 }
 
-/// The shared handles a TTL sweep needs. Bundled so the pass/reap helpers stay
-/// under the argument-count limit and read cleanly.
 struct TtlSweepCtx {
     storage: Arc<Storage>,
     dispatcher: Arc<EventDispatcher>,
@@ -216,9 +214,6 @@ async fn ttl_cleanup_task(ctx: TtlSweepCtx, interval_secs: u64) {
 }
 
 impl TtlSweepCtx {
-    /// Scan for rows whose `_expires_at` has passed and reap each one. Returns the
-    /// number of rows actually reaped. Each row is reaped independently so one
-    /// concurrently-modified row does not abort cleanup of the rest.
     async fn pass(&self, now: u64) -> usize {
         let Ok(items) = self.storage.prefix_scan(b"data/") else {
             return 0;
@@ -245,7 +240,7 @@ impl TtlSweepCtx {
             }
         }
 
-        let scanned = expired.len();
+        let expired_count = expired.len();
         let mut reaped = 0usize;
         for (key, value, entity) in expired {
             if self.reap(&key, &value, &entity).await {
@@ -253,17 +248,12 @@ impl TtlSweepCtx {
             }
         }
 
-        if scanned > 0 {
-            tracing::debug!(reaped, scanned, "TTL cleanup processed");
+        if expired_count > 0 {
+            tracing::debug!(reaped, expired = expired_count, "TTL cleanup processed");
         }
         reaped
     }
 
-    /// Reap a single expired row, mirroring the CRUD delete path: version-guarded on
-    /// the exact scanned bytes (so a concurrent renewal is not clobbered), releasing
-    /// the record's unique guards (so the value is reclaimable), removing indexes, and
-    /// emitting the delete change event. Returns `false` if the reap was skipped
-    /// (the row was renewed/deleted concurrently, or the guard release failed).
     async fn reap(&self, key: &[u8], value: &[u8], entity: &Entity) -> bool {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let mut batch = self.storage.batch();

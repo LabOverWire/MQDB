@@ -71,6 +71,22 @@ disconnect and every hard crash. Today it is broken in two (agent) / four (clust
   create-path opportunistic reap (evict an expired holder on unique-collision) so a seat
   unblocks before the sweep. A short sweep interval covers the common case without this.
 
+Known limitations of the agent sweep (PR 1a), deliberate / pre-existing:
+- **No FK cascade.** The reap releases the *reaped row's* unique guards but does not run
+  FK cascade / set-null / restrict, so expiring a TTL'd row that is an FK *parent* orphans
+  its children and leaves the children's guards. This is pre-existing (the old sweep also
+  bare-removed) and does not affect holds (leaf entities); wiring the sweep through the
+  full `validate_delete` cascade path is a follow-up (and the cluster rewire in 1b needs it
+  too).
+- **Per-row batches on purpose.** Each expired row is reaped in its own batch so a single
+  concurrently-renewed row (failing `expect_value`) doesn't abort the rest — this trades one
+  commit for N. A grouped-commit fast path for the no-contention case is a possible later
+  optimization.
+- **Guard-release failure skips the row.** If `release_unique_guards` errors (a malformed
+  unique value), the reap is skipped rather than removing the row without releasing its
+  guard (skipping is the safer of the two); the row is retried on the next sweep. A
+  permanent failure would retry (and re-log) each interval.
+
 ### B. Client CAS (`expected_version`, terminal, both paths)
 
 - Shared: add `expected_version: Option<u64>` to `Request::Update`/`Request::Delete`
