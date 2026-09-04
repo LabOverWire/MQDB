@@ -4,7 +4,11 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-08-29 — mqdb-cluster 0.4.10
+## 2026-09-01 — mqdb-agent 0.8.25
+
+### Fixed
+
+- **TTL cleanup now releases unique guards and is version-guarded (agent mode).** The TTL sweep deleted expired rows with a bare `batch.remove` — it never released the row's unique-constraint guards, so a row with a `unique` field that expired left its guard behind and the value became **permanently unclaimable** (a new create for that value kept hitting the stale guard); and it carried no precondition, so a row renewed between the sweep's scan and its commit was deleted on the stale snapshot (**silent data loss**). The sweep now mirrors the normal delete: `expect_value` on the exact scanned bytes plus `release_unique_guards`, per row (each expired row is reaped in its own batch, so one concurrently-renewed row no longer aborts the rest). Groundwork for on-disconnect hold reclaim (`docs/design/hold-reclaim.md`); the race and the reclaim invariant are model-checked in `specs/AbandonedHoldReclaim.tla`.
 
 ### Added
 

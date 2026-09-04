@@ -5,6 +5,7 @@ use super::Database;
 use crate::consumer_group::ConsumerGroup;
 use crate::dispatcher::EventDispatcher;
 use crate::outbox_processor::OutboxProcessor;
+use mqdb_core::constraint::ConstraintManager;
 use mqdb_core::entity::Entity;
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::index::IndexManager;
@@ -16,46 +17,50 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 
+pub(super) struct BackgroundDeps<'a> {
+    pub config: &'a mqdb_core::config::DatabaseConfig,
+    pub outbox: &'a Arc<Outbox>,
+    pub dispatcher: &'a Arc<EventDispatcher>,
+    pub storage: &'a Arc<Storage>,
+    pub index_manager: &'a Arc<RwLock<IndexManager>>,
+    pub constraint_manager: &'a Arc<RwLock<ConstraintManager>>,
+    pub consumer_groups: &'a Arc<RwLock<HashMap<String, ConsumerGroup>>>,
+    pub shutdown_rx: &'a watch::Receiver<bool>,
+}
+
 impl Database {
-    pub(super) fn spawn_background_tasks(
-        config: &mqdb_core::config::DatabaseConfig,
-        outbox: &Arc<Outbox>,
-        dispatcher: &Arc<EventDispatcher>,
-        storage: &Arc<Storage>,
-        index_manager: &Arc<RwLock<IndexManager>>,
-        consumer_groups: &Arc<RwLock<HashMap<String, ConsumerGroup>>>,
-        shutdown_rx: &watch::Receiver<bool>,
-    ) -> Vec<JoinHandle<()>> {
+    pub(super) fn spawn_background_tasks(deps: &BackgroundDeps<'_>) -> Vec<JoinHandle<()>> {
         let mut handles = Vec::new();
 
-        if !config.spawn_background_tasks {
+        if !deps.config.spawn_background_tasks {
             return handles;
         }
 
-        if config.outbox.enabled {
+        if deps.config.outbox.enabled {
             handles.push(Self::spawn_outbox_processor(
-                outbox,
-                dispatcher,
-                &config.outbox,
-                shutdown_rx,
+                deps.outbox,
+                deps.dispatcher,
+                &deps.config.outbox,
+                deps.shutdown_rx,
             ));
         }
 
-        if let Some(interval_secs) = config.ttl_cleanup_interval_secs {
+        if let Some(interval_secs) = deps.config.ttl_cleanup_interval_secs {
             handles.push(Self::spawn_ttl_cleanup(
-                storage,
-                dispatcher,
-                outbox,
-                index_manager,
+                deps.storage,
+                deps.dispatcher,
+                deps.outbox,
+                deps.index_manager,
+                deps.constraint_manager,
                 interval_secs,
             ));
         }
 
-        if config.shared_subscription.consumer_timeout_ms > 0 {
+        if deps.config.shared_subscription.consumer_timeout_ms > 0 {
             handles.push(Self::spawn_consumer_timeout_cleanup(
-                consumer_groups,
-                config.shared_subscription.consumer_timeout_ms,
-                shutdown_rx,
+                deps.consumer_groups,
+                deps.config.shared_subscription.consumer_timeout_ms,
+                deps.shutdown_rx,
             ));
         }
 
@@ -92,23 +97,58 @@ impl Database {
         dispatcher: &Arc<EventDispatcher>,
         outbox: &Arc<Outbox>,
         index_manager: &Arc<RwLock<IndexManager>>,
+        constraint_manager: &Arc<RwLock<ConstraintManager>>,
         interval_secs: u64,
     ) -> JoinHandle<()> {
-        let storage_clone = Arc::clone(storage);
-        let dispatcher_clone = Arc::clone(dispatcher);
-        let outbox_clone = Arc::clone(outbox);
-        let index_manager_clone = Arc::clone(index_manager);
+        let ctx = TtlSweepCtx {
+            storage: Arc::clone(storage),
+            dispatcher: Arc::clone(dispatcher),
+            outbox: Arc::clone(outbox),
+            index_manager: Arc::clone(index_manager),
+            constraint_manager: Arc::clone(constraint_manager),
+        };
 
         tokio::spawn(async move {
-            ttl_cleanup_task(
-                storage_clone,
-                dispatcher_clone,
-                outbox_clone,
-                index_manager_clone,
-                interval_secs,
-            )
-            .await;
+            ttl_cleanup_task(ctx, interval_secs).await;
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn ttl_cleanup_pass_for_test(&self, now: u64) -> usize {
+        self.ttl_sweep_ctx().pass(now).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_row_for_test(
+        &self,
+        entity: &str,
+        id: &str,
+    ) -> Option<(Vec<u8>, Vec<u8>, Entity)> {
+        let key = mqdb_core::keys::encode_data_key(entity, id);
+        let value = self.storage.get(&key).ok()??;
+        let entity = Entity::deserialize(entity.to_string(), id.to_string(), &value).ok()?;
+        Some((key, value, entity))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn reap_one_for_test(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        entity: &Entity,
+    ) -> bool {
+        self.ttl_sweep_ctx().reap(key, value, entity).await
+    }
+
+    #[cfg(test)]
+    fn ttl_sweep_ctx(&self) -> TtlSweepCtx {
+        TtlSweepCtx {
+            storage: Arc::clone(&self.storage),
+            dispatcher: Arc::clone(&self.dispatcher),
+            outbox: Arc::clone(&self.outbox),
+            index_manager: Arc::clone(&self.index_manager),
+            constraint_manager: Arc::clone(&self.constraint_manager),
+        }
     }
 
     fn spawn_consumer_timeout_cleanup(
@@ -147,13 +187,17 @@ impl Database {
     }
 }
 
-async fn ttl_cleanup_task(
+/// The shared handles a TTL sweep needs. Bundled so the pass/reap helpers stay
+/// under the argument-count limit and read cleanly.
+struct TtlSweepCtx {
     storage: Arc<Storage>,
     dispatcher: Arc<EventDispatcher>,
     outbox: Arc<Outbox>,
     index_manager: Arc<RwLock<IndexManager>>,
-    interval_secs: u64,
-) {
+    constraint_manager: Arc<RwLock<ConstraintManager>>,
+}
+
+async fn ttl_cleanup_task(ctx: TtlSweepCtx, interval_secs: u64) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
 
     loop {
@@ -167,78 +211,106 @@ async fn ttl_cleanup_task(
             }
         };
 
-        let prefix = b"data/";
-        let Ok(items) = storage.prefix_scan(prefix) else {
-            continue;
+        ctx.pass(now).await;
+    }
+}
+
+impl TtlSweepCtx {
+    /// Scan for rows whose `_expires_at` has passed and reap each one. Returns the
+    /// number of rows actually reaped. Each row is reaped independently so one
+    /// concurrently-modified row does not abort cleanup of the rest.
+    async fn pass(&self, now: u64) -> usize {
+        let Ok(items) = self.storage.prefix_scan(b"data/") else {
+            return 0;
         };
 
-        let mut expired_entities = Vec::new();
-
+        let mut expired = Vec::new();
         for (key, value) in items {
             let Ok(key_str) = std::str::from_utf8(&key) else {
                 continue;
             };
-
             let parts: Vec<&str> = key_str.split('/').collect();
             if parts.len() != 3 {
                 continue;
             }
-
-            let entity_name = parts[1];
-            let id = parts[2];
-
-            let Ok(entity) = Entity::deserialize(entity_name.to_string(), id.to_string(), &value)
+            let Ok(entity) =
+                Entity::deserialize(parts[1].to_string(), parts[2].to_string(), &value)
             else {
                 continue;
             };
-
             if let Some(expires_at) = entity.data.get("_expires_at").and_then(Value::as_u64)
                 && expires_at <= now
             {
-                expired_entities.push((key, entity));
+                expired.push((key, value, entity));
             }
         }
 
-        if expired_entities.is_empty() {
-            continue;
+        let scanned = expired.len();
+        let mut reaped = 0usize;
+        for (key, value, entity) in expired {
+            if self.reap(&key, &value, &entity).await {
+                reaped += 1;
+            }
         }
 
+        if scanned > 0 {
+            tracing::debug!(reaped, scanned, "TTL cleanup processed");
+        }
+        reaped
+    }
+
+    /// Reap a single expired row, mirroring the CRUD delete path: version-guarded on
+    /// the exact scanned bytes (so a concurrent renewal is not clobbered), releasing
+    /// the record's unique guards (so the value is reclaimable), removing indexes, and
+    /// emitting the delete change event. Returns `false` if the reap was skipped
+    /// (the row was renewed/deleted concurrently, or the guard release failed).
+    async fn reap(&self, key: &[u8], value: &[u8], entity: &Entity) -> bool {
         let operation_id = uuid::Uuid::new_v4().to_string();
-        let mut batch = storage.batch();
-        let mut events = Vec::new();
+        let mut batch = self.storage.batch();
 
-        for (key, entity) in &expired_entities {
-            batch.remove(key.clone());
+        batch.expect_value(key.to_vec(), value.to_vec());
+        batch.remove(key.to_vec());
 
-            let index_mgr = index_manager.read().await;
+        {
+            let index_mgr = self.index_manager.read().await;
             index_mgr.remove_indexes(&mut batch, entity);
-
-            events.push(ChangeEvent::delete(
-                entity.name.clone(),
-                entity.id.clone(),
-                entity.data.clone(),
-            ));
         }
 
-        outbox.enqueue_events(&mut batch, &operation_id, &events);
-
-        if let Err(e) = batch.commit() {
-            tracing::error!(err = %e, "TTL cleanup batch commit failed");
-            continue;
+        {
+            let constraint_mgr = self.constraint_manager.read().await;
+            if let Err(e) = constraint_mgr.release_unique_guards(entity, &mut batch) {
+                tracing::warn!(
+                    entity = %entity.name,
+                    id = %entity.id,
+                    err = %e,
+                    "TTL cleanup: release_unique_guards failed, skipping"
+                );
+                return false;
+            }
         }
 
-        for event in events {
-            let _ = dispatcher.dispatch(event).await;
-        }
+        let event =
+            ChangeEvent::delete(entity.name.clone(), entity.id.clone(), entity.data.clone());
+        self.outbox
+            .enqueue_events(&mut batch, &operation_id, std::slice::from_ref(&event));
 
-        if let Err(e) = outbox.mark_delivered(&operation_id) {
-            tracing::warn!(op_id = %operation_id, err = %e, "TTL cleanup mark_delivered failed");
+        match batch.commit() {
+            Ok(()) => {
+                let _ = self.dispatcher.dispatch(event).await;
+                if let Err(e) = self.outbox.mark_delivered(&operation_id) {
+                    tracing::warn!(op_id = %operation_id, err = %e, "TTL cleanup mark_delivered failed");
+                }
+                true
+            }
+            Err(e) => {
+                tracing::debug!(
+                    entity = %entity.name,
+                    id = %entity.id,
+                    err = %e,
+                    "TTL cleanup: skipped expired row (renewed or deleted concurrently)"
+                );
+                false
+            }
         }
-
-        tracing::debug!(
-            count = expired_entities.len(),
-            op_id = %operation_id,
-            "TTL cleanup processed expired entities"
-        );
     }
 }
