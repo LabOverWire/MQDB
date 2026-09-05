@@ -683,6 +683,29 @@ async fn cluster_update_delete_expected_version_cas() {
         "the version bumped, so the old expected version is now stale"
     );
 
+    let bad_update =
+        serde_json::to_vec(&serde_json::json!({"n": 2, "_expected_version": "2"})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &bad_update, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        parse_json_response(&r.payload)["code"],
+        400,
+        "a malformed _expected_version must be rejected, not silently applied"
+    );
+
+    let bad_delete = serde_json::to_vec(&serde_json::json!({"_expected_version": "2"})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/delete", &bad_delete, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        parse_json_response(&r.payload)["code"],
+        400,
+        "a malformed _expected_version must not silently disable the delete CAS"
+    );
+
     let dstale = serde_json::to_vec(&serde_json::json!({"_expected_version": 1})).unwrap();
     let r = handler
         .handle_publish(&mut ctrl, "$DB/docs/d/delete", &dstale, &ctx)

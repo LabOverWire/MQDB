@@ -29,15 +29,15 @@ pub(super) enum JsonOpResult {
 }
 
 /// The reserved `_expected_version` compare-and-set precondition carried in a delete
-/// request body (deletes otherwise ignore their payload).
-fn expected_version_from_delete_payload(payload: &[u8]) -> Option<u64> {
+/// request body (deletes otherwise ignore their payload). Returns the client-facing error
+/// message when the field is present but malformed, so the CAS can never be silently skipped.
+fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, String> {
     if payload.is_empty() {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_slice::<Value>(payload)
-        .ok()?
-        .get("_expected_version")?
-        .as_u64()
+    let mut value: Value =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
+    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
 }
 
 /// Outcome of resolving an identity-mode (email) grantee before a share/unshare
@@ -276,7 +276,10 @@ impl DbRequestHandler {
                 {
                     return JsonOpResult::Response(err);
                 }
-                let expected_version = expected_version_from_delete_payload(payload);
+                let expected_version = match expected_version_from_delete_payload(payload) {
+                    Ok(v) => v,
+                    Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
+                };
                 let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
@@ -973,10 +976,10 @@ impl DbRequestHandler {
         if let Some(obj) = updates.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
-        let expected_version = updates
-            .as_object_mut()
-            .and_then(|obj| obj.remove("_expected_version"))
-            .and_then(|v| v.as_u64());
+        let expected_version = match mqdb_core::protocol::take_expected_version(&mut updates) {
+            Ok(v) => v,
+            Err(e) => return JsonOpResult::Response(Self::json_error(400, &e.to_string())),
+        };
         let vault_crypto = self.resolve_vault_crypto(entity, sender);
         let (old_data, merged_data) = match self.vault_merge_with_existing(
             controller,
