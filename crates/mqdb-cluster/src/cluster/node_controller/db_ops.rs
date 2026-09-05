@@ -18,6 +18,11 @@ use crate::cluster::db_handler::helpers::{parse_projection, validate_projection_
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
+/// Upper bound on rows reaped in a single TTL sweep pass, so a mass expiry cannot hold the
+/// controller write lock long enough to stall heartbeats/Raft. The remainder is reaped on
+/// the next sweep.
+const TTL_REAP_MAX_PER_PASS: usize = 1024;
+
 pub(crate) fn spawn_cascade_ack_waiter(
     outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,
     operation_id: String,
@@ -932,32 +937,11 @@ impl<T: ClusterTransport> NodeController<T> {
         cascade: Option<&CascadeOutboxPayload>,
         ack_receivers: Vec<oneshot::Receiver<bool>>,
     ) -> Vec<u8> {
-        match self.db_delete_prepare(entity, id) {
-            Ok((db_entity, write)) => {
-                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone());
-                let outbox = build_change_event_outbox(&event);
-                if let Some(cas) = cascade {
-                    self.db_commit_with_cascade(write, outbox.clone(), cas)
-                        .await;
-                } else {
-                    self.db_commit(write, outbox.clone()).await;
-                }
-                self.release_unique_for_deleted_record(entity, id, &data)
-                    .await;
-                self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                    .await;
-                if self.ownership.owner_field(entity).is_some() {
-                    self.clear_all_resource_grants(entity, id).await;
-                }
-                if let Some(cas) = cascade {
-                    spawn_cascade_ack_waiter(
-                        self.stores.cluster_outbox().cloned(),
-                        cas.operation_id.clone(),
-                        ack_receivers,
-                        true,
-                    );
-                }
+        match self
+            .delete_record_replicated(entity, id, cascade, ack_receivers)
+            .await
+        {
+            Ok(()) => {
                 let result = serde_json::json!({
                     "status": "ok",
                     "data": {"id": id, "deleted": true}
@@ -969,6 +953,72 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             Err(_) => Self::json_error(500, "internal error"),
         }
+    }
+
+    /// The effectful core of a delete, shared by the client-facing delete and the TTL
+    /// reap: prepare + replicate the delete, release the record's unique guards, emit the
+    /// change event, and clear resource grants. Returns `NotFound` if the row is gone.
+    async fn delete_record_replicated(
+        &mut self,
+        entity: &str,
+        id: &str,
+        cascade: Option<&CascadeOutboxPayload>,
+        ack_receivers: Vec<oneshot::Receiver<bool>>,
+    ) -> Result<(), super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_delete_prepare(entity, id)?;
+        let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+        let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone());
+        let outbox = build_change_event_outbox(&event);
+        if let Some(cas) = cascade {
+            self.db_commit_with_cascade(write, outbox.clone(), cas)
+                .await;
+        } else {
+            self.db_commit(write, outbox.clone()).await;
+        }
+        self.release_unique_for_deleted_record(entity, id, &data)
+            .await;
+        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+            .await;
+        if self.ownership.owner_field(entity).is_some() {
+            self.clear_all_resource_grants(entity, id).await;
+        }
+        if let Some(cas) = cascade {
+            spawn_cascade_ack_waiter(
+                self.stores.cluster_outbox().cloned(),
+                cas.operation_id.clone(),
+                ack_receivers,
+                true,
+            );
+        }
+        Ok(())
+    }
+
+    /// Reap TTL-expired rows this node is the data-partition primary for, routing each
+    /// through the replicated delete core so it releases the row's unique guards, emits a
+    /// change event, and replicates to the replicas. Non-primary nodes skip; the primary's
+    /// replicated delete reaches them. Runs under the controller write lock, so the scan
+    /// and the deletes are atomic w.r.t. other controller messages (a renewal cannot
+    /// interleave). At most `TTL_REAP_MAX_PER_PASS` rows are reaped per call so a mass
+    /// expiry cannot hold the lock long enough to stall heartbeats/Raft; the remainder is
+    /// reaped on the next sweep. Returns the number reaped.
+    pub(crate) async fn reap_expired_ttl(&mut self, now_secs: u64) -> usize {
+        let mut expired = self.stores.db_data.scan_expired_ttl(now_secs);
+        expired.truncate(TTL_REAP_MAX_PER_PASS);
+        let mut reaped = 0usize;
+        for (entity, id) in expired {
+            let partition = crate::cluster::db::data_partition(&entity, &id);
+            if !self.is_primary_for_partition(partition) {
+                continue;
+            }
+            if self
+                .delete_record_replicated(&entity, &id, None, Vec::new())
+                .await
+                .is_ok()
+            {
+                reaped += 1;
+            }
+        }
+        reaped
     }
 
     pub(crate) fn prepare_fk_side_effects(

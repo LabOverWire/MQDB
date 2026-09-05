@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-09-01 — mqdb-cluster 0.4.11
+
+### Fixed
+
+- **TTL cleanup now routes through the replicated delete path (cluster mode).** The cluster TTL sweep removed expired rows with a raw in-memory `entities.remove` — it never released the row's unique-constraint guards (so an expired `unique` value became permanently unclaimable), emitted no change event (so watchers and cross-node subscribers never learned of the deletion), and did not replicate (each node independently mutated its own copy). The sweep now reaps each expired row this node is the data-partition **primary** for through the same path as a normal delete (`db_delete_prepare` + `db_commit` + `release_unique_for_deleted_record` + change event, plus resource-grant clearing), so the delete releases guards, emits a change event, and replicates to the replicas. Runs under the controller write lock so the scan and the deletes are atomic with respect to other controller messages. Companion to the agent-mode fix in 0.8.25; part of on-disconnect hold reclaim (`docs/design/hold-reclaim.md`). FK cascade on TTL expiry remains a follow-up (holds are leaf entities).
+
 ## 2026-09-01 — mqdb-agent 0.8.25
 
 ### Fixed

@@ -595,6 +595,55 @@ async fn delete_releases_unique_claim() {
 }
 
 #[tokio::test]
+async fn ttl_reap_releases_unique_claim_and_removes_row() {
+    use super::super::db::ClusterConstraint;
+
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+        .await
+        .unwrap();
+
+    let data_bytes =
+        serde_json::to_vec(&serde_json::json!({"email": "a@x.com", "_expires_at": 100})).unwrap();
+    let rec = ctrl
+        .db_create("users", "u1", &data_bytes, 1000)
+        .await
+        .unwrap();
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+    ctrl.stores()
+        .db_unique
+        .reassert("users", "email", &value, "u1", rec.partition(), 1000);
+    assert!(ctrl.stores().unique_get("users", "email", &value).is_some());
+
+    let reaped = ctrl.reap_expired_ttl(1_000_000).await;
+    assert_eq!(reaped, 1, "the expired row must be reaped");
+
+    assert!(
+        ctrl.db_get("users", "u1").is_none(),
+        "the expired row must be removed"
+    );
+    assert!(
+        ctrl.stores().unique_get("users", "email", &value).is_none(),
+        "the TTL reap must release the committed unique claim so the value is reclaimable"
+    );
+}
+
+#[tokio::test]
+async fn ttl_reap_leaves_unexpired_row() {
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data_bytes =
+        serde_json::to_vec(&serde_json::json!({"v": 1, "_expires_at": 9_000_000_000u64})).unwrap();
+    ctrl.db_create("widgets", "w1", &data_bytes, 1000)
+        .await
+        .unwrap();
+
+    let reaped = ctrl.reap_expired_ttl(1000).await;
+    assert_eq!(reaped, 0, "a not-yet-expired row must not be reaped");
+    assert!(ctrl.db_get("widgets", "w1").is_some());
+}
+
+#[tokio::test]
 async fn json_update_bypasses_ownership_when_no_sender() {
     let node1 = NodeId::validated(1).unwrap();
     let ownership = ownership_config("diagrams", "userId");

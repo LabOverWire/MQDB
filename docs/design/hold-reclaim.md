@@ -87,6 +87,20 @@ Known limitations of the agent sweep (PR 1a), deliberate / pre-existing:
   guard (skipping is the safer of the two); the row is retried on the next sweep. A
   permanent failure would retry (and re-log) each interval.
 
+Cluster sweep (PR 1b) additional semantics:
+- **Generic reap, no FK cascade.** `reap_expired_ttl` reaps any entity carrying
+  `_expires_at`, not only leaf `holds`, and (like the agent) does not run FK
+  cascade/set-null/restrict. TTL on a non-leaf FK parent therefore breaks referential
+  integrity silently (pre-existing; the old raw-remove sweep also skipped cascade). Use
+  TTL only on leaf entities until the cascade follow-up.
+- **Primary-gated + capped.** Only the data-partition primary reaps; the delete replicates
+  to replicas (so replicas must not also reap — that would be N redundant deletes). A
+  replica that misses the fire-and-forget replicated delete keeps the expired row until it
+  is re-replicated or the partition fails over to it and it sweeps — the same reliability
+  class as any async-replicated write. At most `TTL_REAP_MAX_PER_PASS` (1024) rows are
+  reaped per pass so a mass expiry can't hold the controller write lock long enough to
+  stall heartbeats/Raft; the remainder drains on subsequent sweeps.
+
 ### B. Client CAS (`expected_version`, terminal, both paths)
 
 - Shared: add `expected_version: Option<u64>` to `Request::Update`/`Request::Delete`
