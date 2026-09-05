@@ -138,6 +138,7 @@ impl Database {
                 entity,
                 id,
                 mut fields,
+                expected_version,
             } => {
                 match ownership.evaluate(&entity, sender) {
                     OwnershipDecision::Check {
@@ -191,14 +192,25 @@ impl Database {
                     scope_config,
                 };
                 match self
-                    .update(entity, id, fields, update_constraint, &caller)
+                    .update_with_expected(
+                        entity,
+                        id,
+                        fields,
+                        update_constraint,
+                        expected_version,
+                        &caller,
+                    )
                     .await
                 {
                     Ok(v) => Response::ok(v),
                     Err(e) => e.into(),
                 }
             }
-            Request::Delete { entity, id } => {
+            Request::Delete {
+                entity,
+                id,
+                expected_version,
+            } => {
                 match ownership.evaluate(&entity, sender) {
                     OwnershipDecision::Check {
                         owner_field,
@@ -233,8 +245,13 @@ impl Database {
                 let id_clone = id.clone();
                 let shareable = ownership.owner_field(&entity).is_some();
                 let entity_clone = entity.clone();
+                let caller = CallerContext {
+                    sender,
+                    client_id,
+                    scope_config,
+                };
                 match self
-                    .delete(entity, id, sender, client_id, scope_config, ownership)
+                    .delete_with_expected(entity, id, &caller, ownership, expected_version)
                     .await
                 {
                     Ok(()) => {

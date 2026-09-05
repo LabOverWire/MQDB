@@ -138,9 +138,9 @@ Cluster sweep (PR 1b) additional semantics:
 
 | PR | Scope | Notes |
 |----|-------|-------|
-| 1a | TTL backstop fix — **agent** | `background.rs`: guard release + `expect_value` on scanned bytes + per-entity batches. Standalone data-loss + seat-lockout bug. |
-| 1b | TTL backstop fix — **cluster** | Rewire `handle_ttl_cleanup` through the replicated delete path (primary-gated, guard release, change event, version precondition) — a larger change than 1a, split out to isolate risk. |
-| 2  | Client CAS — both paths + new error | Add "retry-loop-doesn't-defeat-CAS" counter-tests. |
+| 1a ✅ | TTL backstop fix — **agent** | `background.rs`: guard release + `expect_value` on scanned bytes + per-entity batches. Standalone data-loss + seat-lockout bug. |
+| 1b ✅ | TTL backstop fix — **cluster** | Rewire `handle_ttl_cleanup` through the replicated delete path (primary-gated, guard release, change event, version precondition) — a larger change than 1a, split out to isolate risk. |
+| 2 ✅ | Client CAS — both paths + new error | `_expected_version` reserved payload key, terminal `PreconditionFailed` (412); agent `update_with_expected`/`delete_with_expected` + both cluster write paths; retry-loop-doesn't-defeat-CAS counter-tests. |
 | 3  | Presence feed — both modes + topic rule | Gated on decisions 1–2 below. |
 | app | Janitor + reassert-on-reconnect contract + short keepalive | Out of mqdb (application). |
 

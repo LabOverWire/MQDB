@@ -284,6 +284,16 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
 ///
 /// # Errors
 /// Returns an error if JSON deserialization fails or a required ID is missing.
+/// Remove and return the reserved `_expected_version` compare-and-set precondition from a
+/// request payload, so it is never merged into the record as a data field.
+fn extract_expected_version(data: &mut Value) -> Option<u64> {
+    if let Value::Object(obj) = data {
+        obj.remove("_expected_version").and_then(|v| v.as_u64())
+    } else {
+        None
+    }
+}
+
 pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, ProtocolError> {
     if payload.len() > MAX_PAYLOAD_SIZE {
         return Err(ProtocolError::PayloadTooLarge(payload.len()));
@@ -311,17 +321,23 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
         }
         DbOp::Update => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Update))?;
+            let mut fields = data;
+            let expected_version = extract_expected_version(&mut fields);
             Ok(Request::Update {
                 entity: op.entity,
                 id,
-                fields: data,
+                fields,
+                expected_version,
             })
         }
         DbOp::Delete => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Delete))?;
+            let mut data = data;
+            let expected_version = extract_expected_version(&mut data);
             Ok(Request::Delete {
                 entity: op.entity,
                 id,
+                expected_version,
             })
         }
         DbOp::List => {

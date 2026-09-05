@@ -177,6 +177,33 @@ impl Database {
         update_constraint_data: Option<(Value, Value)>,
         caller: &CallerContext<'_>,
     ) -> Result<Value> {
+        self.update_with_expected(
+            entity_name,
+            id,
+            fields,
+            update_constraint_data,
+            None,
+            caller,
+        )
+        .await
+    }
+
+    /// Like [`update`](Self::update) but rejects with [`Error::PreconditionFailed`] (a
+    /// terminal, non-retried error) if the row's current `_version` differs from
+    /// `expected_version` — a client-facing compare-and-set.
+    ///
+    /// # Errors
+    /// Returns an error if the entity is not found, the version precondition fails,
+    /// validation fails, or storage fails.
+    pub async fn update_with_expected(
+        &self,
+        entity_name: String,
+        id: String,
+        fields: Value,
+        update_constraint_data: Option<(Value, Value)>,
+        expected_version: Option<u64>,
+        caller: &CallerContext<'_>,
+    ) -> Result<Value> {
         let retryable = update_constraint_data.is_none();
         let mut attempt = 1;
         loop {
@@ -186,6 +213,7 @@ impl Database {
                     &id,
                     fields.clone(),
                     update_constraint_data.clone(),
+                    expected_version,
                     caller,
                 )
                 .await;
@@ -204,6 +232,7 @@ impl Database {
         id: &str,
         fields: Value,
         update_constraint_data: Option<(Value, Value)>,
+        expected_version: Option<u64>,
         caller: &CallerContext<'_>,
     ) -> Result<Value> {
         let key = keys::encode_data_key(entity_name, id);
@@ -227,6 +256,13 @@ impl Database {
             .get("_version")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        if let Some(expected) = expected_version
+            && existing_version != expected
+        {
+            return Err(Error::PreconditionFailed(format!(
+                "{entity_name}/{id}: expected _version {expected}, found {existing_version}"
+            )));
+        }
         if let Value::Object(ref mut obj) = updated_data {
             obj.insert(
                 "_version".to_string(),
@@ -309,17 +345,34 @@ impl Database {
         scope_config: &ScopeConfig,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
+        let caller = CallerContext {
+            sender,
+            client_id,
+            scope_config,
+        };
+        self.delete_with_expected(entity_name, id, &caller, ownership, None)
+            .await
+    }
+
+    /// Like [`delete`](Self::delete) but rejects with [`Error::PreconditionFailed`] (a
+    /// terminal, non-retried error) if the row's current `_version` differs from
+    /// `expected_version` — a client-facing compare-and-set.
+    ///
+    /// # Errors
+    /// Returns an error if the entity is not found, the version precondition fails, or
+    /// constraint validation fails.
+    pub async fn delete_with_expected(
+        &self,
+        entity_name: String,
+        id: String,
+        caller: &CallerContext<'_>,
+        ownership: &OwnershipConfig,
+        expected_version: Option<u64>,
+    ) -> Result<()> {
         let mut attempt = 1;
         loop {
             let result = self
-                .try_delete_once(
-                    &entity_name,
-                    &id,
-                    sender,
-                    client_id,
-                    scope_config,
-                    ownership,
-                )
+                .try_delete_once(&entity_name, &id, caller, ownership, expected_version)
                 .await;
             match result {
                 Err(Error::Conflict(_)) if attempt < MAX_WRITE_ATTEMPTS => {
@@ -335,12 +388,15 @@ impl Database {
         &self,
         entity_name: &str,
         id: &str,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        scope_config: &ScopeConfig,
+        caller: &CallerContext<'_>,
         ownership: &OwnershipConfig,
+        expected_version: Option<u64>,
     ) -> Result<()> {
         use mqdb_core::constraint::{DeleteOperation, OwnershipContext};
+
+        let sender = caller.sender;
+        let client_id = caller.client_id;
+        let scope_config = caller.scope_config;
 
         let key = keys::encode_data_key(entity_name, id);
         let existing_data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
@@ -350,6 +406,19 @@ impl Database {
 
         let existing_entity =
             Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
+
+        if let Some(expected) = expected_version {
+            let existing_version = existing_entity
+                .data
+                .get("_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if existing_version != expected {
+                return Err(Error::PreconditionFailed(format!(
+                    "{entity_name}/{id}: expected _version {expected}, found {existing_version}"
+                )));
+            }
+        }
 
         let ownership_ctx = sender
             .filter(|_| !ownership.is_empty())
@@ -1047,6 +1116,103 @@ mod concurrency_tests {
             .is_err(),
             "the renewed hold must still hold the seat"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_and_delete_with_expected_version_are_terminal_cas() {
+        let (_tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+        let caller = CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &scope,
+        };
+
+        db.create(
+            "doc".to_string(),
+            json!({ "id": "d", "n": 0 }),
+            None,
+            None,
+            None,
+            &scope,
+        )
+        .await
+        .unwrap();
+
+        let stale = db
+            .update_with_expected(
+                "doc".to_string(),
+                "d".to_string(),
+                json!({ "n": 1 }),
+                None,
+                Some(99),
+                &caller,
+            )
+            .await;
+        assert!(
+            matches!(stale, Err(mqdb_core::error::Error::PreconditionFailed(_))),
+            "a wrong expected version must be a terminal precondition failure, got {stale:?}"
+        );
+
+        let ok = db
+            .update_with_expected(
+                "doc".to_string(),
+                "d".to_string(),
+                json!({ "n": 1 }),
+                None,
+                Some(1),
+                &caller,
+            )
+            .await
+            .expect("matching expected version must succeed");
+        assert_eq!(ok["_version"].as_u64(), Some(2));
+
+        let stale2 = db
+            .update_with_expected(
+                "doc".to_string(),
+                "d".to_string(),
+                json!({ "n": 2 }),
+                None,
+                Some(1),
+                &caller,
+            )
+            .await;
+        assert!(
+            matches!(stale2, Err(mqdb_core::error::Error::PreconditionFailed(_))),
+            "the version bumped, so the old expected version is now stale"
+        );
+
+        let ownership = OwnershipConfig::default();
+        let caller = CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &scope,
+        };
+        let del_stale = db
+            .delete_with_expected(
+                "doc".to_string(),
+                "d".to_string(),
+                &caller,
+                &ownership,
+                Some(1),
+            )
+            .await;
+        assert!(
+            matches!(
+                del_stale,
+                Err(mqdb_core::error::Error::PreconditionFailed(_))
+            ),
+            "delete with a wrong expected version must be rejected, got {del_stale:?}"
+        );
+        db.delete_with_expected(
+            "doc".to_string(),
+            "d".to_string(),
+            &caller,
+            &ownership,
+            Some(2),
+        )
+        .await
+        .expect("delete with the matching version must succeed");
     }
 
     #[tokio::test(flavor = "multi_thread")]

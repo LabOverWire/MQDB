@@ -71,6 +71,7 @@ async fn pre_update_encrypt(
     ownership: &OwnershipConfig,
     sender_uid: Option<&str>,
     delta: Value,
+    expected_version: Option<u64>,
     skip: &[String],
 ) -> Result<(Request, Option<(Value, Value)>), Response> {
     if let OwnershipDecision::Check {
@@ -91,6 +92,7 @@ async fn pre_update_encrypt(
                 entity: entity.to_string(),
                 id: id.to_string(),
                 fields: delta,
+                expected_version,
             },
             None,
         ));
@@ -125,6 +127,7 @@ async fn pre_update_encrypt(
             entity: entity.to_string(),
             id: id.to_string(),
             fields: merged,
+            expected_version,
         },
         Some((plaintext_merged, plaintext_existing)),
     ))
@@ -185,9 +188,18 @@ impl VaultBackend for VaultBackendImpl {
                     entity: ent,
                     id,
                     fields: delta,
+                    expected_version,
                 } => {
                     match pre_update_encrypt(
-                        db, &crypto, &ent, &id, ownership, sender_uid, delta, &skip,
+                        db,
+                        &crypto,
+                        &ent,
+                        &id,
+                        ownership,
+                        sender_uid,
+                        delta,
+                        expected_version,
+                        &skip,
                     )
                     .await
                     {

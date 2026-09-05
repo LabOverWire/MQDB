@@ -4,7 +4,15 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-09-01 — mqdb-cluster 0.4.11
+## 2026-09-05 — mqdb-core 0.7.12, mqdb-agent 0.8.26, mqdb-cluster 0.4.12, mqdb-vault 0.1.4, mqdb-wasm 0.3.6
+
+### Added
+
+- **Client-facing compare-and-set on update and delete.** A write may now carry a reserved `_expected_version` in its payload; the server rejects the operation if the row's current `_version` differs from it. This is the second primitive of on-disconnect hold reclaim (`docs/design/hold-reclaim.md`): a janitor reclaims an abandoned hold with `delete` guarded on the version it last observed, so a holder that renewed in the meantime is never clobbered. The check is **terminal** — it fails with `PreconditionFailed` (transport code 412), which the write-retry loops treat as non-retryable, distinct from an optimistic-concurrency `Conflict` that is retried. Enforced identically in agent mode (`update_with_expected`/`delete_with_expected`) and in both cluster write paths (client-dispatched local-primary and forwarded). Omitting `_expected_version` leaves behavior unchanged.
+
+### Notes
+
+- `_expected_version` is stripped from the payload before validation and storage, so it never persists as a field. Embedded (WASM) mode ignores it (no versioned write path).
 
 ### Fixed
 

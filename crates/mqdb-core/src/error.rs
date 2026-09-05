@@ -87,6 +87,9 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("precondition failed: {0}")]
+    PreconditionFailed(String),
+
     #[error("cascade blocked: cannot delete {0} - cross-owned entity has non-nullable FK field")]
     CascadeBlocked(Box<CascadeBlockedInfo>),
 }
