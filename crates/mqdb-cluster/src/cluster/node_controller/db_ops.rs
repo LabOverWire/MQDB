@@ -971,6 +971,35 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    /// Reap every TTL-expired row this node is the data-partition primary for, routing
+    /// each through the replicated delete path (`execute_json_delete`) so it releases the
+    /// row's unique guards, emits a change event, and replicates to the replicas.
+    /// Non-primary nodes skip; the primary's replicated delete reaches them. Runs under
+    /// the controller write lock, so the scan and the deletes are atomic w.r.t. other
+    /// controller messages (a renewal cannot interleave). Returns the number reaped.
+    pub(crate) async fn reap_expired_ttl(&mut self, now_secs: u64) -> usize {
+        let expired = self.stores.db_data.scan_expired_ttl(now_secs);
+        let mut reaped = 0usize;
+        for (entity, id) in expired {
+            let partition = crate::cluster::db::data_partition(&entity, &id);
+            if !self.is_primary_for_partition(partition) {
+                continue;
+            }
+            let out = self
+                .execute_json_delete(&entity, &id, None, Vec::new())
+                .await;
+            let deleted = serde_json::from_slice::<Value>(&out).ok().and_then(|v| {
+                v.get("data")
+                    .and_then(|d| d.get("deleted"))
+                    .and_then(Value::as_bool)
+            }) == Some(true);
+            if deleted {
+                reaped += 1;
+            }
+        }
+        reaped
+    }
+
     pub(crate) fn prepare_fk_side_effects(
         &self,
         results: &[super::fk::FkReverseLookupResult],

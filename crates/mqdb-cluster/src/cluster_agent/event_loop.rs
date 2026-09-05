@@ -485,10 +485,10 @@ impl ClusteredAgent {
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        let ctrl = self.controller.read().await;
-        let expired_ttl = ctrl.stores().db_data.cleanup_expired_ttl(now_secs);
-        if !expired_ttl.is_empty() {
-            info!(count = expired_ttl.len(), "cleaned up TTL-expired entities");
+        let mut ctrl = self.controller.write().await;
+        let reaped = ctrl.reap_expired_ttl(now_secs).await;
+        if reaped > 0 {
+            info!(count = reaped, "cleaned up TTL-expired entities");
         }
     }
 
