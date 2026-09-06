@@ -30,10 +30,14 @@ pub enum Request {
         entity: String,
         id: String,
         fields: Value,
+        #[serde(default)]
+        expected_version: Option<u64>,
     },
     Delete {
         entity: String,
         id: String,
+        #[serde(default)]
+        expected_version: Option<u64>,
     },
     List {
         entity: String,
@@ -120,6 +124,7 @@ pub enum ErrorCode {
     Forbidden = 403,
     NotFound = 404,
     Conflict = 409,
+    PreconditionFailed = 412,
     RateLimited = 429,
     Internal = 500,
 }
@@ -138,6 +143,7 @@ impl ErrorCode {
             ErrorCode::Forbidden => 7,
             ErrorCode::NotFound => 5,
             ErrorCode::Conflict => 6,
+            ErrorCode::PreconditionFailed => 9,
             ErrorCode::RateLimited => 8,
             ErrorCode::Internal => 13,
         }
@@ -218,6 +224,10 @@ impl From<Error> for Response {
                 ),
             ),
             Error::Conflict(msg) => (ErrorCode::Conflict, format!("conflict: {msg}")),
+            Error::PreconditionFailed(msg) => (
+                ErrorCode::PreconditionFailed,
+                format!("precondition failed: {msg}"),
+            ),
             _ => {
                 tracing::error!(error = %e, "internal error in client request");
                 (ErrorCode::Internal, "internal error".to_string())

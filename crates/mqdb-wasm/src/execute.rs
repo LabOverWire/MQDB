@@ -36,10 +36,10 @@ impl WasmDatabase {
         match request {
             Request::Create { entity, data } => self.create(entity, serialize_js(&data)?).await,
             Request::Read { entity, id, .. } => self.read(entity, id).await,
-            Request::Update { entity, id, fields } => {
-                self.update(entity, id, serialize_js(&fields)?).await
-            }
-            Request::Delete { entity, id } => {
+            Request::Update {
+                entity, id, fields, ..
+            } => self.update(entity, id, serialize_js(&fields)?).await,
+            Request::Delete { entity, id, .. } => {
                 self.delete(entity, id).await?;
                 Ok(JsValue::NULL)
             }

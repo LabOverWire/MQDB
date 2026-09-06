@@ -644,6 +644,84 @@ async fn ttl_reap_leaves_unexpired_row() {
 }
 
 #[tokio::test]
+async fn cluster_update_delete_expected_version_cas() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let data = serde_json::to_vec(&serde_json::json!({"n": 0, "_version": 1})).unwrap();
+    ctrl.db_create("docs", "d", &data, 1000).await.unwrap();
+
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+
+    let stale = serde_json::to_vec(&serde_json::json!({"n": 1, "_expected_version": 99})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &stale, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&r.payload)["code"], 412);
+
+    let ok = serde_json::to_vec(&serde_json::json!({"n": 1, "_expected_version": 1})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &ok, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&r.payload)["status"], "ok");
+
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &ok, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        parse_json_response(&r.payload)["code"],
+        412,
+        "the version bumped, so the old expected version is now stale"
+    );
+
+    let bad_update =
+        serde_json::to_vec(&serde_json::json!({"n": 2, "_expected_version": "2"})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &bad_update, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        parse_json_response(&r.payload)["code"],
+        400,
+        "a malformed _expected_version must be rejected, not silently applied"
+    );
+
+    let bad_delete = serde_json::to_vec(&serde_json::json!({"_expected_version": "2"})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/delete", &bad_delete, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(
+        parse_json_response(&r.payload)["code"],
+        400,
+        "a malformed _expected_version must not silently disable the delete CAS"
+    );
+
+    let dstale = serde_json::to_vec(&serde_json::json!({"_expected_version": 1})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/delete", &dstale, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&r.payload)["code"], 412);
+
+    let dok = serde_json::to_vec(&serde_json::json!({"_expected_version": 2})).unwrap();
+    let r = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/delete", &dok, &ctx)
+        .await
+        .unwrap();
+    assert_eq!(parse_json_response(&r.payload)["data"]["deleted"], true);
+}
+
+#[tokio::test]
 async fn json_update_bypasses_ownership_when_no_sender() {
     let node1 = NodeId::validated(1).unwrap();
     let ownership = ownership_config("diagrams", "userId");

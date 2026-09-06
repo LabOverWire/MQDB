@@ -429,8 +429,8 @@ impl AsyncStorageBackend for IndexedDbBackend {
         }
     }
 
-    async fn flush(&self) -> Result<()> {
-        Ok(())
+    fn flush(&self) -> impl std::future::Future<Output = Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 

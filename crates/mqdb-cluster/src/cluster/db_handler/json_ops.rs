@@ -28,6 +28,18 @@ pub(super) enum JsonOpResult {
     PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
+/// The reserved `_expected_version` compare-and-set precondition carried in a delete
+/// request body (deletes otherwise ignore their payload). Returns the client-facing error
+/// message when the field is present but malformed, so the CAS can never be silently skipped.
+fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, String> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let mut value: Value =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
+    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
+}
+
 /// Outcome of resolving an identity-mode (email) grantee before a share/unshare
 /// is routed to the resource primary.
 #[cfg(feature = "http-api")]
@@ -264,6 +276,10 @@ impl DbRequestHandler {
                 {
                     return JsonOpResult::Response(err);
                 }
+                let expected_version = match expected_version_from_delete_payload(payload) {
+                    Ok(v) => v,
+                    Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
+                };
                 let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
@@ -272,7 +288,7 @@ impl DbRequestHandler {
                             JsonDbOp::Delete,
                             entity,
                             Some(id),
-                            &[],
+                            payload,
                             response_topic,
                             correlation_data,
                             sender,
@@ -287,7 +303,7 @@ impl DbRequestHandler {
                         ))
                     };
                 }
-                self.handle_json_delete(controller, entity, id, mqtt_ctx)
+                self.handle_json_delete(controller, entity, id, expected_version, mqtt_ctx)
                     .await
             }
             DbTopicOperation::JsonList { entity } => {
@@ -960,6 +976,10 @@ impl DbRequestHandler {
         if let Some(obj) = updates.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
+        let expected_version = match mqdb_core::protocol::take_expected_version(&mut updates) {
+            Ok(v) => v,
+            Err(e) => return JsonOpResult::Response(Self::json_error(400, &e.to_string())),
+        };
         let vault_crypto = self.resolve_vault_crypto(entity, sender);
         let (old_data, merged_data) = match self.vault_merge_with_existing(
             controller,
@@ -971,6 +991,19 @@ impl DbRequestHandler {
             Ok(pair) => pair,
             Err(response) => return JsonOpResult::Response(response),
         };
+
+        if let Some(expected) = expected_version {
+            let current = old_data
+                .get("_version")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if current != expected {
+                return JsonOpResult::Response(Self::json_error(
+                    412,
+                    &format!("{entity}/{id}: expected _version {expected}, found {current}"),
+                ));
+            }
+        }
 
         if let Some(err) = Self::validate_against_schema(controller, entity, &merged_data) {
             return JsonOpResult::Response(err);
@@ -1201,12 +1234,28 @@ impl DbRequestHandler {
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
+        expected_version: Option<u64>,
         mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
         let sender = mqtt_ctx.sender;
         let client_id = mqtt_ctx.client_id;
         let response_topic = mqtt_ctx.response_topic.unwrap_or("");
         let correlation_data = mqtt_ctx.correlation_data;
+
+        if let Some(expected) = expected_version
+            && let Some(existing) = controller.db_get(entity, id)
+        {
+            let current = serde_json::from_slice::<Value>(&existing.data)
+                .ok()
+                .and_then(|d| d.get("_version").and_then(Value::as_u64))
+                .unwrap_or(0);
+            if current != expected {
+                return JsonOpResult::Response(Self::json_error(
+                    412,
+                    &format!("{entity}/{id}: expected _version {expected}, found {current}"),
+                ));
+            }
+        }
 
         let (local_results, pending_remote) =
             match controller.start_fk_reverse_lookup(entity, id, sender).await {

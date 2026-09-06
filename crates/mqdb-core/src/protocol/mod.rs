@@ -15,6 +15,8 @@ pub enum ProtocolError {
     InvalidPayload(#[from] serde_json::Error),
     #[error("payload too large ({0} bytes, max {MAX_PAYLOAD_SIZE})")]
     PayloadTooLarge(usize),
+    #[error("invalid _expected_version (must be a non-negative integer): {0}")]
+    InvalidExpectedVersion(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,10 +282,31 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     }
 }
 
+/// Remove and return the reserved `_expected_version` compare-and-set precondition from a
+/// request payload, so it is never merged into the record as a data field.
+///
+/// # Errors
+/// Returns [`ProtocolError::InvalidExpectedVersion`] if the field is present but is not a
+/// non-negative integer — a malformed precondition must fail loudly, not silently disable
+/// the compare-and-set. A missing field or an explicit `null` yields `Ok(None)`.
+pub fn take_expected_version(data: &mut Value) -> Result<Option<u64>, ProtocolError> {
+    let Value::Object(obj) = data else {
+        return Ok(None);
+    };
+    match obj.remove("_expected_version") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| ProtocolError::InvalidExpectedVersion(v.to_string())),
+    }
+}
+
 /// Builds a database request from an operation descriptor and payload.
 ///
 /// # Errors
-/// Returns an error if JSON deserialization fails or a required ID is missing.
+/// Returns an error if JSON deserialization fails, a required ID is missing, or the
+/// `_expected_version` precondition is malformed.
 pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, ProtocolError> {
     if payload.len() > MAX_PAYLOAD_SIZE {
         return Err(ProtocolError::PayloadTooLarge(payload.len()));
@@ -311,17 +334,23 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
         }
         DbOp::Update => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Update))?;
+            let mut fields = data;
+            let expected_version = take_expected_version(&mut fields)?;
             Ok(Request::Update {
                 entity: op.entity,
                 id,
-                fields: data,
+                fields,
+                expected_version,
             })
         }
         DbOp::Delete => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Delete))?;
+            let mut data = data;
+            let expected_version = take_expected_version(&mut data)?;
             Ok(Request::Delete {
                 entity: op.entity,
                 id,
+                expected_version,
             })
         }
         DbOp::List => {
@@ -465,6 +494,52 @@ fn extract_list_options(data: &Value) -> ListOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn take_expected_version_extracts_and_strips() {
+        let mut data = serde_json::json!({"n": 1, "_expected_version": 7});
+        let got = take_expected_version(&mut data).unwrap();
+        assert_eq!(got, Some(7));
+        assert!(data.get("_expected_version").is_none());
+        assert_eq!(data.get("n").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn take_expected_version_absent_or_null_is_none() {
+        let mut absent = serde_json::json!({"n": 1});
+        assert_eq!(take_expected_version(&mut absent).unwrap(), None);
+        let mut null = serde_json::json!({"_expected_version": null});
+        assert_eq!(take_expected_version(&mut null).unwrap(), None);
+    }
+
+    #[test]
+    fn take_expected_version_rejects_malformed() {
+        for bad in [
+            serde_json::json!({"_expected_version": "7"}),
+            serde_json::json!({"_expected_version": 7.5}),
+            serde_json::json!({"_expected_version": -1}),
+            serde_json::json!({"_expected_version": true}),
+        ] {
+            let mut data = bad.clone();
+            let err = take_expected_version(&mut data);
+            assert!(
+                matches!(err, Err(ProtocolError::InvalidExpectedVersion(_))),
+                "a present-but-non-integer precondition must error, not silently skip: {bad:?}"
+            );
+            assert!(
+                data.get("_expected_version").is_none(),
+                "the field is still stripped even on rejection"
+            );
+        }
+    }
+
+    #[test]
+    fn build_request_delete_rejects_malformed_expected_version() {
+        let op = parse_db_topic("$DB/users/123/delete").unwrap();
+        let payload = serde_json::to_vec(&serde_json::json!({"_expected_version": "5"})).unwrap();
+        let err = build_request(op, &payload);
+        assert!(matches!(err, Err(ProtocolError::InvalidExpectedVersion(_))));
+    }
 
     #[test]
     fn test_parse_db_topic_create() {

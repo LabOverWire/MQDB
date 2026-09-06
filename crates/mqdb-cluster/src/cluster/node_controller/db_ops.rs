@@ -23,6 +23,19 @@ const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 /// the next sweep.
 const TTL_REAP_MAX_PER_PASS: usize = 1024;
 
+/// Parse the reserved `_expected_version` compare-and-set precondition from a delete
+/// request payload (the update path removes it from the parsed object instead). Returns the
+/// client-facing error message when the field is present but malformed, so the CAS can never
+/// be silently skipped.
+fn expected_version_from_payload(payload: &[u8]) -> Result<Option<u64>, String> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let mut value: Value =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
+    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
+}
+
 pub(crate) fn spawn_cascade_ack_waiter(
     outbox: Option<crate::cluster::store_manager::outbox::ClusterOutbox>,
     operation_id: String,
@@ -676,9 +689,32 @@ impl<T: ClusterTransport> NodeController<T> {
             .and_then(|obj| obj.remove("__mqdb_fk_expected"))
             .and_then(|v| v.as_str().map(String::from));
 
+        let expected_version = match mqdb_core::protocol::take_expected_version(&mut data) {
+            Ok(v) => v,
+            Err(e) => return (Self::json_error(400, &e.to_string()), None),
+        };
+
         let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
             let existing_data: Value = serde_json::from_slice(&existing.data)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
+
+            if let Some(expected) = expected_version {
+                let current = existing_data
+                    .get("_version")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if current != expected {
+                    return (
+                        Self::json_error(
+                            412,
+                            &format!(
+                                "{entity}/{id}: expected _version {expected}, found {current}"
+                            ),
+                        ),
+                        None,
+                    );
+                }
+            }
 
             if let Some(ref expected) = fk_expected
                 && let Some((field, value)) = expected.split_once('=')
@@ -879,6 +915,28 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
+        let expected_version = match expected_version_from_payload(&request.payload) {
+            Ok(v) => v,
+            Err(msg) => return (Self::json_error(400, &msg), None),
+        };
+        if let Some(expected) = expected_version
+            && let Some(existing) = self.db_get(entity, id)
+        {
+            let current = serde_json::from_slice::<Value>(&existing.data)
+                .ok()
+                .and_then(|d| d.get("_version").and_then(Value::as_u64))
+                .unwrap_or(0);
+            if current != expected {
+                return (
+                    Self::json_error(
+                        412,
+                        &format!("{entity}/{id}: expected _version {expected}, found {current}"),
+                    ),
+                    None,
+                );
+            }
+        }
+
         let (local_results, pending_remote) = match self
             .start_fk_reverse_lookup(entity, id, request.sender.as_deref())
             .await
