@@ -154,15 +154,14 @@ larger change than the agent's batch tweak.
 1. **Per-connection vs per-user binding.** Per-connection false-reclaims a user who still
    has another live connection. **Rec: per-user** (`_bound_user_id` + user-level presence
    aggregation).
-2. **mqtt-lib `user_id`.** ✅ RESOLVED — shipped in mqtt5 `0.38.4` (pin `mqtt5 = "0.38.4"`,
-   replacing the git dep). Both `ClientConnectEvent` and `ClientDisconnectEvent` now carry
+2. **mqtt-lib `user_id`.** ✅ RESOLVED & LANDED — the workspace is pinned to the published
+   `mqtt5 = "0.39"` (`0.39.2`), replacing the git dependency (done in its own step, ahead of
+   PR 3). Both `ClientConnectEvent` and `ClientDisconnectEvent` carry
    `pub user_id: Option<Arc<str>>` (mirrors `ClientPublishEvent::user_id`; the authenticated
    username, `None` for anonymous). Read as `event.user_id.as_deref()`. `ClientDisconnectEvent`
    also has `client_id: Arc<str>` + `unexpected: bool`, so the presence payload
    `{client_id, user_id, event, unexpected, ts}` is fully available (generate `ts`). This
-   unblocks the per-user binding in decision 1. The pin is a workspace dependency bump done
-   as its own step (it swaps a git dep for the published crate and needs its own build/test
-   verification), landing with or before PR 3.
+   unblocks the per-user binding in decision 1.
 3. **Crash-detection latency.** Sub-second reclaim holds only for **graceful** disconnects;
    a hard crash is detected at the MQTT keepalive timeout. **Rec: short keepalive on hold
    connections + document** the crash-path bound.
