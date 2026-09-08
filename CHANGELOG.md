@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-09-07 — mqdb-agent 0.8.27, mqdb-cluster 0.4.13, mqdb-vault 0.1.5, mqdb-cli 0.8.36
+
+### Changed
+
+- **Upgraded `mqtt5` from a git dependency (`0.35.1`) to the published crate `0.39.2`** (pulling `mqtt5-protocol 0.15.0`), and removed the `[patch.crates-io]` git override so all builds resolve mqtt5 from crates.io. The upgrade is API-compatible for everything MQDB uses (client, broker config/auth/events/bridge/acl, message types) — no source changes were needed. `mqtt5 0.39` adds `user_id` to the broker's client connect/disconnect events, which the upcoming presence feed depends on.
+- **Pinned the Rust toolchain to 1.98.0** via `rust-toolchain.toml`, matching the mqtt5 library, and changed CI from `dtolnay/rust-toolchain@stable` to `@1.98.0` so local, CI, and the upstream library build on the same compiler. This removes the local-vs-CI clippy skew that previously let a lint pass locally and fail in CI.
+
 ## 2026-09-05 — mqdb-core 0.7.12, mqdb-agent 0.8.26, mqdb-cluster 0.4.12, mqdb-vault 0.1.4, mqdb-wasm 0.3.6
 
 ### Added

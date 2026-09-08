@@ -39,4 +39,3 @@ wildcards = "allow"
 [sources]
 unknown-registry = "warn"
 unknown-git = "allow"
-allow-git = ["https://github.com/LabOverWire/mqtt-lib"]
