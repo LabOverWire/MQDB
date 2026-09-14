@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-09-12 — mqdb-agent 0.8.28, mqdb-cli 0.8.37
+
+### Added
+
+- **Presence feed (agent mode), opt-in via `--presence` / `MQDB_PRESENCE`.** When enabled, the broker publishes a retained QoS 0 JSON message to `$DB/_presence/{client_id}` on every client connect and disconnect: `{client_id, user_id, event, unexpected, ts}`. `event` is `connect` or `disconnect`; `unexpected` distinguishes an abnormal drop from a clean DISCONNECT. This is the third primitive of on-disconnect hold reclaim (`docs/design/hold-reclaim.md`): a janitor subscribes to `$DB/_presence/#`, applies a grace period, and releases an abandoned hold with a version-guarded (`_expected_version`) delete. Unlike Last Will, presence fires on **both** clean and unexpected disconnects. Internal `mqdb-` clients never produce presence events, and the feed stays silent unless explicitly enabled.
+- **`$DB/_presence/#` is a `ReadOnly` protected topic**, so a non-admin janitor may subscribe while no client — not even an admin — can publish to it and forge a presence message; only the internal service publisher can. Without this rule the `_`-prefixed topic would also have denied the janitor's subscribe outright.
+
+### Notes
+
+- Presence is a **hint**, not a ledger: messages may be dropped under load (the queue is bounded) and can be reordered across a flap, so `ts` is authoritative. Correctness still rests on the TTL backstop plus a returning holder re-asserting its hold; see the invariant model in `specs/AbandonedHoldReclaim.tla`.
+- Because messages are retained, the broker keeps one retained message per distinct `client_id`, overwritten in place on each transition. That is bounded by the client population, but a deployment that uses a fresh random `client_id` for every session will accumulate retained entries — prefer stable client ids when enabling presence.
+- Cluster-mode presence is a follow-up. The cluster's wildcard matcher deliberately drops every `$`-prefixed topic (`cluster/topic_trie.rs`), so a `$DB/_presence/#` subscriber cannot be resolved as a cross-node target; cluster support will broadcast presence to all nodes for local delivery rather than relying on that routing.
+
 ## 2026-09-07 — mqdb-agent 0.8.27, mqdb-cluster 0.4.13, mqdb-vault 0.1.5, mqdb-cli 0.8.36
 
 ### Changed

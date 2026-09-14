@@ -51,6 +51,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
+        pattern: "$DB/_presence/#",
+        tier: ProtectionTier::ReadOnly,
+    },
+    TopicRule {
         pattern: "$DB/_sub/#",
         tier: ProtectionTier::WriteOnly,
     },
@@ -389,6 +393,26 @@ mod tests {
         assert_eq!(
             check_topic_access("$DB/users/events/created", true, true),
             Err(BlockReason::ReadOnlyTopic)
+        );
+    }
+
+    #[test]
+    fn check_access_presence_read_only() {
+        assert_eq!(
+            check_topic_access("$DB/_presence/seat-holder-7", false, false),
+            Ok(()),
+            "a non-admin janitor must be able to subscribe to presence"
+        );
+        assert_eq!(check_topic_access("$DB/_presence/#", false, false), Ok(()));
+        assert_eq!(
+            check_topic_access("$DB/_presence/seat-holder-7", true, false),
+            Err(BlockReason::ReadOnlyTopic),
+            "a client must not be able to forge a presence message"
+        );
+        assert_eq!(
+            check_topic_access("$DB/_presence/seat-holder-7", true, true),
+            Err(BlockReason::ReadOnlyTopic),
+            "not even an admin may publish presence; only the internal service bypass may"
         );
     }
 

@@ -121,18 +121,44 @@ Cluster sweep (PR 1b) additional semantics:
 
 ### C. Presence feed (both modes)
 
-- Cluster (`cluster/event_handler/broker_events.rs`): emit connect + disconnect events,
-  fanned out the **LWT way** (`forward_publish_to_remotes` + topic-index targets) —
-  `queue_local_publish` and change events are local-only and are the wrong template. The
-  publish target must not be swallowed by the DB-op handler (carve `_presence` out of the
-  `handle_db_publish` interception, or publish outside `$DB`), and a shared
-  topic-protection rule (`$DB/_presence/# ReadOnly`, mirroring `$DB/+/events/#` in
-  `mqdb-agent/src/topic_rules.rs`) lets a non-admin janitor subscribe. Keep the `mqdb-`
-  internal-client skip.
-- Agent: wire a `BrokerEventHandler` (none exists today) + a `spawn_presence_task`
-  publishing locally.
-- Payload: `{client_id, user_id, event, unexpected, ts}`. Treat as a **hint** — dropped
-  under load, flap-reordered; `ts` authoritative.
+Topic `$DB/_presence/{client_id}`, retained, QoS 0, opt-in via `--presence` /
+`MQDB_PRESENCE` (default off). Payload `{client_id, user_id, event, unexpected, ts}`.
+Treat as a **hint** — dropped under load (bounded queue), flap-reordered; `ts`
+authoritative. Fires on **both** clean and unexpected disconnect, unlike LWT which is
+`unexpected`-gated. The `mqdb-` internal-client skip is kept, so internal clients are
+invisible in the feed.
+
+Retained means one retained message per distinct `client_id`, overwritten in place.
+Bounded by the client population; a deployment minting a fresh random `client_id` per
+session will accumulate entries.
+
+Agent (done): `presence.rs` holds the shared payload plus a `PresenceEventHandler`
+implementing `BrokerEventHandler` (the agent had none — `config.event_handler` was always
+`None`), wired via `config.event_handler` before `MqttBroker::with_config`. It pushes onto
+a bounded channel drained by `spawn_presence_task`, which publishes retained through the
+internal `mqdb-presence-publisher` client. `handle_message` skips the presence prefix so
+the agent's own `$DB/#` subscriber does not re-parse presence as a DB op.
+
+Topic protection: `$DB/_presence/# ReadOnly` is **mandatory**, for two reasons. It blocks
+every client — admins included, since `ReadOnly` has no `is_admin` exemption — from
+forging a presence message, leaving only the internal-service username bypass; and it
+short-circuits `is_internal_entity_topic`, which would otherwise deny a non-admin
+janitor's *subscribe* outright because `_presence` is `_`-prefixed.
+
+Cluster (follow-up): **do not** copy the LWT template. Two verified constraints shape it:
+- `on_client_publish` swallows any `$DB/` topic outside
+  `{_health,_admin,_sub,_resp}` (`PublishAction::Handled`), and a broker-injected
+  `queue_local_publish` *does* re-enter that handler (on QUIC it publishes as
+  `mqdb-admin-<node>`, which the `mqdb-forward-` bypass does not match). So `_presence`
+  must be added to that allow-list.
+- `TopicTrie::match_topic` returns nothing for any `$`-prefixed topic, so a
+  `$DB/_presence/#` subscriber can never be resolved as a cross-node target. Cross-node
+  delivery therefore **broadcasts** presence to every node, each publishing locally (the
+  broker's own matcher is spec-correct and does match `$DB/_presence/#`), rather than
+  routing via `route_and_forward_publish`. A happy side effect: every node ends up holding
+  the retained set, so a janitor sees the full picture from whichever node it attaches to.
+- The janitor must **not** be named `mqdb-*`: `on_client_subscribe` early-returns on that
+  prefix, so its subscription would never be registered cluster-wide.
 
 ## Phasing
 

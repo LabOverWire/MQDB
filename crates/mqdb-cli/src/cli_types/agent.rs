@@ -115,6 +115,12 @@ pub(crate) struct AgentStartFields {
     pub(crate) scoped_events: bool,
     #[arg(
         long,
+        env = "MQDB_PRESENCE",
+        help = "Publish client connect/disconnect presence to $DB/_presence/{client_id} (retained, QoS 0) for subscribers such as an abandoned-hold janitor"
+    )]
+    pub(crate) presence: bool,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]

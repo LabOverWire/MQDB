@@ -3,6 +3,9 @@
 
 use super::MqdbAgent;
 use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
+use crate::presence::{
+    PRESENCE_CHANNEL_CAPACITY, PRESENCE_TOPIC_PREFIX, PresenceEvent, PresenceEventHandler,
+};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::config::{
@@ -119,6 +122,19 @@ impl MqdbAgent {
             needs_composite,
             admin_users,
         ))
+    }
+
+    pub(super) fn apply_presence_handler(
+        &self,
+        config: &mut BrokerConfig,
+    ) -> Option<flume::Receiver<PresenceEvent>> {
+        if !self.presence {
+            return None;
+        }
+        let (sender, receiver) = flume::bounded(PRESENCE_CHANNEL_CAPACITY);
+        config.event_handler = Some(Arc::new(PresenceEventHandler::new(sender)));
+        info!("presence feed enabled on {PRESENCE_TOPIC_PREFIX}<client_id>");
+        Some(receiver)
     }
 
     pub(super) fn apply_transport_config(&self, config: &mut BrokerConfig) {
