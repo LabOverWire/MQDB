@@ -262,7 +262,7 @@ impl MqdbAgent {
             tokio::time::sleep(Duration::from_millis(200)).await;
 
             let client = MqttClient::new("mqdb-presence-publisher");
-            let addr = format!("{}:{}", presence_addr.ip(), presence_addr.port());
+            let addr = resolve_connect_address(presence_addr);
 
             if let Err(e) = connect_mqtt_client(
                 &client,
@@ -284,12 +284,19 @@ impl MqdbAgent {
                             debug!("Presence channel closed");
                             break;
                         };
+                        let payload = match presence.payload() {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                error!("Failed to serialize presence: {e}");
+                                continue;
+                            }
+                        };
                         let options = mqtt5::types::PublishOptions {
                             retain: true,
                             ..Default::default()
                         };
                         if let Err(e) = client
-                            .publish_with_options(&presence.topic(), presence.payload(), options)
+                            .publish_with_options(&presence.topic(), payload, options)
                             .await
                         {
                             warn!("Failed to publish presence: {e}");

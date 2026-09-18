@@ -130,7 +130,17 @@ invisible in the feed.
 
 Retained means one retained message per distinct `client_id`, overwritten in place.
 Bounded by the client population; a deployment minting a fresh random `client_id` per
-session will accumulate entries.
+session will accumulate entries, and the `ReadOnly` rule blocks operators from clearing
+one with an empty payload — only the internal publisher can overwrite it.
+
+Two failure modes are asymmetric and worth stating plainly. A dropped `disconnect` only
+defers reclaim to the TTL backstop, but a dropped `connect` leaves a live client retained
+as disconnected. Likewise a **session takeover** fires the displaced connection's
+disconnect *after* the new connection's connect (mqtt5 `register_client` precedes
+`fire_connect_event`, and `fire_disconnect_event` runs unconditionally regardless of
+`session_taken_over`), so the handler counts live connections per `client_id` and reports
+`disconnect` only when the last one closes. Presence is also unscoped: every subscriber
+sees every client id, user id and connection timing.
 
 Agent (done): `presence.rs` holds the shared payload plus a `PresenceEventHandler`
 implementing `BrokerEventHandler` (the agent had none — `config.event_handler` was always
