@@ -4,10 +4,11 @@
 use super::protocol::{
     BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, FkCheckRequest,
     FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse, ForwardedPublish, Heartbeat,
-    JsonDbRequest, JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
-    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse, WildcardBroadcast,
+    JsonDbRequest, JsonDbResponse, PresenceBroadcast, QueryRequest, QueryResponse, ReplicationAck,
+    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
+    WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
@@ -47,6 +48,7 @@ pub enum ClusterMessage {
     QueryResponse(QueryResponse),
     BatchReadRequest(BatchReadRequest),
     BatchReadResponse(BatchReadResponse),
+    PresenceBroadcast(PresenceBroadcast),
     WildcardBroadcast(WildcardBroadcast),
     TopicSubscriptionBroadcast(TopicSubscriptionBroadcast),
     PartitionUpdate(PartitionUpdate),
@@ -99,6 +101,7 @@ impl ClusterMessage {
             Self::QueryResponse(_) => 51,
             Self::BatchReadRequest(_) => 52,
             Self::BatchReadResponse(_) => 53,
+            Self::PresenceBroadcast(_) => 62,
             Self::WildcardBroadcast(_) => 60,
             Self::TopicSubscriptionBroadcast(_) => 61,
             Self::PartitionUpdate(_) => 70,
@@ -145,6 +148,7 @@ impl ClusterMessage {
             Self::QueryResponse(_) => "QueryResponse",
             Self::BatchReadRequest(_) => "BatchReadRequest",
             Self::BatchReadResponse(_) => "BatchReadResponse",
+            Self::PresenceBroadcast(_) => "PresenceBroadcast",
             Self::WildcardBroadcast(_) => "WildcardBroadcast",
             Self::TopicSubscriptionBroadcast(_) => "TopicSubscriptionBroadcast",
             Self::PartitionUpdate(_) => "PartitionUpdate",
@@ -194,6 +198,7 @@ impl ClusterMessage {
             Self::QueryResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
             Self::BatchReadRequest(req) => buf.extend_from_slice(&req.to_bytes()),
             Self::BatchReadResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::PresenceBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::WildcardBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::TopicSubscriptionBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::PartitionUpdate(u) => buf.extend_from_slice(&u.to_be_bytes()),
@@ -294,6 +299,10 @@ impl ClusterMessage {
             61 => {
                 let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(data).ok()?;
                 Some(Self::TopicSubscriptionBroadcast(broadcast))
+            }
+            62 => {
+                let (broadcast, _) = PresenceBroadcast::try_from_be_bytes(data).ok()?;
+                Some(Self::PresenceBroadcast(broadcast))
             }
             70 => {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;

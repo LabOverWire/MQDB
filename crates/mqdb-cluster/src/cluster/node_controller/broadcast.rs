@@ -11,6 +11,21 @@ use super::super::{Epoch, NodeId, PartitionId, SubscriptionType, WildcardStoreEr
 use super::NodeController;
 
 impl<T: ClusterTransport> NodeController<T> {
+    pub(crate) async fn handle_presence_broadcast(
+        &self,
+        from: NodeId,
+        broadcast: &crate::cluster::protocol::PresenceBroadcast,
+    ) {
+        let topic = broadcast.topic_str();
+        if topic.is_empty() {
+            return;
+        }
+        tracing::debug!(topic, from = from.get(), "received presence broadcast");
+        self.transport()
+            .queue_local_publish_retained(topic.to_string(), broadcast.payload().to_vec(), 0)
+            .await;
+    }
+
     pub(crate) fn handle_wildcard_broadcast(
         &mut self,
         from: NodeId,

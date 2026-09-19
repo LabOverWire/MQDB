@@ -1293,6 +1293,9 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::BatchReadRequest(request) => {
                 self.handle_batch_read_and_respond(from, request).await;
             }
+            ClusterMessage::PresenceBroadcast(broadcast) => {
+                self.handle_presence_broadcast(from, broadcast).await;
+            }
             ClusterMessage::WildcardBroadcast(broadcast) => {
                 self.handle_wildcard_broadcast(from, broadcast);
             }

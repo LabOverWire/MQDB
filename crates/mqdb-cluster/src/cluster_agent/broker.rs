@@ -132,7 +132,8 @@ impl ClusteredAgent {
             ClusterEventHandler::new(self.node_id, self.controller.clone())
                 .with_ownership(ownership)
                 .with_scope_config(Arc::clone(&self.scope_config))
-                .with_vault_key_store(Arc::clone(&self.vault_key_store)),
+                .with_vault_key_store(Arc::clone(&self.vault_key_store))
+                .with_presence(self.presence),
         );
         self.configure_broker_with_auth(
             event_handler,
@@ -544,7 +545,8 @@ impl ClusteredAgent {
             ClusterEventHandler::new(self.node_id, self.controller.clone())
                 .with_ownership(Arc::clone(&self.ownership))
                 .with_scope_config(Arc::clone(&self.scope_config))
-                .with_vault_key_store(Arc::clone(&self.vault_key_store)),
+                .with_vault_key_store(Arc::clone(&self.vault_key_store))
+                .with_presence(self.presence),
         );
         let synced_retained_topics = event_handler.synced_retained_topics();
 

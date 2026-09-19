@@ -243,6 +243,7 @@ impl ClusteredAgent {
             http_config: config.http_config,
             ownership: ownership_arc,
             scope_config: Arc::new(config.scope_config),
+            presence: config.presence,
             auth_providers: None,
             vault_key_store,
             license_expires_at: config.license_expires_at,

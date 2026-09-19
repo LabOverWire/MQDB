@@ -37,6 +37,7 @@ impl ClusterConfig {
             http_config: None,
             ownership: mqdb_core::types::OwnershipConfig::default(),
             scope_config: mqdb_core::types::ScopeConfig::default(),
+            presence: false,
             passphrase: None,
             license_expires_at: None,
         }
@@ -197,6 +198,12 @@ impl ClusterConfig {
     #[must_use]
     pub fn with_scope_config(mut self, scope_config: mqdb_core::types::ScopeConfig) -> Self {
         self.scope_config = scope_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_presence(mut self, enabled: bool) -> Self {
+        self.presence = enabled;
         self
     }
 

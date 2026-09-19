@@ -32,11 +32,20 @@ fn create_test_controller(
     )
 }
 
+type RetainedPublishes = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+type SentMessages = Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>;
+type PresenceHarness = (
+    crate::cluster::event_handler::ClusterEventHandler<MockTransport>,
+    RetainedPublishes,
+    SentMessages,
+);
+
 #[derive(Debug, Clone)]
 struct MockTransport {
     node_id: NodeId,
     inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
+    retained_publishes: RetainedPublishes,
 }
 
 impl MockTransport {
@@ -45,6 +54,7 @@ impl MockTransport {
             node_id,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             outbox: Arc::new(Mutex::new(Vec::new())),
+            retained_publishes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -100,7 +110,12 @@ impl ClusterTransport for MockTransport {
 
     async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
 
-    async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _qos: u8) {
+        self.retained_publishes
+            .lock()
+            .unwrap()
+            .push((topic, payload));
+    }
 }
 
 fn setup_controller_with_partition(partition: PartitionId) -> NodeController<MockTransport> {
@@ -2379,6 +2394,7 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
         node_id: node1,
         inbox: Arc::new(Mutex::new(VecDeque::new())),
         outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -2467,6 +2483,7 @@ async fn cluster_forwarded_read_graded_against_grant_on_primary() {
         node_id: node1,
         inbox: Arc::new(Mutex::new(VecDeque::new())),
         outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -2834,4 +2851,126 @@ async fn cluster_identity_inflight_resolution_completes_when_not_unshared() {
         resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "canon-1").await["status"],
         "ok"
     );
+}
+
+fn presence_handler_with_transport() -> PresenceHarness {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let retained = Arc::clone(&transport.retained_publishes);
+    let outbox = Arc::clone(&transport.outbox);
+    let ctrl = create_test_controller(node1, transport);
+    let handler = crate::cluster::event_handler::ClusterEventHandler::new(
+        node1,
+        Arc::new(tokio::sync::RwLock::new(ctrl)),
+    )
+    .with_presence(true);
+    (handler, retained, outbox)
+}
+
+fn cluster_connect_event(client_id: &str) -> mqtt5::broker::events::ClientConnectEvent {
+    mqtt5::broker::events::ClientConnectEvent {
+        client_id: client_id.into(),
+        user_id: Some("alice".into()),
+        clean_start: true,
+        session_expiry_interval: 0,
+        will_topic: None,
+        will_payload: None,
+        will_qos: None,
+        will_retain: None,
+    }
+}
+
+#[tokio::test]
+async fn cluster_presence_publishes_locally_and_broadcasts() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, retained, outbox) = presence_handler_with_transport();
+    handler
+        .on_client_connect(cluster_connect_event("seat-holder-7"))
+        .await;
+
+    let published = retained.lock().unwrap().clone();
+    assert_eq!(published.len(), 1, "presence must be delivered locally");
+    assert_eq!(published[0].0, "$DB/_presence/seat-holder-7");
+    let value: serde_json::Value = serde_json::from_slice(&published[0].1).unwrap();
+    assert_eq!(value["event"], "connect");
+    assert_eq!(value["user_id"], "alice");
+
+    let broadcasts = outbox.lock().unwrap();
+    let presence_broadcasts: Vec<_> = broadcasts
+        .iter()
+        .filter_map(|(_, msg)| match msg {
+            ClusterMessage::PresenceBroadcast(b) => Some(b),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        presence_broadcasts.len(),
+        1,
+        "cross-node delivery relies on a broadcast, not wildcard routing"
+    );
+    assert_eq!(
+        presence_broadcasts[0].topic_str(),
+        "$DB/_presence/seat-holder-7"
+    );
+}
+
+#[tokio::test]
+async fn cluster_presence_skips_internal_clients_and_takeover() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, retained, _outbox) = presence_handler_with_transport();
+
+    handler
+        .on_client_connect(cluster_connect_event("mqdb-admin-1"))
+        .await;
+    assert!(
+        retained.lock().unwrap().is_empty(),
+        "internal clients must not appear in the presence feed"
+    );
+
+    handler
+        .on_client_connect(cluster_connect_event("seat-holder-7"))
+        .await;
+    handler
+        .on_client_connect(cluster_connect_event("seat-holder-7"))
+        .await;
+    retained.lock().unwrap().clear();
+
+    handler
+        .on_client_disconnect(mqtt5::broker::events::ClientDisconnectEvent {
+            client_id: "seat-holder-7".into(),
+            user_id: Some("alice".into()),
+            reason: mqtt5::types::ReasonCode::Success,
+            unexpected: true,
+        })
+        .await;
+    assert!(
+        retained.lock().unwrap().is_empty(),
+        "a displaced connection must not report a live client as disconnected"
+    );
+}
+
+#[tokio::test]
+async fn received_presence_broadcast_is_published_locally() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let retained = Arc::clone(&transport.retained_publishes);
+    let ctrl = create_test_controller(node1, transport);
+
+    let broadcast = crate::cluster::protocol::PresenceBroadcast::try_new(
+        "$DB/_presence/remote-holder",
+        br#"{"client_id":"remote-holder","event":"disconnect"}"#,
+    )
+    .expect("presence fits in a broadcast");
+    ctrl.handle_presence_broadcast(node2, &broadcast).await;
+
+    let published = retained.lock().unwrap().clone();
+    assert_eq!(
+        published.len(),
+        1,
+        "a node must locally publish presence it receives"
+    );
+    assert_eq!(published[0].0, "$DB/_presence/remote-holder");
 }

@@ -43,6 +43,7 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) oauth: OAuthArgs,
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
+    pub(crate) presence: bool,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
     pub(crate) license: Option<PathBuf>,
@@ -205,6 +206,9 @@ pub(crate) async fn cmd_cluster_start(
         let scope_config = mqdb_core::types::ScopeConfig::parse(&event_scope_spec)
             .map_err(|e| format!("invalid --event-scope: {e}"))?;
         config = config.with_scope_config(scope_config);
+    }
+    if args.presence {
+        config = config.with_presence(true);
     }
     if let Some(ref info) = license_info {
         config = config.with_license_expiry(info.expires_at);

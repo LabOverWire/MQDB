@@ -37,6 +37,15 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
+            if self.presence {
+                self.live_connections.register(&event.client_id);
+                self.emit_presence(&mqdb_agent::presence::PresenceEvent::connect(
+                    &event.client_id,
+                    event.user_id.as_deref(),
+                ))
+                .await;
+            }
+
             debug!(
                 client_id = %event.client_id,
                 clean_start = event.clean_start,
@@ -132,6 +141,15 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             if event.client_id.starts_with("mqdb-") {
                 trace!("skipping internal client disconnect");
                 return;
+            }
+
+            if self.presence && self.live_connections.is_last(&event.client_id) {
+                self.emit_presence(&mqdb_agent::presence::PresenceEvent::disconnect(
+                    &event.client_id,
+                    event.user_id.as_deref(),
+                    event.unexpected,
+                ))
+                .await;
             }
 
             debug!(
@@ -396,7 +414,10 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             if event.topic.starts_with("$DB/") {
                 let rest = &event.topic.as_ref()[4..];
                 let first_segment = rest.split('/').next().unwrap_or("");
-                if matches!(first_segment, "_health" | "_admin" | "_sub" | "_resp") {
+                if matches!(
+                    first_segment,
+                    "_health" | "_admin" | "_sub" | "_resp" | "_presence"
+                ) {
                     return PublishAction::Continue;
                 }
                 if let Some(uid) = event.user_id.as_deref() {

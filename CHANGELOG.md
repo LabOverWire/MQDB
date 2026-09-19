@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-09-19 — mqdb-agent 0.8.29, mqdb-cluster 0.4.14, mqdb-cli 0.8.38
+
+### Added
+
+- **Presence feed in cluster mode**, behind the same opt-in `--presence` / `MQDB_PRESENCE` flag as agent mode. Each node publishes a retained QoS 0 message to `$DB/_presence/{client_id}` on connect and disconnect for the clients attached to it, and **broadcasts that message to every other node**, which publishes it locally. A janitor therefore sees every client in the cluster no matter which node it subscribes to, and — because each node ends up holding the retained set — it sees the current state immediately on subscribe from any node.
+- **`mqdb dev test --presence`** — a multi-node E2E suite covering same-node presence, cross-node presence in both directions, retained state reaching a late janitor on a different node, and a client's attempt to forge a presence message being rejected.
+
+### Notes
+
+- Cross-node delivery deliberately uses a broadcast rather than the normal publish routing. `TopicTrie::match_topic` returns no matches for any `$`-prefixed topic, so a `$DB/_presence/#` subscriber can never be resolved as a remote target; routing would silently deliver nothing across nodes while appearing to work on a single node. `_presence` is also added to the `$DB/` pass-through list in the cluster publish handler so the message is delivered to subscribers instead of being taken for a database operation.
+- A session takeover reports its disconnect after the replacing connection's connect, so the cluster tracks live connections per `client_id` and reports `disconnect` only when the last one closes, exactly as agent mode does. Without it a reconnecting holder would be retained as disconnected and could be reclaimed while still connected.
+
 ## 2026-09-12 — mqdb-agent 0.8.28, mqdb-cli 0.8.37
 
 ### Added

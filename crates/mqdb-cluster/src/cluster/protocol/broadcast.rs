@@ -201,3 +201,41 @@ impl TopicSubscriptionBroadcast {
         self.qos
     }
 }
+
+#[derive(Debug, Clone, BeBytes)]
+pub struct PresenceBroadcast {
+    version: u8,
+    topic_len: u16,
+    #[FromField(topic_len)]
+    topic: Vec<u8>,
+    payload_len: u16,
+    #[FromField(payload_len)]
+    payload: Vec<u8>,
+}
+
+impl PresenceBroadcast {
+    pub const VERSION: u8 = 1;
+
+    #[must_use]
+    pub fn try_new(topic: &str, payload: &[u8]) -> Option<Self> {
+        let topic_len = u16::try_from(topic.len()).ok()?;
+        let payload_len = u16::try_from(payload.len()).ok()?;
+        Some(Self {
+            version: Self::VERSION,
+            topic_len,
+            topic: topic.as_bytes().to_vec(),
+            payload_len,
+            payload: payload.to_vec(),
+        })
+    }
+
+    #[must_use]
+    pub fn topic_str(&self) -> &str {
+        std::str::from_utf8(&self.topic).unwrap_or("")
+    }
+
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}

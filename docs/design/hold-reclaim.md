@@ -155,7 +155,7 @@ forging a presence message, leaving only the internal-service username bypass; a
 short-circuits `is_internal_entity_topic`, which would otherwise deny a non-admin
 janitor's *subscribe* outright because `_presence` is `_`-prefixed.
 
-Cluster (follow-up): **do not** copy the LWT template. Two verified constraints shape it:
+Cluster (done): **do not** copy the LWT template. Two verified constraints shape it:
 - `on_client_publish` swallows any `$DB/` topic outside
   `{_health,_admin,_sub,_resp}` (`PublishAction::Handled`), and a broker-injected
   `queue_local_publish` *does* re-enter that handler (on QUIC it publishes as
@@ -177,7 +177,8 @@ Cluster (follow-up): **do not** copy the LWT template. Two verified constraints 
 | 1a ✅ | TTL backstop fix — **agent** | `background.rs`: guard release + `expect_value` on scanned bytes + per-entity batches. Standalone data-loss + seat-lockout bug. |
 | 1b ✅ | TTL backstop fix — **cluster** | Rewire `handle_ttl_cleanup` through the replicated delete path (primary-gated, guard release, change event, version precondition) — a larger change than 1a, split out to isolate risk. |
 | 2 ✅ | Client CAS — both paths + new error | `_expected_version` reserved payload key, terminal `PreconditionFailed` (412); agent `update_with_expected`/`delete_with_expected` + both cluster write paths; retry-loop-doesn't-defeat-CAS counter-tests. |
-| 3  | Presence feed — both modes + topic rule | Gated on decisions 1–2 below. |
+| 3a ✅ | Presence feed — **agent** | `presence.rs` handler + `spawn_presence_task` + `$DB/_presence/# ReadOnly`; opt-in `--presence`. |
+| 3b ✅ | Presence feed — **cluster** | `PresenceBroadcast` to all nodes (the `$`-topic wildcard bail makes routing unusable) + `_presence` pass-through; `mqdb dev test --presence`. |
 | app | Janitor + reassert-on-reconnect contract + short keepalive | Out of mqdb (application). |
 
 The TTL fix is split into 1a (agent) and 1b (cluster) because the cluster sweep does a

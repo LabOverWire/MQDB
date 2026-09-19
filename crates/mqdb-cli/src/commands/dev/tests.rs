@@ -64,6 +64,7 @@ pub(crate) fn cmd_dev_test(
     lwt: bool,
     ownership: bool,
     sharing: bool,
+    presence: bool,
     stress_constraints: bool,
     all: bool,
     nodes: u8,
@@ -78,6 +79,7 @@ pub(crate) fn cmd_dev_test(
             && !lwt
             && !ownership
             && !sharing
+            && !presence
             && !stress_constraints);
 
     wait_for_cluster_ready(nodes, 10);
@@ -113,6 +115,10 @@ pub(crate) fn cmd_dev_test(
 
     if sharing {
         run_test_sharing(nodes, &ports, license);
+    }
+
+    if presence {
+        run_test_presence(nodes, &ports, license);
     }
 
     if stress_constraints {
@@ -1435,5 +1441,220 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
+    println!("\nResults: {passed} passed, {failed} failed\n");
+}
+
+fn start_presence_cluster(
+    nodes: u8,
+    exe: &Path,
+    passwd_path: &str,
+    license: Option<&Path>,
+) -> bool {
+    let db_prefix = "/tmp/mqdb-test-presence";
+
+    let _ = std::fs::remove_file(passwd_path);
+    for (user, pass) in [("alice", "alice"), ("admin", "admin")] {
+        let _ = Command::new(exe)
+            .args(["passwd", user, "-b", pass, "-f", passwd_path])
+            .output();
+    }
+
+    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+    std::thread::sleep(Duration::from_secs(1));
+    for i in 1..=nodes {
+        let _ = std::fs::remove_dir_all(format!("{db_prefix}-{i}"));
+    }
+
+    let quic_cert = PathBuf::from("test_certs/server.pem");
+    let quic_key = PathBuf::from("test_certs/server.key");
+    let quic_ca = PathBuf::from("test_certs/ca.pem");
+
+    for node_id in 1..=nodes {
+        let port = 1882 + u16::from(node_id);
+        let db_path = format!("{db_prefix}-{node_id}");
+        let _ = std::fs::create_dir_all(&db_path);
+
+        let mut cmd = Command::new(exe);
+        cmd.args([
+            "cluster",
+            "start",
+            "--node-id",
+            &node_id.to_string(),
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--db",
+            &db_path,
+            "--admin-users",
+            "admin",
+            "--passwd",
+            passwd_path,
+            "--presence",
+        ]);
+
+        if let Some(lic_str) = license.and_then(|p| p.to_str()) {
+            cmd.args(["--license", lic_str]);
+        }
+
+        let peers: Vec<String> = (1..node_id)
+            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+            .collect();
+        if !peers.is_empty() {
+            cmd.args(["--peers", &peers.join(",")]);
+        }
+
+        if quic_cert.exists() && quic_key.exists() {
+            cmd.args([
+                "--quic-cert",
+                quic_cert.to_str().unwrap_or(""),
+                "--quic-key",
+                quic_key.to_str().unwrap_or(""),
+            ]);
+            if quic_ca.exists() {
+                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+            }
+            #[cfg(feature = "dev-insecure")]
+            cmd.arg("--quic-insecure");
+        }
+
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+        );
+        if let Ok(log_file) = std::fs::File::create(format!("{db_path}/mqdb.log")) {
+            if let Ok(log_clone) = log_file.try_clone() {
+                cmd.stdout(log_clone);
+            }
+            cmd.stderr(log_file);
+        }
+
+        println!("  Starting node {node_id} on port {port} (auth + presence)...");
+        let _ = cmd.spawn();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    println!("  Waiting for authenticated cluster...");
+    wait_for_auth_cluster(nodes, 15)
+}
+
+fn capture_presence(sub_port: u16, holder_id: &str, holder_port: u16) -> String {
+    let script = format!(
+        "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v > /tmp/mqdb-presence-out.txt & \
+         sleep 2; \
+         mosquitto_pub -i '{holder_id}' -h 127.0.0.1 -p {holder_port} -u alice -P alice -t 'presence/noop' -m 'x'; \
+         sleep 2; wait"
+    );
+    let _ = Command::new("timeout")
+        .args(["8", "sh", "-c", &script])
+        .output();
+    std::fs::read_to_string("/tmp/mqdb-presence-out.txt").unwrap_or_default()
+}
+
+fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
+    println!("=== Cluster Presence Feed E2E ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let passwd_path = "/tmp/mqdb-test-presence-passwd";
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    if !start_presence_cluster(nodes, &exe, passwd_path, license) {
+        println!("  Cluster failed to become ready");
+        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
+        println!("\nResults: 0 passed, 1 failed\n");
+        return;
+    }
+    println!("  Authenticated cluster ready!\n");
+
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
+
+    let mut check = |name: &str, ok: bool| {
+        if ok {
+            println!("  {name}: ✓");
+            passed += 1;
+        } else {
+            println!("  {name}: ✗");
+            failed += 1;
+        }
+    };
+
+    let same_id = format!("seat-holder-same-{ts}");
+    let out = capture_presence(1883, &same_id, 1883);
+    check(
+        "same-node connect presence",
+        out.contains(&same_id) && out.contains("\"event\":\"connect\""),
+    );
+    check(
+        "same-node disconnect presence",
+        out.contains(&same_id) && out.contains("\"event\":\"disconnect\""),
+    );
+
+    if nodes >= 2 {
+        let cross_id = format!("seat-holder-cross-{ts}");
+        let out = capture_presence(1883, &cross_id, 1884);
+        check(
+            "cross-node connect presence (janitor n1, holder n2)",
+            out.contains(&cross_id) && out.contains("\"event\":\"connect\""),
+        );
+        check(
+            "cross-node disconnect presence (janitor n1, holder n2)",
+            out.contains(&cross_id) && out.contains("\"event\":\"disconnect\""),
+        );
+    }
+
+    if nodes >= 3 {
+        let far_id = format!("seat-holder-far-{ts}");
+        let out = capture_presence(1885, &far_id, 1884);
+        check(
+            "cross-node presence (janitor n3, holder n2)",
+            out.contains(&far_id),
+        );
+    }
+
+    let retained_id = format!("seat-holder-retained-{ts}");
+    let _ = Command::new("timeout")
+        .args([
+            "5",
+            "sh",
+            "-c",
+            &format!(
+                "mosquitto_pub -i '{retained_id}' -h 127.0.0.1 -p 1884 -u alice -P alice -t 'presence/noop' -m 'x'"
+            ),
+        ])
+        .output();
+    std::thread::sleep(Duration::from_secs(2));
+    let late = Command::new("timeout")
+        .args([
+            "5",
+            "sh",
+            "-c",
+            "mosquitto_sub -i 'janitor-late' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/#' -v -W 3",
+        ])
+        .output()
+        .map_or_else(|_| String::new(), |o| String::from_utf8_lossy(&o.stdout).to_string());
+    check(
+        "retained presence reaches a late janitor on another node",
+        late.contains(&retained_id),
+    );
+
+    let _ = Command::new("timeout")
+        .args([
+            "5",
+            "sh",
+            "-c",
+            "mosquitto_pub -i 'attacker' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/victim' -m '{\"forged\":true}'",
+        ])
+        .output();
+    let victim = Command::new("timeout")
+        .args([
+            "5",
+            "sh",
+            "-c",
+            "mosquitto_sub -i 'janitor-forge' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/victim' -v -W 3",
+        ])
+        .output()
+        .map_or_else(|_| String::new(), |o| String::from_utf8_lossy(&o.stdout).to_string());
+    check("a client cannot forge presence", !victim.contains("forged"));
+
+    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
     println!("\nResults: {passed} passed, {failed} failed\n");
 }
