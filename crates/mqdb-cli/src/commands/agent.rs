@@ -31,6 +31,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) ownership: Option<String>,
     pub(crate) ownership_derive: Option<String>,
     pub(crate) scoped_events: bool,
+    pub(crate) presence: bool,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
@@ -158,6 +159,10 @@ pub(crate) async fn cmd_agent_start(
 
     if args.scoped_events {
         agent = agent.with_scoped_events(true);
+    }
+
+    if args.presence {
+        agent = agent.with_presence(true);
     }
 
     #[cfg(feature = "opentelemetry")]

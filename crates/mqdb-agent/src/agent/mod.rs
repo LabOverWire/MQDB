@@ -39,6 +39,7 @@ pub struct MqdbAgent {
     pub(super) ownership_config: Arc<mqdb_core::types::OwnershipConfig>,
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) scoped_events: bool,
+    pub(super) presence: bool,
     pub(super) vault_backend: Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
     pub(super) auth_rate_limiter: Arc<RateLimiter>,
@@ -76,6 +77,7 @@ impl MqdbAgent {
             ownership_config: Arc::new(mqdb_core::types::OwnershipConfig::default()),
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             scoped_events: false,
+            presence: false,
             vault_backend: Arc::new(NoopVaultBackend),
             #[cfg(feature = "http-api")]
             auth_rate_limiter: Arc::new(RateLimiter::new(10)),
@@ -208,6 +210,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_presence(mut self, enabled: bool) -> Self {
+        self.presence = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
         self.license_expires_at = Some(expires_at);
         self
@@ -259,6 +267,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
+        let presence_rx = self.apply_presence_handler(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -291,6 +300,14 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
         );
+        let presence_task = presence_rx.map(|rx| {
+            self.spawn_presence_task(
+                bind_addr,
+                service_username.clone(),
+                service_password.clone(),
+                rx,
+            )
+        });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
             #[cfg(feature = "http-api")]
             {
@@ -315,6 +332,9 @@ impl MqdbAgent {
         let _ = self.shutdown_tx.send(());
         let _ = handler_task.await;
         let _ = event_task.await;
+        if let Some(presence) = presence_task {
+            let _ = presence.await;
+        }
         if let Some(http) = http_task {
             let _ = http.await;
         }
@@ -344,6 +364,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
+        let presence_rx = self.apply_presence_handler(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -379,6 +400,14 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
         );
+        let presence_task = presence_rx.map(|rx| {
+            self.spawn_presence_task(
+                bind_addr,
+                service_username.clone(),
+                service_password.clone(),
+                rx,
+            )
+        });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
             #[cfg(feature = "http-api")]
             {
@@ -414,6 +443,9 @@ impl MqdbAgent {
             let _ = shutdown_tx.send(());
             let _ = handler_task.await;
             let _ = event_task.await;
+            if let Some(presence) = presence_task {
+                let _ = presence.await;
+            }
             if let Some(http) = http_task {
                 let _ = http.await;
             }

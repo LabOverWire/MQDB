@@ -249,6 +249,68 @@ impl MqdbAgent {
         })
     }
 
+    pub(super) fn spawn_presence_task(
+        &self,
+        presence_addr: SocketAddr,
+        presence_service_username: Option<String>,
+        presence_service_password: Option<String>,
+        presence_rx: flume::Receiver<crate::presence::PresenceEvent>,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut presence_shutdown_rx = self.shutdown_tx.subscribe();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            let client = MqttClient::new("mqdb-presence-publisher");
+            let addr = resolve_connect_address(presence_addr);
+
+            if let Err(e) = connect_mqtt_client(
+                &client,
+                "mqdb-presence-publisher",
+                &addr,
+                presence_service_username,
+                presence_service_password,
+            )
+            .await
+            {
+                error!("Failed to connect presence publisher: {e}");
+                return;
+            }
+
+            loop {
+                tokio::select! {
+                    presence = presence_rx.recv_async() => {
+                        let Ok(presence) = presence else {
+                            debug!("Presence channel closed");
+                            break;
+                        };
+                        let payload = match presence.payload() {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                error!("Failed to serialize presence: {e}");
+                                continue;
+                            }
+                        };
+                        let options = mqtt5::types::PublishOptions {
+                            retain: true,
+                            ..Default::default()
+                        };
+                        if let Err(e) = client
+                            .publish_with_options(&presence.topic(), payload, options)
+                            .await
+                        {
+                            warn!("Failed to publish presence: {e}");
+                        }
+                    }
+                    _ = presence_shutdown_rx.recv() => {
+                        debug!("Presence publisher shutting down");
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     #[cfg(feature = "http-api")]
     pub(super) fn spawn_http_task(
         &self,

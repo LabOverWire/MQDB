@@ -194,6 +194,10 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         return;
     }
 
+    if topic.starts_with(crate::presence::PRESENCE_TOPIC_PREFIX) {
+        return;
+    }
+
     if let Some(admin_op) = parse_admin_topic(topic) {
         let admin_ctx = AdminContext {
             db,

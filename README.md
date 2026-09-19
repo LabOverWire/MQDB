@@ -844,6 +844,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_OWNERSHIP` | Ownership config (`entity=field` pairs) | — |
 | `MQDB_OWNERSHIP_DERIVE` | Child-entity access derivation (`child=field>parent` pairs, agent mode only) | — |
 | `MQDB_SCOPED_EVENTS` | Route change events to per-recipient topics for ownership-enabled entities (agent mode only) | `false` |
+| `MQDB_PRESENCE` | Publish client connect/disconnect presence to `$DB/_presence/{client_id}` (retained, QoS 0; agent mode only) | `false` |
 | `MQDB_EVENT_SCOPE` | Scope events by entity field | — |
 | `MQDB_WS_BIND` | WebSocket bind address | — |
 
