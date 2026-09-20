@@ -241,6 +241,14 @@ impl ClusteredAgent {
         let raft_status = self.rx_raft_status.borrow().clone();
 
         let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
+        let members = ctrl.known_members();
+        let unlinked_nodes: Vec<u16> = ctrl
+            .unlinked_from(&members)
+            .await
+            .iter()
+            .map(|n| n.get())
+            .collect();
+        let known_members: Vec<u16> = members.iter().map(|n| n.get()).collect();
 
         let mut partitions = Vec::new();
         for partition in PartitionId::all() {
@@ -274,6 +282,8 @@ impl ClusteredAgent {
             "store_client_locations": stores.client_locations.len(),
             "store_db_data": stores.db_data.len(),
             "alive_nodes": alive_nodes,
+            "known_members": known_members,
+            "unlinked_nodes": unlinked_nodes,
             "partition_count": NUM_PARTITIONS,
             "partitions": partitions
         }))

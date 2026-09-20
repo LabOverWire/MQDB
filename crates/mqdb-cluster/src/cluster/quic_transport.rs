@@ -363,6 +363,10 @@ impl ClusterTransport for QuicDirectTransport {
         Err(TransportError::PartitionNotFound(partition))
     }
 
+    async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+        Some(self.peers.read().await.keys().copied().collect())
+    }
+
     fn recv(&self) -> Option<InboundMessage> {
         if let Ok(mut requeue) = self.requeue_buffer.try_lock()
             && let Some(msg) = requeue.pop_front()

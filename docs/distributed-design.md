@@ -1508,12 +1508,17 @@ mqdb cluster start \
 
 ### 10.2 Join Existing Cluster
 
+`--peers` must list **every** other node, not just one seed. Messages travel over direct peer
+connections and are never relayed, so any node pair without a direct link cannot exchange
+subscriptions, presence, client locations or forwarded publishes, and cannot serve each other's
+partitions.
+
 ```bash
 mqdb cluster start \
-    --node-id 2 \
-    --bind 127.0.0.1:1884 \
-    --db /var/lib/mqdb/node2 \
-    --peers "1@127.0.0.1:1883"
+    --node-id 3 \
+    --bind 127.0.0.1:1885 \
+    --db /var/lib/mqdb/node3 \
+    --peers "1@127.0.0.1:1883,2@127.0.0.1:1884"
 ```
 
 ### 10.3 Bridge Configuration

@@ -97,6 +97,15 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
+    async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(t) => t.direct_peers().await,
+            Self::Quic(t) => t.direct_peers().await,
+        }
+    }
+
     fn recv(&self) -> Option<InboundMessage> {
         match self {
             #[cfg(feature = "mqtt-bridge")]

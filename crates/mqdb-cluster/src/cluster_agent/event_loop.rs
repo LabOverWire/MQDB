@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{AdminRequest, ClusteredAgent};
+use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS};
 use crate::cluster::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, ProcessingBatch,
     TopicSubscriptionBroadcast, WildcardBroadcast,
@@ -78,6 +78,7 @@ impl ClusteredAgent {
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut wildcard_reconciliation_interval = interval(Duration::from_mins(1));
         let mut subscription_reconciliation_interval = interval(Duration::from_mins(5));
+        let mut mesh_check_interval = interval(Duration::from_secs(MESH_CHECK_INTERVAL_SECS));
         let mut retained_sync_cleanup_interval =
             interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
         let mut cascade_retry_interval = tokio::time::interval_at(
@@ -144,6 +145,9 @@ impl ClusteredAgent {
                 }
                 _ = subscription_reconciliation_interval.tick() => {
                     self.handle_subscription_reconciliation().await;
+                }
+                _ = mesh_check_interval.tick() => {
+                    self.warn_on_unlinked_nodes().await;
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
                     Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
@@ -551,6 +555,24 @@ impl ClusteredAgent {
         if expired_unique > 0 {
             info!(expired_unique, "reclaimed abandoned unique reservations");
         }
+    }
+
+    async fn warn_on_unlinked_nodes(&self) {
+        let unlinked = {
+            let ctrl = self.controller.read().await;
+            ctrl.unlinked_nodes().await
+        };
+        if unlinked.is_empty() {
+            return;
+        }
+        let nodes: Vec<u16> = unlinked.iter().map(|node| node.get()).collect();
+        tracing::warn!(
+            unlinked_nodes = ?nodes,
+            "cluster mesh is incomplete: these known nodes have no direct connection to this node. \
+             Broadcasts are a single hop and targeted sends are not routed, so subscriptions, \
+             presence, client locations and cross-node publishes will not reach them. \
+             Start every node with --peers listing all other nodes."
+        );
     }
 
     async fn handle_wildcard_reconciliation(&self) {

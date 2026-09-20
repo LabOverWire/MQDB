@@ -304,6 +304,10 @@ impl ClusterTransport for SimulatedTransport {
         }
     }
 
+    async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+        None
+    }
+
     fn recv(&self) -> Option<InboundMessage> {
         let msg = self.network.receive(self.node_id.get())?;
         let message = Self::deserialize_message(&msg.payload)?;

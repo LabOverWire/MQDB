@@ -702,18 +702,34 @@ MQDB supports distributed clustering with automatic failover and partition rebal
     --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
     --license /path/to/license.key
 
-# Node 2 (joins via peer)
+# Node 2 (peers with node 1)
 ./target/release/mqdb cluster start --node-id 2 --bind 127.0.0.1:1884 \
     --db /tmp/mqdb-node2 --peers "1@127.0.0.1:1883" \
     --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
     --license /path/to/license.key
 
-# Node 3 (joins via peer)
+# Node 3 (peers with BOTH existing nodes)
 ./target/release/mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 \
-    --db /tmp/mqdb-node3 --peers "1@127.0.0.1:1883" \
+    --db /tmp/mqdb-node3 --peers "1@127.0.0.1:1883,2@127.0.0.1:1884" \
     --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
     --license /path/to/license.key
 ```
+
+> **Every node must end up peered with every other node.** Inter-node messages are delivered over
+> direct peer connections and are never relayed, so a node with no direct link to another silently
+> misses its subscriptions, presence and cross-node publishes, and cannot read data whose partition
+> primary it is.
+>
+> A node dials only the nodes listed in its `--peers`, and only at startup — it never retries a
+> failed dial and never dials a node it learns about later. Because a dial only succeeds against a
+> node that is already listening, list the nodes started before it, as above; the links to nodes
+> started afterwards are created when *those* nodes dial in. **This also applies to restarts:** a
+> node restarted with only its original seed peer will not be re-dialled by the nodes that started
+> before it, so restart it with `--peers` listing every other node in the cluster.
+>
+> Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes —
+> and the broker logs a warning every minute while the mesh is incomplete. Note that this detects a
+> node that was never linked; a link that dies in flight is not currently detected.
 
 ### Cluster CLI Commands
 
@@ -749,7 +765,7 @@ mosquitto_pub -h 127.0.0.1 -p 1883 -t "events/test" -m "hello" -i publisher1
 | `--node-name` | Human-readable node name |
 | `--bind` | MQTT listener address (default: 0.0.0.0:1883) |
 | `--db` | Database directory path |
-| `--peers` | Peer nodes to join (format: id@host:port) |
+| `--peers` | All other cluster nodes, comma-separated (format: id@host:port). The cluster requires a full mesh: every node must be peered with every other node. |
 | `--quic-cert` | TLS certificate for QUIC transport (must have serverAuth + clientAuth EKU) |
 | `--quic-key` | TLS private key for QUIC transport |
 | `--quic-ca` | CA certificate for mTLS peer verification (required for mTLS) |

@@ -487,6 +487,10 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
         message: ClusterMessage,
     ) -> impl std::future::Future<Output = Result<(), TransportError>> + Send;
 
+    /// Node ids this transport can deliver to directly, or `None` when the transport is
+    /// broker-mediated and has no notion of a direct peer.
+    fn direct_peers(&self) -> impl std::future::Future<Output = Option<Vec<NodeId>>> + Send;
+
     fn recv(&self) -> Option<InboundMessage>;
 
     fn pending_count(&self) -> usize;

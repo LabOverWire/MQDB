@@ -92,6 +92,10 @@ impl ClusterTransport for MockTransport {
         Ok(())
     }
 
+    async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+        None
+    }
+
     fn recv(&self) -> Option<InboundMessage> {
         self.inbox.lock().unwrap().pop_front()
     }
