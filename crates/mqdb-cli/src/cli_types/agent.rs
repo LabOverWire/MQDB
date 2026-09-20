@@ -259,6 +259,12 @@ pub(crate) struct ClusterStartFields {
     pub(crate) event_scope: Option<String>,
     #[arg(
         long,
+        env = "MQDB_PRESENCE",
+        help = "Publish client connect/disconnect presence to $DB/_presence/{client_id} (retained, QoS 0) for subscribers such as an abandoned-hold janitor"
+    )]
+    pub(crate) presence: bool,
+    #[arg(
+        long,
         env = "MQDB_PASSPHRASE_FILE",
         help = "Path to file containing encryption passphrase"
     )]

@@ -155,7 +155,7 @@ forging a presence message, leaving only the internal-service username bypass; a
 short-circuits `is_internal_entity_topic`, which would otherwise deny a non-admin
 janitor's *subscribe* outright because `_presence` is `_`-prefixed.
 
-Cluster (follow-up): **do not** copy the LWT template. Two verified constraints shape it:
+Cluster (done): **do not** copy the LWT template. Two verified constraints shape it:
 - `on_client_publish` swallows any `$DB/` topic outside
   `{_health,_admin,_sub,_resp}` (`PublishAction::Handled`), and a broker-injected
   `queue_local_publish` *does* re-enter that handler (on QUIC it publishes as
@@ -170,6 +170,27 @@ Cluster (follow-up): **do not** copy the LWT template. Two verified constraints 
 - The janitor must **not** be named `mqdb-*`: `on_client_subscribe` early-returns on that
   prefix, so its subscription would never be registered cluster-wide.
 
+Cluster limitations, all verified against a live 3-node cluster:
+- **A presence broadcast is one hop.** `transport.broadcast` walks only the sender's
+  connected peers and is never relayed, so cluster-wide presence requires a **full peer
+  mesh**. This is pre-existing and not presence-specific — wildcard and topic-subscription
+  broadcasts use the same call, and plain cross-node pub/sub fails on the same topology.
+  Verified: on a hub-and-spoke cluster (nodes 2 and 3 each peered only to node 1) a janitor
+  on node 3 receives nothing for a client on node 2, and neither does a plain subscriber.
+  Every `mqdb dev start-cluster` topology happens to form a full mesh, which is why the E2E
+  does not catch it.
+- **A node only honours presence it opted into.** `handle_presence_broadcast` returns early
+  unless the receiving node was started with `--presence`.
+- **Presence retained state is never replicated.** `on_retained_set` skips the presence
+  prefix alongside `$SYS/` and `_mqdb/`, because the broadcast already puts the message on
+  every node; replicating it too would make N nodes race writes to the same key and let
+  arrival order pick the winner.
+- **A dead node's clients stay retained as connected**, since presence is only emitted by
+  the node a client is attached to. Those holds are reclaimed by the TTL backstop, not by
+  presence.
+- The retained local publish is a bounded `try_send`, so under a connect storm a presence
+  message can be dropped and the retained value left stale.
+
 ## Phasing
 
 | PR | Scope | Notes |
@@ -177,7 +198,8 @@ Cluster (follow-up): **do not** copy the LWT template. Two verified constraints 
 | 1a ✅ | TTL backstop fix — **agent** | `background.rs`: guard release + `expect_value` on scanned bytes + per-entity batches. Standalone data-loss + seat-lockout bug. |
 | 1b ✅ | TTL backstop fix — **cluster** | Rewire `handle_ttl_cleanup` through the replicated delete path (primary-gated, guard release, change event, version precondition) — a larger change than 1a, split out to isolate risk. |
 | 2 ✅ | Client CAS — both paths + new error | `_expected_version` reserved payload key, terminal `PreconditionFailed` (412); agent `update_with_expected`/`delete_with_expected` + both cluster write paths; retry-loop-doesn't-defeat-CAS counter-tests. |
-| 3  | Presence feed — both modes + topic rule | Gated on decisions 1–2 below. |
+| 3a ✅ | Presence feed — **agent** | `presence.rs` handler + `spawn_presence_task` + `$DB/_presence/# ReadOnly`; opt-in `--presence`. |
+| 3b ✅ | Presence feed — **cluster** | `PresenceBroadcast` to all nodes (the `$`-topic wildcard bail makes routing unusable) + `_presence` pass-through; `mqdb dev test --presence`. |
 | app | Janitor + reassert-on-reconnect contract + short keepalive | Out of mqdb (application). |
 
 The TTL fix is split into 1a (agent) and 1b (cluster) because the cluster sweep does a

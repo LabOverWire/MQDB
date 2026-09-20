@@ -29,6 +29,8 @@ pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     synced_retained_topics: Arc<RwLock<HashMap<String, Instant>>>,
     db_handler: DbRequestHandler,
     vault_key_store: Arc<VaultKeyStore>,
+    presence: bool,
+    live_connections: mqdb_agent::presence::LiveConnections,
 }
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
@@ -39,7 +41,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             synced_retained_topics: Arc::new(RwLock::new(HashMap::new())),
             db_handler: DbRequestHandler::new(node_id),
             vault_key_store: Arc::new(VaultKeyStore::new()),
+            presence: false,
+            live_connections: mqdb_agent::presence::LiveConnections::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_presence(mut self, enabled: bool) -> Self {
+        self.presence = enabled;
+        self
     }
 
     #[must_use]

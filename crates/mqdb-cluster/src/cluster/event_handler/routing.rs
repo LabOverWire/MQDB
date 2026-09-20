@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::node_controller::NodeController;
+use super::super::protocol::PresenceBroadcast;
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{
     ForwardTarget, ForwardedPublish, LwtPublisher, NodeId, PublishRouter, SubscriptionType,
@@ -13,6 +14,42 @@ use std::collections::HashMap;
 use tracing::{debug, trace, warn};
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
+    pub(super) async fn client_is_live_elsewhere(&self, client_id: &str) -> bool {
+        let ctrl = self.controller.read().await;
+        Self::resolve_connected_node(&ctrl, client_id).is_some_and(|node| node != self.node_id)
+    }
+
+    pub(super) async fn emit_presence(&self, presence: &mqdb_agent::presence::PresenceEvent) {
+        if !mqdb_agent::presence::is_publishable_client_id(&presence.client_id) {
+            return;
+        }
+        let payload = match presence.payload() {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(error = %e, "failed to serialize presence event");
+                return;
+            }
+        };
+        let topic = presence.topic();
+
+        let transport = {
+            let ctrl = self.controller.read().await;
+            ctrl.transport().clone()
+        };
+
+        transport
+            .queue_local_publish_retained(topic.clone(), payload.clone(), 0)
+            .await;
+
+        let Some(broadcast) = PresenceBroadcast::try_new(&topic, &payload) else {
+            warn!(topic, "presence message too large to broadcast");
+            return;
+        };
+        let _ = transport
+            .broadcast(ClusterMessage::PresenceBroadcast(broadcast))
+            .await;
+    }
+
     pub(super) async fn broadcast_topic_subscription(
         ctrl: &NodeController<T>,
         broadcast: TopicSubscriptionBroadcast,

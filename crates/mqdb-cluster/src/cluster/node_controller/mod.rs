@@ -454,6 +454,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_vault_decrypts: HashMap<u64, PendingVaultDecrypt>,
     pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
+    pub(super) presence: bool,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
     #[cfg(feature = "http-api")]
     pub(super) identity_crypto: Option<Arc<mqdb_agent::http::IdentityCrypto>>,
@@ -529,6 +530,7 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_vault_decrypts: HashMap::new(),
             pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
+            presence: false,
             vault_key_store: Arc::new(VaultKeyStore::new()),
             #[cfg(feature = "http-api")]
             identity_crypto: None,
@@ -537,6 +539,10 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub fn set_ownership(&mut self, ownership: Arc<OwnershipConfig>) {
         self.ownership = ownership;
+    }
+
+    pub fn set_presence(&mut self, enabled: bool) {
+        self.presence = enabled;
     }
 
     pub fn set_vault_key_store(&mut self, store: Arc<VaultKeyStore>) {
@@ -1292,6 +1298,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::BatchReadRequest(request) => {
                 self.handle_batch_read_and_respond(from, request).await;
+            }
+            ClusterMessage::PresenceBroadcast(broadcast) => {
+                self.handle_presence_broadcast(from, broadcast).await;
             }
             ClusterMessage::WildcardBroadcast(broadcast) => {
                 self.handle_wildcard_broadcast(from, broadcast);

@@ -88,9 +88,42 @@ impl PresenceEvent {
     }
 }
 
+#[derive(Default)]
+pub struct LiveConnections {
+    counts: Mutex<HashMap<String, u32>>,
+}
+
+impl LiveConnections {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, client_id: &str) {
+        if let Ok(mut counts) = self.counts.lock() {
+            *counts.entry(client_id.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    pub fn is_last(&self, client_id: &str) -> bool {
+        let Ok(mut counts) = self.counts.lock() else {
+            return true;
+        };
+        let Some(remaining) = counts.get_mut(client_id) else {
+            return true;
+        };
+        *remaining = remaining.saturating_sub(1);
+        if *remaining == 0 {
+            counts.remove(client_id);
+            return true;
+        }
+        false
+    }
+}
+
 pub struct PresenceEventHandler {
     sender: flume::Sender<PresenceEvent>,
-    live_connections: Mutex<HashMap<String, u32>>,
+    live_connections: LiveConnections,
 }
 
 impl PresenceEventHandler {
@@ -98,29 +131,16 @@ impl PresenceEventHandler {
     pub fn new(sender: flume::Sender<PresenceEvent>) -> Self {
         Self {
             sender,
-            live_connections: Mutex::new(HashMap::new()),
+            live_connections: LiveConnections::new(),
         }
     }
 
     fn register_connection(&self, client_id: &str) {
-        if let Ok(mut live) = self.live_connections.lock() {
-            *live.entry(client_id.to_string()).or_insert(0) += 1;
-        }
+        self.live_connections.register(client_id);
     }
 
     fn is_last_connection(&self, client_id: &str) -> bool {
-        let Ok(mut live) = self.live_connections.lock() else {
-            return true;
-        };
-        let Some(remaining) = live.get_mut(client_id) else {
-            return true;
-        };
-        *remaining = remaining.saturating_sub(1);
-        if *remaining == 0 {
-            live.remove(client_id);
-            return true;
-        }
-        false
+        self.live_connections.is_last(client_id)
     }
 
     fn emit(&self, presence: PresenceEvent) {

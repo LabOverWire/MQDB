@@ -14,7 +14,7 @@ mod unique;
 #[cfg(test)]
 mod tests;
 
-pub use broadcast::{TopicSubscriptionBroadcast, WildcardBroadcast, WildcardOp};
+pub use broadcast::{PresenceBroadcast, TopicSubscriptionBroadcast, WildcardBroadcast, WildcardOp};
 pub use db_messages::{JsonDbRequest, JsonDbResponse};
 pub use fk::{FkCheckRequest, FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse};
 pub use heartbeat::Heartbeat;
