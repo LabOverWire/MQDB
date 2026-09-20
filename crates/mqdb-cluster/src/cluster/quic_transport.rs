@@ -889,3 +889,95 @@ mod tests {
         assert_eq!(MAX_MESSAGE_SIZE, 10 * 1024 * 1024);
     }
 }
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn cert_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_certs")
+    }
+
+    async fn connected_pair() -> (quinn::Connection, quinn::Connection) {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let certs = cert_dir();
+        let server_config =
+            build_server_config(&certs.join("server.pem"), &certs.join("server.key"), None)
+                .expect("server config");
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server = Endpoint::server(server_config, addr).expect("server endpoint");
+        let server_addr = server.local_addr().expect("local addr");
+
+        let accept = tokio::spawn(async move {
+            let incoming = server.accept().await.expect("incoming");
+            let conn = incoming.await.expect("accepted");
+            (server, conn)
+        });
+
+        let client_config = build_client_config_secure(
+            Some(&certs.join("ca.pem")),
+            Some(&certs.join("client.pem")),
+            Some(&certs.join("client.key")),
+        )
+        .expect("client config");
+        let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
+        client.set_default_client_config(client_config);
+        let client_conn = client
+            .connect(server_addr, "localhost")
+            .expect("connect")
+            .await
+            .expect("handshake");
+
+        let (_server_endpoint, server_conn) = accept.await.expect("accept task");
+        std::mem::forget(client);
+        std::mem::forget(_server_endpoint);
+        (client_conn, server_conn)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_write_all_desynchronizes_the_framed_stream() {
+        let (client_conn, server_conn) = connected_pair().await;
+        let (mut send, _client_recv) = client_conn.open_bi().await.expect("open_bi");
+
+        let reader = tokio::spawn(async move {
+            let (_srv_send, mut recv) = server_conn.accept_bi().await.expect("accept_bi");
+            let mut len_buf = [0u8; 4];
+            recv.read_exact(&mut len_buf).await.expect("read length");
+            let announced = u32::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; announced];
+            let framed =
+                tokio::time::timeout(Duration::from_secs(3), recv.read_exact(&mut body)).await;
+            (announced, framed.is_ok())
+        });
+
+        let big_payload = vec![0xABu8; 8 * 1024 * 1024];
+        #[allow(clippy::cast_possible_truncation)]
+        let big_len = (big_payload.len() as u32).to_be_bytes();
+        send.write_all(&big_len).await.expect("length prefix");
+
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(2), send.write_all(&big_payload)).await;
+        assert!(
+            cancelled.is_err(),
+            "the timeout must fire while write_all is still mid-payload"
+        );
+
+        let second = b"SECOND";
+        #[allow(clippy::cast_possible_truncation)]
+        let second_len = (second.len() as u32).to_be_bytes();
+        send.write_all(&second_len).await.expect("second length");
+        send.write_all(second).await.expect("second payload");
+
+        let (announced, completed) = reader.await.expect("reader task");
+        assert_eq!(announced, big_payload.len());
+        assert!(
+            !completed,
+            "a cancelled write_all leaves a partial frame: the reader is still waiting for the \
+             abandoned frame's remaining bytes and has swallowed the next frame as its payload, \
+             so the stream never resynchronizes"
+        );
+    }
+}
