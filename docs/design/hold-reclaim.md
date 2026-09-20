@@ -170,6 +170,27 @@ Cluster (done): **do not** copy the LWT template. Two verified constraints shape
 - The janitor must **not** be named `mqdb-*`: `on_client_subscribe` early-returns on that
   prefix, so its subscription would never be registered cluster-wide.
 
+Cluster limitations, all verified against a live 3-node cluster:
+- **A presence broadcast is one hop.** `transport.broadcast` walks only the sender's
+  connected peers and is never relayed, so cluster-wide presence requires a **full peer
+  mesh**. This is pre-existing and not presence-specific — wildcard and topic-subscription
+  broadcasts use the same call, and plain cross-node pub/sub fails on the same topology.
+  Verified: on a hub-and-spoke cluster (nodes 2 and 3 each peered only to node 1) a janitor
+  on node 3 receives nothing for a client on node 2, and neither does a plain subscriber.
+  Every `mqdb dev start-cluster` topology happens to form a full mesh, which is why the E2E
+  does not catch it.
+- **A node only honours presence it opted into.** `handle_presence_broadcast` returns early
+  unless the receiving node was started with `--presence`.
+- **Presence retained state is never replicated.** `on_retained_set` skips the presence
+  prefix alongside `$SYS/` and `_mqdb/`, because the broadcast already puts the message on
+  every node; replicating it too would make N nodes race writes to the same key and let
+  arrival order pick the winner.
+- **A dead node's clients stay retained as connected**, since presence is only emitted by
+  the node a client is attached to. Those holds are reclaimed by the TTL backstop, not by
+  presence.
+- The retained local publish is a bounded `try_send`, so under a connect storm a presence
+  message can be dropped and the retained value left stale.
+
 ## Phasing
 
 | PR | Scope | Notes |

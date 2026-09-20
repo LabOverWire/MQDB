@@ -155,6 +155,7 @@ impl ClusteredAgent {
             tx_raft_events.clone(),
         );
         controller.set_ownership(Arc::clone(&ownership_arc));
+        controller.set_presence(config.presence);
         controller.set_vault_key_store(Arc::clone(&vault_key_store));
         #[cfg(feature = "http-api")]
         controller.set_identity_crypto(

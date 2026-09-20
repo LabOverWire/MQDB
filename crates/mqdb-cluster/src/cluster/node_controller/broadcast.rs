@@ -16,6 +16,9 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         broadcast: &crate::cluster::protocol::PresenceBroadcast,
     ) {
+        if !self.presence {
+            return;
+        }
         let topic = broadcast.topic_str();
         if topic.is_empty() {
             return;

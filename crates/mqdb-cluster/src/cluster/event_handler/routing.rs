@@ -14,6 +14,11 @@ use std::collections::HashMap;
 use tracing::{debug, trace, warn};
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
+    pub(super) async fn client_is_live_elsewhere(&self, client_id: &str) -> bool {
+        let ctrl = self.controller.read().await;
+        Self::resolve_connected_node(&ctrl, client_id).is_some_and(|node| node != self.node_id)
+    }
+
     pub(super) async fn emit_presence(&self, presence: &mqdb_agent::presence::PresenceEvent) {
         if !mqdb_agent::presence::is_publishable_client_id(&presence.client_id) {
             return;

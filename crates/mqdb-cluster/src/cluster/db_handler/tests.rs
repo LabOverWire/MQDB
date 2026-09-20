@@ -2957,7 +2957,8 @@ async fn received_presence_broadcast_is_published_locally() {
     let node2 = NodeId::validated(2).unwrap();
     let transport = MockTransport::new(node1);
     let retained = Arc::clone(&transport.retained_publishes);
-    let ctrl = create_test_controller(node1, transport);
+    let mut ctrl = create_test_controller(node1, transport);
+    ctrl.set_presence(true);
 
     let broadcast = crate::cluster::protocol::PresenceBroadcast::try_new(
         "$DB/_presence/remote-holder",
@@ -2973,4 +2974,25 @@ async fn received_presence_broadcast_is_published_locally() {
         "a node must locally publish presence it receives"
     );
     assert_eq!(published[0].0, "$DB/_presence/remote-holder");
+}
+
+#[tokio::test]
+async fn received_presence_broadcast_is_ignored_when_presence_is_off() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let retained = Arc::clone(&transport.retained_publishes);
+    let ctrl = create_test_controller(node1, transport);
+
+    let broadcast = crate::cluster::protocol::PresenceBroadcast::try_new(
+        "$DB/_presence/remote-holder",
+        br#"{"client_id":"remote-holder","event":"connect"}"#,
+    )
+    .expect("presence fits in a broadcast");
+    ctrl.handle_presence_broadcast(node2, &broadcast).await;
+
+    assert!(
+        retained.lock().unwrap().is_empty(),
+        "a node that did not opt into presence must not retain a peer's presence"
+    );
 }

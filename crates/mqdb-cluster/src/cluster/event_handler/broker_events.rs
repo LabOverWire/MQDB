@@ -143,7 +143,10 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
-            if self.presence && self.live_connections.is_last(&event.client_id) {
+            if self.presence
+                && self.live_connections.is_last(&event.client_id)
+                && !self.client_is_live_elsewhere(&event.client_id).await
+            {
                 self.emit_presence(&mqdb_agent::presence::PresenceEvent::disconnect(
                     &event.client_id,
                     event.user_id.as_deref(),
@@ -472,7 +475,12 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 );
             }
 
-            if event.topic.starts_with("$SYS/") || event.topic.starts_with("_mqdb/") {
+            if event.topic.starts_with("$SYS/")
+                || event.topic.starts_with("_mqdb/")
+                || event
+                    .topic
+                    .starts_with(mqdb_agent::presence::PRESENCE_TOPIC_PREFIX)
+            {
                 trace!("skipping internal retained message");
                 return;
             }

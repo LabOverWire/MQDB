@@ -1536,7 +1536,13 @@ fn start_presence_cluster(
     wait_for_auth_cluster(nodes, 15)
 }
 
+fn presence_line_has(out: &str, client_id: &str, event: &str) -> bool {
+    out.lines()
+        .any(|line| line.contains(client_id) && line.contains(event))
+}
+
 fn capture_presence(sub_port: u16, holder_id: &str, holder_port: u16) -> String {
+    let _ = std::fs::remove_file("/tmp/mqdb-presence-out.txt");
     let script = format!(
         "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v > /tmp/mqdb-presence-out.txt & \
          sleep 2; \
@@ -1581,11 +1587,11 @@ fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
     let out = capture_presence(1883, &same_id, 1883);
     check(
         "same-node connect presence",
-        out.contains(&same_id) && out.contains("\"event\":\"connect\""),
+        presence_line_has(&out, &same_id, "\"event\":\"connect\""),
     );
     check(
         "same-node disconnect presence",
-        out.contains(&same_id) && out.contains("\"event\":\"disconnect\""),
+        presence_line_has(&out, &same_id, "\"event\":\"disconnect\""),
     );
 
     if nodes >= 2 {
@@ -1593,11 +1599,11 @@ fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
         let out = capture_presence(1883, &cross_id, 1884);
         check(
             "cross-node connect presence (janitor n1, holder n2)",
-            out.contains(&cross_id) && out.contains("\"event\":\"connect\""),
+            presence_line_has(&out, &cross_id, "\"event\":\"connect\""),
         );
         check(
             "cross-node disconnect presence (janitor n1, holder n2)",
-            out.contains(&cross_id) && out.contains("\"event\":\"disconnect\""),
+            presence_line_has(&out, &cross_id, "\"event\":\"disconnect\""),
         );
     }
 
