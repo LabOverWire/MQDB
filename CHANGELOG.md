@@ -17,6 +17,7 @@ Each entry lists the date and the crate versions that were released.
 ### Notes
 
 - This makes the failure visible; it does not remove it. A node still cannot dial a peer it was not configured with, because nothing propagates node addresses — auto-dialing discovered nodes is a follow-up that needs addresses in the gossip.
+- Detection covers a node that was **never linked**, which is the misconfiguration case. A link that dies in flight is not yet detected: a peer is never removed from the connection map when its stream fails, so it still counts as linked. Removing it safely needs a per-connection token (a reconnecting peer reuses the same node id and must not have its fresh connection dropped by the old one's cleanup), which belongs with the auto-dial and dial-retry work.
 
 ## 2026-09-19 — mqdb-agent 0.8.29, mqdb-cluster 0.4.14, mqdb-cli 0.8.38
 

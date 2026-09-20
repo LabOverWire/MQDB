@@ -250,9 +250,10 @@ mqdb dev kill --node 3
 mqdb create partition_test --data '{"during": "partition"}' \
   --broker 127.0.0.1:1883 --user admin --pass admin
 
-# 5. Restart Node 3
+# 5. Restart Node 3 — list every other node, otherwise the nodes that started
+#    before it will not re-dial it and the 2-3 link stays down
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-test-3 \
-  --peers 1@127.0.0.1:1883 \
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
   --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
   --passwd /tmp/mqdb-test-passwd --admin-users admin \
   --license /path/to/license.key &

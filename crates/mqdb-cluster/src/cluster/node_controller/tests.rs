@@ -2583,7 +2583,7 @@ async fn unlinked_nodes_names_only_members_missing_a_link() {
 }
 
 #[tokio::test]
-async fn unlinked_nodes_reports_known_members_without_a_direct_link() {
+async fn unlinked_nodes_is_empty_for_a_broker_mediated_transport() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();

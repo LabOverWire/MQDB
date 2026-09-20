@@ -715,13 +715,21 @@ MQDB supports distributed clustering with automatic failover and partition rebal
     --license /path/to/license.key
 ```
 
-> **Every node must peer with every other node.** Inter-node messages are delivered over direct
-> peer connections and are never relayed, so a node with no direct link to another silently misses
-> its subscriptions, presence and cross-node publishes, and cannot read data whose partition
-> primary it is. Each node needs `--peers` listing all nodes started before it; a node started with
-> only a single seed peer will leave the mesh incomplete. Run `mqdb cluster status` after starting
-> a cluster — it reports any `UNLINKED` nodes — and the broker logs a warning every minute while
-> the mesh is incomplete.
+> **Every node must end up peered with every other node.** Inter-node messages are delivered over
+> direct peer connections and are never relayed, so a node with no direct link to another silently
+> misses its subscriptions, presence and cross-node publishes, and cannot read data whose partition
+> primary it is.
+>
+> A node dials only the nodes listed in its `--peers`, and only at startup — it never retries a
+> failed dial and never dials a node it learns about later. Because a dial only succeeds against a
+> node that is already listening, list the nodes started before it, as above; the links to nodes
+> started afterwards are created when *those* nodes dial in. **This also applies to restarts:** a
+> node restarted with only its original seed peer will not be re-dialled by the nodes that started
+> before it, so restart it with `--peers` listing every other node in the cluster.
+>
+> Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes —
+> and the broker logs a warning every minute while the mesh is incomplete. Note that this detects a
+> node that was never linked; a link that dies in flight is not currently detected.
 
 ### Cluster CLI Commands
 

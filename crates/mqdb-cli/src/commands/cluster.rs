@@ -346,10 +346,14 @@ pub(crate) async fn cmd_cluster_status(
             .filter_map(serde_json::Value::as_u64)
             .map(|n| n.to_string())
             .collect();
+        let mut listed = nodes.join(", ");
+        if listed.chars().count() > 20 {
+            listed = format!("{} +{} more", nodes[..3].join(", "), nodes.len() - 3);
+        }
         println!("├─────────────────────────────────────────┤");
         println!(
             "│ {:<39} │",
-            format!("UNLINKED: [{}] — mesh incomplete", nodes.join(", "))
+            format!("UNLINKED: [{listed}] — mesh incomplete")
         );
         println!("│ {:<39} │", "start every node with --peers listing");
         println!("│ {:<39} │", "all other nodes; see README clustering");

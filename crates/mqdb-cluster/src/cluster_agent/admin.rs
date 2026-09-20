@@ -241,13 +241,14 @@ impl ClusteredAgent {
         let raft_status = self.rx_raft_status.borrow().clone();
 
         let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
-        let known_members: Vec<u16> = ctrl.known_members().iter().map(|n| n.get()).collect();
+        let members = ctrl.known_members();
         let unlinked_nodes: Vec<u16> = ctrl
-            .unlinked_nodes()
+            .unlinked_from(&members)
             .await
             .iter()
             .map(|n| n.get())
             .collect();
+        let known_members: Vec<u16> = members.iter().map(|n| n.get()).collect();
 
         let mut partitions = Vec::new();
         for partition in PartitionId::all() {
