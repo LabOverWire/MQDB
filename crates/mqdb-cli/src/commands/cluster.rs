@@ -336,6 +336,25 @@ pub(crate) async fn cmd_cluster_status(
         println!("│ Nodes:    1 (this node only)            │");
     }
 
+    if let Some(unlinked) = data
+        .get("unlinked_nodes")
+        .and_then(serde_json::Value::as_array)
+        && !unlinked.is_empty()
+    {
+        let nodes: Vec<String> = unlinked
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|n| n.to_string())
+            .collect();
+        println!("├─────────────────────────────────────────┤");
+        println!(
+            "│ {:<39} │",
+            format!("UNLINKED: [{}] — mesh incomplete", nodes.join(", "))
+        );
+        println!("│ {:<39} │", "start every node with --peers listing");
+        println!("│ {:<39} │", "all other nodes; see README clustering");
+    }
+
     if let Some(partitions) = data.get("partitions").and_then(serde_json::Value::as_array) {
         let mut primary_counts: HashMap<u64, usize> = HashMap::new();
         let mut with_replicas = 0;

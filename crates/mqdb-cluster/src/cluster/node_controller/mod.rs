@@ -649,6 +649,36 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_nodes()
     }
 
+    /// Cluster members this node knows about, excluding itself: every node that owns a partition
+    /// as primary or replica, plus any node named in voter gossip. A node can appear here without
+    /// being reachable, which is exactly the case `unlinked_nodes` reports.
+    pub fn known_members(&self) -> Vec<NodeId> {
+        let mut members: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
+        for partition in PartitionId::all() {
+            let assignment = self.partition_map().get(partition);
+            if let Some(primary) = assignment.primary {
+                members.insert(primary);
+            }
+            members.extend(assignment.replicas.iter().copied());
+        }
+        members.extend(self.heartbeat.voters().iter().copied());
+        members.remove(&self.node_id);
+        members.into_iter().collect()
+    }
+
+    /// Known cluster members this node has no direct link to. Broadcasts are a single hop and
+    /// targeted sends are not routed, so any node listed here silently misses subscriptions,
+    /// presence, client locations and forwarded publishes.
+    pub async fn unlinked_nodes(&self) -> Vec<NodeId> {
+        let Some(linked) = self.transport().direct_peers().await else {
+            return Vec::new();
+        };
+        self.known_members()
+            .into_iter()
+            .filter(|node| !linked.contains(node))
+            .collect()
+    }
+
     pub fn become_primary(&mut self, partition: PartitionId, epoch: Epoch) {
         let state = self
             .replicas

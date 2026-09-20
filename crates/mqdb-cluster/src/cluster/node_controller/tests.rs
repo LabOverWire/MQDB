@@ -57,6 +57,7 @@ struct MockTransport {
     node_id: NodeId,
     inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
+    linked: Arc<Mutex<Option<Vec<NodeId>>>>,
 }
 
 impl MockTransport {
@@ -65,6 +66,7 @@ impl MockTransport {
             node_id,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             outbox: Arc::new(Mutex::new(Vec::new())),
+            linked: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -112,6 +114,10 @@ impl ClusterTransport for MockTransport {
         _message: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
         Ok(())
+    }
+
+    async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+        self.linked.lock().unwrap().clone()
     }
 
     fn recv(&self) -> Option<InboundMessage> {
@@ -2556,4 +2562,52 @@ async fn three_way_circular_fk_cascade_terminates() {
         !all_ids.is_empty(),
         "should find referencing records in the cycle"
     );
+}
+
+#[tokio::test]
+async fn unlinked_nodes_names_only_members_missing_a_link() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+
+    let transport = MockTransport::new(node1);
+    *transport.linked.lock().unwrap() = Some(vec![node2]);
+    let mut ctrl = create_test_controller(node1, transport);
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
+
+    assert_eq!(
+        ctrl.unlinked_nodes().await,
+        vec![node3],
+        "node3 is a known member with no direct connection, node2 is linked, self is excluded"
+    );
+}
+
+#[tokio::test]
+async fn unlinked_nodes_reports_known_members_without_a_direct_link() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
+
+    assert_eq!(
+        ctrl.known_members(),
+        vec![node2, node3],
+        "voter gossip tells a node which members exist, excluding itself"
+    );
+
+    assert!(
+        ctrl.unlinked_nodes().await.is_empty(),
+        "a broker-mediated transport reports no direct peers, so nothing can be called unlinked"
+    );
+}
+
+#[tokio::test]
+async fn unlinked_nodes_is_empty_without_voter_gossip() {
+    let node1 = NodeId::validated(1).unwrap();
+    let ctrl = create_test_controller(node1, MockTransport::new(node1));
+
+    assert!(ctrl.known_members().is_empty());
+    assert!(ctrl.unlinked_nodes().await.is_empty());
 }

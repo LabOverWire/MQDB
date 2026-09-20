@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-09-20 — mqdb-cluster 0.4.15, mqdb-cli 0.8.39
+
+### Fixed
+
+- **A cluster started from a single seed node no longer fails silently.** Inter-node messages travel over direct peer connections and are never relayed, so the cluster has always required a full peer mesh — but the README told users to start node 2 and node 3 each with only `--peers "1@..."`, which leaves node 2 and node 3 unable to reach each other. On such a cluster, cross-node publishes between them are dropped, and a read on one cannot see data whose partition primary is the other, with no error, warning or metric anywhere. The documentation now shows every node peering with all the others and states the requirement next to `--peers`.
+
+### Added
+
+- **Incomplete-mesh detection.** Each node compares the cluster members it knows about (from the partition map and voter gossip) against the peers it actually has a connection to, and logs a warning naming every unreachable node once a minute while the mesh is incomplete. `mqdb cluster status` reports the same as an `UNLINKED` line, and the status payload gained `known_members` and `unlinked_nodes`. Verified on a live 3-node hub-and-spoke cluster: the two spokes each name the other, the hub stays silent, and a full mesh produces no warning.
+
+### Notes
+
+- This makes the failure visible; it does not remove it. A node still cannot dial a peer it was not configured with, because nothing propagates node addresses — auto-dialing discovered nodes is a follow-up that needs addresses in the gossip.
+
 ## 2026-09-19 — mqdb-agent 0.8.29, mqdb-cluster 0.4.14, mqdb-cli 0.8.38
 
 ### Added
