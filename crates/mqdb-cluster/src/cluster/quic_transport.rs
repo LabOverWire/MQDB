@@ -15,11 +15,13 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
-const PEER_SEND_QUEUE_CAPACITY: usize = 1024;
+const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
+const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
 
 struct PeerConnection {
     _connection: Connection,
-    writer_tx: flume::Sender<Vec<u8>>,
+    control_tx: flume::Sender<Vec<u8>>,
+    bulk_tx: flume::Sender<Vec<u8>>,
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -246,14 +248,16 @@ impl QuicDirectTransport {
             .await
             .map_err(|e| TransportError::SendFailed(format!("failed to send header: {e}")))?;
 
-        let (writer_tx, writer_rx) = flume::bounded(PEER_SEND_QUEUE_CAPACITY);
+        let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
+        let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
         let peer_conn = PeerConnection {
             _connection: connection.clone(),
-            writer_tx,
+            control_tx,
+            bulk_tx,
         };
         self.peers.write().await.insert(peer_id, peer_conn);
 
-        tokio::spawn(peer_writer_task(send_stream, writer_rx, peer_id));
+        tokio::spawn(peer_writer_task(send_stream, control_rx, bulk_rx, peer_id));
 
         let inbox_tx = self.inbox_tx.clone();
         let notify = self.message_notify.clone();
@@ -306,7 +310,13 @@ impl QuicDirectTransport {
             .get(&peer_id)
             .ok_or(TransportError::NodeNotFound(peer_id))?;
 
-        match peer.writer_tx.try_send(frame) {
+        let lane = if message.is_control_plane() {
+            &peer.control_tx
+        } else {
+            &peer.bulk_tx
+        };
+
+        match lane.try_send(frame) {
             Ok(()) => {
                 trace!(
                     from = self.node_id.get(),
@@ -499,16 +509,23 @@ async fn handle_incoming_connection(
 
     info!(peer = peer_node.get(), "accepted incoming QUIC connection");
 
-    let (writer_tx, writer_rx) = flume::bounded(PEER_SEND_QUEUE_CAPACITY);
+    let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
+    let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
     {
         let peer_conn = PeerConnection {
             _connection: connection.clone(),
-            writer_tx,
+            control_tx,
+            bulk_tx,
         };
         peers.write().await.insert(peer_node, peer_conn);
     }
 
-    tokio::spawn(peer_writer_task(send_stream, writer_rx, peer_node));
+    tokio::spawn(peer_writer_task(
+        send_stream,
+        control_rx,
+        bulk_rx,
+        peer_node,
+    ));
 
     receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node).await;
     Ok(())
@@ -516,12 +533,25 @@ async fn handle_incoming_connection(
 
 async fn peer_writer_task(
     mut send_stream: SendStream,
-    writer_rx: flume::Receiver<Vec<u8>>,
+    control_rx: flume::Receiver<Vec<u8>>,
+    bulk_rx: flume::Receiver<Vec<u8>>,
     peer_node: NodeId,
 ) {
     trace!(peer = peer_node.get(), "peer writer task started");
 
-    while let Ok(frame) = writer_rx.recv_async().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            control = control_rx.recv_async() => match control {
+                Ok(frame) => frame,
+                Err(_) => break,
+            },
+            bulk = bulk_rx.recv_async() => match bulk {
+                Ok(frame) => frame,
+                Err(_) => break,
+            },
+        };
+
         if let Err(e) = send_stream.write_all(&frame).await {
             warn!(peer = peer_node.get(), error = %e, "peer writer failed, tearing down stream");
             break;
