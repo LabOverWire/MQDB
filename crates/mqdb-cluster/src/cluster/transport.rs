@@ -79,6 +79,21 @@ pub enum ClusterMessage {
 
 impl ClusterMessage {
     #[must_use]
+    pub fn is_control_plane(&self) -> bool {
+        matches!(
+            self,
+            Self::Heartbeat(_)
+                | Self::DeathNotice { .. }
+                | Self::DrainNotification { .. }
+                | Self::RequestVote(_)
+                | Self::RequestVoteResponse(_)
+                | Self::AppendEntries(_)
+                | Self::AppendEntriesResponse(_)
+                | Self::PartitionUpdate(_)
+        )
+    }
+
+    #[must_use]
     pub fn message_type(&self) -> u8 {
         match self {
             Self::Heartbeat(_) => 0,

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mqdb_cluster::{
-    ClusterMessage, ClusterTransport, Heartbeat, NodeId, QuicDirectTransport, TransportError,
+    ClusterMessage, ClusterTransport, ForwardedPublish, Heartbeat, NodeId, QuicDirectTransport,
+    TransportError,
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
@@ -99,8 +100,16 @@ async fn collect_frame(frame_rx: &flume::Receiver<Vec<u8>>) -> Vec<u8> {
         .expect("far-end frame channel closed")
 }
 
-#[tokio::test]
-async fn backpressure_drops_messages_but_keeps_the_stream_framed() {
+struct StalledPeer {
+    transport: QuicDirectTransport,
+    local: NodeId,
+    peer: NodeId,
+    frame_rx: flume::Receiver<Vec<u8>>,
+    release_tx: oneshot::Sender<()>,
+    far_handle: tokio::task::JoinHandle<()>,
+}
+
+async fn setup_stalled_peer() -> StalledPeer {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let certs = generate_certs();
@@ -122,19 +131,58 @@ async fn backpressure_drops_messages_but_keeps_the_stream_framed() {
     let local = NodeId::validated(1).unwrap();
     let peer = NodeId::validated(2).unwrap();
     let transport = QuicDirectTransport::new(local);
-    transport.set_ca_file(ca_path.clone());
+    transport.set_ca_file(ca_path);
     transport
         .bind("127.0.0.1:0".parse().unwrap(), &leaf_path, &leaf_key_path)
         .await
         .unwrap();
     transport.connect_to_peer(peer, far_addr).await.unwrap();
 
+    StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    }
+}
+
+fn heartbeat(local: NodeId, tick: u64) -> ClusterMessage {
+    ClusterMessage::Heartbeat(Heartbeat::create(local, tick))
+}
+
+fn bulk_message(local: NodeId) -> ClusterMessage {
+    ClusterMessage::ForwardedPublish(ForwardedPublish::new(
+        local,
+        "bulk".to_string(),
+        0,
+        false,
+        vec![0u8; 64],
+        Vec::new(),
+    ))
+}
+
+#[tokio::test]
+async fn backpressure_drops_messages_but_keeps_the_stream_framed() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
     let mut ok_count = 0u32;
     let mut terminated_by_drop = false;
     let mut blocked = false;
     for tick in 0..SEND_ATTEMPTS {
-        let message = ClusterMessage::Heartbeat(Heartbeat::create(local, u64::from(tick)));
-        match tokio::time::timeout(Duration::from_millis(500), transport.send(peer, message)).await
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            transport.send(peer, heartbeat(local, u64::from(tick))),
+        )
+        .await
         {
             Err(_) => {
                 blocked = true;
@@ -177,14 +225,86 @@ async fn backpressure_drops_messages_but_keeps_the_stream_framed() {
         );
     }
 
-    let follow_up = ClusterMessage::Heartbeat(Heartbeat::create(local, u64::MAX));
-    transport.send(peer, follow_up).await.unwrap();
+    transport
+        .send(peer, heartbeat(local, u64::MAX))
+        .await
+        .unwrap();
     let frame = collect_frame(&frame_rx).await;
     assert!(frame.len() >= 3);
     assert_eq!(
         &frame[0..2],
         &local.get().to_be_bytes(),
         "post-backpressure frame mis-framed"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn control_plane_survives_a_full_bulk_queue() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut bulk_ok = 0u32;
+    let mut bulk_dropped = false;
+    for _ in 0..SEND_ATTEMPTS {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            transport.send(peer, bulk_message(local)),
+        )
+        .await
+        {
+            Err(_) => panic!("bulk send blocked under backpressure"),
+            Ok(Ok(())) => bulk_ok += 1,
+            Ok(Err(TransportError::SendQueueFull(_))) => {
+                bulk_dropped = true;
+                break;
+            }
+            Ok(Err(other)) => panic!("unexpected bulk send error: {other}"),
+        }
+    }
+    assert!(bulk_dropped, "bulk lane should saturate and start dropping");
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        transport.send(peer, heartbeat(local, 7)),
+    )
+    .await
+    .expect("control-plane send blocked under backpressure");
+    assert!(
+        matches!(result, Ok(())),
+        "control-plane heartbeat was dropped while the bulk lane was full: {result:?}"
+    );
+
+    release_tx.send(()).ok();
+
+    let heartbeat_type = heartbeat(local, 0).message_type();
+    let mut heartbeat_delivered = false;
+    for _ in 0..bulk_ok + 2 {
+        let frame = collect_frame(&frame_rx).await;
+        assert!(
+            frame.len() >= 3,
+            "frame shorter than a cluster message header"
+        );
+        assert_eq!(
+            &frame[0..2],
+            &local.get().to_be_bytes(),
+            "stream mis-framed under the two-lane writer"
+        );
+        if frame[2] == heartbeat_type {
+            heartbeat_delivered = true;
+            break;
+        }
+    }
+    assert!(
+        heartbeat_delivered,
+        "control-plane heartbeat was accepted but never delivered"
     );
 
     far_handle.abort();
