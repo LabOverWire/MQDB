@@ -895,18 +895,33 @@ mod framing_tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn cert_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_certs")
+    fn self_signed_certs() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed cert");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).expect("write cert");
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).expect("write key");
+        (dir, cert_path, key_path)
     }
 
-    async fn connected_pair() -> (quinn::Connection, quinn::Connection) {
+    struct Pair {
+        _certs: tempfile::TempDir,
+        _client_endpoint: Endpoint,
+        _server_endpoint: Endpoint,
+        client: quinn::Connection,
+        server: quinn::Connection,
+    }
+
+    async fn connected_pair() -> Pair {
         rustls::crypto::ring::default_provider()
             .install_default()
             .ok();
-        let certs = cert_dir();
+        let (dir, cert_path, key_path) = self_signed_certs();
+
         let server_config =
-            build_server_config(&certs.join("server.pem"), &certs.join("server.key"), None)
-                .expect("server config");
+            build_server_config(&cert_path, &key_path, None).expect("server config");
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let server = Endpoint::server(server_config, addr).expect("server endpoint");
         let server_addr = server.local_addr().expect("local addr");
@@ -917,12 +932,8 @@ mod framing_tests {
             (server, conn)
         });
 
-        let client_config = build_client_config_secure(
-            Some(&certs.join("ca.pem")),
-            Some(&certs.join("client.pem")),
-            Some(&certs.join("client.key")),
-        )
-        .expect("client config");
+        let client_config =
+            build_client_config_secure(Some(&cert_path), None, None).expect("client config");
         let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client endpoint");
         client.set_default_client_config(client_config);
         let client_conn = client
@@ -931,15 +942,20 @@ mod framing_tests {
             .await
             .expect("handshake");
 
-        let (_server_endpoint, server_conn) = accept.await.expect("accept task");
-        std::mem::forget(client);
-        std::mem::forget(_server_endpoint);
-        (client_conn, server_conn)
+        let (server_endpoint, server_conn) = accept.await.expect("accept task");
+        Pair {
+            _certs: dir,
+            _client_endpoint: client,
+            _server_endpoint: server_endpoint,
+            client: client_conn,
+            server: server_conn,
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_write_all_desynchronizes_the_framed_stream() {
-        let (client_conn, server_conn) = connected_pair().await;
+        let pair = connected_pair().await;
+        let (client_conn, server_conn) = (pair.client.clone(), pair.server.clone());
         let (mut send, _client_recv) = client_conn.open_bi().await.expect("open_bi");
 
         let reader = tokio::spawn(async move {
