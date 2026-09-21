@@ -530,6 +530,7 @@ pub enum TransportError {
     PartitionNotFound(PartitionId),
     NetworkPartitioned,
     SendFailed(String),
+    SendQueueFull(NodeId),
     NotConnected,
 }
 
@@ -540,6 +541,7 @@ impl std::fmt::Display for TransportError {
             Self::PartitionNotFound(id) => write!(f, "partition {} not found", id.get()),
             Self::NetworkPartitioned => write!(f, "network partitioned"),
             Self::SendFailed(msg) => write!(f, "send failed: {msg}"),
+            Self::SendQueueFull(id) => write!(f, "send queue full for node {}", id.get()),
             Self::NotConnected => write!(f, "not connected"),
         }
     }

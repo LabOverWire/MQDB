@@ -11,16 +11,15 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
-const SEND_TIMEOUT_MS: u64 = 5000;
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
+const PEER_SEND_QUEUE_CAPACITY: usize = 1024;
 
 struct PeerConnection {
     _connection: Connection,
-    send_stream: tokio::sync::Mutex<SendStream>,
+    writer_tx: flume::Sender<Vec<u8>>,
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -236,27 +235,25 @@ impl QuicDirectTransport {
             "connected to peer via QUIC"
         );
 
-        let (send_stream, recv_stream) = connection
+        let (mut send_stream, recv_stream) = connection
             .open_bi()
             .await
             .map_err(|e| TransportError::SendFailed(format!("failed to open stream: {e}")))?;
 
         let header = self.node_id.get().to_be_bytes();
-        {
-            let mut stream = tokio::sync::Mutex::new(send_stream);
-            stream
-                .get_mut()
-                .write_all(&header)
-                .await
-                .map_err(|e| TransportError::SendFailed(format!("failed to send header: {e}")))?;
+        send_stream
+            .write_all(&header)
+            .await
+            .map_err(|e| TransportError::SendFailed(format!("failed to send header: {e}")))?;
 
-            let peer_conn = PeerConnection {
-                _connection: connection.clone(),
-                send_stream: stream,
-            };
+        let (writer_tx, writer_rx) = flume::bounded(PEER_SEND_QUEUE_CAPACITY);
+        let peer_conn = PeerConnection {
+            _connection: connection.clone(),
+            writer_tx,
+        };
+        self.peers.write().await.insert(peer_id, peer_conn);
 
-            self.peers.write().await.insert(peer_id, peer_conn);
-        }
+        tokio::spawn(peer_writer_task(send_stream, writer_rx, peer_id));
 
         let inbox_tx = self.inbox_tx.clone();
         let notify = self.message_notify.clone();
@@ -286,43 +283,45 @@ impl QuicDirectTransport {
         buf
     }
 
+    fn frame_message(&self, message: &ClusterMessage) -> Result<Vec<u8>, TransportError> {
+        let payload = self.serialize_message(message);
+        let len = u32::try_from(payload.len())
+            .map_err(|_| TransportError::SendFailed("message too large to frame".to_string()))?;
+
+        let mut frame = Vec::with_capacity(4 + payload.len());
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        Ok(frame)
+    }
+
     async fn send_to_peer(
         &self,
         peer_id: NodeId,
         message: &ClusterMessage,
     ) -> Result<(), TransportError> {
-        let payload = self.serialize_message(message);
-
-        #[allow(clippy::cast_possible_truncation)]
-        let len_prefix = (payload.len() as u32).to_be_bytes();
+        let frame = self.frame_message(message)?;
 
         let peers = self.peers.read().await;
         let peer = peers
             .get(&peer_id)
             .ok_or(TransportError::NodeNotFound(peer_id))?;
 
-        let mut stream = peer.send_stream.lock().await;
-
-        let timeout = Duration::from_millis(SEND_TIMEOUT_MS);
-
-        tokio::time::timeout(timeout, stream.write_all(&len_prefix))
-            .await
-            .map_err(|_| TransportError::SendFailed("send timeout (length prefix)".to_string()))?
-            .map_err(|e| TransportError::SendFailed(format!("failed to write length: {e}")))?;
-
-        tokio::time::timeout(timeout, stream.write_all(&payload))
-            .await
-            .map_err(|_| TransportError::SendFailed("send timeout (payload)".to_string()))?
-            .map_err(|e| TransportError::SendFailed(format!("failed to write payload: {e}")))?;
-
-        trace!(
-            from = self.node_id.get(),
-            to = peer_id.get(),
-            msg_type = message.type_name(),
-            "sent QUIC message"
-        );
-
-        Ok(())
+        match peer.writer_tx.try_send(frame) {
+            Ok(()) => {
+                trace!(
+                    from = self.node_id.get(),
+                    to = peer_id.get(),
+                    msg_type = message.type_name(),
+                    "queued QUIC message"
+                );
+                Ok(())
+            }
+            Err(flume::TrySendError::Full(_)) => Err(TransportError::SendQueueFull(peer_id)),
+            Err(flume::TrySendError::Disconnected(_)) => Err(TransportError::SendFailed(format!(
+                "peer {} writer task ended",
+                peer_id.get()
+            ))),
+        }
     }
 }
 
@@ -500,16 +499,36 @@ async fn handle_incoming_connection(
 
     info!(peer = peer_node.get(), "accepted incoming QUIC connection");
 
+    let (writer_tx, writer_rx) = flume::bounded(PEER_SEND_QUEUE_CAPACITY);
     {
         let peer_conn = PeerConnection {
             _connection: connection.clone(),
-            send_stream: tokio::sync::Mutex::new(send_stream),
+            writer_tx,
         };
         peers.write().await.insert(peer_node, peer_conn);
     }
 
+    tokio::spawn(peer_writer_task(send_stream, writer_rx, peer_node));
+
     receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node).await;
     Ok(())
+}
+
+async fn peer_writer_task(
+    mut send_stream: SendStream,
+    writer_rx: flume::Receiver<Vec<u8>>,
+    peer_node: NodeId,
+) {
+    trace!(peer = peer_node.get(), "peer writer task started");
+
+    while let Ok(frame) = writer_rx.recv_async().await {
+        if let Err(e) = send_stream.write_all(&frame).await {
+            warn!(peer = peer_node.get(), error = %e, "peer writer failed, tearing down stream");
+            break;
+        }
+    }
+
+    debug!(peer = peer_node.get(), "peer writer task ended");
 }
 
 async fn receiver_task(
