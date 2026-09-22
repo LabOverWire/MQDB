@@ -649,6 +649,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_nodes()
     }
 
+    pub fn alive_or_suspected_nodes(&self) -> Vec<NodeId> {
+        self.heartbeat.alive_or_suspected_nodes()
+    }
+
     /// Cluster members this node knows about, excluding itself: every node that owns a partition
     /// as primary or replica, plus any node named in voter gossip. A node can appear here without
     /// being reachable, which is exactly the case `unlinked_nodes` reports.

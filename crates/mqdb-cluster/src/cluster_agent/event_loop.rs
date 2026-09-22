@@ -297,6 +297,10 @@ impl ClusteredAgent {
                 }
             }
         }
+
+        if !batch.dead_nodes.is_empty() {
+            self.redial_disconnected_peers().await;
+        }
     }
 
     fn try_resolve_constraint_response(&self, msg: &crate::cluster::InboundMessage) -> bool {
@@ -559,13 +563,16 @@ impl ClusteredAgent {
     }
 
     async fn redial_disconnected_peers(&self) {
-        let (quic, alive) = {
+        let (quic, linked) = {
             let ctrl = self.controller.read().await;
-            (ctrl.transport().as_quic().cloned(), ctrl.alive_nodes())
+            (
+                ctrl.transport().as_quic().cloned(),
+                ctrl.alive_or_suspected_nodes(),
+            )
         };
         if let Some(quic) = quic {
             tokio::spawn(async move {
-                quic.redial_unlinked(&alive).await;
+                quic.redial_unlinked(&linked).await;
             });
         }
     }
