@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
@@ -22,6 +22,7 @@ struct PeerConnection {
     _connection: Connection,
     control_tx: flume::Sender<Vec<u8>>,
     bulk_tx: flume::Sender<Vec<u8>>,
+    generation: u64,
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -38,6 +39,8 @@ pub struct QuicDirectTransport {
     node_id: NodeId,
     endpoint: Arc<RwLock<Option<Endpoint>>>,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    peer_addrs: Arc<RwLock<HashMap<NodeId, SocketAddr>>>,
+    generation: Arc<AtomicU64>,
     inbox_tx: flume::Sender<InboundMessage>,
     inbox_rx: flume::Receiver<InboundMessage>,
     requeue_buffer: Arc<Mutex<VecDeque<InboundMessage>>>,
@@ -67,6 +70,8 @@ impl Clone for QuicDirectTransport {
             node_id: self.node_id,
             endpoint: self.endpoint.clone(),
             peers: self.peers.clone(),
+            peer_addrs: self.peer_addrs.clone(),
+            generation: self.generation.clone(),
             inbox_tx: self.inbox_tx.clone(),
             inbox_rx: self.inbox_rx.clone(),
             requeue_buffer: self.requeue_buffer.clone(),
@@ -94,6 +99,8 @@ impl QuicDirectTransport {
             node_id,
             endpoint: Arc::new(RwLock::new(None)),
             peers: Arc::new(RwLock::new(HashMap::new())),
+            peer_addrs: Arc::new(RwLock::new(HashMap::new())),
+            generation: Arc::new(AtomicU64::new(0)),
             inbox_tx,
             inbox_rx,
             requeue_buffer: Arc::new(Mutex::new(VecDeque::new())),
@@ -175,9 +182,10 @@ impl QuicDirectTransport {
         let notify = self.message_notify.clone();
         let local_node = self.node_id;
         let peers = self.peers.clone();
+        let generation = self.generation.clone();
 
         tokio::spawn(async move {
-            acceptor_task(endpoint, inbox_tx, notify, local_node, peers).await;
+            acceptor_task(endpoint, inbox_tx, notify, local_node, peers, generation).await;
         });
 
         Ok(())
@@ -192,6 +200,8 @@ impl QuicDirectTransport {
         peer_id: NodeId,
         peer_addr: SocketAddr,
     ) -> Result<(), TransportError> {
+        self.peer_addrs.write().await.insert(peer_id, peer_addr);
+
         let endpoint_guard = self.endpoint.read().await;
         let endpoint = endpoint_guard
             .as_ref()
@@ -250,14 +260,23 @@ impl QuicDirectTransport {
 
         let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
         let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let peer_conn = PeerConnection {
             _connection: connection.clone(),
             control_tx,
             bulk_tx,
+            generation,
         };
         self.peers.write().await.insert(peer_id, peer_conn);
 
-        tokio::spawn(peer_writer_task(send_stream, control_rx, bulk_rx, peer_id));
+        tokio::spawn(peer_writer_task(
+            send_stream,
+            control_rx,
+            bulk_rx,
+            peer_id,
+            self.peers.clone(),
+            generation,
+        ));
 
         let inbox_tx = self.inbox_tx.clone();
         let notify = self.message_notify.clone();
@@ -268,6 +287,30 @@ impl QuicDirectTransport {
         });
 
         Ok(())
+    }
+
+    /// Re-dial every configured peer that is not currently alive.
+    ///
+    /// Driven by the heartbeat liveness view rather than the transport peer
+    /// map, so a stale entry that has not yet been removed by a send failure
+    /// does not stop reconnection. `connect_to_peer` replaces any stale entry.
+    pub async fn redial_unlinked(&self, alive: &[NodeId]) {
+        let targets: Vec<(NodeId, SocketAddr)> = {
+            let addrs = self.peer_addrs.read().await;
+            addrs
+                .iter()
+                .filter(|&(node, _)| *node != self.node_id && !alive.contains(node))
+                .map(|(node, addr)| (*node, *addr))
+                .collect()
+        };
+
+        for (node, addr) in targets {
+            if let Err(e) = self.connect_to_peer(node, addr).await {
+                debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
+            } else {
+                info!(peer = node.get(), addr = %addr, "redialled peer");
+            }
+        }
     }
 
     #[must_use]
@@ -459,6 +502,7 @@ async fn acceptor_task(
     notify: Arc<Notify>,
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    generation: Arc<AtomicU64>,
 ) {
     info!(node = local_node.get(), "QUIC acceptor task started");
 
@@ -474,10 +518,13 @@ async fn acceptor_task(
         let inbox_tx = inbox_tx.clone();
         let notify = notify.clone();
         let peers = peers.clone();
+        let generation = generation.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_incoming_connection(connection, inbox_tx, notify, local_node, peers).await
+            if let Err(e) = handle_incoming_connection(
+                connection, inbox_tx, notify, local_node, peers, generation,
+            )
+            .await
             {
                 debug!(error = %e, "incoming connection handler failed");
             }
@@ -491,6 +538,7 @@ async fn handle_incoming_connection(
     notify: Arc<Notify>,
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    generation: Arc<AtomicU64>,
 ) -> Result<(), TransportError> {
     let (send_stream, mut recv_stream) = connection
         .accept_bi()
@@ -511,11 +559,13 @@ async fn handle_incoming_connection(
 
     let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
+    let peer_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let peer_conn = PeerConnection {
             _connection: connection.clone(),
             control_tx,
             bulk_tx,
+            generation: peer_generation,
         };
         peers.write().await.insert(peer_node, peer_conn);
     }
@@ -525,6 +575,8 @@ async fn handle_incoming_connection(
         control_rx,
         bulk_rx,
         peer_node,
+        peers.clone(),
+        peer_generation,
     ));
 
     receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node).await;
@@ -536,6 +588,8 @@ async fn peer_writer_task(
     control_rx: flume::Receiver<Vec<u8>>,
     bulk_rx: flume::Receiver<Vec<u8>>,
     peer_node: NodeId,
+    peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    generation: u64,
 ) {
     trace!(peer = peer_node.get(), "peer writer task started");
 
@@ -553,12 +607,27 @@ async fn peer_writer_task(
         };
 
         if let Err(e) = send_stream.write_all(&frame).await {
-            warn!(peer = peer_node.get(), error = %e, "peer writer failed, tearing down stream");
+            warn!(peer = peer_node.get(), error = %e, "peer writer failed, removing dead peer");
+            remove_peer_generation(&peers, peer_node, generation).await;
             break;
         }
     }
 
     debug!(peer = peer_node.get(), "peer writer task ended");
+}
+
+async fn remove_peer_generation(
+    peers: &Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    peer_node: NodeId,
+    generation: u64,
+) {
+    let mut map = peers.write().await;
+    if map
+        .get(&peer_node)
+        .is_some_and(|peer| peer.generation == generation)
+    {
+        map.remove(&peer_node);
+    }
 }
 
 async fn receiver_task(

@@ -43,7 +43,7 @@ fn generate_certs() -> Certs {
     }
 }
 
-fn stalling_server_endpoint(certs: &Certs) -> Endpoint {
+fn server_endpoint(certs: &Certs, stream_window: u32) -> Endpoint {
     let key = PrivateKeyDer::try_from(certs.leaf_key_der.clone()).unwrap();
     let server_crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -55,7 +55,7 @@ fn stalling_server_endpoint(certs: &Certs) -> Endpoint {
     ));
 
     let mut transport = TransportConfig::default();
-    transport.stream_receive_window(VarInt::from_u32(STALL_WINDOW));
+    transport.stream_receive_window(VarInt::from_u32(stream_window));
     server_config.transport_config(Arc::new(transport));
 
     Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap()
@@ -121,7 +121,7 @@ async fn setup_stalled_peer() -> StalledPeer {
     std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
     std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
 
-    let endpoint = stalling_server_endpoint(&certs);
+    let endpoint = server_endpoint(&certs, STALL_WINDOW);
     let far_addr: SocketAddr = endpoint.local_addr().unwrap();
 
     let (release_tx, release_rx) = oneshot::channel();
@@ -305,6 +305,99 @@ async fn control_plane_survives_a_full_bulk_queue() {
     assert!(
         heartbeat_delivered,
         "control-plane heartbeat was accepted but never delivered"
+    );
+
+    far_handle.abort();
+}
+
+async fn reconnecting_far_end(
+    endpoint: Endpoint,
+    close_first: oneshot::Receiver<()>,
+    accepted_tx: flume::Sender<()>,
+) {
+    let conn1: Connection = endpoint.accept().await.unwrap().await.unwrap();
+    let (_s1, mut r1): (SendStream, RecvStream) = conn1.accept_bi().await.unwrap();
+    let mut header = [0u8; 2];
+    r1.read_exact(&mut header).await.unwrap();
+    accepted_tx.send(()).ok();
+
+    close_first.await.ok();
+    conn1.close(0u32.into(), b"test-close");
+    drop(r1);
+    drop(conn1);
+
+    let conn2: Connection = endpoint.accept().await.unwrap().await.unwrap();
+    let (_s2, mut r2): (SendStream, RecvStream) = conn2.accept_bi().await.unwrap();
+    let mut header2 = [0u8; 2];
+    r2.read_exact(&mut header2).await.unwrap();
+    accepted_tx.send(()).ok();
+
+    std::future::pending::<()>().await;
+    drop(conn2);
+}
+
+#[tokio::test]
+async fn dead_peer_is_removed_and_redialled() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let ca_path = dir.path().join("ca.pem");
+    let leaf_path = dir.path().join("leaf.pem");
+    let leaf_key_path = dir.path().join("leaf.key");
+    std::fs::write(&ca_path, &certs.ca_pem).unwrap();
+    std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
+
+    let endpoint = server_endpoint(&certs, 1024 * 1024);
+    let far_addr: SocketAddr = endpoint.local_addr().unwrap();
+
+    let (close_tx, close_rx) = oneshot::channel();
+    let (accepted_tx, accepted_rx) = flume::unbounded();
+    let far_handle = tokio::spawn(reconnecting_far_end(endpoint, close_rx, accepted_tx));
+
+    let local = NodeId::validated(1).unwrap();
+    let peer = NodeId::validated(2).unwrap();
+    let transport = QuicDirectTransport::new(local);
+    transport.set_ca_file(ca_path);
+    transport
+        .bind("127.0.0.1:0".parse().unwrap(), &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+    transport.connect_to_peer(peer, far_addr).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), accepted_rx.recv_async())
+        .await
+        .expect("far end did not accept the initial connection")
+        .unwrap();
+    assert!(
+        transport.direct_peers().await.unwrap().contains(&peer),
+        "peer should be linked after the initial connect"
+    );
+
+    close_tx.send(()).ok();
+    let mut removed = false;
+    for _ in 0..200 {
+        let _ = transport.send(peer, heartbeat(local, 1)).await;
+        if !transport.direct_peers().await.unwrap().contains(&peer) {
+            removed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        removed,
+        "a send-side failure should remove the dead peer from the map"
+    );
+
+    transport.redial_unlinked(&[]).await;
+    tokio::time::timeout(Duration::from_secs(10), accepted_rx.recv_async())
+        .await
+        .expect("far end did not accept the redial")
+        .unwrap();
+    assert!(
+        transport.direct_peers().await.unwrap().contains(&peer),
+        "peer should be re-linked after redial_disconnected"
     );
 
     far_handle.abort();
