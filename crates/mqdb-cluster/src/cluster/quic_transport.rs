@@ -11,12 +11,14 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
 const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
+const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PeerConnection {
     _connection: Connection,
@@ -294,23 +296,34 @@ impl QuicDirectTransport {
     /// Driven by the heartbeat liveness view rather than the transport peer
     /// map, so a stale entry that has not yet been removed by a send failure
     /// does not stop reconnection. `connect_to_peer` replaces any stale entry.
-    pub async fn redial_unlinked(&self, alive: &[NodeId]) {
+    pub async fn redial_unlinked(&self, linked: &[NodeId]) {
         let targets: Vec<(NodeId, SocketAddr)> = {
             let addrs = self.peer_addrs.read().await;
             addrs
                 .iter()
-                .filter(|&(node, _)| *node != self.node_id && !alive.contains(node))
+                .filter(|&(node, _)| *node != self.node_id && !linked.contains(node))
                 .map(|(node, addr)| (*node, *addr))
                 .collect()
         };
 
+        let mut dials = tokio::task::JoinSet::new();
         for (node, addr) in targets {
-            if let Err(e) = self.connect_to_peer(node, addr).await {
-                debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
-            } else {
-                info!(peer = node.get(), addr = %addr, "redialled peer");
-            }
+            let transport = self.clone();
+            dials.spawn(async move {
+                match tokio::time::timeout(REDIAL_DIAL_TIMEOUT, transport.connect_to_peer(node, addr))
+                    .await
+                {
+                    Ok(Ok(())) => info!(peer = node.get(), addr = %addr, "redialled peer"),
+                    Ok(Err(e)) => {
+                        debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
+                    }
+                    Err(_) => {
+                        debug!(peer = node.get(), addr = %addr, "redial to peer timed out, will retry");
+                    }
+                }
+            });
         }
+        while dials.join_next().await.is_some() {}
     }
 
     #[must_use]

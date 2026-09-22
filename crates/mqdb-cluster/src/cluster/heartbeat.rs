@@ -273,6 +273,17 @@ impl HeartbeatManager {
     }
 
     #[must_use]
+    pub fn alive_or_suspected_nodes(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter(|(_, state)| {
+                state.status == NodeStatus::Alive || state.status == NodeStatus::Suspected
+            })
+            .filter_map(|(&id, _)| NodeId::validated(id))
+            .collect()
+    }
+
+    #[must_use]
     pub fn has_alive_peers(&self) -> bool {
         self.nodes
             .values()
@@ -349,6 +360,37 @@ mod tests {
         let dead = mgr.check_timeouts(1600);
         assert_eq!(dead, vec![node2]);
         assert_eq!(mgr.node_status(node2), NodeStatus::Dead);
+    }
+
+    #[test]
+    fn alive_or_suspected_excludes_dead_and_unknown() {
+        let local = NodeId::validated(1).unwrap();
+        let mut mgr = HeartbeatManager::new(local, config());
+
+        let n2 = NodeId::validated(2).unwrap();
+        let n3 = NodeId::validated(3).unwrap();
+        let n4 = NodeId::validated(4).unwrap();
+        let n5 = NodeId::validated(5).unwrap();
+        for n in [n2, n3, n4, n5] {
+            mgr.register_node(n);
+        }
+
+        mgr.receive_heartbeat(n2, &Heartbeat::create(n2, 1900), 1900);
+        mgr.receive_heartbeat(n3, &Heartbeat::create(n3, 1600), 1600);
+        mgr.receive_heartbeat(n4, &Heartbeat::create(n4, 1300), 1300);
+
+        mgr.check_timeouts(2000);
+        assert_eq!(mgr.node_status(n2), NodeStatus::Alive);
+        assert_eq!(mgr.node_status(n3), NodeStatus::Suspected);
+        assert_eq!(mgr.node_status(n4), NodeStatus::Dead);
+        assert_eq!(mgr.node_status(n5), NodeStatus::Unknown);
+
+        let set: std::collections::BTreeSet<NodeId> =
+            mgr.alive_or_suspected_nodes().into_iter().collect();
+        assert!(set.contains(&n2), "alive node must be included");
+        assert!(set.contains(&n3), "suspected node must be included");
+        assert!(!set.contains(&n4), "dead node must be excluded");
+        assert!(!set.contains(&n5), "unknown node must be excluded");
     }
 
     #[test]
