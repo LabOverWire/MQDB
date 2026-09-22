@@ -29,6 +29,10 @@
 (*                      violated (a stale notice matches a reused id).       *)
 (*   *_noredial.cfg     Redial=FALSE  -> Converge violated (removal without  *)
 (*                      re-dial leaves a slot permanently absent).           *)
+(*   *_overlive.cfg     RedialOverLive=TRUE -> InvNoLiveDrop still holds:     *)
+(*                      the impl re-dials on the HEARTBEAT view, so Connect   *)
+(*                      can fire over a still-live slot; the guard keeps it   *)
+(*                      safe (a live slot has no pending notice to race).     *)
 (*                                                                          *)
 (* PREMISE, NOT VERIFIED: that SEND-death (not receiver-exit) is the right   *)
 (* removal trigger is BAKED IN (SendBreak is the only pd producer; there is  *)
@@ -54,11 +58,12 @@
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Nodes, MaxGen, MaxBreaks, Guarded, MonotonicId, Redial
+CONSTANTS Nodes, MaxGen, MaxBreaks, Guarded, MonotonicId, Redial, RedialOverLive
 
 ASSUME MaxGen \in Nat /\ MaxGen >= 2
 ASSUME MaxBreaks \in Nat
 ASSUME Guarded \in BOOLEAN /\ MonotonicId \in BOOLEAN /\ Redial \in BOOLEAN
+ASSUME RedialOverLive \in BOOLEAN
 
 VARIABLES slot, gctr, pd, droppedLive, breaksLeft
 
@@ -91,7 +96,7 @@ NextGen(cur) == IF MonotonicId THEN cur + 1 ELSE (cur % MaxGen) + 1
 \* side are (re)established with fresh generations, replacing any prior entry.
 Connect(a, b) ==
     /\ a # b
-    /\ slot[a][b].st # "live"        \* redial a link that is down (absent or broken)
+    /\ (slot[a][b].st # "live" \/ RedialOverLive)  \* down link; or (impl's real trigger) over a still-live slot when the heartbeat view lags
     /\ (Redial \/ gctr[a][b] = 0)   \* with redial off, only the first (startup) dial fires
     /\ (MonotonicId => (gctr[a][b] < MaxGen /\ gctr[b][a] < MaxGen))
     /\ gctr' = [gctr EXCEPT ![a][b] = NextGen(gctr[a][b]),
