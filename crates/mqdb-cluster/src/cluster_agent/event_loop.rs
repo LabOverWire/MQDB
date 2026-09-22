@@ -148,6 +148,7 @@ impl ClusteredAgent {
                 }
                 _ = mesh_check_interval.tick() => {
                     self.warn_on_unlinked_nodes().await;
+                    self.redial_disconnected_peers().await;
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
                     Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
@@ -554,6 +555,18 @@ impl ClusteredAgent {
         };
         if expired_unique > 0 {
             info!(expired_unique, "reclaimed abandoned unique reservations");
+        }
+    }
+
+    async fn redial_disconnected_peers(&self) {
+        let (quic, alive) = {
+            let ctrl = self.controller.read().await;
+            (ctrl.transport().as_quic().cloned(), ctrl.alive_nodes())
+        };
+        if let Some(quic) = quic {
+            tokio::spawn(async move {
+                quic.redial_unlinked(&alive).await;
+            });
         }
     }
 
