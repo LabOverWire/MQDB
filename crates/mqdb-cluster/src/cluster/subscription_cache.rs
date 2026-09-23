@@ -199,12 +199,16 @@ impl SubscriptionCache {
         &self,
         topic_index: &TopicIndex,
         wildcard_store: &WildcardStore,
+        holds_partition: impl Fn(PartitionId) -> bool,
     ) -> ReconciliationResult {
         let mut result = ReconciliationResult::default();
 
         for snapshot in self.all_snapshots() {
-            result.clients_checked += 1;
             let client_id = snapshot.client_id_str();
+            if !holds_partition(session_partition(client_id)) {
+                continue;
+            }
+            result.clients_checked += 1;
 
             let indexed_exact: HashSet<String> = topic_index
                 .get_client_topics(client_id)
@@ -699,7 +703,7 @@ mod tests {
             .subscribe("topic/a", "client1", partition(), 1)
             .unwrap();
 
-        let result = cache.reconcile(&topic_index, &wildcard_store);
+        let result = cache.reconcile(&topic_index, &wildcard_store, |_| true);
 
         assert_eq!(result.clients_checked, 1);
         assert_eq!(result.index_entries_restored, 2);
@@ -737,7 +741,7 @@ mod tests {
             .subscribe_mqtt("dropped/+/pattern", "client1", 1)
             .unwrap();
 
-        let result = cache.reconcile(&topic_index, &wildcard_store);
+        let result = cache.reconcile(&topic_index, &wildcard_store, |_| true);
 
         assert_eq!(result.index_entries_restored, 0);
         let topics: Vec<String> = cache
@@ -761,10 +765,45 @@ mod tests {
             .add_subscription("client1", "app/resp/client1", 0)
             .unwrap();
 
-        let result = cache.reconcile(&topic_index, &wildcard_store);
+        let result = cache.reconcile(&topic_index, &wildcard_store, |_| true);
 
         assert_eq!(result.index_entries_restored, 0);
         assert!(topic_index.get_client_topics("client1").is_empty());
+        assert_eq!(cache.get_subscriptions("client1").len(), 2);
+    }
+
+    #[test]
+    fn reconcile_ignores_records_for_partitions_not_held() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("held-client", "topic/a", 1).unwrap();
+        cache
+            .add_subscription("stale-client", "topic/a", 1)
+            .unwrap();
+        cache
+            .add_subscription("stale-client", "stale/+/pattern", 1)
+            .unwrap();
+        let held = session_partition("held-client");
+        assert_ne!(held, session_partition("stale-client"));
+
+        let result = cache.reconcile(&topic_index, &wildcard_store, |partition| partition == held);
+
+        assert_eq!(result.clients_checked, 1);
+        assert_eq!(result.index_entries_restored, 1);
+        let subscribers: Vec<String> = topic_index
+            .get_subscribers("topic/a")
+            .iter()
+            .map(|s| s.client_id_str().to_string())
+            .collect();
+        assert_eq!(subscribers, vec!["held-client".to_string()]);
+        assert!(
+            wildcard_store
+                .get_client_patterns("stale-client")
+                .is_empty()
+        );
+        assert_eq!(cache.get_subscriptions("stale-client").len(), 2);
     }
 
     #[test]
@@ -778,13 +817,13 @@ mod tests {
 
         assert_eq!(
             cache
-                .reconcile(&topic_index, &wildcard_store)
+                .reconcile(&topic_index, &wildcard_store, |_| true)
                 .index_entries_restored,
             2
         );
         assert_eq!(
             cache
-                .reconcile(&topic_index, &wildcard_store)
+                .reconcile(&topic_index, &wildcard_store, |_| true)
                 .index_entries_restored,
             0
         );
@@ -808,7 +847,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = replica.reconcile(&topic_index, &wildcard_store);
+        let result = replica.reconcile(&topic_index, &wildcard_store, |_| true);
 
         assert_eq!(result.index_entries_restored, 2);
         assert_eq!(

@@ -229,9 +229,12 @@ impl ClusteredAgent {
         }
         if became_primary {
             let stores = ctrl.stores();
-            let result = stores
-                .subscriptions
-                .reconcile(&stores.topics, &stores.wildcards);
+            let result =
+                stores
+                    .subscriptions
+                    .reconcile(&stores.topics, &stores.wildcards, |partition| {
+                        ctrl.can_serve_reads(partition)
+                    });
             if result.index_entries_restored > 0 {
                 info!(
                     clients = result.clients_checked,
@@ -595,9 +598,12 @@ impl ClusteredAgent {
         let ctrl = self.controller.read().await;
         let stores = ctrl.stores();
         if stores.subscriptions.needs_reconciliation(now) {
-            let result = stores
-                .subscriptions
-                .reconcile(&stores.topics, &stores.wildcards);
+            let result =
+                stores
+                    .subscriptions
+                    .reconcile(&stores.topics, &stores.wildcards, |partition| {
+                        ctrl.can_serve_reads(partition)
+                    });
             if result.index_entries_restored > 0 {
                 info!(
                     clients = result.clients_checked,
