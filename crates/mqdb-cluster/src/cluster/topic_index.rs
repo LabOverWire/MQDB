@@ -112,6 +112,11 @@ pub fn topic_partition(topic: &str) -> PartitionId {
 }
 
 #[must_use]
+pub fn is_response_topic(topic: &str) -> bool {
+    topic.starts_with("resp/") || topic.contains("/resp/")
+}
+
+#[must_use]
 pub fn topic_index_key(topic: &str) -> String {
     let partition = topic_partition(topic);
     format!("_topic_index/p{}/topics/{}", partition.get(), topic)

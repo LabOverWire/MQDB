@@ -4,7 +4,7 @@
 use super::{RecoveryField, RecoveryStats, StoreApplyError, StoreManager};
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::session::session_partition;
-use crate::cluster::{Epoch, SubscriptionType, entity};
+use crate::cluster::{Epoch, SubscriptionType, entity, is_response_topic};
 
 impl StoreManager {
     /// # Errors
@@ -68,10 +68,11 @@ impl StoreManager {
             let client_id = snapshot.client_id_str();
             let partition = session_partition(client_id);
             for entry in snapshot.exact_subscriptions() {
-                if self
-                    .topics
-                    .subscribe(entry.topic_str(), client_id, partition, entry.qos)
-                    .is_ok()
+                if !is_response_topic(entry.topic_str())
+                    && self
+                        .topics
+                        .subscribe(entry.topic_str(), client_id, partition, entry.qos)
+                        .is_ok()
                 {
                     count += 1;
                 }

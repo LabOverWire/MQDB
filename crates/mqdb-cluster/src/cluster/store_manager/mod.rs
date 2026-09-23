@@ -33,7 +33,6 @@ use super::retained_store::RetainedStore;
 use super::session::SessionStore;
 use super::subscription_cache::SubscriptionCache;
 use super::topic_index::TopicIndex;
-use super::wildcard_pending::WildcardPendingStore;
 use super::wildcard_store::WildcardStore;
 use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
@@ -165,7 +164,6 @@ pub struct StoreManager {
     pub retained: RetainedStore,
     pub topics: TopicIndex,
     pub wildcards: WildcardStore,
-    pub wildcard_pending: WildcardPendingStore,
     pub inflight: InflightStore,
     pub offsets: OffsetStore,
     pub idempotency: IdempotencyStore,
@@ -198,7 +196,6 @@ impl StoreManager {
             retained: RetainedStore::new(node_id),
             topics: TopicIndex::new(node_id),
             wildcards: WildcardStore::new(node_id),
-            wildcard_pending: WildcardPendingStore::new(node_id),
             inflight: InflightStore::new(node_id),
             offsets: OffsetStore::new(node_id),
             idempotency: IdempotencyStore::new(node_id),
@@ -234,7 +231,6 @@ impl std::fmt::Debug for StoreManager {
             .field("retained", &self.retained.message_count())
             .field("topics", &self.topics.topic_count())
             .field("wildcards", &self.wildcards.pattern_count())
-            .field("wildcard_pending", &self.wildcard_pending.count())
             .field("inflight", &self.inflight.count())
             .field("offsets", &self.offsets.count())
             .field("idempotency", &self.idempotency.count())
