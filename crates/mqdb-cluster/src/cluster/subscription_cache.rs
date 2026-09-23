@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::protocol::Operation;
-use super::{NodeId, PartitionId, TopicIndex, WildcardStore, session_partition};
+use super::{NodeId, PartitionId, TopicIndex, WildcardStore, is_response_topic, session_partition};
 use bebytes::BeBytes;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
@@ -153,8 +153,7 @@ pub struct SubscriptionCache {
 #[derive(Debug, Default)]
 pub struct ReconciliationResult {
     pub clients_checked: usize,
-    pub subscriptions_added: usize,
-    pub subscriptions_removed: usize,
+    pub index_entries_restored: usize,
 }
 
 impl SubscriptionCache {
@@ -202,72 +201,44 @@ impl SubscriptionCache {
         wildcard_store: &WildcardStore,
     ) -> ReconciliationResult {
         let mut result = ReconciliationResult::default();
-        let mut snapshots = self.snapshots.write().unwrap();
 
-        let client_ids: Vec<String> = snapshots.keys().cloned().collect();
-
-        for client_id in &client_ids {
+        for snapshot in self.all_snapshots() {
             result.clients_checked += 1;
+            let client_id = snapshot.client_id_str();
 
-            let authoritative_exact: HashSet<String> = topic_index
+            let indexed_exact: HashSet<String> = topic_index
                 .get_client_topics(client_id)
                 .into_iter()
                 .map(|(topic, _)| topic)
                 .collect();
+            for entry in snapshot.exact_subscriptions() {
+                if !indexed_exact.contains(entry.topic_str())
+                    && !is_response_topic(entry.topic_str())
+                    && topic_index
+                        .subscribe(
+                            entry.topic_str(),
+                            client_id,
+                            session_partition(client_id),
+                            entry.qos,
+                        )
+                        .is_ok()
+                {
+                    result.index_entries_restored += 1;
+                }
+            }
 
-            let authoritative_wildcards: HashSet<String> = wildcard_store
+            let indexed_wildcards: HashSet<String> = wildcard_store
                 .get_client_patterns(client_id)
                 .into_iter()
                 .map(|(pattern, _)| pattern)
                 .collect();
-
-            if let Some(snapshot) = snapshots.get_mut(client_id) {
-                let cached_topics: HashSet<String> = snapshot
-                    .topics
-                    .iter()
-                    .map(|t| t.topic_str().to_string())
-                    .collect();
-
-                for cached_topic in &cached_topics {
-                    let is_wildcard = cached_topic.contains('+') || cached_topic.contains('#');
-                    let exists = if is_wildcard {
-                        authoritative_wildcards.contains(cached_topic)
-                    } else {
-                        authoritative_exact.contains(cached_topic)
-                    };
-
-                    if !exists {
-                        let _ = snapshot.remove_subscription(cached_topic);
-                        result.subscriptions_removed += 1;
-                    }
-                }
-
-                for topic in &authoritative_exact {
-                    if !snapshot.has_subscription(topic)
-                        && let Some((_, qos)) = topic_index
-                            .get_client_topics(client_id)
-                            .into_iter()
-                            .find(|(t, _)| t == topic)
-                    {
-                        snapshot.add_subscription(topic, qos);
-                        result.subscriptions_added += 1;
-                    }
-                }
-
-                for pattern in &authoritative_wildcards {
-                    if !snapshot.has_subscription(pattern)
-                        && let Some((_, qos)) = wildcard_store
-                            .get_client_patterns(client_id)
-                            .into_iter()
-                            .find(|(p, _)| p == pattern)
-                    {
-                        snapshot.add_subscription(pattern, qos);
-                        result.subscriptions_added += 1;
-                    }
-                }
-
-                if snapshot.topics.is_empty() {
-                    snapshots.remove(client_id);
+            for entry in snapshot.wildcard_subscriptions() {
+                if !indexed_wildcards.contains(entry.topic_str())
+                    && wildcard_store
+                        .subscribe_mqtt(entry.topic_str(), client_id, entry.qos)
+                        .is_ok()
+                {
+                    result.index_entries_restored += 1;
                 }
             }
         }
@@ -714,79 +685,157 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_removes_stale_entries() {
+    fn reconcile_restores_missing_index_entries_from_cache() {
         let cache = SubscriptionCache::new(node(1));
         let topic_index = TopicIndex::new(node(1));
         let wildcard_store = WildcardStore::new(node(1));
 
         cache.add_subscription("client1", "topic/a", 1).unwrap();
-        cache.add_subscription("client1", "topic/b", 1).unwrap();
-
-        topic_index
-            .subscribe("topic/a", "client1", partition(), 1)
-            .unwrap();
-
-        let result = cache.reconcile(&topic_index, &wildcard_store);
-
-        assert_eq!(result.clients_checked, 1);
-        assert_eq!(result.subscriptions_removed, 1);
-        assert_eq!(result.subscriptions_added, 0);
-
-        let subs = cache.get_subscriptions("client1");
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].topic_str(), "topic/a");
-    }
-
-    #[test]
-    fn reconcile_adds_missing_entries() {
-        let cache = SubscriptionCache::new(node(1));
-        let topic_index = TopicIndex::new(node(1));
-        let wildcard_store = WildcardStore::new(node(1));
-
-        cache.add_subscription("client1", "topic/a", 1).unwrap();
-
-        topic_index
-            .subscribe("topic/a", "client1", partition(), 1)
-            .unwrap();
-        topic_index
-            .subscribe("topic/b", "client1", partition(), 2)
-            .unwrap();
-
-        let result = cache.reconcile(&topic_index, &wildcard_store);
-
-        assert_eq!(result.clients_checked, 1);
-        assert_eq!(result.subscriptions_removed, 0);
-        assert_eq!(result.subscriptions_added, 1);
-
-        let subs = cache.get_subscriptions("client1");
-        assert_eq!(subs.len(), 2);
-    }
-
-    #[test]
-    fn reconcile_handles_wildcards() {
-        let cache = SubscriptionCache::new(node(1));
-        let topic_index = TopicIndex::new(node(1));
-        let wildcard_store = WildcardStore::new(node(1));
-
+        cache.add_subscription("client1", "topic/b", 2).unwrap();
         cache
             .add_subscription("client1", "sensors/+/temp", 1)
             .unwrap();
-        cache
-            .add_subscription("client1", "stale/+/pattern", 1)
-            .unwrap();
-
-        wildcard_store
-            .subscribe_mqtt("sensors/+/temp", "client1", 1)
+        topic_index
+            .subscribe("topic/a", "client1", partition(), 1)
             .unwrap();
 
         let result = cache.reconcile(&topic_index, &wildcard_store);
 
         assert_eq!(result.clients_checked, 1);
-        assert_eq!(result.subscriptions_removed, 1);
+        assert_eq!(result.index_entries_restored, 2);
+        let mut indexed = topic_index.get_client_topics("client1");
+        indexed.sort();
+        assert_eq!(
+            indexed,
+            vec![("topic/a".to_string(), 1), ("topic/b".to_string(), 2)]
+        );
+        assert_eq!(
+            topic_index.get_subscribers("topic/b")[0].partition(),
+            Some(session_partition("client1"))
+        );
+        assert_eq!(
+            wildcard_store.get_client_patterns("client1"),
+            vec![("sensors/+/temp".to_string(), 1)]
+        );
+        assert_eq!(cache.get_subscriptions("client1").len(), 3);
+    }
 
-        let subs = cache.get_subscriptions("client1");
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].topic_str(), "sensors/+/temp");
+    #[test]
+    fn reconcile_does_not_resurrect_unsubscribed_topics_from_index() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("client1", "topic/kept", 1).unwrap();
+        topic_index
+            .subscribe("topic/kept", "client1", partition(), 1)
+            .unwrap();
+        topic_index
+            .subscribe("topic/dropped", "client1", partition(), 1)
+            .unwrap();
+        wildcard_store
+            .subscribe_mqtt("dropped/+/pattern", "client1", 1)
+            .unwrap();
+
+        let result = cache.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.index_entries_restored, 0);
+        let topics: Vec<String> = cache
+            .get_subscriptions("client1")
+            .iter()
+            .map(|t| t.topic_str().to_string())
+            .collect();
+        assert_eq!(topics, vec!["topic/kept".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_skips_response_topics() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache
+            .add_subscription("client1", "resp/client1", 0)
+            .unwrap();
+        cache
+            .add_subscription("client1", "app/resp/client1", 0)
+            .unwrap();
+
+        let result = cache.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.index_entries_restored, 0);
+        assert!(topic_index.get_client_topics("client1").is_empty());
+    }
+
+    #[test]
+    fn reconcile_is_idempotent() {
+        let cache = SubscriptionCache::new(node(1));
+        let topic_index = TopicIndex::new(node(1));
+        let wildcard_store = WildcardStore::new(node(1));
+
+        cache.add_subscription("client1", "topic/a", 1).unwrap();
+        cache.add_subscription("client1", "alerts/#", 1).unwrap();
+
+        assert_eq!(
+            cache
+                .reconcile(&topic_index, &wildcard_store)
+                .index_entries_restored,
+            2
+        );
+        assert_eq!(
+            cache
+                .reconcile(&topic_index, &wildcard_store)
+                .index_entries_restored,
+            0
+        );
+        assert_eq!(topic_index.get_subscribers("topic/a").len(), 1);
+    }
+
+    #[test]
+    fn replicated_subscription_survives_reconcile_when_broadcast_was_missed() {
+        let replica = SubscriptionCache::new(node(2));
+        let topic_index = TopicIndex::new(node(2));
+        let wildcard_store = WildcardStore::new(node(2));
+
+        let mut snapshot = MqttSubscriptionSnapshot::create("client1");
+        snapshot.add_subscription("sensors/a", 1);
+        snapshot.add_subscription("alerts/+", 1);
+        replica
+            .apply_replicated(
+                Operation::Insert,
+                "client1",
+                &SubscriptionCache::serialize(&snapshot),
+            )
+            .unwrap();
+
+        let result = replica.reconcile(&topic_index, &wildcard_store);
+
+        assert_eq!(result.index_entries_restored, 2);
+        assert_eq!(
+            topic_index.get_client_topics("client1"),
+            vec![("sensors/a".to_string(), 1)]
+        );
+        assert_eq!(
+            wildcard_store.get_client_patterns("client1"),
+            vec![("alerts/+".to_string(), 1)]
+        );
+
+        let promoted = SubscriptionCache::new(node(3));
+        promoted
+            .import_subscriptions(&replica.export_for_partition(session_partition("client1")))
+            .unwrap();
+
+        let mut topics: Vec<String> = promoted
+            .get_subscriptions("client1")
+            .iter()
+            .map(|t| t.topic_str().to_string())
+            .collect();
+        topics.sort();
+        assert_eq!(
+            topics,
+            vec!["alerts/+".to_string(), "sensors/a".to_string()],
+            "replicated subscriptions were deleted by reconcile because the index broadcast was missed"
+        );
     }
 
     #[test]

@@ -147,7 +147,7 @@ async fn clear_client_subscriptions<T: ClusterTransport + 'static>(
                 }
             } else {
                 let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
+                let is_response_topic = crate::cluster::is_response_topic(topic);
                 if !is_response_topic {
                     let broadcast = TopicSubscriptionBroadcast::unsubscribe(topic, client_id);
                     ClusterEventHandler::<T>::broadcast_topic_subscription(ctrl, broadcast).await;

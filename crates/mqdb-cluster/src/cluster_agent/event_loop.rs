@@ -76,7 +76,6 @@ impl ClusteredAgent {
         let mut tick_interval = interval(Duration::from_millis(10));
         let mut cleanup_interval = interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
-        let mut wildcard_reconciliation_interval = interval(Duration::from_mins(1));
         let mut subscription_reconciliation_interval = interval(Duration::from_mins(5));
         let mut mesh_check_interval = interval(Duration::from_secs(MESH_CHECK_INTERVAL_SECS));
         let mut retained_sync_cleanup_interval =
@@ -139,9 +138,6 @@ impl ClusteredAgent {
                 }
                 _ = cleanup_interval.tick() => {
                     self.handle_session_cleanup().await;
-                }
-                _ = wildcard_reconciliation_interval.tick() => {
-                    self.handle_wildcard_reconciliation().await;
                 }
                 _ = subscription_reconciliation_interval.tick() => {
                     self.handle_subscription_reconciliation().await;
@@ -236,11 +232,10 @@ impl ClusteredAgent {
             let result = stores
                 .subscriptions
                 .reconcile(&stores.topics, &stores.wildcards);
-            if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+            if result.index_entries_restored > 0 {
                 info!(
                     clients = result.clients_checked,
-                    added = result.subscriptions_added,
-                    removed = result.subscriptions_removed,
+                    restored = result.index_entries_restored,
                     "reconciled subscriptions after partition takeover"
                 );
             }
@@ -595,37 +590,6 @@ impl ClusteredAgent {
         );
     }
 
-    async fn handle_wildcard_reconciliation(&self) {
-        let now = current_time_ms();
-        let ctrl = self.controller.read().await;
-        let pending_store = &ctrl.stores().wildcard_pending;
-        if pending_store.needs_reconciliation(now) {
-            let pending = pending_store.get_pending_for_retry();
-            if !pending.is_empty() {
-                debug!(
-                    count = pending.len(),
-                    "retrying pending wildcard broadcasts"
-                );
-                for p in &pending {
-                    let broadcast = p.to_broadcast();
-                    let msg = ClusterMessage::WildcardBroadcast(broadcast);
-                    let _ = ctrl.transport().broadcast(msg).await;
-                    pending_store.mark_retried(&p.pattern, &p.client_id);
-                }
-                info!(
-                    count = pending.len(),
-                    "rebroadcast pending wildcard subscriptions"
-                );
-            }
-            pending_store.mark_reconciliation(now);
-            let max_age_ms = 5 * 60 * 1000;
-            let removed = pending_store.clear_old_entries(now, max_age_ms);
-            if removed > 0 {
-                debug!(removed, "cleared old wildcard pending entries");
-            }
-        }
-    }
-
     async fn handle_subscription_reconciliation(&self) {
         let now = current_time_ms();
         let ctrl = self.controller.read().await;
@@ -634,11 +598,10 @@ impl ClusteredAgent {
             let result = stores
                 .subscriptions
                 .reconcile(&stores.topics, &stores.wildcards);
-            if result.subscriptions_added > 0 || result.subscriptions_removed > 0 {
+            if result.index_entries_restored > 0 {
                 info!(
                     clients = result.clients_checked,
-                    added = result.subscriptions_added,
-                    removed = result.subscriptions_removed,
+                    restored = result.index_entries_restored,
                     "reconciled subscription cache"
                 );
             }

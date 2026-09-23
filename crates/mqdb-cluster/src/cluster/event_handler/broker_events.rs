@@ -264,7 +264,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
 
                     let qos = qos_to_u8(sub.qos);
                     let is_wildcard = topic.contains('+') || topic.contains('#');
-                    let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
+                    let is_response_topic = crate::cluster::is_response_topic(topic);
 
                     if !is_response_topic {
                         if is_wildcard {
@@ -370,7 +370,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     }
                 } else {
                     let _ = ctrl.stores_mut().topics.unsubscribe(topic, client_id);
-                    let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
+                    let is_response_topic = crate::cluster::is_response_topic(topic);
                     if is_response_topic {
                         trace!(
                             topic,
