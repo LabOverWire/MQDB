@@ -156,26 +156,26 @@ The key distinction: exact topic subscriptions are lightweight (1 replicated wri
 
 The `StoreManager` coordinates 17 distinct stores behind a common interface:
 
-**MQTT Stores (11)**:
+**MQTT Stores (10)**:
 - `sessions` - Client session lifecycle
 - `subscriptions` - Topic subscriptions per client
 - `retained` - Retained messages by topic
 - `topics` - TopicIndex (topic → subscribers)
 - `wildcards` - Wildcard subscription trie
-- `wildcard_pending` - Pending wildcard operations
 - `qos2` - QoS 2 exactly-once state machines
 - `inflight` - QoS 1 messages awaiting acknowledgment
 - `offsets` - Consumer group offsets
 - `idempotency` - Request deduplication tokens
 - `client_locations` - Client → connected node mapping
 
-**Database Stores (6)**:
+**Database Stores (7)**:
 - `db_data` - Entity records
 - `db_schema` - Entity schemas with constraints
 - `db_index` - Secondary indexes
 - `db_unique` - Unique constraint reservations
 - `db_fk` - Foreign key validation
 - `db_constraints` - Constraint definitions
+- `fk_reverse_index` - Reverse index from referenced records to referencing records
 
 ### A3.2 The apply_write() Dispatcher
 
@@ -951,8 +951,7 @@ All cluster-managed data types (`crates/mqdb-cluster/src/cluster/entity.rs`):
 
 | Constant | Value | File |
 |----------|-------|------|
-| `SUBSCRIPTION_RECONCILIATION_INTERVAL_MS` | 300,000 (5 min) | `subscription_cache.rs:7` |
-| `WILDCARD_RECONCILIATION_INTERVAL_MS` | 60,000 (1 min) | `wildcard_pending.rs:6` |
+| `SUBSCRIPTION_RECONCILIATION_INTERVAL_MS` | 300,000 (5 min) | `subscription_cache.rs:10` |
 | `CATCHUP_REQUEST_INTERVAL_MS` | 5,000 | `replication.rs:24` |
 | `OFFSET_STALE_TTL_MS` | 604,800,000 (7 days) | `offset_store.rs:86` |
 | `DEFAULT_QUERY_TIMEOUT_MS` | 10,000 | `query_coordinator.rs:7` |
@@ -2242,7 +2241,6 @@ Peer format: `{node_id}@{address}:{port}` (comma-separated for multiple)
 6. Register peers with Controller and Raft
 7. Start main event loop:
    - 100ms: Controller tick, Raft tick, heartbeats
-   - 60s: Wildcard reconciliation
    - 300s: Subscription reconciliation
    - 3600s: Cleanup expired sessions/idempotency
 ```
@@ -2374,7 +2372,7 @@ delete itself.
 The following are implemented but documented in other files:
 
 - **LWT (Last Will Testament)**: Implemented in M9, see `docs/implementation-plan.md`
-- **Subscription cache reconciliation**: `SubscriptionCache::reconcile()` runs every 5 minutes
+- **Subscription reconciliation**: `SubscriptionCache::reconcile()` runs every 5 minutes and after a partition takeover. The replicated subscription record is authoritative: for clients whose session partition this node holds as primary or replica, reconcile re-adds any recorded subscription missing from the local TopicIndex/WildcardStore and never modifies the record. Exact response topics are skipped, as they are never broadcast. Copies held by ex-owners or by the node a client used to connect through are ignored, so they cannot recreate index entries. The index is never pruned, so an entry whose unsubscribe broadcast was missed stays until the client's subscriptions are cleared; it only costs a wasted forward, since the receiving node delivers to its local subscribers only. Model: `specs/ClusterSubReconcile.tla`
 - **Database operations ($DB/#)**: See README.md "MQTT Topic Structure" section
 - **Backup and restore**: See README.md "Admin Operations" section
 

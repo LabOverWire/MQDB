@@ -168,7 +168,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .stores_mut()
             .topics
             .subscribe(topic, client_id, client_partition, qos);
-        let is_response_topic = topic.starts_with("resp/") || topic.contains("/resp/");
+        let is_response_topic = crate::cluster::is_response_topic(topic);
         if is_response_topic {
             trace!(topic, client_id, "skipping broadcast for response topic");
         } else {

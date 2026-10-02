@@ -41,7 +41,6 @@ mod subscription_cache;
 mod topic_index;
 mod topic_trie;
 mod transport;
-mod wildcard_pending;
 mod wildcard_store;
 mod write_log;
 
@@ -123,17 +122,14 @@ pub use subscription_cache::{
     mqtt_subscription_key,
 };
 pub use topic_index::{
-    SubscriberLocation, TopicIndex, TopicIndexEntry, TopicIndexError, topic_index_key,
-    topic_partition,
+    SubscriberLocation, TopicIndex, TopicIndexEntry, TopicIndexError, is_response_topic,
+    topic_index_key, topic_partition,
 };
 pub use topic_trie::{
     SubscriptionType, TopicTrie, WildcardSubscriber, is_wildcard_pattern, validate_pattern,
 };
 pub use transport::{
     ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError,
-};
-pub use wildcard_pending::{
-    PendingWildcard, WILDCARD_RECONCILIATION_INTERVAL_MS, WildcardPendingStore,
 };
 pub use wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError, wildcard_key};
 pub use write_log::PartitionWriteLog;
