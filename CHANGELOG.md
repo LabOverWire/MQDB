@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-01 — mqdb-agent 0.8.30, mqdb-cluster 0.4.16, mqdb-vault 0.1.6, mqdb-cli 0.8.40
+
+### Changed
+
+- **Upgraded `mqtt5` from 0.39.2 to 0.45.1** (and `mqtt5-protocol` from 0.15.0 to 0.15.2). No MQDB source changes were needed. The broker-side changes MQDB users will notice:
+  - **Agent mode migrates its MQTT session storage on first start, one way.** `<db>/mqtt_storage` moves to storage format 2 (sessions in one append-only `sessions/sessions.log`), and older builds refuse a migrated directory. **Back up `<db>/mqtt_storage` before upgrading**; rolling back means restoring that backup. Verified upgrading a 0.39.2 data directory: records, the persistent session and a message queued while the client was offline all survive.
+  - **Session expiry follows MQTT v5 §3.1.2.11.2.** An MQTT v5 CONNECT without a Session Expiry Interval now ends its session at disconnect, so a client that resumes with Clean Start 0 must send a non-zero Session Expiry Interval.
+  - **MQDB's session expiry setting (1 hour) is now a maximum.** It was previously ignored. A client that asks for longer, or an MQTT v3.1.1 CleanSession=0 client, is granted 1 hour.
+
+### Fixed
+
+- **A timed-out send no longer corrupts the stream to a peer** (#143, #145). Inter-node sends wrote each frame with a timeout around `write_all`, which is not cancellation-safe: a timeout mid-frame left a partial length-prefixed frame on the stream, and every later frame to that peer was misread. Each peer connection now has a writer task that owns its send stream and writes whole frames with no timeout. Sends go through a bounded per-peer queue; when it is full the whole frame is dropped instead of truncated, and a slow peer no longer blocks a broadcast to the others.
+- **Heartbeats and Raft traffic are no longer delayed or dropped behind bulk data** (#146, #147). Each peer has two queues: a control queue (256 frames: heartbeats, Raft, death and drain notices, partition updates), drained first, and the bulk queue (1024 frames) for everything else. A full bulk queue no longer drops control frames, which under sustained load could cause false node-death detection and election churn. Both queues still share one stream, so a control frame can wait behind the one bulk frame being written.
+- **A peer whose connection dies is removed and re-dialled** (#146, #148). A dead connection used to stay in the peer map forever and was never re-dialled, so the peer stayed unreachable, and still counted as linked, until it happened to connect inbound. A failed write now removes the entry, guarded by a per-connection generation so a stale failure cannot remove a newer connection, and every 60 seconds each `--peers` peer the heartbeat reports as not alive is dialled again. The design is model-checked in `specs/ClusterRedial.tla`.
+- **Peer re-dial is faster and cannot be stalled by one unreachable peer** (#149, #150). A re-dial now also runs when a node death is detected, so a peer that is back within the dead-detection window reconnects in about 15–17 seconds on a 5-node cluster instead of up to 75. Only peers the heartbeat reports as dead or unknown are re-dialled, so a briefly late but live peer is left alone, and dials run concurrently with a 5-second timeout each.
+- **A node that missed a subscription broadcast no longer deletes the replicated subscription** (#141, #151). Subscription reconciliation trusted the local topic index, which is filled only by a one-hop broadcast. A node that held a client's replicated subscription record but missed the broadcast deleted the record, passed the loss on to later replicas, and never routed to that subscriber. The record is now the source of truth for clients whose session partition the node holds as primary or replica: reconciliation adds missing index entries from it and never changes it. Copies held by former owners are ignored. Exact response topics (`resp/…`) are skipped in reconciliation and in startup recovery, since they are never broadcast. The unused wildcard retry timer (`WildcardPendingStore`) is removed. Model: `specs/ClusterSubReconcile.tla`.
+
+### Changed (dev tooling)
+
+- **Dev clusters use a full peer mesh** (#156). `mqdb dev start-cluster` now defaults to the `full` topology, and the clusters started by the ownership, sharing and presence suites give every node every other node in `--peers`, which the cluster requires. The previous default, `partial`, started each node with only lower-numbered peers; on that topology a node that starts with no peers elects itself, two Raft leaders can be elected in one term, and partitions can keep moving for over a minute (#155). `partial` remains the default with `--no-quic` and can be selected explicitly.
+- **`mqdb dev test` waits for the partition map to settle before writing** (#156). Readiness used to mean only that every node accepted a connection. The suites now wait until three consecutive polls show every node reporting the same partition map, with every partition assigned and every started node holding primaries. On a full mesh this takes 5–8 s on 5 nodes.
+
+### Notes
+
+- **`mqdb-cluster` API:** `WildcardPendingStore`, `PendingWildcard` and `WILDCARD_RECONCILIATION_INTERVAL_MS` are no longer exported, and `ReconciliationResult` replaces `subscriptions_added`/`subscriptions_removed` with `index_entries_restored`. `SubscriptionCache::reconcile` takes a `holds_partition` predicate.
+- Still open from this release's cluster work: a node that holds no copy of a client's subscription record and misses the broadcast is never repaired (#140); subscription record writes are built from the handling node's local copy (#152); a record created just before its partition moves is missing on the new primary (#153); two Raft leaders can be elected in one term when nodes start without the full peer list (#155).
+- The broker's `ClientConnectEvent.clean_start` now reports whether a session was resumed, not the CONNECT flag, so a client's first connect with Clean Start 0 is still reported as clean. Cluster mode uses that flag to decide whether to clear a client's subscriptions on disconnect; moving that decision to the granted session expiry is a follow-up.
+
 ## 2026-09-20 — mqdb-cluster 0.4.15, mqdb-cli 0.8.39
 
 ### Fixed
