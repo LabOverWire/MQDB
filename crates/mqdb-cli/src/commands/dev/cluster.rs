@@ -53,7 +53,7 @@ pub(crate) fn cmd_dev_start_cluster(
     };
     let passwd_path = passwd.unwrap_or_else(|| generated_passwd.as_deref().expect("just created"));
 
-    let topology_name = topology.unwrap_or("partial");
+    let topology_name = topology.unwrap_or("full");
     println!("Using {topology_name} mesh topology (bind: {bind_host})");
 
     for node_id in 1..=nodes {

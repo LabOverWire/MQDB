@@ -42,9 +42,13 @@ fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
         }
 
         if all_ready {
-            std::thread::sleep(Duration::from_secs(2));
-            println!("Cluster ready!");
-            return true;
+            let settled = wait_for_partitions_settled(nodes, timeout_secs);
+            if settled {
+                println!("Cluster ready!");
+            } else {
+                println!("Warning: running tests while partitions may still be moving");
+            }
+            return settled;
         }
 
         std::thread::sleep(Duration::from_millis(500));
@@ -537,6 +541,13 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
     }
 }
 
+fn full_mesh_peers(node_id: u8, nodes: u8) -> Vec<String> {
+    (1..=nodes)
+        .filter(|&n| n != node_id)
+        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
+        .collect()
+}
+
 fn wait_for_auth_cluster(nodes: u8, timeout_secs: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -572,13 +583,118 @@ fn wait_for_auth_cluster(nodes: u8, timeout_secs: u64) -> bool {
         }
 
         if all_ready {
-            std::thread::sleep(Duration::from_secs(2));
-            return true;
+            return wait_for_partitions_settled(nodes, timeout_secs);
         }
 
         std::thread::sleep(Duration::from_millis(500));
     }
 
+    false
+}
+
+type PartitionAssignment = (u64, Option<u64>, Vec<u64>);
+
+fn partition_map_on(port: u16) -> Option<Vec<PartitionAssignment>> {
+    let output = Command::new("timeout")
+        .args([
+            "3",
+            "mosquitto_rr",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
+            "-t",
+            "$SYS/mqdb/cluster/status",
+            "-e",
+            &format!("resp/dev-settle-{port}"),
+            "-m",
+            "{}",
+            "-W",
+            "2",
+        ])
+        .output()
+        .ok()?;
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let data = &status["data"];
+    let fully_linked = data["unlinked_nodes"].as_array().is_some_and(Vec::is_empty);
+    if !fully_linked {
+        return None;
+    }
+    let mut assignments: Vec<PartitionAssignment> = data["partitions"]
+        .as_array()?
+        .iter()
+        .map(|p| {
+            let replicas = p["replicas"]
+                .as_array()
+                .map(|r| r.iter().filter_map(serde_json::Value::as_u64).collect())
+                .unwrap_or_default();
+            (
+                p["id"].as_u64().unwrap_or(0),
+                p["primary"].as_u64(),
+                replicas,
+            )
+        })
+        .collect();
+    assignments.sort_unstable();
+    Some(assignments)
+}
+
+fn partition_map_complete(map: &[PartitionAssignment], nodes: u8) -> bool {
+    map.len() == usize::from(mqdb_core::NUM_PARTITIONS)
+        && map
+            .iter()
+            .all(|(_, primary, replicas)| primary.is_some() && (nodes < 2 || !replicas.is_empty()))
+        && (1..=u64::from(nodes))
+            .all(|node| map.iter().any(|(_, primary, _)| *primary == Some(node)))
+}
+
+fn wait_for_partitions_settled(nodes: u8, timeout_secs: u64) -> bool {
+    const STABLE_POLLS: u32 = 3;
+    let start = Instant::now();
+    let timeout = Duration::from_secs(timeout_secs.max(30));
+    let mut previous: Option<Vec<PartitionAssignment>> = None;
+    let mut stable_polls = 0;
+
+    while start.elapsed() < timeout {
+        let maps: Vec<Option<Vec<PartitionAssignment>>> = (0..nodes)
+            .map(|i| partition_map_on(1883 + u16::from(i)))
+            .collect();
+        let agreed = match maps.first() {
+            Some(Some(first)) if partition_map_complete(first, nodes) => maps
+                .iter()
+                .all(|m| m.as_ref() == Some(first))
+                .then(|| first.clone()),
+            _ => None,
+        };
+        match agreed {
+            Some(map) if previous.as_ref() == Some(&map) => stable_polls += 1,
+            Some(map) => {
+                previous = Some(map);
+                stable_polls = 1;
+            }
+            None => {
+                previous = None;
+                stable_polls = 0;
+            }
+        }
+        if stable_polls >= STABLE_POLLS {
+            println!(
+                "Partition map settled on all {nodes} nodes after {:.1}s",
+                start.elapsed().as_secs_f64()
+            );
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    println!(
+        "Warning: partition map did not settle within {}s",
+        timeout.as_secs()
+    );
     false
 }
 
@@ -646,9 +762,7 @@ fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
             cmd.args(["--license", lic_str]);
         }
 
-        let peers: Vec<String> = (1..node_id)
-            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-            .collect();
+        let peers = full_mesh_peers(node_id, nodes);
         if !peers.is_empty() {
             cmd.args(["--peers", &peers.join(",")]);
         }
@@ -1032,9 +1146,7 @@ fn run_test_sharing(nodes: u8, _ports: &[u16], license: Option<&Path>) {
             cmd.args(["--license", lic_str]);
         }
 
-        let peers: Vec<String> = (1..node_id)
-            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-            .collect();
+        let peers = full_mesh_peers(node_id, nodes);
         if !peers.is_empty() {
             cmd.args(["--peers", &peers.join(",")]);
         }
@@ -1495,9 +1607,7 @@ fn start_presence_cluster(
             cmd.args(["--license", lic_str]);
         }
 
-        let peers: Vec<String> = (1..node_id)
-            .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-            .collect();
+        let peers = full_mesh_peers(node_id, nodes);
         if !peers.is_empty() {
             cmd.args(["--peers", &peers.join(",")]);
         }
