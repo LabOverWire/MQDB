@@ -496,9 +496,11 @@ The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `c
 
 | Topology | Description | Bridges (3 nodes) |
 |----------|-------------|-------------------|
-| `partial` (default) | To lower-numbered nodes | N1:0, N2:1, N3:2 |
+| `full` (default with QUIC) | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
+| `partial` (default with `--no-quic`) | To lower-numbered nodes | N1:0, N2:1, N3:2 |
 | `upper` | To higher-numbered nodes | N1:2, N2:1, N3:0 |
-| `full` | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
+
+`full` is the default with QUIC because it is the only topology in which every node is configured with every other node, which the cluster requires. With the deprecated MQTT bridge transport (`--no-quic`) the default stays `partial`, since a full mesh of bridges either amplifies (`Both`) or flaps (`Out`, issue 11.16). `partial` and `upper` start nodes with an incomplete peer list; they remain available to reproduce membership problems such as #155 (a node that starts with no peers elects itself and two Raft leaders can then be elected in one term).
 
 **Bridge Direction Semantics**:
 
@@ -593,7 +595,7 @@ Full mesh topology experiences Raft leader flapping (every 4-5s) due to unreliab
 - Heartbeats are NOT RECEIVED by followers consistently
 - Election timeout (3-5s) expires, triggering new elections
 
-Use **partial** or **upper** topology for production until this is resolved.
+This applied to the deprecated MQTT bridge transport and was resolved by making QUIC the default (11.16). Do **not** use `partial` or `upper` for production: every node must be configured with every other node (#155).
 
 **Key Findings**:
 - **0 peers = best pubsub**: Nodes with 0 bridge connections achieve 146-154k msg/s vs 5-15k for nodes with peers

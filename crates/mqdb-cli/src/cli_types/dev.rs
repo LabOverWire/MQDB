@@ -83,7 +83,7 @@ pub(crate) enum DevAction {
         #[arg(
             long,
             value_name = "TYPE",
-            help = "Topology: partial (default), upper, or full"
+            help = "Topology: full (default with QUIC), partial (default with --no-quic), or upper"
         )]
         topology: Option<String>,
         #[arg(
