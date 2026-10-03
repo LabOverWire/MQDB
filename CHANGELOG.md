@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-03 — mqdb-cluster 0.4.17, mqdb-cli 0.8.41
+
+### Fixed
+
+- **Raft no longer elects two leaders in one term when nodes start with partial peer lists** (#155). Three defects combined:
+  - A candidate that stepped down to a same-term leader cleared its vote and could vote again in that term. It now keeps its vote.
+  - The election timer started already expired, so a joining node campaigned within about 100 ms of starting. The timer now starts on the first tick, with a per-node randomized first timeout so nodes started together do not all campaign together.
+  - The 10-second startup grace for a node with no peers never applied, so that node elected itself at once with a quorum of one. Startup grace now applies.
+
+  Measured on 5 nodes, starting each node with only lower-numbered peers: 16/16 fresh starts settle in 8–9 s with one leader, against 2/16 that never converged and a 64 s median before. On a full peer mesh the first election now waits one election timeout (3–5 s), so a fresh cluster settles in 11–14 s instead of 8–9 s.
+
+### Notes
+
+- Quorum is still computed over each node's own peer list, with no committed membership, so starting every node with the full peer list remains required (#157).
+
 ## 2026-10-01 — mqdb-agent 0.8.30, mqdb-cluster 0.4.16, mqdb-vault 0.1.6, mqdb-cli 0.8.40
 
 ### Changed

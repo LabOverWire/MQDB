@@ -80,7 +80,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     fn rebuild_partition_map(&mut self) {
-        let outputs = self.node.tick(0);
+        let outputs = self.node.take_committed();
         for output in outputs {
             if let RaftOutput::ApplyCommand(cmd) = output {
                 self.apply_command_local(&cmd);

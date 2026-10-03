@@ -303,6 +303,7 @@ async fn raft_leader_election_three_nodes() {
     assert_eq!(n2.role(), RaftRole::Follower);
     assert_eq!(n3.role(), RaftRole::Follower);
 
+    n1.tick(0);
     let outputs = n1.tick(1000);
     assert_eq!(n1.role(), RaftRole::Candidate);
     assert_eq!(n1.current_term(), 1);
@@ -350,6 +351,7 @@ async fn raft_step_down_on_higher_term() {
     n2.add_peer(node1);
     n2.add_peer(node3);
 
+    n1.tick(0);
     n1.tick(1000);
     assert_eq!(n1.role(), RaftRole::Candidate);
     assert_eq!(n1.current_term(), 1);
@@ -386,6 +388,7 @@ async fn raft_partition_map_updates() {
     follower.add_peer(node1);
     follower.add_peer(node3);
 
+    leader.tick(0);
     let outputs = leader.tick(1000);
     assert_eq!(leader.role(), RaftRole::Candidate);
 

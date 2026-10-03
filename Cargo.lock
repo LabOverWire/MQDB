@@ -1529,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cli"
-version = "0.8.40"
+version = "0.8.41"
 dependencies = [
  "base64 0.22.1",
  "bebytes",
@@ -1556,7 +1556,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cluster"
-version = "0.4.16"
+version = "0.4.17"
 dependencies = [
  "arc-swap",
  "bebytes",

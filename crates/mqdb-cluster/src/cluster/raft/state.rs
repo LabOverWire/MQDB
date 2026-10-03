@@ -279,8 +279,10 @@ impl RaftState {
 
     pub fn become_follower(&mut self, term: u64, leader: Option<NodeId>) {
         self.role = RaftRole::Follower;
-        self.current_term = term;
-        self.voted_for = None;
+        if term > self.current_term {
+            self.current_term = term;
+            self.voted_for = None;
+        }
         self.leader_id = leader;
         self.votes_received.clear();
     }
