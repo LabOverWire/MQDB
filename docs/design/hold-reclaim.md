@@ -136,9 +136,9 @@ one with an empty payload — only the internal publisher can overwrite it.
 Two failure modes are asymmetric and worth stating plainly. A dropped `disconnect` only
 defers reclaim to the TTL backstop, but a dropped `connect` leaves a live client retained
 as disconnected. Likewise a **session takeover** fires the displaced connection's
-disconnect *after* the new connection's connect (mqtt5 `register_client` precedes
-`fire_connect_event`, and `fire_disconnect_event` runs unconditionally regardless of
-`session_taken_over`), so the handler counts live connections per `client_id` and reports
+disconnect *after* the new connection's connect (mqtt5 registers the new connection during
+its connect handshake, before `fire_connect_event`, and `fire_disconnect_event` runs on every
+connection exit, a takeover included), so the handler counts live connections per `client_id` and reports
 `disconnect` only when the last one closes. Presence is also unscoped: every subscriber
 sees every client id, user id and connection timing.
 
@@ -212,9 +212,9 @@ larger change than the agent's batch tweak.
 1. **Per-connection vs per-user binding.** Per-connection false-reclaims a user who still
    has another live connection. **Rec: per-user** (`_bound_user_id` + user-level presence
    aggregation).
-2. **mqtt-lib `user_id`.** ✅ RESOLVED & LANDED — the workspace is pinned to the published
-   `mqtt5 = "0.39"` (`0.39.2`), replacing the git dependency (done in its own step, ahead of
-   PR 3). Both `ClientConnectEvent` and `ClientDisconnectEvent` carry
+2. **mqtt-lib `user_id`.** ✅ RESOLVED & LANDED — the workspace depends on the published
+   `mqtt5` crate (`0.39.2` when this landed, ahead of PR 3; now `0.45`), replacing the git
+   dependency. Both `ClientConnectEvent` and `ClientDisconnectEvent` carry
    `pub user_id: Option<Arc<str>>` (mirrors `ClientPublishEvent::user_id`; the authenticated
    username, `None` for anonymous). Read as `event.user_id.as_deref()`. `ClientDisconnectEvent`
    also has `client_id: Arc<str>` + `unexpected: bool`, so the presence payload
