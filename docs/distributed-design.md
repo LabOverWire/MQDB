@@ -496,11 +496,11 @@ The fix detects bridge clients by their ID pattern `node-X-to-node-Y` (set in `c
 
 | Topology | Description | Bridges (3 nodes) |
 |----------|-------------|-------------------|
-| `full` (default) | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
-| `partial` | To lower-numbered nodes | N1:0, N2:1, N3:2 |
+| `full` (default with QUIC) | All-to-all (duplicates) | N1:2, N2:2, N3:2 |
+| `partial` (default with `--no-quic`) | To lower-numbered nodes | N1:0, N2:1, N3:2 |
 | `upper` | To higher-numbered nodes | N1:2, N2:1, N3:0 |
 
-`full` is the default because it is the only topology in which every node is configured with every other node, which the cluster requires. `partial` and `upper` start nodes with an incomplete peer list; they remain available to reproduce membership problems such as #155 (a node that starts with no peers elects itself and two Raft leaders can then be elected in one term).
+`full` is the default with QUIC because it is the only topology in which every node is configured with every other node, which the cluster requires. With the deprecated MQTT bridge transport (`--no-quic`) the default stays `partial`, since a full mesh of bridges either amplifies (`Both`) or flaps (`Out`, issue 11.16). `partial` and `upper` start nodes with an incomplete peer list; they remain available to reproduce membership problems such as #155 (a node that starts with no peers elects itself and two Raft leaders can then be elected in one term).
 
 **Bridge Direction Semantics**:
 
