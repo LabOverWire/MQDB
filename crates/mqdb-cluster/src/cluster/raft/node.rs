@@ -217,8 +217,8 @@ impl RaftNode {
             self.startup_time = Some(now_ms);
             if self.last_heartbeat_time == 0 {
                 self.last_heartbeat_time = now_ms;
-                self.reset_election_timeout();
             }
+            self.reset_election_timeout();
         }
 
         let mut outputs = Vec::new();
@@ -248,6 +248,7 @@ impl RaftNode {
         self.persist_state();
         self.last_election_time = now_ms;
         self.last_heartbeat_time = now_ms;
+        self.reset_election_timeout();
 
         if self.state.has_quorum() {
             self.state.become_leader();
@@ -348,6 +349,7 @@ impl RaftNode {
                 self.state.grant_vote(request.term, c);
                 self.persist_state();
                 self.last_heartbeat_time = now_ms;
+                self.reset_election_timeout();
             }
             RequestVoteResponse::granted(self.state.current_term())
         } else {
@@ -422,6 +424,7 @@ impl RaftNode {
         }
 
         self.last_heartbeat_time = now_ms;
+        self.reset_election_timeout();
 
         self.persist_log_entries(&request.entries);
 
@@ -586,6 +589,27 @@ mod tests {
             distinct.len(),
             campaigns.len(),
             "first election timeouts must differ per node: {campaigns:?}"
+        );
+    }
+
+    #[test]
+    fn election_timeout_is_redrawn_for_every_election() {
+        let mut node = make_node(3);
+        node.add_peer(NodeId::validated(1).unwrap());
+        node.add_peer(NodeId::validated(2).unwrap());
+        node.tick(0);
+        let campaigns: Vec<u64> = (1..=2000)
+            .filter(|&now| {
+                node.tick(now)
+                    .iter()
+                    .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+            })
+            .collect();
+        let intervals: Vec<u64> = campaigns.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(intervals.len() >= 4, "campaigns: {campaigns:?}");
+        assert!(
+            intervals.windows(2).any(|w| w[0] != w[1]),
+            "every election used the same timeout: {intervals:?}"
         );
     }
 
