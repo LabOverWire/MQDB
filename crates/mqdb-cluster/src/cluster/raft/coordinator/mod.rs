@@ -99,6 +99,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.node.is_leader()
     }
 
+    pub fn storage_failure(&self) -> Option<&str> {
+        self.node.storage_failure()
+    }
+
     pub fn current_term(&self) -> u64 {
         self.node.current_term()
     }

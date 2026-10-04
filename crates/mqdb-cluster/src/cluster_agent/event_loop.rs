@@ -172,7 +172,10 @@ impl ClusteredAgent {
             task.abort();
         }
         broker_handle.abort();
-        Ok(())
+        match self.fatal_error.get() {
+            Some(reason) => Err(reason.clone().into()),
+            None => Ok(()),
+        }
     }
 
     async fn handle_tick(&self, tx_tick: &flume::Sender<u64>) {

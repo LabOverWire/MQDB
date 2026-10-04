@@ -4,10 +4,11 @@
 use crate::cluster::raft::{RaftCommand, RaftCoordinator};
 use crate::cluster::transport::ClusterTransport;
 use crate::cluster::{ClusterMessage, Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, watch};
 use tokio::time::interval;
-use tracing::info;
+use tracing::{error, info};
 
 use super::node_controller::RaftMessage;
 use super::raft::PartitionUpdate;
@@ -50,6 +51,8 @@ pub struct RaftTask<T: ClusterTransport> {
     pub(crate) tx_partition_map: watch::Sender<PartitionMap>,
     pub(crate) tx_status: watch::Sender<RaftStatus>,
     pub(crate) shutdown_rx: broadcast::Receiver<()>,
+    pub(crate) shutdown_tx: broadcast::Sender<()>,
+    pub(crate) fatal_error: Arc<std::sync::OnceLock<String>>,
     pub(crate) all_nodes: Vec<NodeId>,
     pub(crate) partitions_initialized: bool,
 }
@@ -78,6 +81,12 @@ impl<T: ClusterTransport> RaftTask<T> {
                 Ok(cmd) = self.rx_admin.recv_async() => {
                     self.handle_admin_command(cmd).await;
                 }
+            }
+            if let Some(reason) = self.raft.storage_failure() {
+                error!(%reason, "stopping node after a raft storage failure");
+                let _ = self.fatal_error.set(reason.to_string());
+                let _ = self.shutdown_tx.send(());
+                break;
             }
         }
     }
@@ -129,20 +138,24 @@ impl<T: ClusterTransport> RaftTask<T> {
         match msg {
             RaftMessage::RequestVote { from, request } => {
                 let response = self.raft.handle_request_vote(from, request, now).await;
-                let _ = self
-                    .raft
-                    .send(from, ClusterMessage::RequestVoteResponse(response))
-                    .await;
+                if self.raft.storage_failure().is_none() {
+                    let _ = self
+                        .raft
+                        .send(from, ClusterMessage::RequestVoteResponse(response))
+                        .await;
+                }
             }
             RaftMessage::RequestVoteResponse { from, response } => {
                 self.raft.handle_request_vote_response(from, response).await;
             }
             RaftMessage::AppendEntries { from, request } => {
                 let response = self.raft.handle_append_entries(from, request, now).await;
-                let _ = self
-                    .raft
-                    .send(from, ClusterMessage::AppendEntriesResponse(response))
-                    .await;
+                if self.raft.storage_failure().is_none() {
+                    let _ = self
+                        .raft
+                        .send(from, ClusterMessage::AppendEntriesResponse(response))
+                        .await;
+                }
             }
             RaftMessage::AppendEntriesResponse { from, response } => {
                 self.raft
@@ -151,10 +164,12 @@ impl<T: ClusterTransport> RaftTask<T> {
             }
             RaftMessage::InstallSnapshot { from, request } => {
                 let response = self.raft.handle_install_snapshot(from, *request, now).await;
-                let _ = self
-                    .raft
-                    .send(from, ClusterMessage::AppendEntriesResponse(response))
-                    .await;
+                if self.raft.storage_failure().is_none() {
+                    let _ = self
+                        .raft
+                        .send(from, ClusterMessage::AppendEntriesResponse(response))
+                        .await;
+                }
             }
         }
     }
@@ -240,5 +255,133 @@ impl<T: ClusterTransport> RaftTask<T> {
         self.raft
             .set_pending_partition_proposals(NUM_PARTITIONS as usize);
         self.partitions_initialized = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::raft::RaftConfig;
+    use crate::cluster::raft::RequestVoteRequest;
+    use crate::cluster::raft::test_support::FlushFailingBackend;
+    use crate::cluster::transport::{InboundMessage, TransportError};
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone)]
+    struct RecordingTransport {
+        node_id: NodeId,
+        sent: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
+    }
+
+    impl ClusterTransport for RecordingTransport {
+        fn local_node(&self) -> NodeId {
+            self.node_id
+        }
+
+        async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
+            self.sent.lock().unwrap().push((to, message));
+            Ok(())
+        }
+
+        async fn broadcast(&self, message: ClusterMessage) -> Result<(), TransportError> {
+            self.sent.lock().unwrap().push((self.node_id, message));
+            Ok(())
+        }
+
+        async fn send_to_partition_primary(
+            &self,
+            _partition: PartitionId,
+            _message: ClusterMessage,
+        ) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn direct_peers(&self) -> Option<Vec<NodeId>> {
+            None
+        }
+
+        fn recv(&self) -> Option<InboundMessage> {
+            None
+        }
+
+        fn pending_count(&self) -> usize {
+            0
+        }
+
+        fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
+            None
+        }
+
+        fn requeue(&self, _msg: InboundMessage) {}
+
+        async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+
+        async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+    }
+
+    #[tokio::test]
+    async fn storage_failure_stops_the_task_and_the_node() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let backend = FlushFailingBackend::shared();
+        let transport = RecordingTransport {
+            node_id: node2,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        };
+        let sent = Arc::clone(&transport.sent);
+        let mut raft = RaftCoordinator::new_with_storage(
+            node2,
+            transport,
+            RaftConfig::default(),
+            backend.clone(),
+        )
+        .unwrap();
+        raft.add_peer(node1);
+
+        let (tx_messages, rx_messages) = flume::unbounded();
+        let (_tx_events, rx_events) = flume::unbounded();
+        let (_tx_admin, rx_admin) = flume::unbounded();
+        let (tx_partition_map, _rx_map) = watch::channel(PartitionMap::new());
+        let (tx_status, _rx_status) = watch::channel(RaftStatus::default());
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut node_shutdown = shutdown_tx.subscribe();
+        let fatal_error = Arc::new(std::sync::OnceLock::new());
+
+        let task = RaftTask {
+            raft,
+            rx_messages,
+            rx_events,
+            rx_admin,
+            tx_partition_map,
+            tx_status,
+            shutdown_rx,
+            shutdown_tx,
+            fatal_error: Arc::clone(&fatal_error),
+            all_nodes: vec![node1, node2],
+            partitions_initialized: false,
+        };
+        let handle = tokio::spawn(task.run());
+
+        backend.fail_flushes(true);
+        tx_messages
+            .send(RaftMessage::RequestVote {
+                from: node1,
+                request: RequestVoteRequest::create(1, 1, 0, 0),
+            })
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("raft task must stop after a storage failure")
+            .unwrap();
+        assert!(fatal_error.get().is_some());
+        assert!(node_shutdown.try_recv().is_ok());
+        assert!(
+            !sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, m)| matches!(m, ClusterMessage::RequestVoteResponse(_)))
+        );
     }
 }

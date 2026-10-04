@@ -225,6 +225,7 @@ impl ClusteredAgent {
             rx_partition_map,
             rx_raft_status,
             shutdown_tx,
+            fatal_error: Arc::new(std::sync::OnceLock::new()),
             bind_address: config.bind_address,
             db_path: config.db_path,
             peers: config.peers,
@@ -303,6 +304,8 @@ impl ClusteredAgent {
                 .take()
                 .ok_or("run() called twice: tx_raft_status already taken")?,
             shutdown_rx: self.shutdown_tx.subscribe(),
+            shutdown_tx: self.shutdown_tx.clone(),
+            fatal_error: Arc::clone(&self.fatal_error),
             all_nodes,
             partitions_initialized: false,
         };

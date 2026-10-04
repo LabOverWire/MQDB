@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-04 — mqdb-cluster 0.4.19, mqdb-cli 0.8.43
+
+### Fixed
+
+- **A Raft storage failure now stops the node** (#163). Errors from persisting the current term, the vote and the leader's own log entries were ignored, so a node whose disk failed kept voting and leading on state that was not durable: after a restart it could vote twice in one term or lose a committed entry it had counted toward the quorum. The node now refuses the action that needed the write (no vote reply, no RequestVote, no proposal), stops all Raft activity, shuts down, and `mqdb cluster start` exits with an error naming the failure. Verified by removing a running node's disk: it exits with code 1 at the next term change, where it previously kept running.
+
 ## 2026-10-04 — mqdb-cluster 0.4.18, mqdb-cli 0.8.42
 
 ### Fixed

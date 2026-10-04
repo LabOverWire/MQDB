@@ -146,6 +146,7 @@ pub struct ClusteredAgent {
     rx_partition_map: watch::Receiver<PartitionMap>,
     rx_raft_status: watch::Receiver<RaftStatus>,
     shutdown_tx: broadcast::Sender<()>,
+    fatal_error: Arc<std::sync::OnceLock<String>>,
     bind_address: SocketAddr,
     db_path: PathBuf,
     peers: Vec<PeerConfig>,
