@@ -152,12 +152,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             self.processed_new_nodes.remove(&node);
         }
 
-        let is_new_member = !self.cluster_members.contains(&node);
-        if is_new_member {
+        if !self.cluster_members.contains(&node) {
             self.cluster_members.push(node);
-            self.node.add_peer(node);
-            tracing::info!(?node, "added new node as Raft peer");
+            tracing::info!(?node, "added new cluster member");
         }
+        self.node.add_peer(node);
 
         let node_has_partitions = self.node_has_partitions(node);
         let partitions_initialized = self.partitions_initialized();

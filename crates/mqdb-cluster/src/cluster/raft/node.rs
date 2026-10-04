@@ -103,18 +103,26 @@ impl RaftNode {
         let snapshot_point = restored_snapshot
             .as_ref()
             .map(|snapshot| (snapshot.last_index, snapshot.last_term));
-        let log = match (snapshot_point, log.first(), log.last()) {
-            (None, Some(first), Some(last)) if first.index > 1 => {
-                tracing::warn!(
-                    first_index = first.index,
-                    last_index = last.index,
-                    "discarding raft log with no snapshot for its missing prefix"
-                );
-                storage.replace_log_from(first.index, last.index, &[])?;
-                Vec::new()
-            }
-            _ => log,
-        };
+        let first_expected = snapshot_point.map_or(1, |(index, _)| index + 1);
+        let mut log: Vec<LogEntry> = log
+            .into_iter()
+            .filter(|entry| entry.index >= first_expected)
+            .collect();
+        let contiguous = log
+            .iter()
+            .zip(first_expected..)
+            .take_while(|(entry, expected)| entry.index == *expected)
+            .count();
+        if let (Some(first_dropped), Some(last)) = (log.get(contiguous), log.last()) {
+            tracing::warn!(
+                kept = contiguous,
+                first_dropped = first_dropped.index,
+                last_index = last.index,
+                "discarding raft log entries after a gap"
+            );
+            storage.replace_log_from(first_dropped.index, last.index, &[])?;
+            log.truncate(contiguous);
+        }
 
         let state = RaftState::recover(node_id, current_term, voted_for, log, snapshot_point);
         let timeout = config.election_timeout_min_ms;
@@ -539,6 +547,10 @@ impl RaftNode {
             && let Err(error) = storage.install_snapshot(&snapshot)
         {
             tracing::warn!(%error, last_index = snapshot.last_index, "failed to persist raft snapshot");
+            return (
+                AppendEntriesResponse::failure(self.state.current_term()),
+                outputs,
+            );
         }
         self.state
             .install_snapshot(snapshot.last_index, snapshot.last_term);
@@ -756,6 +768,131 @@ mod tests {
                 .unwrap();
         assert_eq!(node.last_log_index(), 0);
         assert!(storage.load_log().unwrap().is_empty());
+    }
+
+    #[test]
+    fn persisted_log_is_kept_only_up_to_its_first_gap() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+        let storage = RaftStorage::new(backend.clone());
+        storage.persist_state(1, None).unwrap();
+        for index in [1, 2, 3, 10, 11, 12] {
+            storage
+                .append_log_entry(&LogEntry::create(index, 1, RaftCommand::Noop))
+                .unwrap();
+        }
+
+        let node =
+            RaftNode::create_with_storage(NodeId::validated(5).unwrap(), test_config(), backend)
+                .unwrap();
+        assert_eq!(node.last_log_index(), 3);
+        let persisted: Vec<u64> = storage
+            .load_log()
+            .unwrap()
+            .iter()
+            .map(|e| e.index)
+            .collect();
+        assert_eq!(persisted, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn persisted_log_must_start_right_after_the_snapshot() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+        let storage = RaftStorage::new(backend.clone());
+        storage.persist_state(2, None).unwrap();
+        let snapshot = RaftSnapshot::capture(5, 2, &crate::cluster::PartitionMap::new(), &[]);
+        storage.install_snapshot(&snapshot).unwrap();
+        for index in [8, 9] {
+            storage
+                .append_log_entry(&LogEntry::create(index, 2, RaftCommand::Noop))
+                .unwrap();
+        }
+
+        let node =
+            RaftNode::create_with_storage(NodeId::validated(5).unwrap(), test_config(), backend)
+                .unwrap();
+        assert_eq!(node.last_log_index(), 5);
+        assert!(storage.load_log().unwrap().is_empty());
+    }
+
+    struct FlushFailingBackend {
+        inner: mqdb_core::MemoryBackend,
+        fail_flush: std::sync::atomic::AtomicBool,
+    }
+
+    impl StorageBackend for FlushFailingBackend {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            self.inner.insert(key, value)
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            self.inner.remove(key)
+        }
+        fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan(prefix)
+        }
+        fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+            self.inner.prefix_count(prefix)
+        }
+        fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+            self.inner.prefix_scan_keys(prefix)
+        }
+        fn prefix_scan_batch(
+            &self,
+            prefix: &[u8],
+            batch_size: usize,
+            after_key: Option<&[u8]>,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan_batch(prefix, batch_size, after_key)
+        }
+        fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.range_scan(start, end)
+        }
+        fn batch(&self) -> Box<dyn mqdb_core::storage::BatchOperations> {
+            self.inner.batch()
+        }
+        fn flush(&self) -> Result<()> {
+            if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(mqdb_core::error::Error::StorageGeneric(
+                    "flush failed".into(),
+                ));
+            }
+            self.inner.flush()
+        }
+    }
+
+    #[test]
+    fn snapshot_that_cannot_be_persisted_is_not_acknowledged() {
+        let backend = Arc::new(FlushFailingBackend {
+            inner: mqdb_core::MemoryBackend::new(),
+            fail_flush: std::sync::atomic::AtomicBool::new(false),
+        });
+        let peer1 = NodeId::validated(1).unwrap();
+        let mut follower = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        follower.add_peer(peer1);
+        backend
+            .fail_flush
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let request = InstallSnapshotRequest {
+            term: 1,
+            leader_id: 1,
+            snapshot: RaftSnapshot::capture(40, 1, &crate::cluster::PartitionMap::new(), &[peer1]),
+        };
+        let (response, outputs) = follower.handle_install_snapshot(peer1, request, 100);
+        assert!(!response.is_success());
+        assert!(
+            !outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::InstallSnapshot(_)))
+        );
+        assert_eq!(follower.commit_index(), 0);
     }
 
     #[test]

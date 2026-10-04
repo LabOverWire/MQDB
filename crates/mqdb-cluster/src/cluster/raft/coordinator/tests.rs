@@ -398,3 +398,23 @@ async fn follower_joining_after_compaction_receives_partition_map() {
     ));
     assert!(restarted.cluster_members().contains(&node1));
 }
+
+#[tokio::test]
+async fn node_alive_registers_raft_peer_for_member_known_from_snapshot() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let snapshot =
+        crate::cluster::raft::RaftSnapshot::capture(40, 2, &PartitionMap::new(), &[node1, node3]);
+    crate::cluster::raft::RaftStorage::new(backend.clone())
+        .install_snapshot(&snapshot)
+        .unwrap();
+
+    let mut coord =
+        RaftCoordinator::new_with_storage(node1, MockTransport::new(node1), test_config(), backend)
+            .unwrap();
+    assert!(coord.cluster_members().contains(&node3));
+
+    coord.handle_node_alive(node3).await;
+    assert!(coord.node.peers().contains(&node3));
+}
