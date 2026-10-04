@@ -13,5 +13,5 @@ pub use rpc::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RaftSnapshot,
     RequestVoteRequest, RequestVoteResponse,
 };
-pub use state::{AppendOutcome, LogEntry, PartitionUpdate, RaftCommand, RaftRole, RaftState};
+pub use state::{LogEntry, PartitionUpdate, PreparedAppend, RaftCommand, RaftRole, RaftState};
 pub use storage::{RaftPersistentState, RaftStorage};

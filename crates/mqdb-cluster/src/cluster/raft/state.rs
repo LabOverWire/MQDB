@@ -116,9 +116,9 @@ impl LogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppendOutcome {
-    Rejected,
-    Accepted { first_written: Option<u64> },
+pub struct PreparedAppend {
+    pub first_index: Option<u64>,
+    pub entries: Vec<LogEntry>,
 }
 
 #[derive(Debug)]
@@ -385,13 +385,13 @@ impl RaftState {
     }
 
     #[must_use]
-    pub fn append_entries(
-        &mut self,
+    pub fn prepare_append(
+        &self,
         prev_log_index: u64,
         prev_log_term: u64,
         entries: Vec<LogEntry>,
-    ) -> AppendOutcome {
-        let (prev_index, prev_term, entries) = if prev_log_index < self.log_base_index {
+    ) -> Option<PreparedAppend> {
+        let (prev_index, prev_term, mut entries) = if prev_log_index < self.log_base_index {
             let entries: Vec<LogEntry> = entries
                 .into_iter()
                 .filter(|e| e.index > self.log_base_index)
@@ -402,41 +402,53 @@ impl RaftState {
         };
 
         if prev_index > self.last_log_index() || self.log_term_at(prev_index) != Some(prev_term) {
-            return AppendOutcome::Rejected;
+            return None;
         }
         if entries
             .iter()
             .zip(prev_index + 1..)
             .any(|(entry, expected)| entry.index != expected)
         {
-            return AppendOutcome::Rejected;
+            return None;
         }
 
-        let mut first_written = None;
-        for entry in entries {
-            match self.log_position(entry.index) {
-                Some(pos) if pos < self.log.len() => {
-                    if self.log[pos].term != entry.term {
-                        self.log.truncate(pos);
-                        first_written.get_or_insert(entry.index);
-                        self.log.push(entry);
-                    }
-                }
-                _ => {
-                    first_written.get_or_insert(entry.index);
-                    self.log.push(entry);
-                }
-            }
-        }
+        let first_new = entries
+            .iter()
+            .position(|entry| self.log_term_at(entry.index) != Some(entry.term))
+            .unwrap_or(entries.len());
+        let entries = entries.split_off(first_new);
+        Some(PreparedAppend {
+            first_index: entries.first().map(|entry| entry.index),
+            entries,
+        })
+    }
 
-        AppendOutcome::Accepted { first_written }
+    pub fn commit_append(&mut self, prepared: PreparedAppend) {
+        if let Some(pos) = prepared
+            .first_index
+            .and_then(|first| self.log_position(first))
+        {
+            self.log.truncate(pos);
+            self.log.extend(prepared.entries);
+        }
+    }
+
+    #[must_use]
+    pub fn holds_entry(&self, index: u64, term: u64) -> bool {
+        index <= self.last_log_index() && self.log_term_at(index) == Some(term)
     }
 
     pub fn install_snapshot(&mut self, last_index: u64, last_term: u64) {
-        self.log.clear();
+        if self.holds_entry(last_index, last_term) {
+            if let Some(pos) = self.log_position(last_index) {
+                self.log.drain(..=pos);
+            }
+        } else {
+            self.log.clear();
+        }
         self.log_base_index = last_index;
         self.log_base_term = last_term;
-        self.commit_index = last_index;
+        self.commit_index = self.commit_index.max(last_index);
         self.last_applied = last_index;
     }
 
@@ -471,10 +483,15 @@ impl RaftState {
         }
     }
 
-    pub fn update_match_index(&mut self, peer: NodeId, index: u64) {
-        if let Some(entry) = self.match_index.iter_mut().find(|(n, _)| *n == peer) {
-            entry.1 = index;
+    pub fn record_match(&mut self, peer: NodeId, index: u64) {
+        let Some(entry) = self.match_index.iter_mut().find(|(n, _)| *n == peer) else {
+            return;
+        };
+        if index < entry.1 {
+            return;
         }
+        entry.1 = index;
+        self.update_next_index(peer, index + 1);
     }
 
     pub fn try_advance_commit_index(&mut self) {
@@ -661,7 +678,7 @@ mod tests {
         let _ = state.propose(RaftCommand::Noop);
         assert_eq!(state.commit_index(), 0);
 
-        state.update_match_index(node2, 1);
+        state.record_match(node2, 1);
         state.try_advance_commit_index();
         assert_eq!(state.commit_index(), 1);
     }
@@ -690,9 +707,9 @@ mod tests {
 
     #[test]
     fn append_rejects_entries_that_do_not_follow_the_log() {
-        let mut state = RaftState::create(NodeId::validated(2).unwrap());
-        let outcome = state.append_entries(0, 0, vec![entry(272, 1), entry(273, 1)]);
-        assert_eq!(outcome, AppendOutcome::Rejected);
+        let state = RaftState::create(NodeId::validated(2).unwrap());
+        let prepared = state.prepare_append(0, 0, vec![entry(272, 1), entry(273, 1)]);
+        assert!(prepared.is_none());
         assert_eq!(state.last_log_index(), 0);
     }
 
@@ -712,13 +729,9 @@ mod tests {
         let mut state = RaftState::create(NodeId::validated(2).unwrap());
         state.install_snapshot(10, 2);
         let entries = (9..=12).map(|i| entry(i, 2)).collect();
-        let outcome = state.append_entries(8, 2, entries);
-        assert_eq!(
-            outcome,
-            AppendOutcome::Accepted {
-                first_written: Some(11)
-            }
-        );
+        let prepared = state.prepare_append(8, 2, entries).unwrap();
+        assert_eq!(prepared.first_index, Some(11));
+        state.commit_append(prepared);
         assert_eq!(state.last_log_index(), 12);
     }
 
@@ -728,15 +741,55 @@ mod tests {
         let entries = (1..=6)
             .map(|i| entry(i, if i <= 3 { 1 } else { 2 }))
             .collect();
-        assert!(matches!(
-            state.append_entries(0, 0, entries),
-            AppendOutcome::Accepted { .. }
-        ));
+        let prepared = state.prepare_append(0, 0, entries).unwrap();
+        state.commit_append(prepared);
         state.update_commit_index(6);
         let _ = state.pending_commands();
         state.compact_log(2);
         assert_eq!(state.log_base_index(), 3);
         assert_eq!(state.log_term_at(3), Some(1));
         assert_eq!(state.last_log_index(), 6);
+    }
+
+    #[test]
+    fn snapshot_keeps_the_log_after_a_matching_snapshot_point() {
+        let mut state = RaftState::create(NodeId::validated(2).unwrap());
+        let prepared = state
+            .prepare_append(0, 0, (1..=10).map(|i| entry(i, 1)).collect())
+            .unwrap();
+        state.commit_append(prepared);
+        state.update_commit_index(3);
+
+        state.install_snapshot(6, 1);
+        assert_eq!(state.last_log_index(), 10);
+        assert_eq!(state.log_term_at(8), Some(1));
+        assert_eq!(state.commit_index(), 6);
+        assert_eq!(state.last_applied(), 6);
+    }
+
+    #[test]
+    fn snapshot_drops_a_log_that_disagrees_at_the_snapshot_point() {
+        let mut state = RaftState::create(NodeId::validated(2).unwrap());
+        let prepared = state
+            .prepare_append(0, 0, (1..=10).map(|i| entry(i, 1)).collect())
+            .unwrap();
+        state.commit_append(prepared);
+
+        state.install_snapshot(6, 2);
+        assert_eq!(state.last_log_index(), 6);
+        assert_eq!(state.last_log_term(), 2);
+    }
+
+    #[test]
+    fn stale_success_does_not_rewind_match_index() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let mut state = RaftState::create(node1);
+        state.add_peer(node2);
+        state.become_candidate();
+        state.become_leader();
+        state.record_match(node2, 8);
+        state.record_match(node2, 3);
+        assert_eq!(state.next_index_for(node2), 9);
     }
 }

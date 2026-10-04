@@ -5,7 +5,7 @@ use super::rpc::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RaftSnapshot,
     RequestVoteRequest, RequestVoteResponse,
 };
-use super::state::{AppendOutcome, LogEntry, RaftCommand, RaftRole, RaftState};
+use super::state::{LogEntry, PreparedAppend, RaftCommand, RaftRole, RaftState};
 use super::storage::RaftStorage;
 use crate::cluster::NodeId;
 use mqdb_core::error::Result;
@@ -235,10 +235,14 @@ impl RaftNode {
         }
     }
 
-    fn persist_log_suffix(&self, first_index: u64, old_last_index: u64) {
-        if let Some(ref storage) = self.storage {
-            let entries = self.state.entries_from(first_index);
-            let _ = storage.replace_log_from(first_index, old_last_index, &entries);
+    fn persist_append(&self, prepared: &PreparedAppend) -> Result<()> {
+        match (&self.storage, prepared.first_index) {
+            (Some(storage), Some(first_index)) => storage.replace_log_from(
+                first_index,
+                self.state.last_log_index(),
+                &prepared.entries,
+            ),
+            _ => Ok(()),
         }
     }
 
@@ -476,33 +480,37 @@ impl RaftNode {
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
 
-        let old_last_index = self.state.last_log_index();
-        let outcome = self.state.append_entries(
+        let verified_index = request.prev_log_index + request.entries.len() as u64;
+        let Some(prepared) = self.state.prepare_append(
             request.prev_log_index,
             request.prev_log_term,
             request.entries,
-        );
-
-        if let AppendOutcome::Accepted { first_written } = outcome {
-            if let Some(first_index) = first_written {
-                self.persist_log_suffix(first_index, old_last_index);
-            }
-            self.state.update_commit_index(request.leader_commit);
-            outputs.extend(self.apply_committed());
-
-            (
-                AppendEntriesResponse::success(
-                    self.state.current_term(),
-                    self.state.last_log_index(),
-                ),
-                outputs,
-            )
-        } else {
-            (
+        ) else {
+            return (
                 AppendEntriesResponse::failure(self.state.current_term()),
                 outputs,
-            )
+            );
+        };
+
+        if let Err(error) = self.persist_append(&prepared) {
+            tracing::warn!(%error, "failed to persist raft log entries");
+            return (
+                AppendEntriesResponse::failure(self.state.current_term()),
+                outputs,
+            );
         }
+        self.state.commit_append(prepared);
+        self.state
+            .update_commit_index(request.leader_commit.min(verified_index));
+        outputs.extend(self.apply_committed());
+
+        (
+            AppendEntriesResponse::success(
+                self.state.current_term(),
+                verified_index.max(self.state.log_base_index()),
+            ),
+            outputs,
+        )
     }
 
     pub fn handle_install_snapshot(
@@ -543,8 +551,11 @@ impl RaftNode {
             );
         }
 
+        let keeps_suffix = self
+            .state
+            .holds_entry(snapshot.last_index, snapshot.last_term);
         if let Some(ref storage) = self.storage
-            && let Err(error) = storage.install_snapshot(&snapshot)
+            && let Err(error) = storage.install_snapshot(&snapshot, keeps_suffix)
         {
             tracing::warn!(%error, last_index = snapshot.last_index, "failed to persist raft snapshot");
             return (
@@ -582,8 +593,7 @@ impl RaftNode {
         }
 
         if response.is_success() {
-            self.state.update_next_index(from, response.match_index + 1);
-            self.state.update_match_index(from, response.match_index);
+            self.state.record_match(from, response.match_index);
             self.state.try_advance_commit_index();
             outputs.extend(self.apply_committed());
         } else if response.match_index > 0 {
@@ -800,7 +810,7 @@ mod tests {
         let storage = RaftStorage::new(backend.clone());
         storage.persist_state(2, None).unwrap();
         let snapshot = RaftSnapshot::capture(5, 2, &crate::cluster::PartitionMap::new(), &[]);
-        storage.install_snapshot(&snapshot).unwrap();
+        storage.install_snapshot(&snapshot, false).unwrap();
         for index in [8, 9] {
             storage
                 .append_log_entry(&LogEntry::create(index, 2, RaftCommand::Noop))
@@ -893,6 +903,90 @@ mod tests {
                 .any(|o| matches!(o, RaftOutput::InstallSnapshot(_)))
         );
         assert_eq!(follower.commit_index(), 0);
+    }
+
+    fn noop_entries(range: std::ops::RangeInclusive<u64>, term: u64) -> Vec<LogEntry> {
+        range
+            .map(|index| LogEntry::create(index, term, RaftCommand::Noop))
+            .collect()
+    }
+
+    #[test]
+    fn entries_that_cannot_be_persisted_are_not_acknowledged() {
+        let backend = Arc::new(FlushFailingBackend {
+            inner: mqdb_core::MemoryBackend::new(),
+            fail_flush: std::sync::atomic::AtomicBool::new(false),
+        });
+        let peer1 = NodeId::validated(1).unwrap();
+        let mut follower = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        follower.add_peer(peer1);
+        backend
+            .fail_flush
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let append = AppendEntriesRequest::create(1, 1, 0, 0, noop_entries(1..=3, 1), 3);
+        let (response, _) = follower.handle_append_entries(peer1, append.clone(), 100);
+        assert!(!response.is_success());
+        assert_eq!(follower.last_log_index(), 0);
+        assert_eq!(follower.commit_index(), 0);
+
+        backend
+            .fail_flush
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let (response, _) = follower.handle_append_entries(peer1, append, 200);
+        assert!(response.is_success());
+        assert_eq!(RaftStorage::new(backend).load_log().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn snapshot_keeps_acknowledged_entries_after_its_point() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+        let peer1 = NodeId::validated(1).unwrap();
+        let mut follower = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        follower.add_peer(peer1);
+        let append = AppendEntriesRequest::create(1, 1, 0, 0, noop_entries(1..=10, 1), 3);
+        let (response, _) = follower.handle_append_entries(peer1, append, 100);
+        assert_eq!(response.match_index, 10);
+
+        let request = InstallSnapshotRequest {
+            term: 1,
+            leader_id: 1,
+            snapshot: RaftSnapshot::capture(6, 1, &crate::cluster::PartitionMap::new(), &[peer1]),
+        };
+        let (response, _) = follower.handle_install_snapshot(peer1, request, 200);
+        assert!(response.is_success());
+        assert_eq!(follower.last_log_index(), 10);
+        let persisted: Vec<u64> = RaftStorage::new(backend)
+            .load_log()
+            .unwrap()
+            .iter()
+            .map(|e| e.index)
+            .collect();
+        assert_eq!(persisted, vec![7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn success_reports_only_the_range_the_request_verified() {
+        let peer1 = NodeId::validated(1).unwrap();
+        let mut follower = make_node(2);
+        follower.add_peer(peer1);
+        let stale = AppendEntriesRequest::create(1, 1, 0, 0, noop_entries(1..=10, 1), 0);
+        let _ = follower.handle_append_entries(peer1, stale, 100);
+
+        let append = AppendEntriesRequest::create(2, 1, 5, 1, noop_entries(6..=7, 1), 0);
+        let (response, _) = follower.handle_append_entries(peer1, append, 200);
+        assert!(response.is_success());
+        assert_eq!(response.match_index, 7);
     }
 
     #[test]

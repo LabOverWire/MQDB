@@ -196,16 +196,16 @@ HandleAE(m) ==
                     ok == prev <= LastIdx(r) /\ prev >= base[r]
                           /\ (prev = 0 \/ TermAt(r, prev) = (IF skip > 0 THEN baseTerm[r] ELSE m.prevTerm))
                     newLog == IF ok THEN Overlay(r, first, es) ELSE log[r]
-                    newLast == base[r] + Len(newLog)
+                    verified == IF prev + Len(es) > base[r] THEN prev + Len(es) ELSE base[r]
                     newCommit == IF ok /\ m.commit > commitIndex[r]
-                                   THEN Min(m.commit, newLast) ELSE commitIndex[r]
+                                   THEN Min(m.commit, verified) ELSE commitIndex[r]
                 IN /\ StepDownVars(r, m.term)
                    /\ log' = [log EXCEPT ![r] = newLog]
                    /\ IF ok THEN DurableLog(r, newLog) ELSE UNCHANGED pLog
                    /\ commitIndex' = [commitIndex EXCEPT ![r] = newCommit]
                    /\ sm' = [sm EXCEPT ![r] = ApplyTo(r, base[r], baseTerm[r], newLog, newCommit)]
                    /\ msgs' = (msgs \ {m}) \cup
-                        {Reply(m, r, m.term, ok, IF ok THEN newLast ELSE 0)}
+                        {Reply(m, r, m.term, ok, IF ok THEN verified ELSE 0)}
            ELSE LET ok == m.prev = 0 \/ (Known(r, m.prev) /\ TermAt(r, m.prev) = m.prevTerm)
                     newLog == IF ok THEN Overlay(r, m.first, m.entries) ELSE log[r]
                     newLast == base[r] + Len(newLog)
@@ -234,15 +234,20 @@ HandleIS(m) ==
                 /\ msgs' = (msgs \ {m}) \cup {Reply(m, r, m.term, TRUE, commitIndex[r])}
                 /\ UNCHANGED <<base, baseTerm, log, commitIndex, sm, pBase, pBaseTerm,
                                pLog, pSm, installs>>
-           ELSE /\ StepDownVars(r, m.term)
+           ELSE LET keep == m.lastIdx <= LastIdx(r) /\ m.lastIdx >= base[r]
+                            /\ TermAt(r, m.lastIdx) = m.lastTerm
+                    suffix == IF keep THEN SubSeq(log[r], m.lastIdx - base[r] + 1, Len(log[r]))
+                              ELSE <<>>
+                IN
+                /\ StepDownVars(r, m.term)
                 /\ base' = [base EXCEPT ![r] = m.lastIdx]
                 /\ baseTerm' = [baseTerm EXCEPT ![r] = m.lastTerm]
-                /\ log' = [log EXCEPT ![r] = <<>>]
+                /\ log' = [log EXCEPT ![r] = suffix]
                 /\ commitIndex' = [commitIndex EXCEPT ![r] = m.lastIdx]
                 /\ sm' = [sm EXCEPT ![r] = m.sm]
                 /\ pBase' = [pBase EXCEPT ![r] = m.lastIdx]
                 /\ pBaseTerm' = [pBaseTerm EXCEPT ![r] = m.lastTerm]
-                /\ pLog' = [pLog EXCEPT ![r] = <<>>]
+                /\ pLog' = [pLog EXCEPT ![r] = suffix]
                 /\ pSm' = [pSm EXCEPT ![r] = m.sm]
                 /\ installs' = installs + 1
                 /\ msgs' = (msgs \ {m}) \cup {Reply(m, r, m.term, TRUE, m.lastIdx)}
@@ -268,6 +273,9 @@ HandleAER(m) ==
          ELSE IF role[l] # "L" \/ m.term < term[l]
            THEN /\ msgs' = msgs \ {m}
                 /\ UNCHANGED <<term, role, votedFor, votes, nextIndex, matchIndex, commitIndex, sm>>
+           ELSE IF Fix /\ m.success /\ m.match < matchIndex[l][m.from]
+             THEN /\ msgs' = msgs \ {m}
+                  /\ UNCHANGED <<term, role, votedFor, votes, nextIndex, matchIndex, commitIndex, sm>>
            ELSE IF m.success
              THEN LET mi == [matchIndex[l] EXCEPT ![m.from] = m.match]
                       c == CommitTo(l, mi)

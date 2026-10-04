@@ -94,12 +94,18 @@ impl RaftStorage {
 
     /// # Errors
     /// Returns an error if persistence fails.
-    pub fn install_snapshot(&self, snapshot: &RaftSnapshot) -> Result<()> {
-        let entries = self.backend.prefix_scan(RAFT_LOG_PREFIX)?;
+    pub fn install_snapshot(&self, snapshot: &RaftSnapshot, keep_suffix: bool) -> Result<()> {
+        let keys = self.backend.prefix_scan_keys(RAFT_LOG_PREFIX)?;
         let mut batch = self.backend.batch();
         batch.insert(RAFT_SNAPSHOT_KEY.to_vec(), snapshot.to_bytes());
-        for (key, _) in entries {
-            batch.remove(key);
+        for key in keys {
+            let covered = key
+                .strip_prefix(RAFT_LOG_PREFIX)
+                .and_then(|suffix| <[u8; 8]>::try_from(suffix).ok())
+                .is_none_or(|index| u64::from_be_bytes(index) <= snapshot.last_index);
+            if !keep_suffix || covered {
+                batch.remove(key);
+            }
         }
         batch.commit()?;
         self.backend.flush()
@@ -223,7 +229,7 @@ mod tests {
             &crate::cluster::PartitionMap::new(),
             &[NodeId::validated(1).unwrap()],
         );
-        s.install_snapshot(&snapshot).unwrap();
+        s.install_snapshot(&snapshot, false).unwrap();
         assert!(s.load_log().unwrap().is_empty());
         assert_eq!(s.load_snapshot().unwrap(), Some(snapshot));
     }
@@ -242,5 +248,18 @@ mod tests {
             log.iter().map(|e| (e.index, e.term)).collect::<Vec<_>>(),
             vec![(1, 1), (2, 1), (3, 2)]
         );
+    }
+
+    #[test]
+    fn install_snapshot_can_keep_the_entries_after_it() {
+        let s = storage();
+        for i in 1..=5 {
+            s.append_log_entry(&LogEntry::create(i, 1, RaftCommand::Noop))
+                .unwrap();
+        }
+        let snapshot = RaftSnapshot::capture(3, 1, &crate::cluster::PartitionMap::new(), &[]);
+        s.install_snapshot(&snapshot, true).unwrap();
+        let persisted: Vec<u64> = s.load_log().unwrap().iter().map(|e| e.index).collect();
+        assert_eq!(persisted, vec![4, 5]);
     }
 }

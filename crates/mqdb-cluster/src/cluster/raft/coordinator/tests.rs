@@ -407,7 +407,7 @@ async fn node_alive_registers_raft_peer_for_member_known_from_snapshot() {
     let snapshot =
         crate::cluster::raft::RaftSnapshot::capture(40, 2, &PartitionMap::new(), &[node1, node3]);
     crate::cluster::raft::RaftStorage::new(backend.clone())
-        .install_snapshot(&snapshot)
+        .install_snapshot(&snapshot, false)
         .unwrap();
 
     let mut coord =
