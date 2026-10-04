@@ -89,7 +89,10 @@ impl ClusteredAgent {
             tokio::time::Instant::now() + Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
             Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
         );
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .unwrap_or_else(|| self.shutdown_tx.subscribe());
         let tx_tick = self
             .tx_tick
             .take()
