@@ -29,7 +29,8 @@ use super::protocol::{
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
 use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RequestVoteRequest,
+    RequestVoteResponse,
 };
 use super::raft_task::RaftEvent;
 use super::replication::{ReplicaRole, ReplicaState};
@@ -417,6 +418,10 @@ pub enum RaftMessage {
     AppendEntriesResponse {
         from: NodeId,
         response: AppendEntriesResponse,
+    },
+    InstallSnapshot {
+        from: NodeId,
+        request: Box<InstallSnapshotRequest>,
     },
 }
 
@@ -1029,7 +1034,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 ClusterMessage::RequestVote(_)
                 | ClusterMessage::RequestVoteResponse(_)
                 | ClusterMessage::AppendEntries(_)
-                | ClusterMessage::AppendEntriesResponse(_) => raft_count += 1,
+                | ClusterMessage::AppendEntriesResponse(_)
+                | ClusterMessage::InstallSnapshot(_) => raft_count += 1,
                 _ => other_count += 1,
             }
             self.handle_message(msg).await;
@@ -1085,7 +1091,8 @@ impl<T: ClusterTransport> NodeController<T> {
             | ClusterMessage::RequestVote(_)
             | ClusterMessage::RequestVoteResponse(_)
             | ClusterMessage::AppendEntries(_)
-            | ClusterMessage::AppendEntriesResponse(_) => None,
+            | ClusterMessage::AppendEntriesResponse(_)
+            | ClusterMessage::InstallSnapshot(_) => None,
 
             ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write).await;
@@ -1259,6 +1266,14 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::AppendEntriesResponse(resp) => {
                 self.forward_raft_append_response(msg.from, resp);
+            }
+            ClusterMessage::InstallSnapshot(request) => {
+                let _ = self
+                    .tx_raft_messages
+                    .try_send(RaftMessage::InstallSnapshot {
+                        from: msg.from,
+                        request,
+                    });
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(

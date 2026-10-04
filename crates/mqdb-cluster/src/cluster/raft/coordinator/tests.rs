@@ -304,3 +304,140 @@ async fn coordinator_from_storage_respects_startup_grace_without_peers() {
     coord.tick(now + 10_400).await;
     assert!(coord.is_leader());
 }
+
+fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {
+    PartitionId::all().all(|p| a.get(p) == b.get(p))
+}
+
+async fn replicate_round(
+    leader: &mut RaftCoordinator<MockTransport>,
+    follower: &mut RaftCoordinator<MockTransport>,
+    now: u64,
+) -> usize {
+    let leader_id = leader.node_id();
+    let follower_id = follower.node_id();
+    leader.tick(now).await;
+    let sent = leader.transport.sent_messages();
+    leader.transport.clear();
+    let mut snapshots = 0;
+    for (to, message) in sent {
+        if to != follower_id {
+            continue;
+        }
+        let response = match message {
+            ClusterMessage::AppendEntries(request) => {
+                follower
+                    .handle_append_entries(leader_id, request, now)
+                    .await
+            }
+            ClusterMessage::InstallSnapshot(request) => {
+                snapshots += 1;
+                follower
+                    .handle_install_snapshot(leader_id, *request, now)
+                    .await
+            }
+            _ => continue,
+        };
+        leader
+            .handle_append_entries_response(follower_id, response)
+            .await;
+    }
+    follower.transport.clear();
+    snapshots
+}
+
+#[tokio::test]
+async fn follower_joining_after_compaction_receives_partition_map() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut leader = RaftCoordinator::new(node1, MockTransport::new(node1), test_config());
+    leader.tick(0).await;
+    leader.tick(1000).await;
+    assert!(leader.is_leader());
+
+    for i in 0..1200u64 {
+        let partition = PartitionId::new(u16::try_from(i % 256).unwrap()).unwrap();
+        let command = RaftCommand::update_partition(partition, node1, &[], Epoch::new(i + 1));
+        leader.propose_partition_update(command).await.unwrap();
+    }
+    leader.tick(1001).await;
+    assert!(leader.log_len() < usize::try_from(leader.last_log_index()).unwrap());
+
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let mut follower = RaftCoordinator::new_with_storage(
+        node2,
+        MockTransport::new(node2),
+        test_config(),
+        backend.clone(),
+    )
+    .unwrap();
+    follower.add_peer(node1);
+    leader.add_peer(node2);
+
+    let mut snapshots = 0;
+    for round in 0..10 {
+        snapshots += replicate_round(&mut leader, &mut follower, 2000 + round * 100).await;
+    }
+
+    assert_eq!(follower.commit_index(), leader.commit_index());
+    assert!(same_assignments(
+        follower.partition_map(),
+        leader.partition_map()
+    ));
+    assert!(
+        snapshots > 0,
+        "the follower must be brought up to date with a snapshot"
+    );
+
+    let restarted =
+        RaftCoordinator::new_with_storage(node2, MockTransport::new(node2), test_config(), backend)
+            .unwrap();
+    assert!(same_assignments(
+        restarted.partition_map(),
+        leader.partition_map()
+    ));
+    assert!(restarted.cluster_members().contains(&node1));
+}
+
+#[tokio::test]
+async fn node_alive_registers_raft_peer_for_member_known_from_snapshot() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let snapshot =
+        crate::cluster::raft::RaftSnapshot::capture(40, 2, &PartitionMap::new(), &[node1, node3]);
+    crate::cluster::raft::RaftStorage::new(backend.clone())
+        .install_snapshot(&snapshot, false)
+        .unwrap();
+
+    let mut coord =
+        RaftCoordinator::new_with_storage(node1, MockTransport::new(node1), test_config(), backend)
+            .unwrap();
+    assert!(coord.cluster_members().contains(&node3));
+
+    coord.handle_node_alive(node3).await;
+    assert!(coord.node.peers().contains(&node3));
+}
+
+#[tokio::test]
+async fn snapshot_install_clears_pending_partition_proposals() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut coord = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
+    coord.add_peer(node1);
+    coord.set_pending_partition_proposals(7);
+
+    let request = crate::cluster::raft::InstallSnapshotRequest {
+        term: 1,
+        leader_id: 1,
+        snapshot: crate::cluster::raft::RaftSnapshot::capture(
+            5,
+            1,
+            &PartitionMap::new(),
+            &[node1, node2],
+        ),
+    };
+    let response = coord.handle_install_snapshot(node1, request, 100).await;
+    assert!(response.is_success());
+    assert_eq!(coord.pending_partition_proposals, 0);
+}

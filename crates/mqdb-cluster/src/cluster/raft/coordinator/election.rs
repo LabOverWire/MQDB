@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::rpc::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RequestVoteRequest,
+    RequestVoteResponse,
 };
 use super::super::state::RaftCommand;
 use super::CoordinatorError;
@@ -185,6 +186,23 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "received AppendEntries"
         );
         let (response, outputs) = self.node.handle_append_entries(from, request, now_ms);
+        self.process_outputs(outputs).await;
+        response
+    }
+
+    pub async fn handle_install_snapshot(
+        &mut self,
+        from: NodeId,
+        request: InstallSnapshotRequest,
+        now_ms: u64,
+    ) -> AppendEntriesResponse {
+        tracing::debug!(
+            from = from.get(),
+            term = request.term,
+            last_index = request.snapshot.last_index,
+            "received InstallSnapshot"
+        );
+        let (response, outputs) = self.node.handle_install_snapshot(from, request, now_ms);
         self.process_outputs(outputs).await;
         response
     }

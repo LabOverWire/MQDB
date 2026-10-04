@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::node::RaftOutput;
+use super::super::rpc::{InstallSnapshotRequest, RaftSnapshot};
 use super::super::state::RaftCommand;
 use super::RaftCoordinator;
 use crate::cluster::rebalancer::{
@@ -39,6 +40,31 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                     .send(to, ClusterMessage::AppendEntries(request))
                     .await;
             }
+            RaftOutput::SendSnapshot {
+                to,
+                last_index,
+                last_term,
+            } => {
+                tracing::info!(to = to.get(), last_index, "sending Raft snapshot");
+                let request = InstallSnapshotRequest {
+                    term: self.node.current_term(),
+                    leader_id: self.node.node_id().get(),
+                    snapshot: RaftSnapshot::capture(
+                        last_index,
+                        last_term,
+                        &self.partition_map,
+                        &self.cluster_members,
+                    ),
+                };
+                let _ = self
+                    .transport
+                    .send(to, ClusterMessage::InstallSnapshot(Box::new(request)))
+                    .await;
+            }
+            RaftOutput::InstallSnapshot(snapshot) => {
+                tracing::info!(last_index = snapshot.last_index, "installing Raft snapshot");
+                self.restore_snapshot(&snapshot);
+            }
             RaftOutput::ApplyCommand(cmd) => {
                 tracing::info!(?cmd, "applying Raft command");
                 self.apply_command(cmd).await;
@@ -53,6 +79,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                     "became Raft follower"
                 );
             }
+        }
+    }
+
+    pub(super) fn restore_snapshot(&mut self, snapshot: &RaftSnapshot) {
+        self.partition_map = snapshot.partition_map();
+        self.pending_partition_proposals = 0;
+        self.cluster_members.clone_from(&snapshot.members);
+        let own_id = self.node.node_id();
+        if !self.cluster_members.contains(&own_id) {
+            self.cluster_members.push(own_id);
         }
     }
 
@@ -117,12 +153,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             self.processed_new_nodes.remove(&node);
         }
 
-        let is_new_member = !self.cluster_members.contains(&node);
-        if is_new_member {
+        if !self.cluster_members.contains(&node) {
             self.cluster_members.push(node);
-            self.node.add_peer(node);
-            tracing::info!(?node, "added new node as Raft peer");
+            tracing::info!(?node, "added new cluster member");
         }
+        self.node.add_peer(node);
 
         let node_has_partitions = self.node_has_partitions(node);
         let partitions_initialized = self.partitions_initialized();
