@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::rpc::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, RaftSnapshot,
+    RequestVoteRequest, RequestVoteResponse,
 };
-use super::state::{LogEntry, RaftCommand, RaftRole, RaftState};
+use super::state::{AppendOutcome, LogEntry, RaftCommand, RaftRole, RaftState};
 use super::storage::RaftStorage;
 use crate::cluster::NodeId;
 use mqdb_core::error::Result;
@@ -40,6 +41,12 @@ pub enum RaftOutput {
         to: NodeId,
         request: AppendEntriesRequest,
     },
+    SendSnapshot {
+        to: NodeId,
+        last_index: u64,
+        last_term: u64,
+    },
+    InstallSnapshot(RaftSnapshot),
     ApplyCommand(RaftCommand),
     BecameLeader,
     BecameFollower {
@@ -56,6 +63,7 @@ pub struct RaftNode {
     last_election_time: u64,
     random_seed: u64,
     startup_time: Option<u64>,
+    restored_snapshot: Option<RaftSnapshot>,
 }
 
 impl RaftNode {
@@ -71,6 +79,7 @@ impl RaftNode {
             last_election_time: 0,
             random_seed: u64::from(node_id.get()),
             startup_time: None,
+            restored_snapshot: None,
         }
     }
 
@@ -90,8 +99,24 @@ impl RaftNode {
             }
             None => (0, None, Vec::new()),
         };
+        let restored_snapshot = storage.load_snapshot()?;
+        let snapshot_point = restored_snapshot
+            .as_ref()
+            .map(|snapshot| (snapshot.last_index, snapshot.last_term));
+        let log = match (snapshot_point, log.first(), log.last()) {
+            (None, Some(first), Some(last)) if first.index > 1 => {
+                tracing::warn!(
+                    first_index = first.index,
+                    last_index = last.index,
+                    "discarding raft log with no snapshot for its missing prefix"
+                );
+                storage.replace_log_from(first.index, last.index, &[])?;
+                Vec::new()
+            }
+            _ => log,
+        };
 
-        let state = RaftState::recover(node_id, current_term, voted_for, log);
+        let state = RaftState::recover(node_id, current_term, voted_for, log, snapshot_point);
         let timeout = config.election_timeout_min_ms;
 
         Ok(Self {
@@ -103,7 +128,12 @@ impl RaftNode {
             last_election_time: 0,
             random_seed: u64::from(node_id.get()),
             startup_time: None,
+            restored_snapshot,
         })
+    }
+
+    pub fn take_restored_snapshot(&mut self) -> Option<RaftSnapshot> {
+        self.restored_snapshot.take()
     }
 
     #[must_use]
@@ -197,9 +227,10 @@ impl RaftNode {
         }
     }
 
-    fn persist_log_entries(&self, entries: &[LogEntry]) {
+    fn persist_log_suffix(&self, first_index: u64, old_last_index: u64) {
         if let Some(ref storage) = self.storage {
-            let _ = storage.append_log_entries_batch(entries);
+            let entries = self.state.entries_from(first_index);
+            let _ = storage.replace_log_from(first_index, old_last_index, &entries);
         }
     }
 
@@ -279,6 +310,17 @@ impl RaftNode {
 
         for peer in peers {
             let next_idx = self.state.next_index_for(peer);
+            if next_idx <= self.state.log_base_index() {
+                let last_index = self.state.last_applied();
+                if let Some(last_term) = self.state.log_term_at(last_index) {
+                    outputs.push(RaftOutput::SendSnapshot {
+                        to: peer,
+                        last_index,
+                        last_term,
+                    });
+                }
+                continue;
+            }
             let prev_idx = next_idx.saturating_sub(1);
             let prev_term = self.state.log_term_at(prev_idx).unwrap_or(0);
             let entries = self.state.entries_from(next_idx);
@@ -426,15 +468,17 @@ impl RaftNode {
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
 
-        self.persist_log_entries(&request.entries);
-
-        let success = self.state.append_entries(
+        let old_last_index = self.state.last_log_index();
+        let outcome = self.state.append_entries(
             request.prev_log_index,
             request.prev_log_term,
             request.entries,
         );
 
-        if success {
+        if let AppendOutcome::Accepted { first_written } = outcome {
+            if let Some(first_index) = first_written {
+                self.persist_log_suffix(first_index, old_last_index);
+            }
             self.state.update_commit_index(request.leader_commit);
             outputs.extend(self.apply_committed());
 
@@ -451,6 +495,60 @@ impl RaftNode {
                 outputs,
             )
         }
+    }
+
+    pub fn handle_install_snapshot(
+        &mut self,
+        from: NodeId,
+        request: InstallSnapshotRequest,
+        now_ms: u64,
+    ) -> (AppendEntriesResponse, Vec<RaftOutput>) {
+        let mut outputs = Vec::new();
+
+        if from.get() != request.leader_id || request.term < self.state.current_term() {
+            return (
+                AppendEntriesResponse::failure(self.state.current_term()),
+                outputs,
+            );
+        }
+
+        let leader = NodeId::validated(request.leader_id);
+        if request.term > self.state.current_term() || self.state.role() != RaftRole::Follower {
+            self.state.become_follower(request.term, leader);
+            self.persist_state();
+            outputs.push(RaftOutput::BecameFollower { leader });
+        } else if self.state.leader_id() != leader {
+            self.state.set_leader(leader);
+        }
+
+        self.last_heartbeat_time = now_ms;
+        self.reset_election_timeout();
+
+        let snapshot = request.snapshot;
+        if snapshot.last_index <= self.state.commit_index() {
+            return (
+                AppendEntriesResponse::success(
+                    self.state.current_term(),
+                    self.state.commit_index(),
+                ),
+                outputs,
+            );
+        }
+
+        if let Some(ref storage) = self.storage
+            && let Err(error) = storage.install_snapshot(&snapshot)
+        {
+            tracing::warn!(%error, last_index = snapshot.last_index, "failed to persist raft snapshot");
+        }
+        self.state
+            .install_snapshot(snapshot.last_index, snapshot.last_term);
+        let last_index = snapshot.last_index;
+        outputs.push(RaftOutput::InstallSnapshot(snapshot));
+
+        (
+            AppendEntriesResponse::success(self.state.current_term(), last_index),
+            outputs,
+        )
     }
 
     pub fn handle_append_entries_response(
@@ -611,6 +709,53 @@ mod tests {
             intervals.windows(2).any(|w| w[0] != w[1]),
             "every election used the same timeout: {intervals:?}"
         );
+    }
+
+    #[test]
+    fn snapshot_older_than_the_commit_index_is_ignored() {
+        let peer1 = NodeId::validated(1).unwrap();
+        let mut follower = make_node(2);
+        follower.add_peer(peer1);
+        let entries = (1..=5)
+            .map(|i| LogEntry::create(i, 1, RaftCommand::Noop))
+            .collect();
+        let append = AppendEntriesRequest::create(1, 1, 0, 0, entries, 5);
+        let (response, _) = follower.handle_append_entries(peer1, append, 100);
+        assert!(response.is_success());
+        assert_eq!(follower.commit_index(), 5);
+
+        let request = InstallSnapshotRequest {
+            term: 1,
+            leader_id: 1,
+            snapshot: RaftSnapshot::capture(3, 1, &crate::cluster::PartitionMap::new(), &[peer1]),
+        };
+        let (response, outputs) = follower.handle_install_snapshot(peer1, request, 200);
+        assert!(response.is_success());
+        assert_eq!(response.match_index, 5);
+        assert!(
+            !outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::InstallSnapshot(_)))
+        );
+        assert_eq!(follower.last_log_index(), 5);
+    }
+
+    #[test]
+    fn persisted_log_without_its_prefix_is_discarded_on_restart() {
+        let backend: Arc<dyn StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+        let storage = RaftStorage::new(backend.clone());
+        storage.persist_state(1, None).unwrap();
+        for index in 272..=275 {
+            storage
+                .append_log_entry(&LogEntry::create(index, 1, RaftCommand::Noop))
+                .unwrap();
+        }
+
+        let node =
+            RaftNode::create_with_storage(NodeId::validated(5).unwrap(), test_config(), backend)
+                .unwrap();
+        assert_eq!(node.last_log_index(), 0);
+        assert!(storage.load_log().unwrap().is_empty());
     }
 
     #[test]

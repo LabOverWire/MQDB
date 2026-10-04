@@ -684,6 +684,7 @@ async fn receiver_task(
                     ClusterMessage::RequestVoteResponse(_) => "RequestVoteResponse",
                     ClusterMessage::AppendEntries(_) => "AppendEntries",
                     ClusterMessage::AppendEntriesResponse(_) => "AppendEntriesResponse",
+                    ClusterMessage::InstallSnapshot(_) => "InstallSnapshot",
                     ClusterMessage::CatchupRequest(_) => "CatchupRequest",
                     ClusterMessage::CatchupResponse(_) => "CatchupResponse",
                     ClusterMessage::ForwardedPublish(_) => "ForwardedPublish",

@@ -166,6 +166,14 @@ impl MessageProcessor {
                         response: *resp,
                     });
             }
+            ClusterMessage::InstallSnapshot(request) => {
+                let _ = self
+                    .tx_raft_messages
+                    .try_send(RaftMessage::InstallSnapshot {
+                        from: msg.from,
+                        request: request.clone(),
+                    });
+            }
 
             ClusterMessage::ForwardedPublish(fwd) => {
                 if self.check_forward_dedup(fwd) {

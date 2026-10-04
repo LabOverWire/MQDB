@@ -11,8 +11,8 @@ use super::protocol::{
     WildcardBroadcast,
 };
 use super::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
-    RequestVoteResponse,
+    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, PartitionUpdate,
+    RequestVoteRequest, RequestVoteResponse,
 };
 use super::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest};
 use super::{NodeId, PartitionId};
@@ -35,6 +35,7 @@ pub enum ClusterMessage {
     RequestVoteResponse(RequestVoteResponse),
     AppendEntries(AppendEntriesRequest),
     AppendEntriesResponse(AppendEntriesResponse),
+    InstallSnapshot(Box<InstallSnapshotRequest>),
     CatchupRequest(CatchupRequest),
     CatchupResponse(CatchupResponse),
     ForwardedPublish(ForwardedPublish),
@@ -89,6 +90,7 @@ impl ClusterMessage {
                 | Self::RequestVoteResponse(_)
                 | Self::AppendEntries(_)
                 | Self::AppendEntriesResponse(_)
+                | Self::InstallSnapshot(_)
                 | Self::PartitionUpdate(_)
         )
     }
@@ -106,6 +108,7 @@ impl ClusterMessage {
             Self::RequestVoteResponse(_) => 21,
             Self::AppendEntries(_) => 22,
             Self::AppendEntriesResponse(_) => 23,
+            Self::InstallSnapshot(_) => 24,
             Self::CatchupRequest(_) => 12,
             Self::CatchupResponse(_) => 13,
             Self::ForwardedPublish(_) => 30,
@@ -153,6 +156,7 @@ impl ClusterMessage {
             Self::RequestVoteResponse(_) => "RequestVoteResponse",
             Self::AppendEntries(_) => "AppendEntries",
             Self::AppendEntriesResponse(_) => "AppendEntriesResponse",
+            Self::InstallSnapshot(_) => "InstallSnapshot",
             Self::CatchupRequest(_) => "CatchupRequest",
             Self::CatchupResponse(_) => "CatchupResponse",
             Self::ForwardedPublish(_) => "ForwardedPublish",
@@ -200,6 +204,7 @@ impl ClusterMessage {
             Self::RequestVoteResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::AppendEntries(req) => buf.extend_from_slice(&req.to_bytes()),
             Self::AppendEntriesResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            Self::InstallSnapshot(req) => buf.extend_from_slice(&req.to_bytes()),
             Self::CatchupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::CatchupResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
             Self::ForwardedPublish(fwd) => buf.extend_from_slice(&fwd.to_bytes()),
@@ -279,6 +284,9 @@ impl ClusterMessage {
                 let (resp, _) = AppendEntriesResponse::try_from_be_bytes(data).ok()?;
                 Some(Self::AppendEntriesResponse(resp))
             }
+            24 => Some(Self::InstallSnapshot(Box::new(
+                InstallSnapshotRequest::from_bytes(data)?,
+            ))),
             30 => Some(Self::ForwardedPublish(ForwardedPublish::from_bytes(data)?)),
             40 => {
                 let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;

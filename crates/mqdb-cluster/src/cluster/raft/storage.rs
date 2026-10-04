@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::NodeId;
+use super::rpc::RaftSnapshot;
 use super::state::LogEntry;
 use bebytes::BeBytes;
 use mqdb_core::error::Result;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 
 const RAFT_STATE_KEY: &[u8] = b"_raft/state";
 const RAFT_LOG_PREFIX: &[u8] = b"_raft/log/";
+const RAFT_SNAPSHOT_KEY: &[u8] = b"_raft/snapshot";
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct RaftPersistentState {
@@ -75,22 +77,6 @@ impl RaftStorage {
     }
 
     /// # Errors
-    /// Returns an error if persistence fails.
-    pub fn append_log_entries_batch(&self, entries: &[LogEntry]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let mut batch = self.backend.batch();
-        for entry in entries {
-            let key = log_entry_key(entry.index);
-            let bytes = entry.to_be_bytes();
-            batch.insert(key, bytes);
-        }
-        batch.commit()?;
-        self.backend.flush()
-    }
-
-    /// # Errors
     /// Returns an error if loading fails or data is corrupted.
     pub fn load_log(&self) -> Result<Vec<LogEntry>> {
         let entries_raw = self.backend.prefix_scan(RAFT_LOG_PREFIX)?;
@@ -107,21 +93,46 @@ impl RaftStorage {
     }
 
     /// # Errors
-    /// Returns an error if deletion fails.
-    pub fn truncate_log_from(&self, index: u64) -> Result<()> {
+    /// Returns an error if persistence fails.
+    pub fn install_snapshot(&self, snapshot: &RaftSnapshot) -> Result<()> {
         let entries = self.backend.prefix_scan(RAFT_LOG_PREFIX)?;
         let mut batch = self.backend.batch();
-
-        for (key, value) in entries {
-            let (entry, _) = LogEntry::try_from_be_bytes(&value)
-                .map_err(|e| mqdb_core::error::Error::StorageGeneric(e.to_string()))?;
-            if entry.index >= index {
-                batch.remove(key);
-            }
+        batch.insert(RAFT_SNAPSHOT_KEY.to_vec(), snapshot.to_bytes());
+        for (key, _) in entries {
+            batch.remove(key);
         }
-
         batch.commit()?;
         self.backend.flush()
+    }
+
+    /// # Errors
+    /// Returns an error if persistence fails.
+    pub fn replace_log_from(
+        &self,
+        first_index: u64,
+        old_last_index: u64,
+        entries: &[LogEntry],
+    ) -> Result<()> {
+        let mut batch = self.backend.batch();
+        for index in first_index..=old_last_index {
+            batch.remove(log_entry_key(index));
+        }
+        for entry in entries {
+            batch.insert(log_entry_key(entry.index), entry.to_be_bytes());
+        }
+        batch.commit()?;
+        self.backend.flush()
+    }
+
+    /// # Errors
+    /// Returns an error if loading fails or data is corrupted.
+    pub fn load_snapshot(&self) -> Result<Option<RaftSnapshot>> {
+        match self.backend.get(RAFT_SNAPSHOT_KEY)? {
+            Some(bytes) => RaftSnapshot::from_bytes(&bytes).map(Some).ok_or_else(|| {
+                mqdb_core::error::Error::StorageGeneric("corrupt raft snapshot".into())
+            }),
+            None => Ok(None),
+        }
     }
 }
 
@@ -192,27 +203,44 @@ mod tests {
     }
 
     #[test]
-    fn truncate_log() {
-        let s = storage();
-
-        for i in 1..=5 {
-            let entry = LogEntry::create(i, 1, RaftCommand::Noop);
-            s.append_log_entry(&entry).unwrap();
-        }
-
-        s.truncate_log_from(3).unwrap();
-
-        let log = s.load_log().unwrap();
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0].index, 1);
-        assert_eq!(log[1].index, 2);
-    }
-
-    #[test]
     fn persistent_state_bebytes_roundtrip() {
         let state = RaftPersistentState::create(42, NodeId::validated(7));
         let bytes = state.to_be_bytes();
         let (parsed, _) = RaftPersistentState::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(state, parsed);
+    }
+
+    #[test]
+    fn install_snapshot_replaces_the_persisted_log() {
+        let s = storage();
+        for i in 1..=5 {
+            s.append_log_entry(&LogEntry::create(i, 1, RaftCommand::Noop))
+                .unwrap();
+        }
+        let snapshot = RaftSnapshot::capture(
+            7,
+            2,
+            &crate::cluster::PartitionMap::new(),
+            &[NodeId::validated(1).unwrap()],
+        );
+        s.install_snapshot(&snapshot).unwrap();
+        assert!(s.load_log().unwrap().is_empty());
+        assert_eq!(s.load_snapshot().unwrap(), Some(snapshot));
+    }
+
+    #[test]
+    fn replace_log_from_drops_the_overwritten_suffix() {
+        let s = storage();
+        for i in 1..=5 {
+            s.append_log_entry(&LogEntry::create(i, 1, RaftCommand::Noop))
+                .unwrap();
+        }
+        s.replace_log_from(3, 5, &[LogEntry::create(3, 2, RaftCommand::Noop)])
+            .unwrap();
+        let log = s.load_log().unwrap();
+        assert_eq!(
+            log.iter().map(|e| (e.index, e.term)).collect::<Vec<_>>(),
+            vec![(1, 1), (2, 1), (3, 2)]
+        );
     }
 }

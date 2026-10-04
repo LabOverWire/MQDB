@@ -149,6 +149,13 @@ impl<T: ClusterTransport> RaftTask<T> {
                     .handle_append_entries_response(from, response)
                     .await;
             }
+            RaftMessage::InstallSnapshot { from, request } => {
+                let response = self.raft.handle_install_snapshot(from, *request, now).await;
+                let _ = self
+                    .raft
+                    .send(from, ClusterMessage::AppendEntriesResponse(response))
+                    .await;
+            }
         }
     }
 

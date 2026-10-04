@@ -1,7 +1,8 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::state::LogEntry;
+use super::state::{LogEntry, PartitionUpdate};
+use crate::cluster::{Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
 use bebytes::BeBytes;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -204,6 +205,155 @@ impl AppendEntriesResponse {
     }
 }
 
+const SNAPSHOT_PARTITIONS: usize = NUM_PARTITIONS as usize;
+const PARTITION_UPDATE_LEN: usize = 11;
+
+#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+struct SnapshotHeader {
+    last_index: u64,
+    last_term: u64,
+    member_count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaftSnapshot {
+    pub last_index: u64,
+    pub last_term: u64,
+    pub members: Vec<NodeId>,
+    pub partitions: Box<[PartitionUpdate; SNAPSHOT_PARTITIONS]>,
+}
+
+impl RaftSnapshot {
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn capture(
+        last_index: u64,
+        last_term: u64,
+        map: &PartitionMap,
+        members: &[NodeId],
+    ) -> Self {
+        let mut partitions = Box::new([PartitionUpdate::new(0, 0, 0, 0, 0); SNAPSHOT_PARTITIONS]);
+        for (slot, partition) in partitions.iter_mut().zip(PartitionId::all()) {
+            let assignment = map.get(partition);
+            *slot = PartitionUpdate::new(
+                partition.get() as u8,
+                assignment.primary.map_or(0, NodeId::get),
+                assignment.replicas.first().map_or(0, |n| n.get()),
+                assignment.replicas.get(1).map_or(0, |n| n.get()),
+                assignment.epoch.get() as u32,
+            );
+        }
+        Self {
+            last_index,
+            last_term,
+            members: members.to_vec(),
+            partitions,
+        }
+    }
+
+    #[must_use]
+    pub fn partition_map(&self) -> PartitionMap {
+        let mut map = PartitionMap::new();
+        for update in self.partitions.iter() {
+            let Some(partition) = PartitionId::new(u16::from(update.partition)) else {
+                continue;
+            };
+            let Some(primary) = NodeId::validated(update.primary) else {
+                continue;
+            };
+            let replicas = [update.replica1, update.replica2]
+                .into_iter()
+                .filter_map(NodeId::validated)
+                .collect();
+            map.set(
+                partition,
+                crate::cluster::PartitionAssignment::new(
+                    primary,
+                    replicas,
+                    Epoch::new(u64::from(update.epoch)),
+                ),
+            );
+        }
+        map
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let header =
+            SnapshotHeader::new(self.last_index, self.last_term, self.members.len() as u16);
+        let mut buf = header.to_be_bytes();
+        for member in &self.members {
+            buf.extend_from_slice(&member.get().to_be_bytes());
+        }
+        for update in self.partitions.iter() {
+            buf.extend_from_slice(&update.to_be_bytes());
+        }
+        buf
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (header, consumed) = SnapshotHeader::try_from_be_bytes(bytes).ok()?;
+        let members_end = consumed + usize::from(header.member_count) * 2;
+        let partitions_end = members_end + SNAPSHOT_PARTITIONS * PARTITION_UPDATE_LEN;
+        if bytes.len() != partitions_end {
+            return None;
+        }
+        let members = bytes[consumed..members_end]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| NodeId::validated(u16::from_be_bytes(*pair)))
+            .collect::<Option<Vec<_>>>()?;
+        let mut partitions = Box::new([PartitionUpdate::new(0, 0, 0, 0, 0); SNAPSHOT_PARTITIONS]);
+        for (slot, chunk) in partitions
+            .iter_mut()
+            .zip(bytes[members_end..].as_chunks::<PARTITION_UPDATE_LEN>().0)
+        {
+            *slot = PartitionUpdate::try_from_be_bytes(chunk).ok()?.0;
+        }
+        Some(Self {
+            last_index: header.last_index,
+            last_term: header.last_term,
+            members,
+            partitions,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+struct InstallSnapshotHeader {
+    term: u64,
+    leader_id: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallSnapshotRequest {
+    pub term: u64,
+    pub leader_id: u16,
+    pub snapshot: RaftSnapshot,
+}
+
+impl InstallSnapshotRequest {
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = InstallSnapshotHeader::new(self.term, self.leader_id).to_be_bytes();
+        buf.extend_from_slice(&self.snapshot.to_bytes());
+        buf
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (header, consumed) = InstallSnapshotHeader::try_from_be_bytes(bytes).ok()?;
+        Some(Self {
+            term: header.term,
+            leader_id: header.leader_id,
+            snapshot: RaftSnapshot::from_bytes(&bytes[consumed..])?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +404,32 @@ mod tests {
         let (parsed, _) = AppendEntriesResponse::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(resp, parsed);
         assert!(parsed.is_success());
+    }
+
+    #[test]
+    fn install_snapshot_roundtrip() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let mut map = PartitionMap::new();
+        map.set(
+            PartitionId::new(7).unwrap(),
+            crate::cluster::PartitionAssignment::new(node2, vec![node1], Epoch::new(9)),
+        );
+        let request = InstallSnapshotRequest {
+            term: 3,
+            leader_id: 1,
+            snapshot: RaftSnapshot::capture(1272, 3, &map, &[node1, node2]),
+        };
+        let bytes = request.to_bytes();
+        let parsed = InstallSnapshotRequest::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, request);
+        assert_eq!(
+            parsed
+                .snapshot
+                .partition_map()
+                .get(PartitionId::new(7).unwrap()),
+            map.get(PartitionId::new(7).unwrap())
+        );
+        assert!(InstallSnapshotRequest::from_bytes(&bytes[..bytes.len() - 1]).is_none());
     }
 }

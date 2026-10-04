@@ -115,6 +115,12 @@ impl LogEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppendOutcome {
+    Rejected,
+    Accepted { first_written: Option<u64> },
+}
+
 #[derive(Debug)]
 pub struct RaftState {
     node_id: NodeId,
@@ -122,6 +128,7 @@ pub struct RaftState {
     voted_for: Option<NodeId>,
     log: Vec<LogEntry>,
     log_base_index: u64,
+    log_base_term: u64,
     commit_index: u64,
     last_applied: u64,
     role: RaftRole,
@@ -141,6 +148,7 @@ impl RaftState {
             voted_for: None,
             log: Vec::new(),
             log_base_index: 0,
+            log_base_term: 0,
             commit_index: 0,
             last_applied: 0,
             role: RaftRole::Follower,
@@ -158,16 +166,26 @@ impl RaftState {
         current_term: u64,
         voted_for: Option<NodeId>,
         log: Vec<LogEntry>,
+        snapshot_point: Option<(u64, u64)>,
     ) -> Self {
-        let log_base_index = log.first().map_or(0, |e| e.index.saturating_sub(1));
+        let (log_base_index, log_base_term, log) = match snapshot_point {
+            Some((index, term)) => (
+                index,
+                term,
+                log.into_iter().filter(|e| e.index > index).collect(),
+            ),
+            None => (0, 0, log),
+        };
+        let applied = snapshot_point.map_or(0, |(index, _)| index);
         Self {
             node_id,
             current_term,
             voted_for,
             log,
             log_base_index,
-            commit_index: 0,
-            last_applied: 0,
+            log_base_term,
+            commit_index: applied,
+            last_applied: applied,
             role: RaftRole::Follower,
             leader_id: None,
             next_index: Vec::new(),
@@ -218,7 +236,12 @@ impl RaftState {
 
     #[must_use]
     pub fn last_log_index(&self) -> u64 {
-        self.log.last().map_or(0, |e| e.index)
+        self.log.last().map_or(self.log_base_index, |e| e.index)
+    }
+
+    #[must_use]
+    pub fn log_base_index(&self) -> u64 {
+        self.log_base_index
     }
 
     #[must_use]
@@ -228,7 +251,7 @@ impl RaftState {
 
     #[must_use]
     pub fn last_log_term(&self) -> u64 {
-        self.log.last().map_or(0, |e| e.term)
+        self.log.last().map_or(self.log_base_term, |e| e.term)
     }
 
     #[must_use]
@@ -248,6 +271,9 @@ impl RaftState {
     pub fn log_term_at(&self, index: u64) -> Option<u64> {
         if index == 0 {
             return Some(0);
+        }
+        if index == self.log_base_index {
+            return Some(self.log_base_term);
         }
         let pos = self.log_position(index)?;
         self.log
@@ -358,39 +384,60 @@ impl RaftState {
         self.voted_for = Some(candidate);
     }
 
-    pub fn append_entry(&mut self, entry: LogEntry) {
-        let Some(pos) = self.log_position(entry.index) else {
-            return;
-        };
-        if pos < self.log.len() {
-            if self.log[pos].term != entry.term {
-                self.log.truncate(pos);
-                self.log.push(entry);
-            }
-        } else if entry.index == self.last_log_index() + 1 {
-            self.log.push(entry);
-        }
-    }
-
     #[must_use]
     pub fn append_entries(
         &mut self,
         prev_log_index: u64,
         prev_log_term: u64,
         entries: Vec<LogEntry>,
-    ) -> bool {
-        if prev_log_index > 0 {
-            match self.log_term_at(prev_log_index) {
-                Some(term) if term == prev_log_term => {}
-                _ => return false,
+    ) -> AppendOutcome {
+        let (prev_index, prev_term, entries) = if prev_log_index < self.log_base_index {
+            let entries: Vec<LogEntry> = entries
+                .into_iter()
+                .filter(|e| e.index > self.log_base_index)
+                .collect();
+            (self.log_base_index, self.log_base_term, entries)
+        } else {
+            (prev_log_index, prev_log_term, entries)
+        };
+
+        if prev_index > self.last_log_index() || self.log_term_at(prev_index) != Some(prev_term) {
+            return AppendOutcome::Rejected;
+        }
+        if entries
+            .iter()
+            .zip(prev_index + 1..)
+            .any(|(entry, expected)| entry.index != expected)
+        {
+            return AppendOutcome::Rejected;
+        }
+
+        let mut first_written = None;
+        for entry in entries {
+            match self.log_position(entry.index) {
+                Some(pos) if pos < self.log.len() => {
+                    if self.log[pos].term != entry.term {
+                        self.log.truncate(pos);
+                        first_written.get_or_insert(entry.index);
+                        self.log.push(entry);
+                    }
+                }
+                _ => {
+                    first_written.get_or_insert(entry.index);
+                    self.log.push(entry);
+                }
             }
         }
 
-        for entry in entries {
-            self.append_entry(entry);
-        }
+        AppendOutcome::Accepted { first_written }
+    }
 
-        true
+    pub fn install_snapshot(&mut self, last_index: u64, last_term: u64) {
+        self.log.clear();
+        self.log_base_index = last_index;
+        self.log_base_term = last_term;
+        self.commit_index = last_index;
+        self.last_applied = last_index;
     }
 
     pub fn update_commit_index(&mut self, leader_commit: u64) {
@@ -427,14 +474,6 @@ impl RaftState {
     pub fn update_match_index(&mut self, peer: NodeId, index: u64) {
         if let Some(entry) = self.match_index.iter_mut().find(|(n, _)| *n == peer) {
             entry.1 = index;
-        }
-    }
-
-    pub fn decrement_next_index(&mut self, peer: NodeId) {
-        if let Some(entry) = self.next_index.iter_mut().find(|(n, _)| *n == peer)
-            && entry.1 > 1
-        {
-            entry.1 -= 1;
         }
     }
 
@@ -503,10 +542,10 @@ impl RaftState {
         if remove_count == 0 {
             return;
         }
+        let last_removed = &self.log[remove_count - 1];
+        self.log_base_index = last_removed.index;
+        self.log_base_term = last_removed.term;
         self.log.drain(..remove_count);
-        if let Some(first) = self.log.first() {
-            self.log_base_index = first.index - 1;
-        }
     }
 
     #[must_use]
@@ -643,5 +682,61 @@ mod tests {
         let bytes = update.to_be_bytes();
         let (parsed, _) = PartitionUpdate::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(update, parsed);
+    }
+
+    fn entry(index: u64, term: u64) -> LogEntry {
+        LogEntry::create(index, term, RaftCommand::Noop)
+    }
+
+    #[test]
+    fn append_rejects_entries_that_do_not_follow_the_log() {
+        let mut state = RaftState::create(NodeId::validated(2).unwrap());
+        let outcome = state.append_entries(0, 0, vec![entry(272, 1), entry(273, 1)]);
+        assert_eq!(outcome, AppendOutcome::Rejected);
+        assert_eq!(state.last_log_index(), 0);
+    }
+
+    #[test]
+    fn snapshot_point_becomes_the_log_tail() {
+        let mut state = RaftState::create(NodeId::validated(2).unwrap());
+        state.install_snapshot(10, 2);
+        assert_eq!(state.last_log_index(), 10);
+        assert_eq!(state.last_log_term(), 2);
+        assert_eq!(state.log_term_at(10), Some(2));
+        assert_eq!(state.commit_index(), 10);
+        assert_eq!(state.last_applied(), 10);
+    }
+
+    #[test]
+    fn append_skips_entries_covered_by_the_snapshot() {
+        let mut state = RaftState::create(NodeId::validated(2).unwrap());
+        state.install_snapshot(10, 2);
+        let entries = (9..=12).map(|i| entry(i, 2)).collect();
+        let outcome = state.append_entries(8, 2, entries);
+        assert_eq!(
+            outcome,
+            AppendOutcome::Accepted {
+                first_written: Some(11)
+            }
+        );
+        assert_eq!(state.last_log_index(), 12);
+    }
+
+    #[test]
+    fn compaction_keeps_the_term_of_the_new_base() {
+        let mut state = RaftState::create(NodeId::validated(1).unwrap());
+        let entries = (1..=6)
+            .map(|i| entry(i, if i <= 3 { 1 } else { 2 }))
+            .collect();
+        assert!(matches!(
+            state.append_entries(0, 0, entries),
+            AppendOutcome::Accepted { .. }
+        ));
+        state.update_commit_index(6);
+        let _ = state.pending_commands();
+        state.compact_log(2);
+        assert_eq!(state.log_base_index(), 3);
+        assert_eq!(state.log_term_at(3), Some(1));
+        assert_eq!(state.last_log_index(), 6);
     }
 }
