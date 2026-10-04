@@ -110,6 +110,7 @@ async fn coordinator_election_and_propose() {
     coord1.add_peer(node2);
     coord2.add_peer(node1);
 
+    coord1.tick(0).await;
     coord1.tick(1000).await;
     let sent = coord1.transport.sent_messages();
     assert_eq!(sent.len(), 1);
@@ -140,6 +141,7 @@ async fn coordinator_applies_partition_update() {
     coord1.add_peer(node2);
     coord2.add_peer(node1);
 
+    coord1.tick(0).await;
     coord1.tick(1000).await;
     let request = match &coord1.transport.sent_messages()[0].1 {
         ClusterMessage::RequestVote(req) => *req,
@@ -224,6 +226,7 @@ async fn handle_node_death_reassigns_partitions() {
     coord2.add_peer(node1);
     coord2.add_peer(node3);
 
+    coord1.tick(0).await;
     coord1.tick(1000).await;
     let request = match &coord1.transport.sent_messages()[0].1 {
         ClusterMessage::RequestVote(req) => *req,
@@ -274,4 +277,30 @@ async fn handle_node_death_does_nothing_when_not_leader() {
 
     let indices = coord.handle_node_death(node2).await;
     assert!(indices.is_empty());
+}
+
+#[tokio::test]
+async fn coordinator_from_storage_respects_startup_grace_without_peers() {
+    let node_id = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node_id);
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let config = RaftConfig {
+        election_timeout_min_ms: 150,
+        election_timeout_max_ms: 300,
+        heartbeat_interval_ms: 50,
+        startup_grace_period_ms: 10_000,
+    };
+    let mut coord = RaftCoordinator::new_with_storage(node_id, transport, config, backend).unwrap();
+    let now = 1_790_000_000_000;
+
+    coord.tick(now).await;
+    coord.tick(now + 5_000).await;
+    assert!(
+        !coord.is_leader(),
+        "a node without peers must wait out the startup grace period before electing itself"
+    );
+
+    coord.tick(now + 10_000).await;
+    coord.tick(now + 10_400).await;
+    assert!(coord.is_leader());
 }

@@ -302,6 +302,7 @@ async fn cluster_formation_three_nodes() {
     );
 
     let first = &mut cluster.nodes[0];
+    first.raft.tick(0);
     let outputs = first.raft.tick(1000);
     assert_eq!(first.raft.role(), RaftRole::Candidate);
     assert_eq!(first.raft.current_term(), 1);
@@ -561,6 +562,7 @@ async fn raft_log_replication_commit() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
+    cluster.nodes[0].raft.tick(0);
     let outputs = cluster.nodes[0].raft.tick(1000);
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
 
@@ -1795,6 +1797,7 @@ async fn raft_logs_converge_after_divergence() {
 
     let n1 = cluster.nodes[0].id;
 
+    cluster.nodes[0].raft.tick(0);
     let outputs = cluster.nodes[0].raft.tick(1000);
     for output in outputs {
         if let RaftOutput::SendRequestVote { to, request } = output {
@@ -2272,6 +2275,7 @@ async fn raft_command_application_updates_partition_map() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
+    cluster.nodes[0].raft.tick(0);
     let outputs = cluster.nodes[0].raft.tick(1000);
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
 
@@ -2574,6 +2578,7 @@ async fn raft_state_persisted_and_recovered() {
 
         node.add_peer(peer_id);
 
+        node.tick(0);
         node.tick(1000);
         assert_eq!(node.role(), RaftRole::Candidate);
         assert_eq!(node.current_term(), 1);
@@ -2609,6 +2614,7 @@ async fn raft_log_persisted_and_recovered() {
 
         node.add_peer(peer_id);
 
+        node.tick(0);
         node.tick(1000);
 
         let vote_response = mqdb_cluster::cluster::raft::RequestVoteResponse::granted(1);

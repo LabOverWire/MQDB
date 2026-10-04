@@ -215,6 +215,10 @@ impl RaftNode {
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         if self.startup_time.is_none() {
             self.startup_time = Some(now_ms);
+            if self.last_heartbeat_time == 0 {
+                self.last_heartbeat_time = now_ms;
+            }
+            self.reset_election_timeout();
         }
 
         let mut outputs = Vec::new();
@@ -292,6 +296,10 @@ impl RaftNode {
         }
 
         outputs
+    }
+
+    pub fn take_committed(&mut self) -> Vec<RaftOutput> {
+        self.apply_committed()
     }
 
     fn apply_committed(&mut self) -> Vec<RaftOutput> {
@@ -508,6 +516,103 @@ mod tests {
         RaftNode::create(node_id, test_config())
     }
 
+    fn heartbeat_from(leader: u16, term: u64, prev_log_index: u64) -> AppendEntriesRequest {
+        AppendEntriesRequest::create(term, leader, prev_log_index, 0, Vec::new(), 0)
+    }
+
+    #[test]
+    fn candidate_stepping_down_in_same_term_keeps_its_vote() {
+        let mut node = make_node(2);
+        node.add_peer(NodeId::validated(1).unwrap());
+        node.add_peer(NodeId::validated(3).unwrap());
+        node.add_peer(NodeId::validated(4).unwrap());
+        node.add_peer(NodeId::validated(5).unwrap());
+        node.tick(0);
+        node.tick(1000);
+        assert_eq!(node.role(), RaftRole::Candidate);
+        assert_eq!(node.current_term(), 1);
+
+        let _ = node.handle_append_entries(
+            NodeId::validated(1).unwrap(),
+            heartbeat_from(1, 1, 257),
+            1100,
+        );
+        assert_eq!(node.role(), RaftRole::Follower);
+        assert_eq!(node.current_term(), 1);
+
+        let request = RequestVoteRequest::create(1, 5, 0, 0);
+        let (response, _) = node.handle_request_vote(NodeId::validated(5).unwrap(), request, 1150);
+        assert!(
+            !response.is_granted(),
+            "a node that voted for itself in term 1 must not grant a second term-1 vote"
+        );
+    }
+
+    #[test]
+    fn first_tick_starts_the_election_timer_instead_of_firing_it() {
+        let mut node = make_node(2);
+        node.add_peer(NodeId::validated(1).unwrap());
+        let now = 1_790_000_000_000;
+
+        let outputs = node.tick(now);
+        assert!(outputs.is_empty());
+        assert_eq!(node.role(), RaftRole::Follower);
+
+        let outputs = node.tick(now + 301);
+        assert!(
+            outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+        );
+    }
+
+    fn first_campaign_time(node_id: u16, start_ms: u64) -> Option<u64> {
+        let mut node = make_node(node_id);
+        node.add_peer(NodeId::validated(if node_id == 1 { 2 } else { 1 }).unwrap());
+        node.tick(start_ms);
+        (start_ms..=start_ms + 300).find(|&now| {
+            node.tick(now)
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+        })
+    }
+
+    #[test]
+    fn nodes_started_together_do_not_campaign_together() {
+        let start = 1_790_000_000_000;
+        let campaigns: Vec<_> = (1..=5).map(|id| first_campaign_time(id, start)).collect();
+        assert!(campaigns.iter().all(Option::is_some));
+        let mut distinct = campaigns.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            campaigns.len(),
+            "first election timeouts must differ per node: {campaigns:?}"
+        );
+    }
+
+    #[test]
+    fn election_timeout_is_redrawn_for_every_election() {
+        let mut node = make_node(3);
+        node.add_peer(NodeId::validated(1).unwrap());
+        node.add_peer(NodeId::validated(2).unwrap());
+        node.tick(0);
+        let campaigns: Vec<u64> = (1..=2000)
+            .filter(|&now| {
+                node.tick(now)
+                    .iter()
+                    .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+            })
+            .collect();
+        let intervals: Vec<u64> = campaigns.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(intervals.len() >= 4, "campaigns: {campaigns:?}");
+        assert!(
+            intervals.windows(2).any(|w| w[0] != w[1]),
+            "every election used the same timeout: {intervals:?}"
+        );
+    }
+
     #[test]
     fn starts_as_follower() {
         let node = make_node(1);
@@ -520,6 +625,7 @@ mod tests {
         node.add_peer(NodeId::validated(2).unwrap());
         node.add_peer(NodeId::validated(3).unwrap());
 
+        node.tick(0);
         let outputs = node.tick(1000);
         assert!(
             outputs
@@ -538,6 +644,7 @@ mod tests {
         node.add_peer(peer2);
         node.add_peer(peer3);
 
+        node.tick(0);
         node.tick(1000);
         assert_eq!(node.role(), RaftRole::Candidate);
 
@@ -556,6 +663,7 @@ mod tests {
     fn steps_down_on_higher_term() {
         let mut node = make_node(1);
         node.add_peer(NodeId::validated(2).unwrap());
+        node.tick(0);
         node.tick(1000);
         assert_eq!(node.current_term(), 1);
 
@@ -577,6 +685,7 @@ mod tests {
         let peer2 = NodeId::validated(2).unwrap();
         node.add_peer(peer2);
 
+        node.tick(0);
         node.tick(1000);
         let response = RequestVoteResponse::granted(1);
         node.handle_request_vote_response(peer2, response);
@@ -600,6 +709,7 @@ mod tests {
         leader.add_peer(peer2);
         follower.add_peer(peer1);
 
+        leader.tick(0);
         leader.tick(1000);
         let response = RequestVoteResponse::granted(1);
         leader.handle_request_vote_response(peer2, response);
