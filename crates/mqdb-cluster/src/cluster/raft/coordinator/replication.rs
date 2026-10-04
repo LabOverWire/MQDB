@@ -84,6 +84,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub(super) fn restore_snapshot(&mut self, snapshot: &RaftSnapshot) {
         self.partition_map = snapshot.partition_map();
+        self.pending_partition_proposals = 0;
         self.cluster_members.clone_from(&snapshot.members);
         let own_id = self.node.node_id();
         if !self.cluster_members.contains(&own_id) {

@@ -418,3 +418,26 @@ async fn node_alive_registers_raft_peer_for_member_known_from_snapshot() {
     coord.handle_node_alive(node3).await;
     assert!(coord.node.peers().contains(&node3));
 }
+
+#[tokio::test]
+async fn snapshot_install_clears_pending_partition_proposals() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut coord = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
+    coord.add_peer(node1);
+    coord.set_pending_partition_proposals(7);
+
+    let request = crate::cluster::raft::InstallSnapshotRequest {
+        term: 1,
+        leader_id: 1,
+        snapshot: crate::cluster::raft::RaftSnapshot::capture(
+            5,
+            1,
+            &PartitionMap::new(),
+            &[node1, node2],
+        ),
+    };
+    let response = coord.handle_install_snapshot(node1, request, 100).await;
+    assert!(response.is_success());
+    assert_eq!(coord.pending_partition_proposals, 0);
+}
