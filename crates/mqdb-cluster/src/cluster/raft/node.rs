@@ -64,6 +64,7 @@ pub struct RaftNode {
     random_seed: u64,
     startup_time: Option<u64>,
     restored_snapshot: Option<RaftSnapshot>,
+    storage_failure: Option<String>,
 }
 
 impl RaftNode {
@@ -80,6 +81,7 @@ impl RaftNode {
             random_seed: u64::from(node_id.get()),
             startup_time: None,
             restored_snapshot: None,
+            storage_failure: None,
         }
     }
 
@@ -137,6 +139,7 @@ impl RaftNode {
             random_seed: u64::from(node_id.get()),
             startup_time: None,
             restored_snapshot,
+            storage_failure: None,
         })
     }
 
@@ -223,15 +226,44 @@ impl RaftNode {
         now_ms >= startup + self.config.startup_grace_period_ms
     }
 
-    fn persist_state(&self) {
-        if let Some(ref storage) = self.storage {
-            let _ = storage.persist_state(self.state.current_term(), self.state.voted_for());
+    #[must_use]
+    pub fn storage_failure(&self) -> Option<&str> {
+        self.storage_failure.as_deref()
+    }
+
+    fn record_storage_failure(&mut self, what: &str, error: &mqdb_core::error::Error) {
+        tracing::error!(%error, "raft storage failure while persisting {what}");
+        self.storage_failure
+            .get_or_insert_with(|| format!("failed to persist raft {what}: {error}"));
+    }
+
+    fn persist_state(&mut self) -> bool {
+        let result = match self.storage {
+            Some(ref storage) => {
+                storage.persist_state(self.state.current_term(), self.state.voted_for())
+            }
+            None => Ok(()),
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.record_storage_failure("term and vote", &error);
+                false
+            }
         }
     }
 
-    fn persist_log_entry(&self, entry: &LogEntry) {
-        if let Some(ref storage) = self.storage {
-            let _ = storage.append_log_entry(entry);
+    fn persist_last_entry(&mut self) -> bool {
+        let result = match (&self.storage, self.state.last_log_entry()) {
+            (Some(storage), Some(entry)) => storage.append_log_entry(entry),
+            _ => Ok(()),
+        };
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                self.record_storage_failure("log entry", &error);
+                false
+            }
         }
     }
 
@@ -246,16 +278,21 @@ impl RaftNode {
         }
     }
 
-    fn propose_leader_noop(&mut self) {
-        if let Some(_index) = self.state.propose(RaftCommand::Noop)
-            && let Some(entry) = self.state.last_log_entry()
-        {
-            self.persist_log_entry(entry);
-            self.state.try_advance_commit_index();
+    fn propose_leader_noop(&mut self) -> bool {
+        if self.state.propose(RaftCommand::Noop).is_none() {
+            return true;
         }
+        if !self.persist_last_entry() {
+            return false;
+        }
+        self.state.try_advance_commit_index();
+        true
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Vec<RaftOutput> {
+        if self.storage_failure.is_some() {
+            return Vec::new();
+        }
         if self.startup_time.is_none() {
             self.startup_time = Some(now_ms);
             if self.last_heartbeat_time == 0 {
@@ -288,14 +325,18 @@ impl RaftNode {
 
     fn start_election(&mut self, now_ms: u64) -> Vec<RaftOutput> {
         self.state.become_candidate();
-        self.persist_state();
+        if !self.persist_state() {
+            return Vec::new();
+        }
         self.last_election_time = now_ms;
         self.last_heartbeat_time = now_ms;
         self.reset_election_timeout();
 
         if self.state.has_quorum() {
             self.state.become_leader();
-            self.propose_leader_noop();
+            if !self.propose_leader_noop() {
+                return Vec::new();
+            }
             let mut outputs = vec![RaftOutput::BecameLeader];
             outputs.extend(self.send_heartbeats());
             return outputs;
@@ -375,7 +416,7 @@ impl RaftNode {
     ) -> (RequestVoteResponse, Vec<RaftOutput>) {
         let mut outputs = Vec::new();
 
-        if from.get() != request.candidate_id {
+        if self.storage_failure.is_some() || from.get() != request.candidate_id {
             return (
                 RequestVoteResponse::rejected(self.state.current_term()),
                 outputs,
@@ -384,7 +425,9 @@ impl RaftNode {
 
         if request.term > self.state.current_term() {
             self.state.become_follower(request.term, None);
-            self.persist_state();
+            if !self.persist_state() {
+                return (RequestVoteResponse::rejected(request.term), Vec::new());
+            }
             outputs.push(RaftOutput::BecameFollower { leader: None });
         }
 
@@ -401,7 +444,9 @@ impl RaftNode {
         let response = if can_grant {
             if let Some(c) = candidate {
                 self.state.grant_vote(request.term, c);
-                self.persist_state();
+                if !self.persist_state() {
+                    return (RequestVoteResponse::rejected(request.term), Vec::new());
+                }
                 self.last_heartbeat_time = now_ms;
                 self.reset_election_timeout();
             }
@@ -420,9 +465,15 @@ impl RaftNode {
     ) -> Vec<RaftOutput> {
         let mut outputs = Vec::new();
 
+        if self.storage_failure.is_some() {
+            return outputs;
+        }
+
         if response.term > self.state.current_term() {
             self.state.become_follower(response.term, None);
-            self.persist_state();
+            if !self.persist_state() {
+                return Vec::new();
+            }
             outputs.push(RaftOutput::BecameFollower { leader: None });
             return outputs;
         }
@@ -437,7 +488,9 @@ impl RaftNode {
 
         if response.is_granted() && self.state.record_vote(from) {
             self.state.become_leader();
-            self.propose_leader_noop();
+            if !self.propose_leader_noop() {
+                return Vec::new();
+            }
             outputs.push(RaftOutput::BecameLeader);
             outputs.extend(self.send_heartbeats());
         }
@@ -453,7 +506,7 @@ impl RaftNode {
     ) -> (AppendEntriesResponse, Vec<RaftOutput>) {
         let mut outputs = Vec::new();
 
-        if from.get() != request.leader_id {
+        if self.storage_failure.is_some() || from.get() != request.leader_id {
             return (
                 AppendEntriesResponse::failure(self.state.current_term()),
                 outputs,
@@ -471,7 +524,9 @@ impl RaftNode {
 
         if request.term > self.state.current_term() || self.state.role() != RaftRole::Follower {
             self.state.become_follower(request.term, leader);
-            self.persist_state();
+            if !self.persist_state() {
+                return (AppendEntriesResponse::failure(request.term), Vec::new());
+            }
             outputs.push(RaftOutput::BecameFollower { leader });
         } else if self.state.leader_id() != leader {
             self.state.set_leader(leader);
@@ -493,7 +548,7 @@ impl RaftNode {
         };
 
         if let Err(error) = self.persist_append(&prepared) {
-            tracing::warn!(%error, "failed to persist raft log entries");
+            self.record_storage_failure("log entries", &error);
             return (
                 AppendEntriesResponse::failure(self.state.current_term()),
                 outputs,
@@ -521,7 +576,10 @@ impl RaftNode {
     ) -> (AppendEntriesResponse, Vec<RaftOutput>) {
         let mut outputs = Vec::new();
 
-        if from.get() != request.leader_id || request.term < self.state.current_term() {
+        if self.storage_failure.is_some()
+            || from.get() != request.leader_id
+            || request.term < self.state.current_term()
+        {
             return (
                 AppendEntriesResponse::failure(self.state.current_term()),
                 outputs,
@@ -531,7 +589,9 @@ impl RaftNode {
         let leader = NodeId::validated(request.leader_id);
         if request.term > self.state.current_term() || self.state.role() != RaftRole::Follower {
             self.state.become_follower(request.term, leader);
-            self.persist_state();
+            if !self.persist_state() {
+                return (AppendEntriesResponse::failure(request.term), Vec::new());
+            }
             outputs.push(RaftOutput::BecameFollower { leader });
         } else if self.state.leader_id() != leader {
             self.state.set_leader(leader);
@@ -554,10 +614,12 @@ impl RaftNode {
         let keeps_suffix = self
             .state
             .holds_entry(snapshot.last_index, snapshot.last_term);
-        if let Some(ref storage) = self.storage
-            && let Err(error) = storage.install_snapshot(&snapshot, keeps_suffix)
-        {
-            tracing::warn!(%error, last_index = snapshot.last_index, "failed to persist raft snapshot");
+        let persisted = match self.storage {
+            Some(ref storage) => storage.install_snapshot(&snapshot, keeps_suffix),
+            None => Ok(()),
+        };
+        if let Err(error) = persisted {
+            self.record_storage_failure("snapshot", &error);
             return (
                 AppendEntriesResponse::failure(self.state.current_term()),
                 outputs,
@@ -581,9 +643,15 @@ impl RaftNode {
     ) -> Vec<RaftOutput> {
         let mut outputs = Vec::new();
 
+        if self.storage_failure.is_some() {
+            return outputs;
+        }
+
         if response.term > self.state.current_term() {
             self.state.become_follower(response.term, None);
-            self.persist_state();
+            if !self.persist_state() {
+                return Vec::new();
+            }
             outputs.push(RaftOutput::BecameFollower { leader: None });
             return outputs;
         }
@@ -606,11 +674,14 @@ impl RaftNode {
     }
 
     pub fn propose(&mut self, command: RaftCommand) -> (Option<u64>, Vec<RaftOutput>) {
+        if self.storage_failure.is_some() {
+            return (None, vec![]);
+        }
         let Some(index) = self.state.propose(command) else {
             return (None, vec![]);
         };
-        if let Some(entry) = self.state.last_log_entry() {
-            self.persist_log_entry(entry);
+        if !self.persist_last_entry() {
+            return (None, vec![]);
         }
         self.state.try_advance_commit_index();
         let outputs = self.apply_committed();
@@ -620,6 +691,7 @@ impl RaftNode {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::FlushFailingBackend;
     use super::*;
 
     fn test_config() -> RaftConfig {
@@ -824,60 +896,9 @@ mod tests {
         assert!(storage.load_log().unwrap().is_empty());
     }
 
-    struct FlushFailingBackend {
-        inner: mqdb_core::MemoryBackend,
-        fail_flush: std::sync::atomic::AtomicBool,
-    }
-
-    impl StorageBackend for FlushFailingBackend {
-        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-            self.inner.get(key)
-        }
-        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-            self.inner.insert(key, value)
-        }
-        fn remove(&self, key: &[u8]) -> Result<()> {
-            self.inner.remove(key)
-        }
-        fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-            self.inner.prefix_scan(prefix)
-        }
-        fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
-            self.inner.prefix_count(prefix)
-        }
-        fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
-            self.inner.prefix_scan_keys(prefix)
-        }
-        fn prefix_scan_batch(
-            &self,
-            prefix: &[u8],
-            batch_size: usize,
-            after_key: Option<&[u8]>,
-        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-            self.inner.prefix_scan_batch(prefix, batch_size, after_key)
-        }
-        fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-            self.inner.range_scan(start, end)
-        }
-        fn batch(&self) -> Box<dyn mqdb_core::storage::BatchOperations> {
-            self.inner.batch()
-        }
-        fn flush(&self) -> Result<()> {
-            if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(mqdb_core::error::Error::StorageGeneric(
-                    "flush failed".into(),
-                ));
-            }
-            self.inner.flush()
-        }
-    }
-
     #[test]
     fn snapshot_that_cannot_be_persisted_is_not_acknowledged() {
-        let backend = Arc::new(FlushFailingBackend {
-            inner: mqdb_core::MemoryBackend::new(),
-            fail_flush: std::sync::atomic::AtomicBool::new(false),
-        });
+        let backend = FlushFailingBackend::shared();
         let peer1 = NodeId::validated(1).unwrap();
         let mut follower = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
@@ -886,9 +907,7 @@ mod tests {
         )
         .unwrap();
         follower.add_peer(peer1);
-        backend
-            .fail_flush
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        backend.fail_flushes(true);
 
         let request = InstallSnapshotRequest {
             term: 1,
@@ -903,6 +922,7 @@ mod tests {
                 .any(|o| matches!(o, RaftOutput::InstallSnapshot(_)))
         );
         assert_eq!(follower.commit_index(), 0);
+        assert!(follower.storage_failure().is_some());
     }
 
     fn noop_entries(range: std::ops::RangeInclusive<u64>, term: u64) -> Vec<LogEntry> {
@@ -913,10 +933,7 @@ mod tests {
 
     #[test]
     fn entries_that_cannot_be_persisted_are_not_acknowledged() {
-        let backend = Arc::new(FlushFailingBackend {
-            inner: mqdb_core::MemoryBackend::new(),
-            fail_flush: std::sync::atomic::AtomicBool::new(false),
-        });
+        let backend = FlushFailingBackend::shared();
         let peer1 = NodeId::validated(1).unwrap();
         let mut follower = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
@@ -925,22 +942,19 @@ mod tests {
         )
         .unwrap();
         follower.add_peer(peer1);
-        backend
-            .fail_flush
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        backend.fail_flushes(true);
 
         let append = AppendEntriesRequest::create(1, 1, 0, 0, noop_entries(1..=3, 1), 3);
         let (response, _) = follower.handle_append_entries(peer1, append.clone(), 100);
         assert!(!response.is_success());
         assert_eq!(follower.last_log_index(), 0);
         assert_eq!(follower.commit_index(), 0);
+        assert!(follower.storage_failure().is_some());
 
-        backend
-            .fail_flush
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        backend.fail_flushes(false);
         let (response, _) = follower.handle_append_entries(peer1, append, 200);
-        assert!(response.is_success());
-        assert_eq!(RaftStorage::new(backend).load_log().unwrap().len(), 3);
+        assert!(!response.is_success());
+        assert!(RaftStorage::new(backend).load_log().unwrap().is_empty());
     }
 
     #[test]
@@ -987,6 +1001,97 @@ mod tests {
         let (response, _) = follower.handle_append_entries(peer1, append, 200);
         assert!(response.is_success());
         assert_eq!(response.match_index, 7);
+    }
+
+    #[test]
+    fn vote_that_cannot_be_persisted_is_not_granted() {
+        let backend = FlushFailingBackend::shared();
+        let mut node = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        node.add_peer(NodeId::validated(1).unwrap());
+        backend.fail_flushes(true);
+
+        let request = RequestVoteRequest::create(1, 1, 0, 0);
+        let (response, outputs) =
+            node.handle_request_vote(NodeId::validated(1).unwrap(), request, 100);
+        assert!(!response.is_granted());
+        assert!(outputs.is_empty());
+        assert!(node.storage_failure().is_some());
+        assert!(node.tick(10_000).is_empty());
+    }
+
+    #[test]
+    fn same_term_vote_that_cannot_be_persisted_is_not_granted() {
+        let backend = FlushFailingBackend::shared();
+        let peer1 = NodeId::validated(1).unwrap();
+        let peer3 = NodeId::validated(3).unwrap();
+        let mut node = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        node.add_peer(peer1);
+        node.add_peer(peer3);
+        let heartbeat = AppendEntriesRequest::create(1, 1, 0, 0, Vec::new(), 0);
+        let (response, _) = node.handle_append_entries(peer1, heartbeat, 100);
+        assert!(response.is_success());
+        assert_eq!(node.current_term(), 1);
+        backend.fail_flushes(true);
+
+        let request = RequestVoteRequest::create(1, 3, 0, 0);
+        let (response, _) = node.handle_request_vote(peer3, request, 200);
+        assert!(!response.is_granted());
+        assert!(node.storage_failure().is_some());
+    }
+
+    #[test]
+    fn election_whose_term_cannot_be_persisted_sends_no_requests() {
+        let backend = FlushFailingBackend::shared();
+        let mut node = RaftNode::create_with_storage(
+            NodeId::validated(2).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        node.add_peer(NodeId::validated(1).unwrap());
+        node.tick(0);
+        backend.fail_flushes(true);
+
+        let outputs = node.tick(1000);
+        assert!(
+            !outputs
+                .iter()
+                .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
+        );
+        assert!(node.storage_failure().is_some());
+    }
+
+    #[test]
+    fn leader_entry_that_cannot_be_persisted_is_not_committed() {
+        let backend = FlushFailingBackend::shared();
+        let mut leader = RaftNode::create_with_storage(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            backend.clone(),
+        )
+        .unwrap();
+        leader.tick(0);
+        leader.tick(1000);
+        assert!(leader.is_leader());
+        let committed = leader.commit_index();
+        backend.fail_flushes(true);
+
+        let (index, outputs) = leader.propose(RaftCommand::Noop);
+        assert!(index.is_none());
+        assert!(outputs.is_empty());
+        assert_eq!(leader.commit_index(), committed);
+        assert!(leader.storage_failure().is_some());
+        assert!(leader.propose(RaftCommand::Noop).0.is_none());
     }
 
     #[test]

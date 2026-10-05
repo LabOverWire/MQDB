@@ -89,7 +89,10 @@ impl ClusteredAgent {
             tokio::time::Instant::now() + Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
             Duration::from_secs(UNIQUE_RECONCILE_INTERVAL_SECS),
         );
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .unwrap_or_else(|| self.shutdown_tx.subscribe());
         let tx_tick = self
             .tx_tick
             .take()
@@ -124,6 +127,10 @@ impl ClusteredAgent {
             tokio::select! {
                 biased;
 
+                _ = shutdown_rx.recv() => {
+                    info!("cluster node shutting down");
+                    break;
+                }
                 _ = tick_interval.tick() => {
                     Box::pin(self.handle_tick(&tx_tick)).await;
                 }
@@ -161,10 +168,6 @@ impl ClusteredAgent {
                 _ = unique_reconcile_interval.tick() => {
                     self.handle_unique_reconcile().await;
                 }
-                _ = shutdown_rx.recv() => {
-                    info!("cluster node shutting down");
-                    break;
-                }
             }
         }
 
@@ -172,7 +175,10 @@ impl ClusteredAgent {
             task.abort();
         }
         broker_handle.abort();
-        Ok(())
+        match self.fatal_error.get() {
+            Some(reason) => Err(reason.clone().into()),
+            None => Ok(()),
+        }
     }
 
     async fn handle_tick(&self, tx_tick: &flume::Sender<u64>) {

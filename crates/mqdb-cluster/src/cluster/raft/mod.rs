@@ -6,6 +6,8 @@ mod node;
 mod rpc;
 mod state;
 mod storage;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use coordinator::{CoordinatorError, RaftCoordinator};
 pub use node::{RaftConfig, RaftNode, RaftOutput};
