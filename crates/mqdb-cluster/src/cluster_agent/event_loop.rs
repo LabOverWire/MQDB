@@ -127,6 +127,10 @@ impl ClusteredAgent {
             tokio::select! {
                 biased;
 
+                _ = shutdown_rx.recv() => {
+                    info!("cluster node shutting down");
+                    break;
+                }
                 _ = tick_interval.tick() => {
                     Box::pin(self.handle_tick(&tx_tick)).await;
                 }
@@ -163,10 +167,6 @@ impl ClusteredAgent {
                 }
                 _ = unique_reconcile_interval.tick() => {
                     self.handle_unique_reconcile().await;
-                }
-                _ = shutdown_rx.recv() => {
-                    info!("cluster node shutting down");
-                    break;
                 }
             }
         }
