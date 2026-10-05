@@ -43,6 +43,7 @@ impl MqdbAgent {
         handler_username: Option<String>,
         handler_password: Option<String>,
         auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
+        mut broker_ready_rx: watch::Receiver<bool>,
         handler_ready_tx: Option<oneshot::Sender<()>>,
     ) -> tokio::task::JoinHandle<()> {
         let db = Arc::clone(&self.db);
@@ -67,7 +68,9 @@ impl MqdbAgent {
         let jti_revocation = self.jti_revocation.clone();
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            if !wait_for_broker(&mut broker_ready_rx, &mut shutdown_rx, "internal handler").await {
+                return;
+            }
 
             let client = MqttClient::new("mqdb-internal-handler");
             let addr = resolve_connect_address(bind_addr);
@@ -171,8 +174,13 @@ impl MqdbAgent {
         let ownership_config = Arc::clone(&self.ownership_config);
 
         tokio::spawn(async move {
-            if broker_ready_rx.wait_for(|ready| *ready).await.is_err() {
-                error!("broker stopped before the event publisher could connect");
+            if !wait_for_broker(
+                &mut broker_ready_rx,
+                &mut event_shutdown_rx,
+                "event publisher",
+            )
+            .await
+            {
                 return;
             }
 
@@ -265,11 +273,20 @@ impl MqdbAgent {
         presence_service_username: Option<String>,
         presence_service_password: Option<String>,
         presence_rx: flume::Receiver<crate::presence::PresenceEvent>,
+        mut broker_ready_rx: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         let mut presence_shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            if !wait_for_broker(
+                &mut broker_ready_rx,
+                &mut presence_shutdown_rx,
+                "presence publisher",
+            )
+            .await
+            {
+                return;
+            }
 
             let client = MqttClient::new("mqdb-presence-publisher");
             let addr = resolve_connect_address(presence_addr);
@@ -327,6 +344,7 @@ impl MqdbAgent {
         bind_addr: SocketAddr,
         service_username: Option<&String>,
         service_password: Option<&String>,
+        mut broker_ready_rx: watch::Receiver<bool>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let mut http_config = self
             .http_config
@@ -337,12 +355,20 @@ impl MqdbAgent {
         http_config.vault_backend = Some(Arc::clone(&self.vault_backend));
         http_config.db_access = Arc::clone(&self.db) as Arc<dyn crate::vault_backend::DbAccess>;
         let http_bind = http_config.bind_address;
-        let http_shutdown_rx = self.shutdown_tx.subscribe();
+        let mut http_shutdown_rx = self.shutdown_tx.subscribe();
         let http_addr = resolve_connect_address(bind_addr);
         let http_creds = (service_username.cloned(), service_password.cloned());
 
         Some(tokio::spawn(async move {
-            tokio::time::sleep(mqtt5::time::Duration::from_millis(300)).await;
+            if !wait_for_broker(
+                &mut broker_ready_rx,
+                &mut http_shutdown_rx,
+                "HTTP OAuth client",
+            )
+            .await
+            {
+                return;
+            }
 
             let http_mqtt_client = MqttClient::new("mqdb-http-oauth");
             if let Err(e) = connect_mqtt_client(
@@ -423,5 +449,24 @@ async fn event_publish_topics(
             )
         }
         None => Some(vec![event.event_topic(num_partitions)]),
+    }
+}
+
+async fn wait_for_broker(
+    broker_ready_rx: &mut watch::Receiver<bool>,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+    task: &str,
+) -> bool {
+    tokio::select! {
+        ready = broker_ready_rx.wait_for(|ready| *ready) => {
+            if ready.is_err() {
+                error!("broker stopped before the {task} could connect");
+            }
+            ready.is_ok()
+        }
+        _ = shutdown_rx.recv() => {
+            debug!("{task} shutting down before the broker became ready");
+            false
+        }
     }
 }

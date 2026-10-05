@@ -128,3 +128,25 @@ async fn publisher_keeps_running_after_falling_behind() {
     let _ = agent.shutdown.send(());
     tmp.close().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_right_after_start_stops_the_agent() {
+    for _ in 0..5 {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path().join("agent"))
+            .await
+            .unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", next_test_port()).parse().unwrap();
+        let agent = MqdbAgent::new(db)
+            .with_bind_address(addr)
+            .with_anonymous(true);
+        let (handle, _ready_rx, shutdown) = agent.start().await.unwrap();
+        let _ = shutdown.send(());
+        let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        assert!(
+            stopped.is_ok(),
+            "agent did not stop after an early shutdown"
+        );
+        tmp.close().unwrap();
+    }
+}

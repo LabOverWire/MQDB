@@ -9,6 +9,7 @@ Each entry lists the date and the crate versions that were released.
 ### Fixed
 
 - **Writes made right after an agent becomes ready now publish their change events** (#162). The event publisher subscribed to the database's change-event channel only after a 200 ms sleep and its MQTT connect, while `MqdbAgent::start` already reported ready, so a write in the first ~100 ms after ready was stored but its change event was dropped silently. The publisher now subscribes when it is spawned, waits for the broker to accept connections instead of sleeping, and `ready` is sent only once it is connected. With `mqdb agent start`, a write sent as soon as `$DB/_health` reported ready now produces its event in 10/10 fresh starts (0/10 before).
+- **An agent started with `MqdbAgent::start` and shut down before its broker became ready now stops.** The internal handler, event, presence and HTTP OAuth clients slept for a fixed time and then connected without listening for shutdown, so the returned task never finished. They now wait for the broker's ready signal or shutdown, whichever comes first.
 - **The event publisher no longer stops for good when it falls behind.** A burst of writes larger than the change-event channel made it exit its loop, so the agent published no further change events until restart. It now logs how many events were skipped and continues.
 
 ## 2026-10-04 — mqdb-cluster 0.4.19, mqdb-cli 0.8.43

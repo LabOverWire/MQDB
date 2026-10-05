@@ -293,6 +293,7 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
+            broker.ready_receiver(),
             None,
         );
         let event_task = self.spawn_event_task(
@@ -308,6 +309,7 @@ impl MqdbAgent {
                 service_username.clone(),
                 service_password.clone(),
                 rx,
+                broker.ready_receiver(),
             )
         });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -317,6 +319,7 @@ impl MqdbAgent {
                     bind_addr,
                     service_username.as_ref(),
                     service_password.as_ref(),
+                    broker.ready_receiver(),
                 )
             }
             #[cfg(not(feature = "http-api"))]
@@ -395,6 +398,7 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
+            broker.ready_receiver(),
             Some(handler_ready_tx),
         );
         let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
@@ -411,6 +415,7 @@ impl MqdbAgent {
                 service_username.clone(),
                 service_password.clone(),
                 rx,
+                broker.ready_receiver(),
             )
         });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -420,6 +425,7 @@ impl MqdbAgent {
                     bind_addr,
                     service_username.as_ref(),
                     service_password.as_ref(),
+                    broker.ready_receiver(),
                 )
             }
             #[cfg(not(feature = "http-api"))]
