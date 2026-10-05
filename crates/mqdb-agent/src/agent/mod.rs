@@ -436,9 +436,12 @@ impl MqdbAgent {
         let license_task = self.spawn_license_check_task();
 
         tokio::spawn(async move {
-            let _ = broker_ready_rx.changed().await;
-            let _ = handler_ready_rx.await;
-            let _ = publisher_ready_rx.await;
+            if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
+                || handler_ready_rx.await.is_err()
+                || publisher_ready_rx.await.is_err()
+            {
+                return;
+            }
             let _ = ready_tx.send(true);
         });
 

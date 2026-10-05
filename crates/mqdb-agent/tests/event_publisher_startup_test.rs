@@ -140,12 +140,17 @@ async fn shutdown_right_after_start_stops_the_agent() {
         let agent = MqdbAgent::new(db)
             .with_bind_address(addr)
             .with_anonymous(true);
-        let (handle, _ready_rx, shutdown) = agent.start().await.unwrap();
+        let (handle, ready_rx, shutdown) = agent.start().await.unwrap();
         let _ = shutdown.send(());
         let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
         assert!(
             stopped.is_ok(),
             "agent did not stop after an early shutdown"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !*ready_rx.borrow(),
+            "agent reported ready after it was shut down before becoming ready"
         );
         tmp.close().unwrap();
     }
