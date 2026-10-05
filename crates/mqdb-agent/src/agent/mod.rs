@@ -299,6 +299,8 @@ impl MqdbAgent {
             bind_addr,
             service_username.clone(),
             service_password.clone(),
+            broker.ready_receiver(),
+            None,
         );
         let presence_task = presence_rx.map(|rx| {
             self.spawn_presence_task(
@@ -395,10 +397,13 @@ impl MqdbAgent {
             auth_providers,
             Some(handler_ready_tx),
         );
+        let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
+            broker.ready_receiver(),
+            Some(publisher_ready_tx),
         );
         let presence_task = presence_rx.map(|rx| {
             self.spawn_presence_task(
@@ -427,6 +432,7 @@ impl MqdbAgent {
         tokio::spawn(async move {
             let _ = broker_ready_rx.changed().await;
             let _ = handler_ready_rx.await;
+            let _ = publisher_ready_rx.await;
             let _ = ready_tx.send(true);
         });
 

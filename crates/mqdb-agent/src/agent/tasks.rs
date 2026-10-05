@@ -9,7 +9,7 @@ use mqtt5::time::Duration;
 use mqtt5::types::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 impl MqdbAgent {
@@ -160,18 +160,24 @@ impl MqdbAgent {
         event_addr: SocketAddr,
         event_service_username: Option<String>,
         event_service_password: Option<String>,
+        mut broker_ready_rx: watch::Receiver<bool>,
+        publisher_ready_tx: Option<oneshot::Sender<()>>,
     ) -> tokio::task::JoinHandle<()> {
         let event_db = Arc::clone(&self.db);
+        let mut event_rx = self.db.event_receiver();
         let mut event_shutdown_rx = self.shutdown_tx.subscribe();
         let num_partitions = self.db.num_partitions();
         let scoped_events = self.scoped_events;
         let ownership_config = Arc::clone(&self.ownership_config);
 
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            if broker_ready_rx.wait_for(|ready| *ready).await.is_err() {
+                error!("broker stopped before the event publisher could connect");
+                return;
+            }
 
             let client = MqttClient::new("mqdb-event-publisher");
-            let addr = format!("{}:{}", event_addr.ip(), event_addr.port());
+            let addr = resolve_connect_address(event_addr);
 
             if let Err(e) = connect_mqtt_client(
                 &client,
@@ -185,8 +191,9 @@ impl MqdbAgent {
                 error!("Failed to connect event publisher: {e}");
                 return;
             }
-
-            let mut event_rx = event_db.event_receiver();
+            if let Some(tx) = publisher_ready_tx {
+                let _ = tx.send(());
+            }
 
             loop {
                 tokio::select! {
@@ -234,8 +241,11 @@ impl MqdbAgent {
                                     }
                                 }
                             }
-                            Err(e) => {
-                                error!("Event channel error: {e}");
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                error!(skipped, "event publisher fell behind; change events were dropped");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
+                                debug!("change event channel closed");
                                 break;
                             }
                         }
