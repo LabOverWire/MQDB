@@ -293,12 +293,15 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
+            broker.ready_receiver(),
             None,
         );
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
+            broker.ready_receiver(),
+            None,
         );
         let presence_task = presence_rx.map(|rx| {
             self.spawn_presence_task(
@@ -306,6 +309,7 @@ impl MqdbAgent {
                 service_username.clone(),
                 service_password.clone(),
                 rx,
+                broker.ready_receiver(),
             )
         });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -315,6 +319,7 @@ impl MqdbAgent {
                     bind_addr,
                     service_username.as_ref(),
                     service_password.as_ref(),
+                    broker.ready_receiver(),
                 )
             }
             #[cfg(not(feature = "http-api"))]
@@ -393,12 +398,16 @@ impl MqdbAgent {
             service_username.clone(),
             service_password.clone(),
             auth_providers,
+            broker.ready_receiver(),
             Some(handler_ready_tx),
         );
+        let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
+            broker.ready_receiver(),
+            Some(publisher_ready_tx),
         );
         let presence_task = presence_rx.map(|rx| {
             self.spawn_presence_task(
@@ -406,6 +415,7 @@ impl MqdbAgent {
                 service_username.clone(),
                 service_password.clone(),
                 rx,
+                broker.ready_receiver(),
             )
         });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -415,6 +425,7 @@ impl MqdbAgent {
                     bind_addr,
                     service_username.as_ref(),
                     service_password.as_ref(),
+                    broker.ready_receiver(),
                 )
             }
             #[cfg(not(feature = "http-api"))]
@@ -425,8 +436,12 @@ impl MqdbAgent {
         let license_task = self.spawn_license_check_task();
 
         tokio::spawn(async move {
-            let _ = broker_ready_rx.changed().await;
-            let _ = handler_ready_rx.await;
+            if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
+                || handler_ready_rx.await.is_err()
+                || publisher_ready_rx.await.is_err()
+            {
+                return;
+            }
             let _ = ready_tx.send(true);
         });
 
