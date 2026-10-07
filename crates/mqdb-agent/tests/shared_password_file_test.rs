@@ -75,7 +75,8 @@ async fn start_agent(data_dir: &Path, password_file: &Path) -> RunningAgent {
 async fn agents_sharing_a_password_file_leave_it_unchanged() {
     let tmp = TempDir::new().unwrap();
     let password_file = tmp.path().join("passwd");
-    let hash = PasswordAuthProvider::hash_password("secret").unwrap();
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    let hash = PasswordAuthProvider::hash_password(&admin_password).unwrap();
     let original = format!("admin:{hash}\n");
     std::fs::write(&password_file, &original).unwrap();
 
@@ -89,7 +90,7 @@ async fn agents_sharing_a_password_file_leave_it_unchanged() {
     assert_eq!(std::fs::read_to_string(&password_file).unwrap(), original);
     for port in [first.port, second.port] {
         assert!(
-            admin_login(port, "secret").await,
+            admin_login(port, &admin_password).await,
             "admin must still be able to log in"
         );
     }
@@ -102,11 +103,13 @@ async fn agents_sharing_a_password_file_leave_it_unchanged() {
 async fn explicit_service_credentials_keep_the_file_password() {
     let tmp = TempDir::new().unwrap();
     let password_file = tmp.path().join("passwd");
-    let hash = PasswordAuthProvider::hash_password("secret").unwrap();
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    let hash = PasswordAuthProvider::hash_password(&admin_password).unwrap();
     std::fs::write(&password_file, format!("admin:{hash}\n")).unwrap();
 
     let (agent, port) = password_agent(&tmp.path().join("agent"), &password_file).await;
-    let agent = agent.with_service_credentials("admin".to_string(), "other".to_string());
+    let agent =
+        agent.with_service_credentials("admin".to_string(), uuid::Uuid::new_v4().to_string());
     let (handle, _, shutdown) = agent.start().await.unwrap();
     let running = RunningAgent {
         port,
@@ -115,7 +118,7 @@ async fn explicit_service_credentials_keep_the_file_password() {
     };
 
     let file_password_accepted = tokio::time::timeout(Duration::from_secs(10), async {
-        while !admin_login(running.port, "secret").await {
+        while !admin_login(running.port, &admin_password).await {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
