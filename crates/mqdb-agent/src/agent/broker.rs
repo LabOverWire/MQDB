@@ -182,7 +182,8 @@ impl MqdbAgent {
             &auth_providers,
             config.service_username,
             config.service_password,
-        ) {
+        ) && !comprehensive.password_provider().has_user(svc_user)
+        {
             comprehensive
                 .password_provider()
                 .add_user(svc_user.clone(), svc_pass)?;

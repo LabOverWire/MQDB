@@ -1724,7 +1724,7 @@ This process occurs within the `configure_broker_auth` function in `crates/mqdb-
 
 #### Automatic Registration
 
-A key part of this design is automatic registration. After generating the new credentials, the node immediately makes them valid for its own broker. For example, if using a password file, the node automatically appends the new `username:hashed_password` pair to the file. This ensures the internal client can always authenticate with its own broker instance.
+A key part of this design is automatic registration. After generating the new credentials, the node immediately makes them valid for its own broker. If using a password file, the node adds the service user to the in-memory password provider it builds from that file; the file itself is never written, so several nodes can share one file and `--passwd` must point to an existing file. With SCRAM or JWT, the service user is registered in a password provider that the broker falls back to. This ensures the internal client can always authenticate with its own broker instance.
 
 #### Authorization Bypass
 
