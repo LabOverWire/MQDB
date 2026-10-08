@@ -16,7 +16,18 @@ use tempfile::TempDir;
 struct RunningAgent {
     db: Database,
     port: u16,
+    handle: tokio::task::JoinHandle<()>,
     shutdown: tokio::sync::broadcast::Sender<()>,
+}
+
+impl RunningAgent {
+    async fn stop(self) {
+        self.shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), self.handle)
+            .await
+            .expect("agent did not stop")
+            .unwrap();
+    }
 }
 
 async fn start_agent(
@@ -33,11 +44,19 @@ async fn start_agent(
     let agent = MqdbAgent::new(db.clone())
         .with_bind_address(addr)
         .with_anonymous(true);
-    let (_handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
+    let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
     while !*ready_rx.borrow() {
         ready_rx.changed().await.unwrap();
     }
-    (RunningAgent { db, port, shutdown }, tmp)
+    (
+        RunningAgent {
+            db,
+            port,
+            handle,
+            shutdown,
+        },
+        tmp,
+    )
 }
 
 async fn watch_events(
@@ -87,8 +106,8 @@ async fn write_right_after_ready_publishes_its_change_event() {
             event.is_ok(),
             "trial {trial}: no change event for a write made right after ready"
         );
-        let _ = subscriber.disconnect().await;
-        let _ = agent.shutdown.send(());
+        subscriber.disconnect().await.unwrap();
+        agent.stop().await;
         tmp.close().unwrap();
     }
 }
@@ -124,8 +143,8 @@ async fn publisher_keeps_running_after_falling_behind() {
         topic.is_ok(),
         "no change event after the publisher fell behind"
     );
-    let _ = subscriber.disconnect().await;
-    let _ = agent.shutdown.send(());
+    subscriber.disconnect().await.unwrap();
+    agent.stop().await;
     tmp.close().unwrap();
 }
 
@@ -141,7 +160,7 @@ async fn shutdown_right_after_start_stops_the_agent() {
             .with_bind_address(addr)
             .with_anonymous(true);
         let (handle, ready_rx, shutdown) = agent.start().await.unwrap();
-        let _ = shutdown.send(());
+        shutdown.send(()).unwrap();
         let stopped = tokio::time::timeout(Duration::from_secs(5), handle).await;
         assert!(
             stopped.is_ok(),

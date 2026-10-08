@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-05 — mqdb-agent 0.8.32, mqdb-cluster 0.4.20, mqdb-cli 0.8.45
+
+### Fixed
+
+- **Nodes no longer rewrite the password file at startup** (#160). With `--passwd`, every agent and cluster node read the file, appended a new `mqdb-internal-<uuid>` service user and wrote the whole file back. Nodes sharing one file, as `mqdb dev start-cluster` does, could read it mid-write and write back only their own user, removing `admin` and the other nodes' service users; a read error replaced the file with a single service user; and the file grew by one user on every start. The service user is now registered in memory with the node's password provider, and the operator's file is never written. Because the node no longer writes the file, `--passwd` must now point to an existing file; a missing file makes startup fail instead of creating one.
+
 ## 2026-10-04 — mqdb-agent 0.8.31, mqdb-cli 0.8.44
 
 ### Fixed

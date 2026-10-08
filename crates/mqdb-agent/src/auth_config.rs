@@ -1,7 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use mqtt5::broker::PasswordAuthProvider;
 use mqtt5::broker::config::{
     AuthConfig, AuthMethod, FederatedJwtConfig, JwtConfig, RateLimitConfig,
 };
@@ -48,7 +47,7 @@ pub struct AuthSetupResult {
 
 /// # Errors
 ///
-/// Returns an error if password hashing or file I/O fails.
+/// Returns an error if the auth configuration cannot be built.
 pub async fn configure_broker_auth(
     config: &AuthSetupConfig,
     auth_config: &mut AuthConfig,
@@ -76,16 +75,6 @@ pub async fn configure_broker_auth(
     if let Some(ref path) = config.password_file {
         let svc_user = format!("mqdb-internal-{}", uuid::Uuid::new_v4());
         let svc_pass = uuid::Uuid::new_v4().to_string();
-        let hash = PasswordAuthProvider::hash_password(&svc_pass)?;
-
-        let prefix = format!("{svc_user}:");
-        let mut contents = tokio::fs::read_to_string(path).await.unwrap_or_default();
-        let has_user = contents.lines().any(|line| line.starts_with(&prefix));
-        if !has_user {
-            use std::fmt::Write;
-            let _ = writeln!(contents, "{svc_user}:{hash}");
-            tokio::fs::write(path, &contents).await?;
-        }
 
         auth_config.password_file = Some(path.clone());
         auth_config.allow_anonymous = config.allow_anonymous;
@@ -146,4 +135,32 @@ pub async fn configure_broker_auth(
         needs_composite: uses_enhanced_auth,
         admin_users: config.admin_users.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn password_mode_leaves_the_password_file_unchanged() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("passwd");
+        let hash = mqtt5::broker::PasswordAuthProvider::hash_password("admin").unwrap();
+        let original = format!("admin:{hash}\n");
+        std::fs::write(&path, &original).unwrap();
+
+        let config = AuthSetupConfig {
+            password_file: Some(path.clone()),
+            allow_anonymous: false,
+            ..AuthSetupConfig::default()
+        };
+        let mut auth_config = AuthConfig::default();
+        let result = configure_broker_auth(&config, &mut auth_config)
+            .await
+            .unwrap();
+
+        assert!(result.service_username.is_some());
+        assert!(result.service_password.is_some());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
 }

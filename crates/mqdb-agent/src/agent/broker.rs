@@ -178,6 +178,17 @@ impl MqdbAgent {
             None
         };
 
+        if let (Some(comprehensive), Some(svc_user), Some(svc_pass)) = (
+            &auth_providers,
+            config.service_username,
+            config.service_password,
+        ) && !comprehensive.password_provider().has_user(svc_user)
+        {
+            comprehensive
+                .password_provider()
+                .add_user(svc_user.clone(), svc_pass)?;
+        }
+
         if config.needs_composite
             && let (Some(svc_user), Some(svc_pass)) =
                 (config.service_username, config.service_password)
@@ -185,9 +196,6 @@ impl MqdbAgent {
             let primary = broker.auth_provider();
             let fallback: Arc<dyn mqtt5::broker::auth::AuthProvider> =
                 if let Some(ref comprehensive) = auth_providers {
-                    comprehensive
-                        .password_provider()
-                        .add_user(svc_user.clone(), svc_pass)?;
                     comprehensive.clone()
                 } else {
                     let fallback = PasswordAuthProvider::new();

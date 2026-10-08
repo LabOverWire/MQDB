@@ -260,16 +260,21 @@ impl ClusteredAgent {
             None
         };
 
+        if let (Some(comprehensive), Some(svc_user), Some(svc_pass)) =
+            (&auth_providers, service_username, service_password)
+        {
+            comprehensive
+                .password_provider()
+                .add_user(svc_user.clone(), svc_pass)
+                .map_err(|e| format!("failed to create service account: {e}"))?;
+        }
+
         if needs_composite
             && let (Some(svc_user), Some(svc_pass)) = (service_username, service_password)
         {
             let primary = broker.auth_provider();
             let fallback: Arc<dyn mqtt5::broker::auth::AuthProvider> =
                 if let Some(ref comprehensive) = auth_providers {
-                    comprehensive
-                        .password_provider()
-                        .add_user(svc_user.clone(), svc_pass)
-                        .map_err(|e| format!("failed to create service account: {e}"))?;
                     comprehensive.clone()
                 } else {
                     let fallback = PasswordAuthProvider::new();
