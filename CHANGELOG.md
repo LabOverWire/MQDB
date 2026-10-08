@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-08 — mqdb-cli 0.8.46
+
+### Security
+
+- **rustls updated to 0.23.45** (GHSA-2mjx-qc3c-rqvc: TLS 1.3 handshake messages were accepted across encryption level boundaries). rustls handles TLS and QUIC for client connections and the cluster transport, using the `ring` crypto provider. The update also brings rustls-webpki 0.103.15, and aws-lc-rs 1.18.1, which is used only by the agent's HTTP client (reqwest).
+- **xxhash-rust updated to 0.8.19** (GHSA-6g2r-675j-hx59: the safe xxh3 custom-secret API accepted a too-short secret in release builds). It is a dependency of the fjall storage engine.
+
 ## 2026-10-05 — mqdb-agent 0.8.32, mqdb-cluster 0.4.20, mqdb-cli 0.8.45
 
 ### Fixed
