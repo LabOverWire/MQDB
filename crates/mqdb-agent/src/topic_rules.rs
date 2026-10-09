@@ -55,6 +55,10 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::ReadOnly,
     },
     TopicRule {
+        pattern: "$sparkplug/#",
+        tier: ProtectionTier::ReadOnly,
+    },
+    TopicRule {
         pattern: "$DB/_sub/#",
         tier: ProtectionTier::WriteOnly,
     },
@@ -413,6 +417,33 @@ mod tests {
             check_topic_access("$DB/_presence/seat-holder-7", true, true),
             Err(BlockReason::ReadOnlyTopic),
             "not even an admin may publish presence; only the internal service bypass may"
+        );
+    }
+
+    #[test]
+    fn check_access_sparkplug_certificates_read_only() {
+        assert_eq!(
+            check_topic_access("$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1", false, false),
+            Ok(()),
+            "a host application must be able to subscribe to certificates"
+        );
+        assert_eq!(
+            check_topic_access("$sparkplug/certificates/#", false, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_topic_access("$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1", true, false),
+            Err(BlockReason::ReadOnlyTopic),
+            "a client must not be able to forge a birth certificate"
+        );
+        assert_eq!(
+            check_topic_access(
+                "$sparkplug/certificates/spBv1.0/G1/DBIRTH/E1/D1",
+                true,
+                true
+            ),
+            Err(BlockReason::ReadOnlyTopic),
+            "not even an admin may publish certificates; only the internal service bypass may"
         );
     }
 

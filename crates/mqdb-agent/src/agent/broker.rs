@@ -6,16 +6,71 @@ use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION
 use crate::presence::{
     PRESENCE_CHANNEL_CAPACITY, PRESENCE_TOPIC_PREFIX, PresenceEvent, PresenceEventHandler,
 };
+use crate::sparkplug::{
+    CERTIFICATE_CHANNEL_CAPACITY, CERTIFICATES_PREFIX, Certificate, CertificateEventHandler,
+};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::config::{
     ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig, WebSocketConfig,
 };
+use mqtt5::broker::events::{
+    BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
+    PublishAction,
+};
 use mqtt5::broker::{AclManager, BrokerConfig, MqttBroker, PasswordAuthProvider};
 use mqtt5::time::Duration;
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::info;
+
+pub(super) struct BrokerFeeds {
+    pub(super) presence: Option<flume::Receiver<PresenceEvent>>,
+    pub(super) certificates: Option<flume::Receiver<Certificate>>,
+}
+
+struct AgentEventHandler {
+    presence: Option<PresenceEventHandler>,
+    certificates: Option<CertificateEventHandler>,
+}
+
+impl BrokerEventHandler for AgentEventHandler {
+    fn on_client_connect<'a>(
+        &'a self,
+        event: ClientConnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(presence) = &self.presence {
+                presence.on_client_connect(event).await;
+            }
+        })
+    }
+
+    fn on_client_disconnect<'a>(
+        &'a self,
+        event: ClientDisconnectEvent,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(presence) = &self.presence {
+                presence.on_client_disconnect(event).await;
+            }
+        })
+    }
+
+    fn on_client_publish<'a>(
+        &'a self,
+        event: ClientPublishEvent,
+    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(certificates) = &self.certificates {
+                certificates.observe(&event.topic, &event.payload);
+            }
+            PublishAction::Continue
+        })
+    }
+}
 
 pub(super) struct AuthProviderConfig<'a> {
     pub needs_composite: bool,
@@ -124,17 +179,31 @@ impl MqdbAgent {
         ))
     }
 
-    pub(super) fn apply_presence_handler(
-        &self,
-        config: &mut BrokerConfig,
-    ) -> Option<flume::Receiver<PresenceEvent>> {
-        if !self.presence {
-            return None;
+    pub(super) fn apply_event_handlers(&self, config: &mut BrokerConfig) -> BrokerFeeds {
+        let (presence_handler, presence) = if self.presence {
+            let (sender, receiver) = flume::bounded(PRESENCE_CHANNEL_CAPACITY);
+            info!("presence feed enabled on {PRESENCE_TOPIC_PREFIX}<client_id>");
+            (Some(PresenceEventHandler::new(sender)), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let (certificate_handler, certificates) = if self.sparkplug_aware {
+            let (sender, receiver) = flume::bounded(CERTIFICATE_CHANNEL_CAPACITY);
+            info!("Sparkplug aware: storing birth certificates on {CERTIFICATES_PREFIX}");
+            (Some(CertificateEventHandler::new(sender)), Some(receiver))
+        } else {
+            (None, None)
+        };
+        if presence_handler.is_some() || certificate_handler.is_some() {
+            config.event_handler = Some(Arc::new(AgentEventHandler {
+                presence: presence_handler,
+                certificates: certificate_handler,
+            }));
         }
-        let (sender, receiver) = flume::bounded(PRESENCE_CHANNEL_CAPACITY);
-        config.event_handler = Some(Arc::new(PresenceEventHandler::new(sender)));
-        info!("presence feed enabled on {PRESENCE_TOPIC_PREFIX}<client_id>");
-        Some(receiver)
+        BrokerFeeds {
+            presence,
+            certificates,
+        }
     }
 
     pub(super) fn apply_transport_config(&self, config: &mut BrokerConfig) {

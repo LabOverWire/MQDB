@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-09 — mqdb-agent 0.8.35, mqdb-cli 0.8.49
+
+### Added
+
+- **Sparkplug Aware MQTT server, agent mode** (`--sparkplug-aware`, `MQDB_SPARKPLUG_AWARE`). The agent stores the latest NBIRTH and DBIRTH from each Sparkplug edge node and device and republishes them, retained at QoS 1, on `$sparkplug/certificates/spBv1.0/<group>/NBIRTH/<edge>` and `.../DBIRTH/<edge>/<device>`, as the Sparkplug 3.0 "Aware" profile requires. Births themselves are still delivered as published, and data, death and STATE messages are not stored. The optional rewrite of NDEATH timestamps is not implemented. Off by default.
+- **`$sparkplug/#` is read-only for clients**, so clients cannot forge a certificate. Only the agent's internal service publishes there.
+
+### Known limitations
+
+- Cluster mode does not offer `--sparkplug-aware` yet (#172). Retained messages in cluster mode are not kept consistent across nodes: after an update, other nodes can keep serving the old value, and a node that fetched a retained message from another node can deliver it without the retain flag. Certificates would inherit that.
+- MQTT 3.1.1 subscribers receive retained messages, certificates included, with MQTT 5 properties in the payload until mqtt5 fixes LabOverWire/mqtt-lib#213. MQTT 5 subscribers are not affected.
+
 ## 2026-10-09 — mqdb-agent 0.8.34, mqdb-cluster 0.4.21, mqdb-vault 0.1.7, mqdb-cli 0.8.48
 
 ### Changed

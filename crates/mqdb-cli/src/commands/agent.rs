@@ -32,6 +32,7 @@ pub(crate) struct AgentStartArgs {
     pub(crate) ownership_derive: Option<String>,
     pub(crate) scoped_events: bool,
     pub(crate) presence: bool,
+    pub(crate) sparkplug_aware: bool,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
@@ -163,6 +164,10 @@ pub(crate) async fn cmd_agent_start(
 
     if args.presence {
         agent = agent.with_presence(true);
+    }
+
+    if args.sparkplug_aware {
+        agent = agent.with_sparkplug_aware(true);
     }
 
     #[cfg(feature = "opentelemetry")]

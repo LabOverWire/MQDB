@@ -15,6 +15,7 @@ pub mod presence;
 pub mod rate_limiter;
 pub mod runtime;
 pub mod session;
+pub mod sparkplug;
 pub mod subscription_registry;
 pub mod topic_protection;
 pub mod topic_rules;
