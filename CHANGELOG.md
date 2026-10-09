@@ -8,11 +8,13 @@ Each entry lists the date and the crate versions that were released.
 
 ### Security
 
-- **Agent mode no longer executes responses as requests** (#164). The agent's internal handler subscribes to `$DB/#`, and responses are published to whatever response topic the client chose. A client could set its response topic to a request topic such as `$DB/<entity>/<id>/delete` or `$DB/<entity>/create`, and the agent then executed its own response as that request with the internal service account, bypassing ownership and the client's ACL. Any authenticated user could delete another user's records or create records in entities it cannot write. The handler now ignores messages published by the agent's own response publisher. Cluster mode was not affected.
+- **Agent mode no longer executes its own responses as requests** (#164). The internal handler subscribes to `$DB/#`, so a response published to a `$DB/` request topic was executed with the internal service account, bypassing ownership and the client's ACL. The handler now ignores messages from its own response publisher, identified by the broker-stamped client ID and service username together. Cluster mode was not affected.
+- **Agent mode refuses requests whose response topic the sender may not publish to.** Responses were published by the internal service account to whatever response topic the client named, including topics the client could not publish to. The handler now checks the response topic against the sender's publish permissions (topic protection and ACL) and drops the request with a warning if it is not allowed. Behaviour change: with an ACL, a client must have publish permission on its response topic, not only subscribe permission.
 
 ### Fixed
 
-- **The internal handler no longer logs `Invalid $DB topic format` for responses and notifications it publishes itself**, such as responses to `$DB/clients/<client-id>/<request-id>` or `$DB/_verify/challenges/email` notifications. Malformed request topics still log the warning.
+- **The internal handler no longer logs `Invalid $DB topic format` for messages that are not requests**: its own responses, such as those to `$DB/clients/<client-id>/<request-id>`, and `$DB/_verify/` notifications. Malformed request topics still log the warning.
+- **A request dropped because the internal handler's queue is full is now logged** with its topic, instead of being discarded silently.
 
 ## 2026-10-08 — mqdb-cli 0.8.46
 

@@ -3,7 +3,7 @@
 
 use super::handlers::handle_message;
 use super::{MqdbAgent, connect_mqtt_client, resolve_connect_address};
-use mqtt5::broker::auth::ComprehensiveAuthProvider;
+use mqtt5::broker::auth::{AuthProvider, ComprehensiveAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
@@ -11,6 +11,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
+
+pub(super) struct HandlerAuth {
+    pub providers: Option<Arc<ComprehensiveAuthProvider>>,
+    pub authorizer: Arc<dyn AuthProvider>,
+}
 
 impl MqdbAgent {
     pub(super) fn spawn_license_check_task(&self) -> Option<tokio::task::JoinHandle<()>> {
@@ -42,10 +47,14 @@ impl MqdbAgent {
         bind_addr: SocketAddr,
         handler_username: Option<String>,
         handler_password: Option<String>,
-        auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
+        auth: HandlerAuth,
         mut broker_ready_rx: watch::Receiver<bool>,
         handler_ready_tx: Option<oneshot::Sender<()>>,
     ) -> tokio::task::JoinHandle<()> {
+        let HandlerAuth {
+            providers: auth_providers,
+            authorizer,
+        } = auth;
         let db = Arc::clone(&self.db);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let backup_dir = self.backup_dir.clone();
@@ -75,6 +84,7 @@ impl MqdbAgent {
             let client = MqttClient::new("mqdb-internal-handler");
             let addr = resolve_connect_address(bind_addr);
 
+            let service_username = handler_username.clone();
             let response_creds = (handler_username.clone(), handler_password.clone());
             let connect_result = connect_mqtt_client(
                 &client,
@@ -95,7 +105,10 @@ impl MqdbAgent {
             let callback_tx = msg_tx.clone();
             if let Err(e) = client
                 .subscribe("$DB/#", move |message| {
-                    let _ = callback_tx.try_send(message);
+                    if let Err(e) = callback_tx.try_send(message) {
+                        let dropped = e.into_inner();
+                        warn!(topic = %dropped.topic, "internal handler queue full, request dropped");
+                    }
                 })
                 .await
             {
@@ -129,6 +142,8 @@ impl MqdbAgent {
                             let ctx = super::handlers::MessageContext {
                                 db: &db,
                                 client: &response_client,
+                                authorizer: authorizer.as_ref(),
+                                service_username: service_username.as_deref(),
                                 backup_dir: &backup_dir,
                                 ownership: &ownership_config,
                                 scope_config: &scope_config,

@@ -1,5 +1,5 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 
 mod common;
 
@@ -74,40 +74,86 @@ async fn request(client: &MqttClient, topic: &str, payload: &Value) -> Value {
     serde_json::from_slice(&payload).unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn responses_published_to_request_topics_are_not_executed() {
-    let tmp = TempDir::new().unwrap();
-    let alice = User::new("alice");
-    let bob = User::new("bob");
-    let password_file = tmp.path().join("passwd");
-    let lines: String = [&alice, &bob]
-        .iter()
-        .map(|user| {
-            let hash = PasswordAuthProvider::hash_password(&user.password).unwrap();
-            format!("{}:{hash}\n", user.name)
-        })
-        .collect();
-    std::fs::write(&password_file, lines).unwrap();
+struct TestAgent {
+    port: u16,
+    handle: tokio::task::JoinHandle<()>,
+    shutdown: tokio::sync::broadcast::Sender<()>,
+    tmp: TempDir,
+}
 
-    let db = Database::open_without_background_tasks(tmp.path().join("agent"))
+impl TestAgent {
+    async fn start(users: &[&User]) -> Self {
+        let tmp = TempDir::new().unwrap();
+        let password_file = tmp.path().join("passwd");
+        let lines: String = users
+            .iter()
+            .map(|user| {
+                let hash = PasswordAuthProvider::hash_password(&user.password).unwrap();
+                format!("{}:{hash}\n", user.name)
+            })
+            .collect();
+        std::fs::write(&password_file, lines).unwrap();
+
+        let db = Database::open_without_background_tasks(tmp.path().join("agent"))
+            .await
+            .unwrap();
+        let port = next_test_port();
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let agent = MqdbAgent::new(db)
+            .with_bind_address(addr)
+            .with_password_file(password_file)
+            .with_ownership_config(OwnershipConfig::parse("diagrams=userId").unwrap());
+        let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !*ready_rx.borrow() {
+                ready_rx.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("agent did not become ready");
+        Self {
+            port,
+            handle,
+            shutdown,
+            tmp,
+        }
+    }
+
+    async fn stop(self) {
+        self.shutdown.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), self.handle)
+            .await
+            .expect("agent did not stop")
+            .unwrap();
+        self.tmp.close().unwrap();
+    }
+}
+
+async fn watch(client: &MqttClient, topic: &str) -> flume::Receiver<Vec<u8>> {
+    let (tx, rx) = flume::unbounded();
+    client
+        .subscribe(topic, move |msg| {
+            let _ = tx.try_send(msg.payload.clone());
+        })
         .await
         .unwrap();
-    let port = next_test_port();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let agent = MqdbAgent::new(db)
-        .with_bind_address(addr)
-        .with_password_file(password_file)
-        .with_ownership_config(OwnershipConfig::parse("diagrams=userId").unwrap());
-    let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !*ready_rx.borrow() {
-            ready_rx.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("agent did not become ready");
+    rx
+}
 
-    let bob_client = bob.connect(port).await;
+async fn wait_for_delivery(deliveries: &flume::Receiver<Vec<u8>>) {
+    tokio::time::timeout(Duration::from_secs(5), deliveries.recv_async())
+        .await
+        .expect("response was not delivered")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_published_to_request_topics_are_not_executed() {
+    let alice = User::new("alice");
+    let bob = User::new("bob");
+    let agent = TestAgent::start(&[&alice, &bob]).await;
+
+    let bob_client = bob.connect(agent.port).await;
     let created = request(
         &bob_client,
         "$DB/diagrams/create",
@@ -116,7 +162,7 @@ async fn responses_published_to_request_topics_are_not_executed() {
     .await;
     assert_eq!(created["status"], "ok", "{created}");
 
-    let alice_client = alice.connect(port).await;
+    let alice_client = alice.connect(agent.port).await;
     let denied = request(
         &alice_client,
         "$DB/diagrams/bobs-diagram/delete",
@@ -125,6 +171,8 @@ async fn responses_published_to_request_topics_are_not_executed() {
     .await;
     assert_eq!(denied["status"], "error", "{denied}");
 
+    let delete_deliveries = watch(&bob_client, "$DB/diagrams/bobs-diagram/delete").await;
+    let create_deliveries = watch(&bob_client, "$DB/smuggled/create").await;
     publish_with_response_topic(
         &alice_client,
         "$DB/notes/list",
@@ -139,27 +187,48 @@ async fn responses_published_to_request_topics_are_not_executed() {
         "$DB/smuggled/create",
     )
     .await;
+    wait_for_delivery(&delete_deliveries).await;
+    wait_for_delivery(&create_deliveries).await;
     request(&alice_client, "$DB/notes/list", &json!({})).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let diagram = request(&bob_client, "$DB/diagrams/bobs-diagram", &json!({})).await;
     assert_eq!(
         diagram["status"], "ok",
-        "a response published to a delete topic deleted another user's record: {diagram}"
+        "the agent executed its own response as a delete: {diagram}"
     );
     let smuggled = request(&bob_client, "$DB/smuggled/list", &json!({})).await;
     assert_eq!(
         smuggled["data"],
         json!([]),
-        "a response published to a create topic created a record"
+        "the agent executed its own response as a create"
     );
 
     alice_client.disconnect().await.unwrap();
     bob_client.disconnect().await.unwrap();
-    shutdown.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(10), handle)
-        .await
-        .expect("agent did not stop")
-        .unwrap();
-    tmp.close().unwrap();
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_with_an_unauthorized_response_topic_are_refused() {
+    let alice = User::new("alice");
+    let agent = TestAgent::start(&[&alice]).await;
+    let alice_client = alice.connect(agent.port).await;
+
+    publish_with_response_topic(
+        &alice_client,
+        "$DB/notes/create",
+        &json!({"id": "refused-note"}),
+        "$DB/_presence/someone",
+    )
+    .await;
+    request(&alice_client, "$DB/notes/list", &json!({})).await;
+
+    let note = request(&alice_client, "$DB/notes/refused-note", &json!({})).await;
+    assert_eq!(
+        note["status"], "error",
+        "a request whose response topic the sender may not publish to was executed: {note}"
+    );
+
+    alice_client.disconnect().await.unwrap();
+    agent.stop().await;
 }

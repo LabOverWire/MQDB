@@ -10,7 +10,7 @@ use mqdb_core::protocol::{AdminOperation, build_request, parse_admin_topic, pars
 use mqdb_core::transport::Response;
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqtt5::QoS;
-use mqtt5::broker::auth::ComprehensiveAuthProvider;
+use mqtt5::broker::auth::{AuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::{AclRule, Permission};
 use mqtt5::client::MqttClient;
 use mqtt5::types::Message;
@@ -28,12 +28,23 @@ use tracing::Instrument;
 
 pub(super) const RESPONSE_PUBLISHER_CLIENT_ID: &str = "mqdb-response-publisher";
 
-fn published_by(message: &Message, client_id: &str) -> bool {
+const VERIFY_TOPIC_PREFIX: &str = "$DB/_verify/";
+
+fn user_property<'a>(message: &'a Message, key: &str) -> Option<&'a str> {
     message
         .properties
         .user_properties
         .iter()
-        .any(|(key, value)| key == "x-mqtt-client-id" && value == client_id)
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+fn is_own_response(
+    service_username: Option<&str>,
+    sender: Option<&str>,
+    client_id: Option<&str>,
+) -> bool {
+    client_id == Some(RESPONSE_PUBLISHER_CLIENT_ID) && sender == service_username
 }
 
 async fn publish_response(
@@ -62,6 +73,8 @@ async fn publish_response(
 pub(super) struct MessageContext<'a> {
     pub db: &'a Database,
     pub client: &'a MqttClient,
+    pub authorizer: &'a dyn AuthProvider,
+    pub service_username: Option<&'a str>,
     pub backup_dir: &'a Path,
     pub ownership: &'a OwnershipConfig,
     pub scope_config: &'a ScopeConfig,
@@ -199,16 +212,36 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     let scope_config = ctx.scope_config;
     let vault_backend = ctx.vault_backend;
     let topic = &message.topic;
+    let sender_uid = user_property(&message, "x-mqtt-sender");
+    let mqtt_client_id = user_property(&message, "x-mqtt-client-id");
 
-    if published_by(&message, RESPONSE_PUBLISHER_CLIENT_ID) {
+    if is_own_response(ctx.service_username, sender_uid, mqtt_client_id) {
         return;
     }
 
-    if topic.contains("/events") {
+    if topic.contains("/events")
+        || topic.starts_with(crate::presence::PRESENCE_TOPIC_PREFIX)
+        || topic.starts_with(VERIFY_TOPIC_PREFIX)
+    {
         return;
     }
 
-    if topic.starts_with(crate::presence::PRESENCE_TOPIC_PREFIX) {
+    if let Some(response_topic) = &message.properties.response_topic
+        && !ctx
+            .authorizer
+            .authorize_publish(
+                mqtt_client_id.unwrap_or_default(),
+                sender_uid,
+                response_topic,
+            )
+            .await
+    {
+        warn!(
+            topic,
+            response_topic,
+            client_id = mqtt_client_id,
+            "request refused: the sender may not publish to its response topic"
+        );
         return;
     }
 
@@ -259,20 +292,6 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             return;
         }
     };
-
-    let sender_uid = message
-        .properties
-        .user_properties
-        .iter()
-        .find(|(k, _)| k == "x-mqtt-sender")
-        .map(|(_, v)| v.as_str());
-
-    let mqtt_client_id = message
-        .properties
-        .user_properties
-        .iter()
-        .find(|(k, _)| k == "x-mqtt-client-id")
-        .map(|(_, v)| v.as_str());
 
     let vault_eligible = vault_backend.is_eligible(&op.entity, ownership, sender_uid);
 
