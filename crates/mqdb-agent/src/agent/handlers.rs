@@ -26,6 +26,16 @@ use mqtt5::telemetry::propagation;
 
 use tracing::Instrument;
 
+pub(super) const RESPONSE_PUBLISHER_CLIENT_ID: &str = "mqdb-response-publisher";
+
+fn published_by(message: &Message, client_id: &str) -> bool {
+    message
+        .properties
+        .user_properties
+        .iter()
+        .any(|(key, value)| key == "x-mqtt-client-id" && value == client_id)
+}
+
 async fn publish_response(
     client: &MqttClient,
     response_topic: &str,
@@ -189,6 +199,10 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     let scope_config = ctx.scope_config;
     let vault_backend = ctx.vault_backend;
     let topic = &message.topic;
+
+    if published_by(&message, RESPONSE_PUBLISHER_CLIENT_ID) {
+        return;
+    }
 
     if topic.contains("/events") {
         return;

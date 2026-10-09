@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-08 — mqdb-agent 0.8.33, mqdb-cli 0.8.47
+
+### Security
+
+- **Agent mode no longer executes responses as requests** (#164). The agent's internal handler subscribes to `$DB/#`, and responses are published to whatever response topic the client chose. A client could set its response topic to a request topic such as `$DB/<entity>/<id>/delete` or `$DB/<entity>/create`, and the agent then executed its own response as that request with the internal service account, bypassing ownership and the client's ACL. Any authenticated user could delete another user's records or create records in entities it cannot write. The handler now ignores messages published by the agent's own response publisher. Cluster mode was not affected.
+
+### Fixed
+
+- **The internal handler no longer logs `Invalid $DB topic format` for responses and notifications it publishes itself**, such as responses to `$DB/clients/<client-id>/<request-id>` or `$DB/_verify/challenges/email` notifications. Malformed request topics still log the warning.
+
 ## 2026-10-08 — mqdb-cli 0.8.46
 
 ### Security

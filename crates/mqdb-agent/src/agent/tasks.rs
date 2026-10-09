@@ -108,10 +108,10 @@ impl MqdbAgent {
                 let _ = tx.send(());
             }
 
-            let response_client = MqttClient::new("mqdb-response-publisher");
+            let response_client = MqttClient::new(super::handlers::RESPONSE_PUBLISHER_CLIENT_ID);
             if let Err(e) = connect_mqtt_client(
                 &response_client,
-                "mqdb-response-publisher",
+                super::handlers::RESPONSE_PUBLISHER_CLIENT_ID,
                 &addr,
                 response_creds.0,
                 response_creds.1,
