@@ -292,7 +292,10 @@ impl MqdbAgent {
             bind_addr,
             service_username.clone(),
             service_password.clone(),
-            auth_providers,
+            tasks::HandlerAuth {
+                providers: auth_providers,
+                authorizer: broker.auth_provider(),
+            },
             broker.ready_receiver(),
             None,
         );
@@ -397,7 +400,10 @@ impl MqdbAgent {
             bind_addr,
             service_username.clone(),
             service_password.clone(),
-            auth_providers,
+            tasks::HandlerAuth {
+                providers: auth_providers,
+                authorizer: broker.auth_provider(),
+            },
             broker.ready_receiver(),
             Some(handler_ready_tx),
         );
