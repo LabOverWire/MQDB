@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-agent"
-version = "0.8.33"
+version = "0.8.34"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cli"
-version = "0.8.47"
+version = "0.8.48"
 dependencies = [
  "base64 0.22.1",
  "bebytes",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cluster"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "arc-swap",
  "bebytes",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-vault"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "base64 0.22.1",
  "mqdb-agent",
@@ -1631,9 +1631,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.45.1"
+version = "0.47.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9455d95f74762a1bb0bfa762cb9a46609779f09182863932f3ab6be55661df06"
+checksum = "c17a98724b9ff6b0d6038f16ffd96f226a6173d0bb4eed33d4c610f6351397d3"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1679,9 +1679,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.15.2"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64a8f82fd77dfd1edeee276d5529786b3bd3f3581b0095f2e1814bd7fb21f747"
+checksum = "65d2adeec2533d2dc11e3c4668feae4a09b8312bdd0f574b22a279865112dc1c"
 dependencies = [
  "bebytes",
  "bytes",
