@@ -48,7 +48,7 @@ async fn publish_birth(client: &MqttClient, topic: &str, payload: &[u8]) {
         .unwrap();
 }
 
-async fn watch_certificates(
+async fn watch_stored_births(
     port: u16,
     client_id: &str,
 ) -> (MqttClient, flume::Receiver<(String, Vec<u8>, bool)>) {
@@ -62,7 +62,7 @@ async fn watch_certificates(
     (host, rx)
 }
 
-async fn next_certificate(
+async fn next_stored_birth(
     rx: &flume::Receiver<(String, Vec<u8>, bool)>,
 ) -> (String, Vec<u8>, bool) {
     tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
@@ -71,12 +71,12 @@ async fn next_certificate(
         .unwrap()
 }
 
-async fn late_certificates(
+async fn late_stored_births(
     port: u16,
     client_id: &str,
     topics: &[&str],
 ) -> (MqttClient, Vec<(String, Vec<u8>, bool)>) {
-    let (host, rx) = watch_certificates(port, client_id).await;
+    let (host, rx) = watch_stored_births(port, client_id).await;
     let mut received = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !topics.iter().all(|topic| {
@@ -94,8 +94,8 @@ async fn late_certificates(
     (host, received)
 }
 
-async fn wait_for_certificate(port: u16, topic: &str, payload: &[u8]) {
-    let (host, rx) = watch_certificates(port, "certificate-probe").await;
+async fn wait_until_stored(port: u16, topic: &str, payload: &[u8]) {
+    let (host, rx) = watch_stored_births(port, "certificate-probe").await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (got_topic, got_payload, _) = rx.recv_async().await.unwrap();
@@ -119,10 +119,10 @@ async fn births_are_retained_on_certificate_topics() {
     let device_birth = [0x08, 0x01, 0x80, 0x7f];
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-1", &node_birth).await;
     publish_birth(&edge, "spBv1.0/plant/DBIRTH/edge-1/press-4", &device_birth).await;
-    wait_for_certificate(port, DEVICE_BIRTH_TOPIC, &device_birth).await;
+    wait_until_stored(port, DEVICE_BIRTH_TOPIC, &device_birth).await;
 
     let (host, received) =
-        late_certificates(port, "scada-host", &[NODE_BIRTH_TOPIC, DEVICE_BIRTH_TOPIC]).await;
+        late_stored_births(port, "scada-host", &[NODE_BIRTH_TOPIC, DEVICE_BIRTH_TOPIC]).await;
     for (topic, payload, _) in &received {
         let expected = if topic == NODE_BIRTH_TOPIC {
             node_birth.as_slice()
@@ -132,7 +132,7 @@ async fn births_are_retained_on_certificate_topics() {
         assert_eq!(
             payload.as_slice(),
             expected,
-            "a host subscribing late must get each birth byte for byte: {topic}"
+            "a host subscribing late must get each birth byte for byte"
         );
     }
 
@@ -149,14 +149,14 @@ async fn the_latest_birth_replaces_the_stored_certificate() {
     let edge = connect(port, "edge-1").await;
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-1", b"bdseq-0").await;
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-1", b"bdseq-1").await;
-    wait_for_certificate(port, NODE_BIRTH_TOPIC, b"bdseq-1").await;
+    wait_until_stored(port, NODE_BIRTH_TOPIC, b"bdseq-1").await;
 
-    let (host, received) = late_certificates(port, "scada-host", &[NODE_BIRTH_TOPIC]).await;
+    let (host, received) = late_stored_births(port, "scada-host", &[NODE_BIRTH_TOPIC]).await;
     assert!(
         received
             .iter()
             .all(|(topic, payload, _)| topic == NODE_BIRTH_TOPIC && payload == b"bdseq-1"),
-        "only the most recent NBIRTH may be stored: {received:?}"
+        "only the most recent NBIRTH may be stored"
     );
 
     host.disconnect().await.unwrap();
@@ -168,7 +168,7 @@ async fn the_latest_birth_replaces_the_stored_certificate() {
 async fn data_and_death_messages_are_not_stored() {
     let port = next_test_port();
     let (_tmp, agent_handle) = start_agent(port, true).await;
-    let (host, rx) = watch_certificates(port, "scada-host").await;
+    let (host, rx) = watch_stored_births(port, "scada-host").await;
 
     let edge = connect(port, "edge-1").await;
     for topic in [
@@ -182,7 +182,7 @@ async fn data_and_death_messages_are_not_stored() {
     }
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-1", b"birth").await;
 
-    let (topic, payload, _) = next_certificate(&rx).await;
+    let (topic, payload, _) = next_stored_birth(&rx).await;
     assert_eq!(
         (topic.as_str(), payload.as_slice()),
         (NODE_BIRTH_TOPIC, b"birth".as_slice()),
@@ -211,7 +211,7 @@ async fn clients_cannot_forge_certificates() {
 
     let edge = connect(port, "edge-2").await;
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-2", b"real").await;
-    wait_for_certificate(
+    wait_until_stored(
         port,
         "$sparkplug/certificates/spBv1.0/plant/NBIRTH/edge-2",
         b"real",
@@ -219,12 +219,12 @@ async fn clients_cannot_forge_certificates() {
     .await;
 
     let real_topic = "$sparkplug/certificates/spBv1.0/plant/NBIRTH/edge-2";
-    let (host, received) = late_certificates(port, "scada-host", &[real_topic]).await;
+    let (host, received) = late_stored_births(port, "scada-host", &[real_topic]).await;
     assert!(
         received
             .iter()
             .all(|(topic, payload, _)| topic == real_topic && payload == b"real"),
-        "the forged certificate must not be stored; only the real one may be retained: {received:?}"
+        "the forged certificate must not be stored; only the real one may be retained"
     );
 
     host.disconnect().await.unwrap();
