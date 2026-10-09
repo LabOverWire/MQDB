@@ -3000,3 +3000,164 @@ async fn received_presence_broadcast_is_ignored_when_presence_is_off() {
         "a node that did not opt into presence must not retain a peer's presence"
     );
 }
+
+type SessionHarness = (
+    crate::cluster::event_handler::ClusterEventHandler<MockTransport>,
+    Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
+);
+
+fn session_harness() -> SessionHarness {
+    let node1 = NodeId::validated(1).unwrap();
+    let ctrl = Arc::new(tokio::sync::RwLock::new(create_test_controller(
+        node1,
+        MockTransport::new(node1),
+    )));
+    let handler = crate::cluster::event_handler::ClusterEventHandler::new(node1, Arc::clone(&ctrl));
+    (handler, ctrl)
+}
+
+fn session_connect(
+    client_id: &str,
+    clean_start: bool,
+    session_expiry_interval: u32,
+) -> mqtt5::broker::events::ClientConnectEvent {
+    mqtt5::broker::events::ClientConnectEvent {
+        session_expiry_interval,
+        clean_start,
+        ..cluster_connect_event(client_id)
+    }
+}
+
+fn session_disconnect(client_id: &str) -> mqtt5::broker::events::ClientDisconnectEvent {
+    mqtt5::broker::events::ClientDisconnectEvent {
+        client_id: client_id.into(),
+        user_id: Some("alice".into()),
+        reason: mqtt5::types::ReasonCode::Success,
+        unexpected: false,
+    }
+}
+
+fn session_subscribe(client_id: &str, topic: &str) -> mqtt5::broker::events::ClientSubscribeEvent {
+    mqtt5::broker::events::ClientSubscribeEvent {
+        client_id: client_id.into(),
+        subscriptions: vec![mqtt5::broker::events::SubscriptionInfo {
+            topic_filter: topic.into(),
+            qos: mqtt5::QoS::AtLeastOnce,
+            result: mqtt5::broker::events::SubAckReasonCode::GrantedQoS1,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn reconnecting_to_the_same_node_restores_the_client_location() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("phone"))
+        .await;
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+
+    let ctrl = ctrl.read().await;
+    assert_eq!(
+        ctrl.stores().client_locations.get("phone"),
+        NodeId::validated(1),
+        "a client that resumes its session on the same node must be routable from other nodes"
+    );
+    assert!(
+        ctrl.stores()
+            .sessions
+            .get("phone")
+            .is_some_and(|s| s.is_connected()),
+        "the session record must say the client is connected again"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_keeps_subscriptions_of_a_session_that_outlives_it() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("sensor", true, 300))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("sensor", "plant/temp"))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("sensor"))
+        .await;
+
+    assert_eq!(
+        ctrl.read()
+            .await
+            .stores()
+            .topics
+            .get_client_topics("sensor")
+            .len(),
+        1,
+        "a session with a nonzero expiry keeps its subscriptions after disconnect, whatever its clean start flag"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_clears_subscriptions_of_a_session_that_ends_with_it() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("kiosk", false, 0))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("kiosk", "plant/temp"))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("kiosk"))
+        .await;
+
+    assert!(
+        ctrl.read()
+            .await
+            .stores()
+            .topics
+            .get_client_topics("kiosk")
+            .is_empty(),
+        "a session with expiry 0 ends at disconnect, so its subscriptions must go"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_of_a_taken_over_connection_keeps_the_new_one_routable() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("tablet", false, 0))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("tablet", "plant/temp"))
+        .await;
+    handler
+        .on_client_connect(session_connect("tablet", false, 0))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("tablet"))
+        .await;
+
+    let ctrl = ctrl.read().await;
+    assert_eq!(
+        ctrl.stores().client_locations.get("tablet"),
+        NodeId::validated(1),
+        "the displaced connection's disconnect must not remove the live connection's location"
+    );
+    assert_eq!(
+        ctrl.stores().topics.get_client_topics("tablet").len(),
+        1,
+        "the displaced connection's disconnect must not clear the live session's subscriptions"
+    );
+}

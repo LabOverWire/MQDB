@@ -37,8 +37,8 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
+            self.live_connections.register(&event.client_id);
             if self.presence {
-                self.live_connections.register(&event.client_id);
                 self.emit_presence(&mqdb_agent::presence::PresenceEvent::connect(
                     &event.client_id,
                     event.user_id.as_deref(),
@@ -49,6 +49,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             debug!(
                 client_id = %event.client_id,
                 clean_start = event.clean_start,
+                session_expiry_interval = event.session_expiry_interval,
                 has_will_topic = event.will_topic.is_some(),
                 "client connected"
             );
@@ -56,35 +57,46 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             let mut ctrl = self.controller.write().await;
             let client_id = event.client_id.as_ref();
 
-            if event.clean_start {
-                let existing = ctrl.stores().sessions.get(client_id);
-                if existing.is_some() {
-                    debug!(client_id, "clean_start=true, clearing old session state");
-                    clear_client_subscriptions(&mut ctrl, client_id).await;
-                    let _ = ctrl.stores_mut().remove_session_replicated(client_id);
-                }
+            if event.clean_start && ctrl.stores().sessions.get(client_id).is_some() {
+                debug!(client_id, "clean_start=true, clearing old session state");
+                clear_client_subscriptions(&mut ctrl, client_id).await;
+                let _ = ctrl.stores_mut().remove_session_replicated(client_id);
             }
 
-            let result = ctrl.stores_mut().create_session_replicated(client_id);
-            if let Err(e) = result {
+            if ctrl.stores().sessions.get(client_id).is_none()
+                && let Err(e) = ctrl.stores_mut().create_session_replicated(client_id)
+            {
                 warn!(client_id, error = %e, "failed to create session");
                 return;
             }
-            let (_session, create_write) = result.unwrap();
 
-            let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
-                s.set_clean_session(event.clean_start);
+            let will = event.will_topic.as_ref().map(|topic| {
+                (
+                    qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce)),
+                    event.will_retain.unwrap_or(false),
+                    topic.as_ref(),
+                    event
+                        .will_payload
+                        .as_ref()
+                        .map(|b| b.to_vec())
+                        .unwrap_or_default(),
+                )
             });
-            let clean_session_write = match result {
-                Ok((_session, write)) => {
-                    ctrl.write_or_forward(write.clone()).await;
-                    Some(write)
+            let connected_at = current_time_ms();
+            let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
+                s.set_connected(true, self.node_id, connected_at);
+                s.set_clean_session(event.session_expiry_interval == 0);
+                match &will {
+                    Some((qos, retain, topic, payload)) => {
+                        s.set_will(*qos, *retain, topic, payload)
+                    }
+                    None => s.clear_will(),
                 }
-                Err(e) => {
-                    warn!(client_id, error = ?e, "failed to set clean_session flag");
-                    None
-                }
-            };
+            });
+            match result {
+                Ok((_session, write)) => ctrl.write_or_forward(write).await,
+                Err(e) => warn!(client_id, error = ?e, "failed to update session"),
+            }
 
             let location_entry = ClientLocationEntry::create(client_id, self.node_id);
             let location_write = ReplicationWrite::new(
@@ -97,38 +109,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 location_entry.to_be_bytes(),
             );
             ctrl.write_or_forward(location_write).await;
-
-            if let Some(ref topic) = event.will_topic {
-                let will_qos = qos_to_u8(event.will_qos.unwrap_or(QoS::AtMostOnce));
-                let will_retain = event.will_retain.unwrap_or(false);
-                let will_payload = event
-                    .will_payload
-                    .as_ref()
-                    .map(|b| b.to_vec())
-                    .unwrap_or_default();
-
-                let result = ctrl.stores_mut().update_session_replicated(client_id, |s| {
-                    s.set_will(will_qos, will_retain, topic.as_ref(), &will_payload);
-                });
-                match result {
-                    Ok((session, will_write)) => {
-                        debug!(
-                            client_id,
-                            has_will = session.has_will,
-                            "will stored in session"
-                        );
-                        ctrl.write_or_forward(will_write).await;
-                    }
-                    Err(e) => {
-                        warn!(client_id, error = ?e, "failed to store will in session");
-                        if clean_session_write.is_none() {
-                            ctrl.write_or_forward(create_write).await;
-                        }
-                    }
-                }
-            } else if clean_session_write.is_none() {
-                ctrl.write_or_forward(create_write).await;
-            }
         })
     }
 
@@ -143,8 +123,9 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
+            let last_connection = self.live_connections.is_last(&event.client_id);
             if self.presence
-                && self.live_connections.is_last(&event.client_id)
+                && last_connection
                 && !self.client_is_live_elsewhere(&event.client_id).await
             {
                 self.emit_presence(&mqdb_agent::presence::PresenceEvent::disconnect(
@@ -161,6 +142,11 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 unexpected = event.unexpected,
                 "client disconnected"
             );
+
+            if !last_connection {
+                debug!(client_id = %event.client_id, "connection was taken over, keeping session");
+                return;
+            }
 
             let mut ctrl = self.controller.write().await;
             let client_id = event.client_id.as_ref();

@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-09 — mqdb-agent 0.8.34, mqdb-cluster 0.4.21, mqdb-vault 0.1.7, mqdb-cli 0.8.48
+
+### Changed
+
+- **mqtt5 updated to 0.47.2** (mqtt5-protocol 0.16). No source changes were needed for the update itself. What it brings to MQDB:
+  - **Storage directory lock:** mqtt5 now locks its storage directory. This changes nothing for MQDB: a second agent on the same `--db` was already refused by MQDB's own database lock (`Storage(Locked)`).
+  - **Shutdown:** graceful shutdown waits for connection handlers to finish writing session state.
+  - **QUIC connections:** a malformed packet now closes the whole QUIC connection, as it does over TCP.
+  - **Offline queue:** the client's offline queue is bounded at 1,000 messages or 64 MiB.
+  - **Connect events:** `clean_start` reports the flag the client sent; see Fixed.
+
+### Fixed
+
+- **Cluster: a client that reconnects to the same node is reachable from other nodes again.** When the node already held the client's session record, the connect handler returned early, so the record still said disconnected and no client location was published. Publishes from other nodes then had nowhere to go. Connect now updates the existing record and always publishes the location. On mqtt5 0.45 this was mostly hidden, because a first connect was reported as clean and its record was deleted at disconnect. With 0.47 reporting the real flag, a client reconnecting with `clean_start=0` stopped receiving cross-node publishes.
+- **Cluster: whether a disconnect clears a client's subscriptions now follows its session expiry.** The handler used the clean start flag, which on mqtt5 0.45 meant "no session was resumed". A client with a persistent session therefore lost its cluster-wide subscriptions at its first disconnect. When it resumed the session on the same node without resubscribing, as MQTT 5 allows, it received nothing published on other nodes. Subscriptions are now cleared at disconnect only when the session expiry is 0.
+- **Cluster: the disconnect of a connection that was taken over no longer removes the new connection's location and subscriptions**, when the new connection's connect was handled first. Connections are now counted on every node, not only with `--presence`.
+
 ## 2026-10-08 — mqdb-agent 0.8.33, mqdb-cli 0.8.47
 
 ### Security
