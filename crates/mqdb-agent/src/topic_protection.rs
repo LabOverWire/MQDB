@@ -18,6 +18,7 @@ pub struct TopicProtectionAuthProvider {
     internal_service_username: Option<String>,
     all_users_admin: bool,
     scoped_events: bool,
+    sparkplug_aware: bool,
 }
 
 /// If `topic` is a per-user event namespace `$DB/u/{user}/...`, return `{user}`.
@@ -41,7 +42,14 @@ impl TopicProtectionAuthProvider {
             internal_service_username: None,
             all_users_admin: false,
             scoped_events: false,
+            sparkplug_aware: false,
         }
+    }
+
+    #[must_use]
+    pub fn with_sparkplug_aware(mut self, enabled: bool) -> Self {
+        self.sparkplug_aware = enabled;
+        self
     }
 
     #[must_use]
@@ -112,6 +120,15 @@ impl AuthProvider for TopicProtectionAuthProvider {
         let is_internal = self.is_internal_service(user_id);
 
         Box::pin(async move {
+            if self.sparkplug_aware && crate::sparkplug::is_reserved_topic(topic) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic = %topic,
+                    "publish to the Sparkplug certificate namespace denied (broker-only)"
+                );
+                return false;
+            }
+
             if is_internal {
                 return self
                     .inner
@@ -297,6 +314,55 @@ mod tests {
     fn create_test_provider_with_internal(internal_username: &str) -> TopicProtectionAuthProvider {
         TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), HashSet::new())
             .with_internal_service_username(Some(internal_username.to_string()))
+    }
+
+    #[tokio::test]
+    async fn sparkplug_aware_reserves_the_certificate_namespace_for_the_broker() {
+        let admins: HashSet<String> = ["admin".to_string()].into_iter().collect();
+        let provider = TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), admins)
+            .with_internal_service_username(Some("mqdb-internal-abc123".to_string()))
+            .with_sparkplug_aware(true);
+        let certificate = "$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1";
+
+        for user in [
+            Some("edge"),
+            Some("admin"),
+            Some("mqdb-internal-abc123"),
+            None,
+        ] {
+            assert!(
+                !provider
+                    .authorize_publish("client", user, certificate)
+                    .await,
+                "{user:?} must not publish a certificate when the broker stores them"
+            );
+        }
+        assert!(
+            provider
+                .authorize_subscribe("host", Some("edge"), "$sparkplug/certificates/#")
+                .await,
+            "host applications must still be able to read certificates"
+        );
+        assert!(
+            provider
+                .authorize_publish("edge", Some("edge"), "spBv1.0/G1/NBIRTH/E1")
+                .await,
+            "births themselves stay publishable"
+        );
+    }
+
+    #[tokio::test]
+    async fn sparkplug_namespace_is_ordinary_without_sparkplug_aware() {
+        let provider = create_test_provider(HashSet::new());
+        assert!(
+            provider
+                .authorize_publish(
+                    "bridge",
+                    Some("bridge"),
+                    "$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1"
+                )
+                .await
+        );
     }
 
     #[tokio::test]

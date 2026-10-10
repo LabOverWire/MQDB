@@ -121,6 +121,12 @@ pub(crate) struct AgentStartFields {
     pub(crate) presence: bool,
     #[arg(
         long,
+        env = "MQDB_SPARKPLUG_AWARE",
+        help = "Act as a Sparkplug Aware MQTT server: store each edge node's latest NBIRTH and DBIRTH and republish them retained on $sparkplug/certificates/..."
+    )]
+    pub(crate) sparkplug_aware: bool,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]

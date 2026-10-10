@@ -21,3 +21,4 @@ The guide is split into focused subdocuments for efficient reference:
 | [13-http-api.md](13-http-api.md)           | OAuth/identity, email verification, admin MQTT endpoints, advanced options  |
 | [14-checklists.md](14-checklists.md)       | Quick test, complete verification, and additions checklists                 |
 | [15-license.md](15-license.md)             | License key verification and enforcement                                   |
+| [16-sparkplug.md](16-sparkplug.md)         | Sparkplug Aware certificates (agent mode)                                   |

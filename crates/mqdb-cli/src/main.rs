@@ -246,6 +246,7 @@ async fn dispatch_agent(action: AgentAction) -> Result<(), Box<dyn std::error::E
                 ownership_derive: fields.ownership_derive,
                 scoped_events: fields.scoped_events,
                 presence: fields.presence,
+                sparkplug_aware: fields.sparkplug_aware,
                 otlp_endpoint: fields.otlp_endpoint,
                 otel_service_name: fields.otel_service_name,
                 otel_sampling_ratio: fields.otel_sampling_ratio,

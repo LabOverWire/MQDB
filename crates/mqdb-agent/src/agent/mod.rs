@@ -40,6 +40,7 @@ pub struct MqdbAgent {
     pub(super) scope_config: Arc<mqdb_core::types::ScopeConfig>,
     pub(super) scoped_events: bool,
     pub(super) presence: bool,
+    pub(super) sparkplug_aware: bool,
     pub(super) vault_backend: Arc<dyn VaultBackend>,
     #[cfg(feature = "http-api")]
     pub(super) auth_rate_limiter: Arc<RateLimiter>,
@@ -78,6 +79,7 @@ impl MqdbAgent {
             scope_config: Arc::new(mqdb_core::types::ScopeConfig::default()),
             scoped_events: false,
             presence: false,
+            sparkplug_aware: false,
             vault_backend: Arc::new(NoopVaultBackend),
             #[cfg(feature = "http-api")]
             auth_rate_limiter: Arc::new(RateLimiter::new(10)),
@@ -216,6 +218,12 @@ impl MqdbAgent {
     }
 
     #[must_use]
+    pub fn with_sparkplug_aware(mut self, enabled: bool) -> Self {
+        self.sparkplug_aware = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn with_license_expiry(mut self, expires_at: u64) -> Self {
         self.license_expires_at = Some(expires_at);
         self
@@ -267,7 +275,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
-        let presence_rx = self.apply_presence_handler(&mut config);
+        let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -281,9 +289,13 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                sparkplug_aware: self.sparkplug_aware,
             },
         )
         .await?;
+        if let Some(certificates) = &certificates {
+            certificates.attach(broker.router());
+        }
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
@@ -372,7 +384,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
-        let presence_rx = self.apply_presence_handler(&mut config);
+        let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -386,9 +398,13 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                sparkplug_aware: self.sparkplug_aware,
             },
         )
         .await?;
+        if let Some(certificates) = &certificates {
+            certificates.attach(broker.router());
+        }
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
