@@ -1,11 +1,8 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::broker::BrokerFeeds;
 use super::handlers::handle_message;
 use super::{MqdbAgent, connect_mqtt_client, resolve_connect_address};
-use crate::presence::PresenceEvent;
-use crate::sparkplug::Certificate;
 use mqtt5::broker::auth::{AuthProvider, ComprehensiveAuthProvider};
 use mqtt5::client::MqttClient;
 use mqtt5::time::Duration;
@@ -14,27 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
-
-pub(super) struct RetainedPublisher<T> {
-    pub client_id: &'static str,
-    pub qos: mqtt5::QoS,
-    pub receiver: flume::Receiver<T>,
-    pub encode: fn(T) -> Option<(String, Vec<u8>)>,
-}
-
-fn encode_presence(presence: PresenceEvent) -> Option<(String, Vec<u8>)> {
-    match presence.payload() {
-        Ok(payload) => Some((presence.topic(), payload)),
-        Err(e) => {
-            error!("Failed to serialize presence: {e}");
-            None
-        }
-    }
-}
-
-fn encode_certificate(certificate: Certificate) -> Option<(String, Vec<u8>)> {
-    Some((certificate.topic, certificate.payload))
-}
 
 pub(super) struct HandlerAuth {
     pub providers: Option<Arc<ComprehensiveAuthProvider>>,
@@ -306,103 +282,70 @@ impl MqdbAgent {
         })
     }
 
-    pub(super) fn spawn_feed_publishers(
+    pub(super) fn spawn_presence_task(
         &self,
-        feeds: BrokerFeeds,
-        addr: SocketAddr,
-        service_username: Option<&String>,
-        service_password: Option<&String>,
-        broker_ready_rx: &watch::Receiver<bool>,
-    ) -> [Option<tokio::task::JoinHandle<()>>; 2] {
-        let presence = feeds.presence.map(|receiver| {
-            self.spawn_retained_publisher(
-                RetainedPublisher {
-                    client_id: "mqdb-presence-publisher",
-                    qos: mqtt5::QoS::AtMostOnce,
-                    receiver,
-                    encode: encode_presence,
-                },
-                addr,
-                service_username.cloned(),
-                service_password.cloned(),
-                broker_ready_rx.clone(),
-            )
-        });
-        let certificates = feeds.certificates.map(|receiver| {
-            self.spawn_retained_publisher(
-                RetainedPublisher {
-                    client_id: "mqdb-certificate-publisher",
-                    qos: mqtt5::QoS::AtLeastOnce,
-                    receiver,
-                    encode: encode_certificate,
-                },
-                addr,
-                service_username.cloned(),
-                service_password.cloned(),
-                broker_ready_rx.clone(),
-            )
-        });
-        [presence, certificates]
-    }
-
-    pub(super) fn spawn_retained_publisher<T: Send + 'static>(
-        &self,
-        publisher: RetainedPublisher<T>,
-        addr: SocketAddr,
-        service_username: Option<String>,
-        service_password: Option<String>,
+        presence_addr: SocketAddr,
+        presence_service_username: Option<String>,
+        presence_service_password: Option<String>,
+        presence_rx: flume::Receiver<crate::presence::PresenceEvent>,
         mut broker_ready_rx: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let RetainedPublisher {
-            client_id,
-            qos,
-            receiver,
-            encode,
-        } = publisher;
+        let mut presence_shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            if !wait_for_broker(&mut broker_ready_rx, &mut shutdown_rx, client_id).await {
-                return;
-            }
-
-            let client = MqttClient::new(client_id);
-            let addr = resolve_connect_address(addr);
-
-            if let Err(e) = connect_mqtt_client(
-                &client,
-                client_id,
-                &addr,
-                service_username,
-                service_password,
+            if !wait_for_broker(
+                &mut broker_ready_rx,
+                &mut presence_shutdown_rx,
+                "presence publisher",
             )
             .await
             {
-                error!(client_id, "Failed to connect retained publisher: {e}");
+                return;
+            }
+
+            let client = MqttClient::new("mqdb-presence-publisher");
+            let addr = resolve_connect_address(presence_addr);
+
+            if let Err(e) = connect_mqtt_client(
+                &client,
+                "mqdb-presence-publisher",
+                &addr,
+                presence_service_username,
+                presence_service_password,
+            )
+            .await
+            {
+                error!("Failed to connect presence publisher: {e}");
                 return;
             }
 
             loop {
                 tokio::select! {
-                    item = receiver.recv_async() => {
-                        let Ok(item) = item else {
-                            debug!(client_id, "retained publisher channel closed");
+                    presence = presence_rx.recv_async() => {
+                        let Ok(presence) = presence else {
+                            debug!("Presence channel closed");
                             break;
                         };
-                        let Some((topic, payload)) = encode(item) else {
-                            continue;
+                        let payload = match presence.payload() {
+                            Ok(payload) => payload,
+                            Err(e) => {
+                                error!("Failed to serialize presence: {e}");
+                                continue;
+                            }
                         };
                         let options = mqtt5::types::PublishOptions {
-                            qos,
                             retain: true,
                             ..Default::default()
                         };
-                        if let Err(e) = client.publish_with_options(&topic, payload, options).await {
-                            warn!(client_id, topic, "Failed to publish retained message: {e}");
+                        if let Err(e) = client
+                            .publish_with_options(&presence.topic(), payload, options)
+                            .await
+                        {
+                            warn!("Failed to publish presence: {e}");
                         }
                     }
-                    _ = shutdown_rx.recv() => {
-                        debug!(client_id, "retained publisher shutting down");
+                    _ = presence_shutdown_rx.recv() => {
+                        debug!("Presence publisher shutting down");
                         break;
                     }
                 }

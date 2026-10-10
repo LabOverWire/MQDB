@@ -1,20 +1,41 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::future::Future;
-use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 
-use mqtt5::broker::events::{BrokerEventHandler, ClientPublishEvent, PublishAction};
-use tracing::debug;
+use mqtt5::QoS;
+use mqtt5::broker::router::MessageRouter;
+use mqtt5::packet::publish::PublishPacket;
+use tracing::{debug, warn};
+
+pub const RESERVED_ROOT: &str = "$sparkplug";
 
 pub const CERTIFICATES_PREFIX: &str = "$sparkplug/certificates/";
-
-pub const CERTIFICATE_CHANNEL_CAPACITY: usize = 1024;
 
 const NAMESPACE: &str = "spBv1.0";
 
 #[must_use]
-pub fn certificate_topic(topic: &str) -> Option<String> {
+pub fn is_reserved_topic(topic: &str) -> bool {
+    topic
+        .strip_prefix(RESERVED_ROOT)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Birth<'a> {
+    Node {
+        group: &'a str,
+        edge: &'a str,
+    },
+    Device {
+        group: &'a str,
+        edge: &'a str,
+        device: &'a str,
+    },
+}
+
+#[must_use]
+pub fn parse_birth(topic: &str) -> Option<Birth<'_>> {
     let mut levels = topic.split('/');
     let (Some(NAMESPACE), Some(group), Some(kind), Some(edge)) =
         (levels.next(), levels.next(), levels.next(), levels.next())
@@ -25,65 +46,78 @@ pub fn certificate_topic(topic: &str) -> Option<String> {
     if levels.next().is_some() || group.is_empty() || edge.is_empty() {
         return None;
     }
-    let is_birth = match (kind, device) {
-        ("NBIRTH", None) => true,
-        ("DBIRTH", Some(device)) => !device.is_empty(),
-        _ => false,
-    };
-    is_birth.then(|| format!("{CERTIFICATES_PREFIX}{topic}"))
+    match (kind, device) {
+        ("NBIRTH", None) => Some(Birth::Node { group, edge }),
+        ("DBIRTH", Some(device)) if !device.is_empty() => Some(Birth::Device {
+            group,
+            edge,
+            device,
+        }),
+        _ => None,
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Certificate {
-    pub topic: String,
-    pub payload: Vec<u8>,
+#[must_use]
+pub fn certificate_topic(topic: &str) -> Option<String> {
+    parse_birth(topic).map(|_| format!("{CERTIFICATES_PREFIX}{topic}"))
 }
 
-impl Certificate {
+fn device_certificates_filter(group: &str, edge: &str) -> String {
+    format!("{CERTIFICATES_PREFIX}{NAMESPACE}/{group}/DBIRTH/{edge}/+")
+}
+
+fn retained(topic: String, payload: Vec<u8>) -> PublishPacket {
+    PublishPacket::new(topic, payload, QoS::AtLeastOnce).with_retain(true)
+}
+
+#[derive(Default)]
+pub struct CertificateStore {
+    router: OnceLock<Arc<MessageRouter>>,
+}
+
+impl CertificateStore {
     #[must_use]
-    pub fn from_publish(topic: &str, payload: &[u8]) -> Option<Self> {
-        if payload.is_empty() {
-            return None;
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn attach(&self, router: Arc<MessageRouter>) {
+        if self.router.set(router).is_err() {
+            warn!("certificate store already attached to a broker");
         }
-        certificate_topic(topic).map(|topic| Self {
-            topic,
-            payload: payload.to_vec(),
-        })
-    }
-}
-
-pub struct CertificateEventHandler {
-    sender: flume::Sender<Certificate>,
-}
-
-impl CertificateEventHandler {
-    #[must_use]
-    pub fn new(sender: flume::Sender<Certificate>) -> Self {
-        Self { sender }
     }
 
-    pub fn observe(&self, topic: &str, payload: &[u8]) {
-        let Some(certificate) = Certificate::from_publish(topic, payload) else {
+    pub async fn observe(&self, topic: &str, payload: &[u8]) {
+        let Some(birth) = parse_birth(topic) else {
             return;
         };
-        if self.sender.try_send(certificate).is_err() {
-            debug!(
-                topic,
-                "certificate queue full or closed, dropping certificate"
-            );
+        if payload.is_empty() {
+            return;
         }
-    }
-}
-
-impl BrokerEventHandler for CertificateEventHandler {
-    fn on_client_publish<'a>(
-        &'a self,
-        event: ClientPublishEvent,
-    ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
-        Box::pin(async move {
-            self.observe(&event.topic, &event.payload);
-            PublishAction::Continue
-        })
+        let Some(router) = self.router.get() else {
+            warn!(
+                topic,
+                "certificate store not attached to a broker, birth not stored"
+            );
+            return;
+        };
+        if let Birth::Node { group, edge } = birth {
+            for stale in router
+                .get_retained_messages(&device_certificates_filter(group, edge))
+                .await
+            {
+                debug!(topic = %stale.topic_name, "clearing device certificate after node rebirth");
+                router
+                    .route_message(&retained(stale.topic_name, Vec::new()), None)
+                    .await;
+            }
+        }
+        router
+            .route_message(
+                &retained(format!("{CERTIFICATES_PREFIX}{topic}"), payload.to_vec()),
+                None,
+            )
+            .await;
     }
 }
 
@@ -97,6 +131,13 @@ mod tests {
             certificate_topic("spBv1.0/G1/NBIRTH/E1").as_deref(),
             Some("$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1")
         );
+        assert_eq!(
+            parse_birth("spBv1.0/G1/NBIRTH/E1"),
+            Some(Birth::Node {
+                group: "G1",
+                edge: "E1"
+            })
+        );
     }
 
     #[test]
@@ -104,6 +145,14 @@ mod tests {
         assert_eq!(
             certificate_topic("spBv1.0/G1/DBIRTH/E1/D1").as_deref(),
             Some("$sparkplug/certificates/spBv1.0/G1/DBIRTH/E1/D1")
+        );
+        assert_eq!(
+            parse_birth("spBv1.0/G1/DBIRTH/E1/D1"),
+            Some(Birth::Device {
+                group: "G1",
+                edge: "E1",
+                device: "D1"
+            })
         );
     }
 
@@ -125,55 +174,27 @@ mod tests {
             "spAv1.0/G1/NBIRTH/E1",
             "sensors/G1/NBIRTH/E1",
         ] {
-            assert_eq!(certificate_topic(topic), None, "{topic}");
+            assert_eq!(parse_birth(topic), None, "{topic}");
         }
     }
 
     #[test]
-    fn empty_birth_payload_is_not_stored() {
-        assert_eq!(Certificate::from_publish("spBv1.0/G1/NBIRTH/E1", b""), None);
+    fn reserved_namespace_is_the_sparkplug_root_only() {
+        assert!(is_reserved_topic("$sparkplug"));
+        assert!(is_reserved_topic(
+            "$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1"
+        ));
+        assert!(is_reserved_topic("$sparkplug/anything"));
+        assert!(!is_reserved_topic("$sparkplugs/x"));
+        assert!(!is_reserved_topic("spBv1.0/G1/NBIRTH/E1"));
+        assert!(!is_reserved_topic("$SYS/broker"));
     }
 
-    #[tokio::test]
-    async fn handler_queues_births_and_lets_every_publish_through() {
-        let (tx, rx) = flume::bounded(4);
-        let handler = CertificateEventHandler::new(tx);
-
-        for (topic, payload) in [
-            ("spBv1.0/G1/NBIRTH/E1", b"node-birth".as_slice()),
-            ("spBv1.0/G1/NDATA/E1", b"data".as_slice()),
-            ("spBv1.0/G1/DBIRTH/E1/D1", b"device-birth".as_slice()),
-        ] {
-            let action = handler
-                .on_client_publish(ClientPublishEvent {
-                    client_id: "E1".into(),
-                    user_id: None,
-                    topic: topic.into(),
-                    payload: payload.to_vec().into(),
-                    qos: mqtt5::QoS::AtMostOnce,
-                    retain: false,
-                    packet_id: None,
-                    response_topic: None,
-                    correlation_data: None,
-                })
-                .await;
-            assert!(matches!(action, PublishAction::Continue), "{topic}");
-        }
-
+    #[test]
+    fn device_filter_covers_only_that_edge() {
         assert_eq!(
-            rx.try_recv().ok(),
-            Some(Certificate {
-                topic: "$sparkplug/certificates/spBv1.0/G1/NBIRTH/E1".into(),
-                payload: b"node-birth".to_vec(),
-            })
+            device_certificates_filter("G1", "E1"),
+            "$sparkplug/certificates/spBv1.0/G1/DBIRTH/E1/+"
         );
-        assert_eq!(
-            rx.try_recv().ok(),
-            Some(Certificate {
-                topic: "$sparkplug/certificates/spBv1.0/G1/DBIRTH/E1/D1".into(),
-                payload: b"device-birth".to_vec(),
-            })
-        );
-        assert!(rx.try_recv().is_err(), "data messages have no certificate");
     }
 }

@@ -275,7 +275,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
-        let feeds = self.apply_event_handlers(&mut config);
+        let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -289,9 +289,13 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                sparkplug_aware: self.sparkplug_aware,
             },
         )
         .await?;
+        if let Some(certificates) = &certificates {
+            certificates.attach(broker.router());
+        }
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
@@ -314,13 +318,15 @@ impl MqdbAgent {
             broker.ready_receiver(),
             None,
         );
-        let feed_tasks = self.spawn_feed_publishers(
-            feeds,
-            bind_addr,
-            service_username.as_ref(),
-            service_password.as_ref(),
-            &broker.ready_receiver(),
-        );
+        let presence_task = presence_rx.map(|rx| {
+            self.spawn_presence_task(
+                bind_addr,
+                service_username.clone(),
+                service_password.clone(),
+                rx,
+                broker.ready_receiver(),
+            )
+        });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
             #[cfg(feature = "http-api")]
             {
@@ -346,8 +352,8 @@ impl MqdbAgent {
         let _ = self.shutdown_tx.send(());
         let _ = handler_task.await;
         let _ = event_task.await;
-        for feed in feed_tasks.into_iter().flatten() {
-            let _ = feed.await;
+        if let Some(presence) = presence_task {
+            let _ = presence.await;
         }
         if let Some(http) = http_task {
             let _ = http.await;
@@ -378,7 +384,7 @@ impl MqdbAgent {
             self.build_broker_config().await?;
 
         self.apply_transport_config(&mut config);
-        let feeds = self.apply_event_handlers(&mut config);
+        let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
@@ -392,9 +398,13 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                sparkplug_aware: self.sparkplug_aware,
             },
         )
         .await?;
+        if let Some(certificates) = &certificates {
+            certificates.attach(broker.router());
+        }
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
@@ -421,13 +431,15 @@ impl MqdbAgent {
             broker.ready_receiver(),
             Some(publisher_ready_tx),
         );
-        let feed_tasks = self.spawn_feed_publishers(
-            feeds,
-            bind_addr,
-            service_username.as_ref(),
-            service_password.as_ref(),
-            &broker.ready_receiver(),
-        );
+        let presence_task = presence_rx.map(|rx| {
+            self.spawn_presence_task(
+                bind_addr,
+                service_username.clone(),
+                service_password.clone(),
+                rx,
+                broker.ready_receiver(),
+            )
+        });
         let http_task: Option<tokio::task::JoinHandle<()>> = {
             #[cfg(feature = "http-api")]
             {
@@ -468,8 +480,8 @@ impl MqdbAgent {
             let _ = shutdown_tx.send(());
             let _ = handler_task.await;
             let _ = event_task.await;
-            for feed in feed_tasks.into_iter().flatten() {
-                let _ = feed.await;
+            if let Some(presence) = presence_task {
+                let _ = presence.await;
             }
             if let Some(http) = http_task {
                 let _ = http.await;

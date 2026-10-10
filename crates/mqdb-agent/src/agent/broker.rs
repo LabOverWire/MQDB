@@ -6,9 +6,7 @@ use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION
 use crate::presence::{
     PRESENCE_CHANNEL_CAPACITY, PRESENCE_TOPIC_PREFIX, PresenceEvent, PresenceEventHandler,
 };
-use crate::sparkplug::{
-    CERTIFICATE_CHANNEL_CAPACITY, CERTIFICATES_PREFIX, Certificate, CertificateEventHandler,
-};
+use crate::sparkplug::{CERTIFICATES_PREFIX, CertificateStore};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
 use mqtt5::broker::config::{
@@ -26,14 +24,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::info;
 
-pub(super) struct BrokerFeeds {
-    pub(super) presence: Option<flume::Receiver<PresenceEvent>>,
-    pub(super) certificates: Option<flume::Receiver<Certificate>>,
+pub(super) struct AuthProviderConfig<'a> {
+    pub needs_composite: bool,
+    pub service_username: Option<&'a String>,
+    pub service_password: Option<&'a String>,
+    pub password_file: Option<&'a std::path::Path>,
+    pub acl_file: Option<&'a std::path::Path>,
+    pub admin_users: &'a HashSet<String>,
+    pub allow_anonymous: bool,
+    pub scoped_events: bool,
+    pub sparkplug_aware: bool,
 }
 
 struct AgentEventHandler {
     presence: Option<PresenceEventHandler>,
-    certificates: Option<CertificateEventHandler>,
+    certificates: Option<Arc<CertificateStore>>,
 }
 
 impl BrokerEventHandler for AgentEventHandler {
@@ -65,22 +70,11 @@ impl BrokerEventHandler for AgentEventHandler {
     ) -> Pin<Box<dyn Future<Output = PublishAction> + Send + 'a>> {
         Box::pin(async move {
             if let Some(certificates) = &self.certificates {
-                certificates.observe(&event.topic, &event.payload);
+                certificates.observe(&event.topic, &event.payload).await;
             }
             PublishAction::Continue
         })
     }
-}
-
-pub(super) struct AuthProviderConfig<'a> {
-    pub needs_composite: bool,
-    pub service_username: Option<&'a String>,
-    pub service_password: Option<&'a String>,
-    pub password_file: Option<&'a std::path::Path>,
-    pub acl_file: Option<&'a std::path::Path>,
-    pub admin_users: &'a HashSet<String>,
-    pub allow_anonymous: bool,
-    pub scoped_events: bool,
 }
 
 impl MqdbAgent {
@@ -179,31 +173,31 @@ impl MqdbAgent {
         ))
     }
 
-    pub(super) fn apply_event_handlers(&self, config: &mut BrokerConfig) -> BrokerFeeds {
-        let (presence_handler, presence) = if self.presence {
+    pub(super) fn apply_event_handlers(
+        &self,
+        config: &mut BrokerConfig,
+    ) -> (
+        Option<flume::Receiver<PresenceEvent>>,
+        Option<Arc<CertificateStore>>,
+    ) {
+        let (presence, presence_rx) = if self.presence {
             let (sender, receiver) = flume::bounded(PRESENCE_CHANNEL_CAPACITY);
             info!("presence feed enabled on {PRESENCE_TOPIC_PREFIX}<client_id>");
             (Some(PresenceEventHandler::new(sender)), Some(receiver))
         } else {
             (None, None)
         };
-        let (certificate_handler, certificates) = if self.sparkplug_aware {
-            let (sender, receiver) = flume::bounded(CERTIFICATE_CHANNEL_CAPACITY);
+        let certificates = self.sparkplug_aware.then(|| {
             info!("Sparkplug aware: storing birth certificates on {CERTIFICATES_PREFIX}");
-            (Some(CertificateEventHandler::new(sender)), Some(receiver))
-        } else {
-            (None, None)
-        };
-        if presence_handler.is_some() || certificate_handler.is_some() {
+            Arc::new(CertificateStore::new())
+        });
+        if presence.is_some() || certificates.is_some() {
             config.event_handler = Some(Arc::new(AgentEventHandler {
-                presence: presence_handler,
-                certificates: certificate_handler,
+                presence,
+                certificates: certificates.clone(),
             }));
         }
-        BrokerFeeds {
-            presence,
-            certificates,
-        }
+        (presence_rx, certificates)
     }
 
     pub(super) fn apply_transport_config(&self, config: &mut BrokerConfig) {
@@ -283,7 +277,8 @@ impl MqdbAgent {
             TopicProtectionAuthProvider::new(current_provider, config.admin_users.clone())
                 .with_internal_service_username(config.service_username.cloned())
                 .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty())
-                .with_scoped_events(config.scoped_events);
+                .with_scoped_events(config.scoped_events)
+                .with_sparkplug_aware(config.sparkplug_aware);
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if config.admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");
