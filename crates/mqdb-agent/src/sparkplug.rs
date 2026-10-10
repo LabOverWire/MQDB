@@ -88,7 +88,8 @@ impl CertificateStore {
     }
 
     pub async fn observe(&self, topic: &str, payload: &[u8]) {
-        let Some(birth) = parse_birth(topic) else {
+        let (Some(birth), Some(certificate)) = (parse_birth(topic), certificate_topic(topic))
+        else {
             return;
         };
         if payload.is_empty() {
@@ -113,10 +114,7 @@ impl CertificateStore {
             }
         }
         router
-            .route_message(
-                &retained(format!("{CERTIFICATES_PREFIX}{topic}"), payload.to_vec()),
-                None,
-            )
+            .route_message(&retained(certificate, payload.to_vec()), None)
             .await;
     }
 }

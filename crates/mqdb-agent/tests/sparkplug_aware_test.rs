@@ -22,9 +22,22 @@ async fn start_agent(port: u16, sparkplug_aware: bool) -> (TempDir, tokio::task:
         .with_bind_address(addr)
         .with_anonymous(true)
         .with_sparkplug_aware(sparkplug_aware);
-    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
-    let _ = ready_rx.changed().await;
+    let (handle, ready_rx, _shutdown) = agent.start().await.unwrap();
+    wait_until_ready(ready_rx).await;
     (tmp, handle)
+}
+
+async fn wait_until_ready(mut ready_rx: tokio::sync::watch::Receiver<bool>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !*ready_rx.borrow() {
+            ready_rx
+                .changed()
+                .await
+                .expect("the agent stopped before it became ready");
+        }
+    })
+    .await
+    .expect("agent did not become ready");
 }
 
 async fn connect(port: u16, client_id: &str) -> MqttClient {
@@ -205,9 +218,13 @@ async fn clients_cannot_forge_certificates() {
         retain: true,
         ..Default::default()
     };
-    let _ = attacker
+    let forged = attacker
         .publish_with_options(NODE_BIRTH_TOPIC, b"forged".to_vec(), options)
         .await;
+    assert!(
+        forged.is_err(),
+        "the broker must refuse a client publish to the certificate namespace"
+    );
 
     let edge = connect(port, "edge-2").await;
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-2", b"real").await;
@@ -274,6 +291,7 @@ async fn the_certificate_namespace_stays_open_when_the_feature_is_off() {
     let (_tmp, agent_handle) = start_agent(port, false).await;
 
     let bridge = connect(port, "external-aware-bridge").await;
+    publish_birth(&bridge, "spBv1.0/plant/NBIRTH/edge-2", b"unstored-birth").await;
     let options = PublishOptions {
         qos: mqtt5::QoS::AtLeastOnce,
         retain: true,
@@ -290,6 +308,12 @@ async fn the_certificate_namespace_stays_open_when_the_feature_is_off() {
             .iter()
             .any(|(topic, payload, _)| topic == NODE_BIRTH_TOPIC && payload == b"from-a-bridge"),
         "without --sparkplug-aware, $sparkplug/ must behave like any other topic"
+    );
+    assert!(
+        received
+            .iter()
+            .all(|(topic, _, _)| topic == NODE_BIRTH_TOPIC),
+        "without --sparkplug-aware, births must not be stored; the birth was published first on the same connection"
     );
 
     host.disconnect().await.unwrap();
@@ -354,14 +378,8 @@ async fn a_restrictive_acl_does_not_stop_certificates() {
         .with_password_file(password_file)
         .with_acl_file(acl_file)
         .with_sparkplug_aware(true);
-    let (agent_handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !*ready_rx.borrow() {
-            ready_rx.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("agent did not become ready");
+    let (agent_handle, ready_rx, _shutdown) = agent.start().await.unwrap();
+    wait_until_ready(ready_rx).await;
 
     let edge = edge_account.connect(port).await;
     publish_birth(&edge, "spBv1.0/plant/NBIRTH/edge-1", b"acl-birth").await;

@@ -13,7 +13,13 @@ With `--sparkplug-aware`, the agent stores the latest NBIRTH and DBIRTH from eac
 | `spBv1.0/<group>/NBIRTH/<edge>` | `$sparkplug/certificates/spBv1.0/<group>/NBIRTH/<edge>` |
 | `spBv1.0/<group>/DBIRTH/<edge>/<device>` | `$sparkplug/certificates/spBv1.0/<group>/DBIRTH/<edge>/<device>` |
 
-The broker writes certificates itself; while the feature is on, no client (admins included) may publish to `$sparkplug/...`. A new NBIRTH clears that edge's stored DBIRTH certificates, so only devices in the latest birth sequence keep one. Agent mode only (cluster mode: #172).
+The broker writes certificates itself; while the feature is on, no client (admins included) may publish to `$sparkplug/...`. Agent mode only (cluster mode: #172).
+
+A new NBIRTH clears that edge's stored DBIRTH certificates, so only devices in the latest birth sequence keep one. Each clear is the standard MQTT retained delete: an empty retained message, which live subscribers to `$sparkplug/certificates/#` also receive. A zero-length message on a DBIRTH certificate topic means "this device's certificate was removed", not a birth with no metrics.
+
+Limitations:
+- A DBIRTH from an edge's previous connection that is handled after its new NBIRTH (a reconnect that takes over a live session) is stored and survives. Telling the two apart would need the `bdSeq` metric from the protobuf payload.
+- Certificates are ordinary retained messages and stay stored when the agent restarts without `--sparkplug-aware`. Clients can then overwrite them like any topic. Clear one with an empty retained publish: `mosquitto_pub -V mqttv5 -u e2e -P e2epw -r -n -t '$sparkplug/certificates/spBv1.0/<group>/NBIRTH/<edge>'`.
 
 Use MQTT 5 clients (`-V mqttv5`). MQTT 3.1.1 subscribers get MQTT 5 properties in retained payloads until LabOverWire/mqtt-lib#213 is fixed.
 

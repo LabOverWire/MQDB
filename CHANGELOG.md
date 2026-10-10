@@ -10,7 +10,7 @@ Each entry lists the date and the crate versions that were released.
 
 - **Sparkplug Aware MQTT server, agent mode** (`--sparkplug-aware`, `MQDB_SPARKPLUG_AWARE`, off by default). The agent stores the latest NBIRTH and DBIRTH from each Sparkplug edge node and device. It republishes them, retained at QoS 1, on `$sparkplug/certificates/spBv1.0/<group>/NBIRTH/<edge>` and `.../DBIRTH/<edge>/<device>`, as the Sparkplug 3.0 "Aware" profile requires.
   - The broker stores each certificate itself, in order, before the birth is delivered. No internal client or queue is involved, so an ACL cannot block it.
-  - A new NBIRTH clears that edge's stored DBIRTH certificates, so devices missing from the latest birth sequence lose theirs.
+  - A new NBIRTH clears that edge's stored DBIRTH certificates, so devices missing from the latest birth sequence lose theirs. The clear is the standard MQTT retained delete, so live certificate subscribers receive a zero-length message on that topic.
   - Births are still delivered as published. Data, death and STATE messages are not stored.
   - The optional rewrite of NDEATH timestamps is not implemented.
 - **While `--sparkplug-aware` is on, no client may publish to `$sparkplug/...`**, admins and the internal service included, so certificates cannot be forged. With the flag off, `$sparkplug/` behaves like any other topic.
@@ -18,7 +18,8 @@ Each entry lists the date and the crate versions that were released.
 ### Known limitations
 
 - A QoS 2 birth is stored when the broker receives it, before the QoS 2 handshake completes. Sparkplug requires births at QoS 0, so only non-compliant edges are affected.
-
+- A DBIRTH from an edge's previous connection that is handled after its new NBIRTH survives the clear. Telling them apart would need the `bdSeq` metric from the protobuf payload.
+- Certificates stay stored when the agent restarts without `--sparkplug-aware`, and clients can then overwrite them like any topic. Clear one with an empty retained publish.
 - Cluster mode does not offer `--sparkplug-aware` yet (#172). Retained messages in cluster mode are not kept consistent across nodes: after an update, other nodes can keep serving the old value, and a node that fetched a retained message from another node can deliver it without the retain flag. Certificates would inherit that.
 - MQTT 3.1.1 subscribers receive retained messages, certificates included, with MQTT 5 properties in the payload until mqtt5 fixes LabOverWire/mqtt-lib#213. MQTT 5 subscribers are not affected.
 
