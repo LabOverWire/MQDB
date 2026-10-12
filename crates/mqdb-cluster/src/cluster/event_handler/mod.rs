@@ -7,13 +7,15 @@ mod routing;
 use super::db_handler::DbRequestHandler;
 use super::node_controller::NodeController;
 use super::transport::{ClusterMessage, ClusterTransport};
-use super::{ForwardTarget, LwtPublisher, NodeId, TopicSubscriptionBroadcast, WildcardBroadcast};
+use super::{
+    ForwardTarget, LwtPublisher, NodeId, RetainedEchoes, TopicSubscriptionBroadcast,
+    WildcardBroadcast,
+};
 use mqdb_vault::VaultKeyStore;
 use mqtt5::QoS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -21,12 +23,10 @@ static RETAINED_SET_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RETAINED_SET_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static RETAINED_SET_PROCESSED: AtomicU64 = AtomicU64::new(0);
 
-const RETAINED_SYNC_TTL: Duration = Duration::from_secs(5);
-
 pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     node_id: NodeId,
     controller: Arc<RwLock<NodeController<T>>>,
-    synced_retained_topics: Arc<RwLock<HashMap<String, Instant>>>,
+    retained_echoes: Arc<RetainedEchoes>,
     db_handler: DbRequestHandler,
     vault_key_store: Arc<VaultKeyStore>,
     presence: bool,
@@ -38,7 +38,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         Self {
             node_id,
             controller,
-            synced_retained_topics: Arc::new(RwLock::new(HashMap::new())),
+            retained_echoes: Arc::new(RetainedEchoes::new()),
             db_handler: DbRequestHandler::new(node_id),
             vault_key_store: Arc::new(VaultKeyStore::new()),
             presence: false,
@@ -78,8 +78,9 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     #[must_use]
-    pub fn synced_retained_topics(&self) -> Arc<RwLock<HashMap<String, Instant>>> {
-        Arc::clone(&self.synced_retained_topics)
+    pub fn with_retained_echoes(mut self, echoes: Arc<RetainedEchoes>) -> Self {
+        self.retained_echoes = echoes;
+        self
     }
 }
 
@@ -229,16 +230,10 @@ async fn collect_pending_retained(
 
 async fn deliver_retained_messages<T: ClusterTransport>(
     transport: &T,
-    synced_topics: &RwLock<HashMap<String, Instant>>,
     retained: Vec<super::retained_store::RetainedMessage>,
 ) {
-    let mut synced = synced_topics.write().await;
     for msg in retained {
         let topic = msg.topic_str().to_string();
-        if synced.contains_key(&topic) {
-            continue;
-        }
-        synced.insert(topic.clone(), Instant::now());
         debug!(
             topic,
             qos = msg.qos,
@@ -246,7 +241,7 @@ async fn deliver_retained_messages<T: ClusterTransport>(
             "delivering retained message to subscriber"
         );
         transport
-            .queue_local_publish_retained(topic, msg.payload.clone(), msg.qos)
+            .queue_local_publish_retained(topic, msg.payload, msg.qos)
             .await;
     }
 }

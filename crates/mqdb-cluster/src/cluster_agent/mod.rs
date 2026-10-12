@@ -13,7 +13,7 @@ pub use transport::ClusterTransportKind;
 use crate::cluster::raft::RaftCoordinator;
 use crate::cluster::{
     DedicatedExecutor, InboundMessage, NodeController, NodeId, PartitionMap, ProcessingBatch,
-    RaftAdminCommand, RaftEvent, RaftStatus,
+    RaftAdminCommand, RaftEvent, RaftStatus, RetainedEchoes,
 };
 use mqdb_core::config::DurabilityMode;
 use mqdb_vault::VaultKeyStore;
@@ -28,7 +28,7 @@ const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
 const UNIQUE_RECONCILE_INTERVAL_SECS: u64 = 10;
 const RETAINED_SYNC_CLEANUP_INTERVAL_SECS: u64 = 30;
 const MESH_CHECK_INTERVAL_SECS: u64 = 60;
-const RETAINED_SYNC_TTL_SECS: u64 = 5;
+const RETAINED_ECHO_MAX_AGE_SECS: u64 = 5;
 
 const RAFT_CHANNEL_CAPACITY: usize = 4096;
 const MAIN_QUEUE_CAPACITY: usize = 4096;
@@ -85,6 +85,12 @@ struct MessageProcessorChannels {
     transport_inbox_rx: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
     tx_batch: flume::Sender<ProcessingBatch>,
+}
+
+struct RunningBroker {
+    handle: tokio::task::JoinHandle<()>,
+    router: Arc<mqtt5::broker::router::MessageRouter>,
+    bridge_manager: Option<Arc<mqtt5::broker::bridge::BridgeManager>>,
 }
 
 #[derive(Debug)]
@@ -169,6 +175,7 @@ pub struct ClusteredAgent {
     ownership: Arc<mqdb_core::types::OwnershipConfig>,
     scope_config: Arc<mqdb_core::types::ScopeConfig>,
     presence: bool,
+    retained_echoes: Arc<RetainedEchoes>,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
     vault_key_store: Arc<VaultKeyStore>,
     license_expires_at: Option<u64>,

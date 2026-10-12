@@ -46,7 +46,6 @@ use mqdb_vault::VaultKeyStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::time::Instant;
 use tokio::sync::oneshot;
 
 use super::SessionData;
@@ -453,7 +452,6 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     pub(super) draining: bool,
     pub(super) query_coordinator: QueryCoordinator,
-    pub(super) synced_retained_topics: Option<Arc<tokio::sync::RwLock<HashMap<String, Instant>>>>,
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
     pub(super) pending_scatter_requests: HashMap<u64, PendingScatterRequest>,
     pub(super) pending_vault_decrypts: HashMap<u64, PendingVaultDecrypt>,
@@ -529,7 +527,6 @@ impl<T: ClusterTransport> NodeController<T> {
             outgoing_snapshots: HashMap::new(),
             draining: false,
             query_coordinator: QueryCoordinator::new(node_id),
-            synced_retained_topics: None,
             pending_retained_queries: HashMap::new(),
             pending_scatter_requests: HashMap::new(),
             pending_vault_decrypts: HashMap::new(),
@@ -572,13 +569,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .alive_nodes()
             .into_iter()
             .any(|n| n != self.node_id)
-    }
-
-    pub fn set_synced_retained_topics(
-        &mut self,
-        topics: Arc<tokio::sync::RwLock<HashMap<String, Instant>>>,
-    ) {
-        self.synced_retained_topics = Some(topics);
     }
 
     #[must_use]

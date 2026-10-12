@@ -29,11 +29,18 @@ struct PeerConnection {
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalPublishKind {
+    Plain,
+    Retained,
+    RetainedRefresh,
+}
+
 pub struct LocalPublishRequest {
     pub topic: String,
     pub payload: Vec<u8>,
     pub qos: u8,
-    pub retain: bool,
+    pub kind: LocalPublishKind,
     pub user_properties: Vec<(String, String)>,
 }
 
@@ -464,7 +471,7 @@ impl ClusterTransport for QuicDirectTransport {
             topic: topic.clone(),
             payload,
             qos,
-            retain: false,
+            kind: LocalPublishKind::Plain,
             user_properties: Vec::new(),
         }) {
             warn!(topic, "local_publish queue full, dropping message: {e}");
@@ -486,7 +493,7 @@ impl ClusterTransport for QuicDirectTransport {
             topic: topic.clone(),
             payload,
             qos,
-            retain: false,
+            kind: LocalPublishKind::Plain,
             user_properties,
         }) {
             warn!(topic, "local_publish queue full, dropping message: {e}");
@@ -498,12 +505,27 @@ impl ClusterTransport for QuicDirectTransport {
             topic: topic.clone(),
             payload,
             qos,
-            retain: true,
+            kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
         }) {
             warn!(
                 topic,
                 "local_publish queue full, dropping retained message: {e}"
+            );
+        }
+    }
+
+    async fn queue_retained_refresh(&self, topic: String) {
+        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
+            topic: topic.clone(),
+            payload: Vec::new(),
+            qos: 0,
+            kind: LocalPublishKind::RetainedRefresh,
+            user_properties: Vec::new(),
+        }) {
+            warn!(
+                topic,
+                "local_publish queue full, dropping retained refresh: {e}"
             );
         }
     }

@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{AdminRequest, ClusterTransportKind, ClusteredAgent};
+use super::{AdminRequest, ClusterTransportKind, ClusteredAgent, RunningBroker};
 use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
 use mqdb_agent::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::QoS;
@@ -17,7 +17,7 @@ use mqtt5::transport::StreamStrategy;
 use mqtt5::types::Message;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use mqdb_agent::broker_defaults::{
     BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS,
@@ -133,7 +133,8 @@ impl ClusteredAgent {
                 .with_ownership(ownership)
                 .with_scope_config(Arc::clone(&self.scope_config))
                 .with_vault_key_store(Arc::clone(&self.vault_key_store))
-                .with_presence(self.presence),
+                .with_presence(self.presence)
+                .with_retained_echoes(Arc::clone(&self.retained_echoes)),
         );
         self.configure_broker_with_auth(
             event_handler,
@@ -359,43 +360,40 @@ impl ClusteredAgent {
         mut broker: MqttBroker,
         bridge_configs: &[BridgeConfig],
         use_external_bridge_manager: bool,
-    ) -> (tokio::task::JoinHandle<()>, Option<Arc<BridgeManager>>) {
+    ) -> RunningBroker {
         let mut ready_rx = broker.ready_receiver();
+        let router = broker.router();
 
-        let router = if use_external_bridge_manager {
-            Some(broker.router())
-        } else {
-            None
-        };
-
-        let broker_handle = tokio::spawn(async move {
-            let _ = broker.run().await;
+        let handle = tokio::spawn(async move {
+            if let Err(e) = broker.run().await {
+                error!(error = %e, "broker stopped with an error");
+            }
         });
 
         info!("waiting for broker ready signal");
         let _ = ready_rx.changed().await;
         info!("broker ready signal received");
 
-        let bridge_manager = if let (Some(router), Some(executor)) = (router, &self.bridge_executor)
-        {
-            let manager = Arc::new(BridgeManager::with_runtime(
-                router.clone(),
-                executor.handle(),
-            ));
-            router.set_bridge_manager(manager.clone()).await;
-            for config in bridge_configs {
-                if let Err(e) = manager.add_bridge(config.clone()) {
-                    warn!(bridge = %config.name, error = %e, "failed to add bridge");
+        let bridge_manager =
+            if use_external_bridge_manager && let Some(executor) = &self.bridge_executor {
+                let manager = Arc::new(BridgeManager::with_runtime(
+                    router.clone(),
+                    executor.handle(),
+                ));
+                router.set_bridge_manager(manager.clone()).await;
+                for config in bridge_configs {
+                    if let Err(e) = manager.add_bridge(config.clone()) {
+                        warn!(bridge = %config.name, error = %e, "failed to add bridge");
+                    }
                 }
-            }
-            info!(
-                bridges = bridge_configs.len(),
-                "started bridges on dedicated executor"
-            );
-            Some(manager)
-        } else {
-            None
-        };
+                info!(
+                    bridges = bridge_configs.len(),
+                    "started bridges on dedicated executor"
+                );
+                Some(manager)
+            } else {
+                None
+            };
 
         info!(
             node_id = self.node_id.get(),
@@ -405,7 +403,11 @@ impl ClusteredAgent {
             "cluster node started"
         );
 
-        (broker_handle, bridge_manager)
+        RunningBroker {
+            handle,
+            router,
+            bridge_manager,
+        }
     }
 
     pub(super) async fn connect_transport(
@@ -541,25 +543,6 @@ impl ClusteredAgent {
         .map_err(|e| format!("failed to connect transport to local broker: {e}"))?;
         info!("transport connected to local broker");
         Ok(mqtt_transport.client().clone())
-    }
-
-    pub(super) async fn initialize_event_handler(
-        &self,
-    ) -> Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::time::Instant>>> {
-        let event_handler = Arc::new(
-            ClusterEventHandler::new(self.node_id, self.controller.clone())
-                .with_ownership(Arc::clone(&self.ownership))
-                .with_scope_config(Arc::clone(&self.scope_config))
-                .with_vault_key_store(Arc::clone(&self.vault_key_store))
-                .with_presence(self.presence),
-        );
-        let synced_retained_topics = event_handler.synced_retained_topics();
-
-        {
-            let mut ctrl = self.controller.write().await;
-            ctrl.set_synced_retained_topics(synced_retained_topics.clone());
-        }
-        synced_retained_topics
     }
 
     pub(super) async fn take_local_publish_receiver(

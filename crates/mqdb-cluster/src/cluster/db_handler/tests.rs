@@ -33,6 +33,7 @@ fn create_test_controller(
 }
 
 type RetainedPublishes = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+type RetainedRefreshes = Arc<Mutex<Vec<String>>>;
 type SentMessages = Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>;
 type PresenceHarness = (
     crate::cluster::event_handler::ClusterEventHandler<MockTransport>,
@@ -46,6 +47,7 @@ struct MockTransport {
     inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
     retained_publishes: RetainedPublishes,
+    retained_refreshes: RetainedRefreshes,
 }
 
 impl MockTransport {
@@ -55,6 +57,7 @@ impl MockTransport {
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             outbox: Arc::new(Mutex::new(Vec::new())),
             retained_publishes: Arc::new(Mutex::new(Vec::new())),
+            retained_refreshes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -119,6 +122,10 @@ impl ClusterTransport for MockTransport {
             .lock()
             .unwrap()
             .push((topic, payload));
+    }
+
+    async fn queue_retained_refresh(&self, topic: String) {
+        self.retained_refreshes.lock().unwrap().push(topic);
     }
 }
 
@@ -2399,6 +2406,7 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
         inbox: Arc::new(Mutex::new(VecDeque::new())),
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -2488,6 +2496,7 @@ async fn cluster_forwarded_read_graded_against_grant_on_primary() {
         inbox: Arc::new(Mutex::new(VecDeque::new())),
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -3159,5 +3168,117 @@ async fn disconnect_of_a_taken_over_connection_keeps_the_new_one_routable() {
         ctrl.stores().topics.get_client_topics("tablet").len(),
         1,
         "the displaced connection's disconnect must not clear the live session's subscriptions"
+    );
+}
+
+type RetainedSyncHarness = (
+    Arc<mqtt5::broker::router::MessageRouter>,
+    crate::cluster::LocalRetainedWriter,
+    Arc<crate::cluster::RetainedStore>,
+    RetainedRefreshes,
+    Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
+);
+
+fn retained_sync_harness() -> RetainedSyncHarness {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let refreshes = Arc::clone(&transport.retained_refreshes);
+    let ctrl = create_test_controller(node1, transport);
+    let store = Arc::clone(&ctrl.stores().retained);
+    let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
+    let echoes = Arc::new(crate::cluster::RetainedEchoes::new());
+    let handler = crate::cluster::event_handler::ClusterEventHandler::new(node1, Arc::clone(&ctrl))
+        .with_retained_echoes(Arc::clone(&echoes));
+    let router =
+        Arc::new(mqtt5::broker::router::MessageRouter::new().with_event_handler(Arc::new(handler)));
+    let writer =
+        crate::cluster::LocalRetainedWriter::new(Arc::clone(&router), Arc::clone(&store), echoes);
+    (router, writer, store, refreshes, ctrl)
+}
+
+fn retained_write(
+    topic: &str,
+    operation: super::super::protocol::Operation,
+    payload: &[u8],
+) -> super::super::protocol::ReplicationWrite {
+    let message = super::super::RetainedMessage::create(topic, 1, payload, 0);
+    super::super::protocol::ReplicationWrite::new(
+        super::super::topic_partition(topic),
+        operation,
+        Epoch::ZERO,
+        0,
+        super::super::entity::RETAINED.to_string(),
+        topic.to_string(),
+        message.to_be_bytes(),
+    )
+}
+
+#[tokio::test]
+async fn a_replicated_set_and_clear_written_to_the_broker_are_not_replicated_again() {
+    let (router, writer, store, refreshes, _ctrl) = retained_sync_harness();
+
+    store.set("plant/state", 1, b"on", 0);
+    writer.refresh("plant/state").await;
+    assert_eq!(
+        router.get_retained_messages("plant/state").await.len(),
+        1,
+        "the refresh must write the stored value into the broker"
+    );
+
+    store.set("plant/state", 1, b"", 0);
+    writer.refresh("plant/state").await;
+    assert!(
+        router.get_retained_messages("plant/state").await.is_empty(),
+        "the refresh must clear the broker copy"
+    );
+
+    assert!(
+        refreshes.lock().unwrap().is_empty(),
+        "the broker's report of a sync must be recognised as its echo, not replicated as a new change"
+    );
+}
+
+#[tokio::test]
+async fn a_client_retained_change_is_replicated_and_refreshed() {
+    let (router, _writer, store, refreshes, _ctrl) = retained_sync_harness();
+
+    let publish = mqtt5::packet::publish::PublishPacket::new(
+        "plant/state",
+        b"off".to_vec(),
+        mqtt5::QoS::AtLeastOnce,
+    )
+    .with_retain(true);
+    router.route_message(&publish, None).await;
+
+    assert_eq!(
+        store.get("plant/state").map(|message| message.payload),
+        Some(b"off".to_vec()),
+        "a client change must reach the retained store"
+    );
+    assert_eq!(
+        *refreshes.lock().unwrap(),
+        vec!["plant/state".to_string()],
+        "a client change must queue a refresh so the broker follows the store"
+    );
+}
+
+#[tokio::test]
+async fn every_replicated_retained_write_refreshes_the_broker() {
+    use super::super::protocol::Operation;
+
+    let (_router, _writer, _store, refreshes, ctrl) = retained_sync_harness();
+    let ctrl = ctrl.read().await;
+
+    ctrl.sync_retained_to_broker(&retained_write("plant/state", Operation::Insert, b"on"))
+        .await;
+    ctrl.sync_retained_to_broker(&retained_write("plant/state", Operation::Delete, b""))
+        .await;
+    ctrl.sync_retained_to_broker(&retained_write("plant/state", Operation::Insert, b"off"))
+        .await;
+
+    assert_eq!(
+        *refreshes.lock().unwrap(),
+        vec!["plant/state".to_string(); 3],
+        "writes arriving in quick succession must each reach the broker"
     );
 }

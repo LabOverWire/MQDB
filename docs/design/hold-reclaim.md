@@ -160,7 +160,11 @@ Cluster (done): **do not** copy the LWT template. Two verified constraints shape
   `{_health,_admin,_sub,_resp}` (`PublishAction::Handled`), and a broker-injected
   `queue_local_publish` *does* re-enter that handler (on QUIC it publishes as
   `mqdb-admin-<node>`, which the `mqdb-forward-` bypass does not match). So `_presence`
-  must be added to that allow-list.
+  was added to that allow-list. Retained local publishes, presence included, now skip
+  the admin client and go straight into the broker's router, so they no longer re-enter
+  the handler. No internal publish reaches the allow-list entry any more; it now only
+  short-circuits publishes by the internal service account, the one identity topic
+  protection lets publish to `$DB/_presence/#`.
 - `TopicTrie::match_topic` returns nothing for any `$`-prefixed topic, so a
   `$DB/_presence/#` subscriber can never be resolved as a cross-node target. Cross-node
   delivery therefore **broadcasts** presence to every node, each publishing locally (the

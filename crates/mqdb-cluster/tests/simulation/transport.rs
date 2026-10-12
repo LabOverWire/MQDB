@@ -337,6 +337,7 @@ impl ClusterTransport for SimulatedTransport {
     async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
 
     async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+    async fn queue_retained_refresh(&self, _topic: String) {}
 }
 
 #[cfg(test)]

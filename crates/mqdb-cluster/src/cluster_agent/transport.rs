@@ -180,4 +180,13 @@ impl ClusterTransport for ClusterTransportKind {
             Self::Quic(t) => t.queue_local_publish_retained(topic, payload, qos).await,
         }
     }
+
+    async fn queue_retained_refresh(&self, topic: String) {
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(t) => t.queue_retained_refresh(topic).await,
+            Self::Quic(t) => t.queue_retained_refresh(topic).await,
+        }
+    }
 }

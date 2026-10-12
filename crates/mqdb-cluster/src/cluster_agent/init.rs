@@ -11,7 +11,7 @@ use crate::cluster::MqttTransport;
 use crate::cluster::raft::{RaftConfig, RaftCoordinator};
 use crate::cluster::{
     DedicatedExecutor, InboundMessage, MessageProcessor, NodeController, NodeId, PartitionMap,
-    QuicDirectTransport, RaftStatus, TransportConfig,
+    QuicDirectTransport, RaftStatus, RetainedEchoes, TransportConfig,
 };
 use mqdb_core::config::DurabilityMode;
 use mqdb_core::storage::{EncryptedBackend, FjallBackend};
@@ -247,6 +247,7 @@ impl ClusteredAgent {
             ownership: ownership_arc,
             scope_config: Arc::new(config.scope_config),
             presence: config.presence,
+            retained_echoes: Arc::new(RetainedEchoes::new()),
             auth_providers: None,
             vault_key_store,
             license_expires_at: config.license_expires_at,
@@ -323,8 +324,10 @@ impl ClusteredAgent {
         &mut self,
         service_username: Option<&String>,
         service_password: Option<&String>,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        let mut http_config = self.http_config.take()?;
+    ) {
+        let Some(mut http_config) = self.http_config.take() else {
+            return;
+        };
         let http_bind = http_config.bind_address;
         let http_shutdown_rx = self.shutdown_tx.subscribe();
 
@@ -358,7 +361,7 @@ impl ClusteredAgent {
         let http_svc_user = service_username.cloned();
         let http_svc_pass = service_password.cloned();
 
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             tokio::time::sleep(mqtt5::time::Duration::from_millis(300)).await;
 
             let connect_result = if let (Some(user), Some(pass)) = (http_svc_user, http_svc_pass) {
@@ -372,7 +375,7 @@ impl ClusteredAgent {
             };
 
             if let Err(e) = connect_result {
-                tracing::error!("Failed to connect HTTP OAuth MQTT client: {}", e);
+                tracing::error!("Failed to connect HTTP OAuth MQTT client: {e}");
                 return;
             }
 
@@ -380,8 +383,8 @@ impl ClusteredAgent {
             let server =
                 mqdb_agent::http::HttpServer::new(http_config, http_mqtt_client, http_shutdown_rx);
             if let Err(e) = server.run().await {
-                tracing::error!("HTTP server error: {}", e);
+                tracing::error!("HTTP server error: {e}");
             }
-        }))
+        });
     }
 }

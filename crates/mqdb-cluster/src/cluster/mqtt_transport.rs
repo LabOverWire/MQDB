@@ -467,6 +467,13 @@ impl ClusterTransport for MqttTransport {
             .publish_with_options(&topic, payload, options)
             .await;
     }
+
+    async fn queue_retained_refresh(&self, topic: String) {
+        tracing::warn!(
+            topic,
+            "retained refresh is not supported on the MQTT bridge transport"
+        );
+    }
 }
 
 #[cfg(test)]
