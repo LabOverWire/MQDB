@@ -3,8 +3,11 @@
 
 use super::handlers::handle_message;
 use super::{MqdbAgent, connect_mqtt_client, resolve_connect_address};
+use mqtt5::QoS;
 use mqtt5::broker::auth::{AuthProvider, ComprehensiveAuthProvider};
+use mqtt5::broker::router::MessageRouter;
 use mqtt5::client::MqttClient;
+use mqtt5::packet::publish::PublishPacket;
 use mqtt5::time::Duration;
 use mqtt5::types::Message;
 use std::net::SocketAddr;
@@ -284,41 +287,12 @@ impl MqdbAgent {
 
     pub(super) fn spawn_presence_task(
         &self,
-        presence_addr: SocketAddr,
-        presence_service_username: Option<String>,
-        presence_service_password: Option<String>,
+        router: Arc<MessageRouter>,
         presence_rx: flume::Receiver<crate::presence::PresenceEvent>,
-        mut broker_ready_rx: watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         let mut presence_shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
-            if !wait_for_broker(
-                &mut broker_ready_rx,
-                &mut presence_shutdown_rx,
-                "presence publisher",
-            )
-            .await
-            {
-                return;
-            }
-
-            let client = MqttClient::new("mqdb-presence-publisher");
-            let addr = resolve_connect_address(presence_addr);
-
-            if let Err(e) = connect_mqtt_client(
-                &client,
-                "mqdb-presence-publisher",
-                &addr,
-                presence_service_username,
-                presence_service_password,
-            )
-            .await
-            {
-                error!("Failed to connect presence publisher: {e}");
-                return;
-            }
-
             loop {
                 tokio::select! {
                     presence = presence_rx.recv_async() => {
@@ -333,16 +307,9 @@ impl MqdbAgent {
                                 continue;
                             }
                         };
-                        let options = mqtt5::types::PublishOptions {
-                            retain: true,
-                            ..Default::default()
-                        };
-                        if let Err(e) = client
-                            .publish_with_options(&presence.topic(), payload, options)
-                            .await
-                        {
-                            warn!("Failed to publish presence: {e}");
-                        }
+                        let publish = PublishPacket::new(presence.topic(), payload, QoS::AtMostOnce)
+                            .with_retain(true);
+                        router.route_message(&publish, None).await;
                     }
                     _ = presence_shutdown_rx.recv() => {
                         debug!("Presence publisher shutting down");

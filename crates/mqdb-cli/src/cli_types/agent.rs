@@ -127,6 +127,20 @@ pub(crate) struct AgentStartFields {
     pub(crate) sparkplug_aware: bool,
     #[arg(
         long,
+        env = "MQDB_MAX_RETAINED_MESSAGES",
+        default_value = "0",
+        help = "Reject client retained publishes to new topics once this many retained messages are stored, counting the broker's own $SYS topics, presence and Sparkplug certificates (0 = no limit)"
+    )]
+    pub(crate) max_retained_messages: usize,
+    #[arg(
+        long,
+        env = "MQDB_MAX_RETAINED_MESSAGE_SIZE",
+        default_value = "0",
+        help = "Reject retained publishes whose payload exceeds this many bytes (0 = no limit)"
+    )]
+    pub(crate) max_retained_message_size: usize,
+    #[arg(
+        long,
         env = "MQDB_OTLP_ENDPOINT",
         help = "OTLP collector endpoint (enables OpenTelemetry tracing)"
     )]
@@ -269,6 +283,13 @@ pub(crate) struct ClusterStartFields {
         help = "Publish client connect/disconnect presence to $DB/_presence/{client_id} (retained, QoS 0) for subscribers such as an abandoned-hold janitor"
     )]
     pub(crate) presence: bool,
+    #[arg(
+        long,
+        env = "MQDB_MAX_RETAINED_MESSAGE_SIZE",
+        default_value = "0",
+        help = "Reject retained publishes whose payload exceeds this many bytes (0 = no limit)"
+    )]
+    pub(crate) max_retained_message_size: usize,
     #[arg(
         long,
         env = "MQDB_PASSPHRASE_FILE",

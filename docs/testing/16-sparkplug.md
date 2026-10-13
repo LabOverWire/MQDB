@@ -17,6 +17,8 @@ The broker writes certificates itself; while the feature is on, no client (admin
 
 A new NBIRTH clears that edge's stored DBIRTH certificates, so only devices in the latest birth sequence keep one. Each clear is the standard MQTT retained delete: an empty retained message, which live subscribers to `$sparkplug/certificates/#` also receive. A zero-length message on a DBIRTH certificate topic means "this device's certificate was removed", not a birth with no metrics.
 
+With `--max-retained-message-size`, a non-retained NBIRTH or DBIRTH larger than the limit is still delivered, but its certificate is cleared instead of stored, so certificate subscribers receive a zero-length message on that topic. A retained birth over the limit is refused before the broker sees it, and the stored certificate is left as it was.
+
 Limitations:
 - A DBIRTH from an edge's previous connection that is handled after its new NBIRTH (a reconnect that takes over a live session) is stored and survives. Telling the two apart would need the `bdSeq` metric from the protobuf payload.
 - Certificates are ordinary retained messages and stay stored when the agent restarts without `--sparkplug-aware`. Clients can then overwrite them like any topic. Clear one with an empty retained publish: `mosquitto_pub -V mqttv5 -u e2e -P e2epw -r -n -t '$sparkplug/certificates/spBv1.0/<group>/NBIRTH/<edge>'`.

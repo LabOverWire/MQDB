@@ -229,7 +229,7 @@ mod tests {
     fn internal_clients_are_recognized() {
         assert!(is_internal_client("mqdb-admin-1"));
         assert!(is_internal_client("mqdb-forward-2"));
-        assert!(is_internal_client("mqdb-presence-publisher"));
+        assert!(is_internal_client("mqdb-http-oauth"));
         assert!(!is_internal_client("seat-holder-7"));
         assert!(!is_internal_client("janitor"));
     }

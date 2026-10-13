@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-13 — mqdb-agent 0.8.36, mqdb-cluster 0.4.23, mqdb-cli 0.8.51
+
+### Added
+
+- **Retained message limits** (#174), both off (`0`) by default. A refused publish gets `Quota exceeded` at QoS 1 and 2, is dropped at QoS 0, and is neither stored nor delivered.
+  - `--max-retained-message-size` / `MQDB_MAX_RETAINED_MESSAGE_SIZE`, agent and cluster: the largest retained payload in bytes. Set the same value on every cluster node.
+  - `--max-retained-messages` / `MQDB_MAX_RETAINED_MESSAGES`, agent only: once this many retained messages are stored, retained publishes to new topics are refused. Replacing or clearing an existing topic is always accepted. The count includes the broker's own 15 `$SYS/broker/...` topics, presence and Sparkplug certificates. The agent logs a warning at startup when the limit is 15 or lower; a cluster node logs a warning when `MQDB_MAX_RETAINED_MESSAGES` is set to a non-zero value, and ignores it. Both are `warn` level, so they show only with `RUST_LOG=warn` or more verbose.
+  - Agent presence, and on the QUIC transport (the default) a cluster node's internal retained writes (presence, retained sync between nodes, retained delivery to new subscribers), go straight into the broker's router, so the limits never drop them.
+  - A non-retained Sparkplug birth larger than `--max-retained-message-size` is still delivered, but its certificate is cleared instead of stored. `CertificateStore::with_max_payload_size` sets the limit.
+
+### Changed
+
+- Agent presence is written straight into the broker's router instead of through the internal `mqdb-presence-publisher` client, so presence is always stored, even at the retained message limit.
+
+### Known limitations
+
+- Retained wills are not checked against either limit, because mqtt5 publishes wills without the check (LabOverWire/mqtt-lib#227).
+- Presence is not limited by `--max-retained-messages`: each client id keeps a retained presence topic, so with `--presence` the store can grow past the limit and leave no room for client retained topics.
+- Cluster mode has no count limit yet; this will be done with #172.
+
 ## 2026-10-11 — mqdb-cluster 0.4.22, mqdb-cli 0.8.50
 
 ### Fixed

@@ -192,6 +192,7 @@ impl ClusteredAgent {
             session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
+            max_retained_message_size: self.max_retained_message_size,
             wildcard_subscription_available: true,
             subscription_identifier_available: true,
             shared_subscription_available: true,

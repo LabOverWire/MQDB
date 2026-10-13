@@ -44,6 +44,7 @@ pub(crate) struct ClusterStartArgs {
     pub(crate) ownership: Option<String>,
     pub(crate) event_scope: Option<String>,
     pub(crate) presence: bool,
+    pub(crate) max_retained_message_size: usize,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
     pub(crate) license: Option<PathBuf>,
@@ -209,6 +210,14 @@ pub(crate) async fn cmd_cluster_start(
     }
     if args.presence {
         config = config.with_presence(true);
+    }
+    config = config.with_max_retained_message_size(args.max_retained_message_size);
+    if std::env::var("MQDB_MAX_RETAINED_MESSAGES")
+        .is_ok_and(|value| !matches!(value.trim(), "" | "0"))
+    {
+        tracing::warn!(
+            "MQDB_MAX_RETAINED_MESSAGES is ignored in cluster mode, only the retained message size limit applies"
+        );
     }
     if let Some(ref info) = license_info {
         config = config.with_license_expiry(info.expires_at);

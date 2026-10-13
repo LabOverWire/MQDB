@@ -1035,3 +1035,53 @@ pub(super) async fn clear_expired_session_subscriptions<T: ClusterTransport>(
         ctrl.write_or_forward(write).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::{RetainedEchoes, RetainedStore};
+    use mqtt5::broker::router::MessageRouter;
+
+    fn retained_request(topic: &str, payload: &[u8]) -> LocalPublishRequest {
+        LocalPublishRequest {
+            topic: topic.to_string(),
+            payload: payload.to_vec(),
+            qos: 1,
+            kind: LocalPublishKind::Retained,
+            user_properties: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_local_publish_is_written_to_the_router_without_the_admin_client() {
+        let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
+        let router = Arc::new(MessageRouter::new());
+        let retained_writer = LocalRetainedWriter::new(
+            Arc::clone(&router),
+            Arc::new(RetainedStore::new(NodeId::validated(1).unwrap())),
+            Arc::new(RetainedEchoes::new()),
+        );
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+        ClusteredAgent::dispatch_local_publish(
+            &admin_client,
+            &retained_writer,
+            &semaphore,
+            retained_request("$DB/_presence/c1", b"connect"),
+        )
+        .await;
+
+        let stored = router.get_retained_messages("$DB/_presence/c1").await;
+        assert_eq!(stored.len(), 1);
+        assert_eq!(&stored[0].payload[..], b"connect");
+
+        ClusteredAgent::dispatch_local_publish(
+            &admin_client,
+            &retained_writer,
+            &semaphore,
+            retained_request("$DB/_presence/c1", b""),
+        )
+        .await;
+        assert_eq!(router.retained_count().await, 0);
+    }
+}

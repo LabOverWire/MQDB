@@ -248,6 +248,7 @@ impl ClusteredAgent {
             scope_config: Arc::new(config.scope_config),
             presence: config.presence,
             retained_echoes: Arc::new(RetainedEchoes::new()),
+            max_retained_message_size: config.max_retained_message_size,
             auth_providers: None,
             vault_key_store,
             license_expires_at: config.license_expires_at,

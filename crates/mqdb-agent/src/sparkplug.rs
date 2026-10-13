@@ -73,12 +73,23 @@ fn retained(topic: String, payload: Vec<u8>) -> PublishPacket {
 #[derive(Default)]
 pub struct CertificateStore {
     router: OnceLock<Arc<MessageRouter>>,
+    max_payload_size: usize,
 }
 
 impl CertificateStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_max_payload_size(mut self, max_payload_size: usize) -> Self {
+        self.max_payload_size = max_payload_size;
+        self
+    }
+
+    fn fits(&self, payload: &[u8]) -> bool {
+        self.max_payload_size == 0 || payload.len() <= self.max_payload_size
     }
 
     pub fn attach(&self, router: Arc<MessageRouter>) {
@@ -112,6 +123,18 @@ impl CertificateStore {
                     .route_message(&retained(stale.topic_name, Vec::new()), None)
                     .await;
             }
+        }
+        if !self.fits(payload) {
+            warn!(
+                topic = %certificate,
+                size = payload.len(),
+                limit = self.max_payload_size,
+                "birth larger than the retained message size limit, certificate cleared"
+            );
+            router
+                .route_message(&retained(certificate, Vec::new()), None)
+                .await;
+            return;
         }
         router
             .route_message(&retained(certificate, payload.to_vec()), None)
@@ -186,6 +209,15 @@ mod tests {
         assert!(!is_reserved_topic("$sparkplugs/x"));
         assert!(!is_reserved_topic("spBv1.0/G1/NBIRTH/E1"));
         assert!(!is_reserved_topic("$SYS/broker"));
+    }
+
+    #[test]
+    fn certificate_size_limit_applies_only_when_set() {
+        let unlimited = CertificateStore::new();
+        assert!(unlimited.fits(&[0; 4096]));
+        let limited = CertificateStore::new().with_max_payload_size(16);
+        assert!(limited.fits(&[0; 16]));
+        assert!(!limited.fits(&[0; 17]));
     }
 
     #[test]

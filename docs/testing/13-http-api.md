@@ -678,6 +678,51 @@ mqdb agent start --db /tmp/dur-test --durability periodic --durability-ms 50 --p
 mqdb agent start --db /tmp/dur-test --durability none --passwd /tmp/passwd.txt
 ```
 
+### Retained Message Limits
+
+Both limits are off (`0`) by default. `--max-retained-message-size` (`MQDB_MAX_RETAINED_MESSAGE_SIZE`) applies to agent and cluster mode; `--max-retained-messages` (`MQDB_MAX_RETAINED_MESSAGES`) to agent mode only. A refused publish gets `Quota exceeded` at QoS 1 and 2 and is dropped silently at QoS 0; it is neither stored nor delivered.
+
+The count covers every retained message the broker holds: the broker's own `$SYS/broker/...` topics (15, the last 12 appearing about 10 s after start), presence and Sparkplug certificates included. The agent logs a warning at startup when the limit is 15 or lower (shown with `RUST_LOG=warn`). MQDB's own presence and certificates are always stored, even at the limit, so with `--presence` every client id adds a retained topic the limit does not stop. Replacing or clearing an existing retained topic is always accepted. A non-retained Sparkplug birth over the size limit is delivered, but its certificate is cleared rather than stored. Retained wills are not checked against either limit.
+
+```bash
+mqdb agent start --db /tmp/retained-limits --bind 127.0.0.1:1883 --passwd /tmp/passwd.txt \
+    --max-retained-messages 17 --max-retained-message-size 16
+
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/large -m 'seventeen-bytes!!'
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/small -m 'sixteen-bytes!!!'
+sleep 12
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/second -m 'two'
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/third -m 'three'
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/small -m 'replaced'
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/second -n
+mosquitto_pub -V mqttv5 -u e2e -P e2epw -q 1 -r -t limits/third -m 'three'
+mosquitto_sub -V mqttv5 -u e2e -P e2epw -t 'limits/#' -F '%t retain=%r %p' -W 2
+```
+
+Expected: the 17-byte publish prints `Warning: Publish 1 failed: Quota exceeded.` / `Retained message too large`. The first `limits/third` publish prints `Retained message limit exceeded` (15 `$SYS` topics, `limits/small` and `limits/second` fill the 17). Replacing `limits/small` and clearing `limits/second` succeed, and the second `limits/third` publish then succeeds. The subscriber gets, in any order:
+```
+limits/third retain=1 three
+limits/small retain=1 replaced
+```
+
+Cluster: start a 5-node cluster with the size limit and presence on every node, then publish from each node.
+
+```bash
+MQDB_MAX_RETAINED_MESSAGE_SIZE=64 MQDB_PRESENCE=true \
+    mqdb dev start-cluster --nodes 5 --clean --passwd /tmp/passwd.txt --license /path/to/license.key
+
+for p in 1883 1884 1885 1886 1887; do
+  mosquitto_pub -V mqttv5 -p $p -u e2e -P e2epw -q 1 -r -t limits/big/$p -m "$(printf 'x%.0s' $(seq 1 65))"
+  mosquitto_pub -V mqttv5 -p $p -u e2e -P e2epw -q 1 -r -t limits/fit/$p -m "$(printf 'y%.0s' $(seq 1 64))"
+done
+mosquitto_sub -V mqttv5 -p 1884 -u e2e -P e2epw -i presence-probe -t idle/x -W 2
+for p in 1883 1884 1885 1886 1887; do
+  mosquitto_sub -V mqttv5 -p $p -u e2e -P e2epw -t 'limits/#' -t '$DB/_presence/presence-probe' -F '%t len=%l' -W 4
+done
+```
+
+Expected: every 65-byte publish prints `Quota exceeded` / `Retained message too large`; no node returns a `limits/big/...` topic; every node returns the five `limits/fit/...` topics and the `$DB/_presence/presence-probe` disconnect event (about 100 bytes, over the limit, stored anyway).
+
 ### Verification Checklist
 
 - [ ] WebSocket transport accepts connections on `--ws-bind` port
@@ -687,3 +732,5 @@ mqdb agent start --db /tmp/dur-test --durability none --passwd /tmp/passwd.txt
 - [ ] Certificate auth maps TLS client certs to usernames
 - [ ] Federated JWT accepts tokens from multiple issuers
 - [ ] Durability modes: `immediate` fsyncs every write, `periodic` at interval, `none` skips
+- [ ] Retained publishes over `--max-retained-message-size`, or to a new topic at `--max-retained-messages`, are refused with `Quota exceeded` and not stored
+- [ ] Cluster presence is stored on every node even when it is larger than `--max-retained-message-size`
