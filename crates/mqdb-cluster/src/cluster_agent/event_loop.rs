@@ -1,10 +1,11 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS};
+use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroker};
 use crate::cluster::{
-    ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, ProcessingBatch,
-    TopicSubscriptionBroadcast, WildcardBroadcast,
+    ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
+    NodeController, NodeId, PartitionId, ProcessingBatch, TopicSubscriptionBroadcast,
+    WildcardBroadcast,
 };
 use mqtt5::time::Duration;
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use tokio::time::interval;
 use tracing::{debug, info, warn};
 
 use super::{
-    CLEANUP_INTERVAL_SECS, RETAINED_SYNC_CLEANUP_INTERVAL_SECS, RETAINED_SYNC_TTL_SECS,
+    CLEANUP_INTERVAL_SECS, RETAINED_ECHO_MAX_AGE_SECS, RETAINED_SYNC_CLEANUP_INTERVAL_SECS,
     TTL_CLEANUP_INTERVAL_SECS, UNIQUE_RECONCILE_INTERVAL_SECS,
 };
 
@@ -21,8 +22,6 @@ impl ClusteredAgent {
     /// # Errors
     /// If broker setup, transport connection, or event loop execution fails.
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let synced_retained_topics = self.initialize_event_handler().await;
-
         let (bridge_configs, use_external_bridge_manager) = self.prepare_bridges()?;
 
         let (broker_config, service_username, service_password, needs_composite, admin_users) =
@@ -40,7 +39,7 @@ impl ClusteredAgent {
             .await?;
         self.auth_providers = auth_providers;
 
-        let (broker_handle, _bridge_manager) = self
+        let broker = self
             .start_broker(broker, &bridge_configs, use_external_bridge_manager)
             .await;
 
@@ -54,8 +53,7 @@ impl ClusteredAgent {
         self.setup_and_spawn_raft().await?;
 
         Box::pin(self.run_event_loop(
-            synced_retained_topics,
-            broker_handle,
+            broker,
             admin_client,
             admin_rx,
             service_username.as_ref(),
@@ -66,8 +64,7 @@ impl ClusteredAgent {
 
     async fn run_event_loop(
         &mut self,
-        synced_retained_topics: Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>>,
-        broker_handle: tokio::task::JoinHandle<()>,
+        broker: RunningBroker,
         admin_client: mqtt5::MqttClient,
         admin_rx: flume::Receiver<AdminRequest>,
         service_username: Option<&String>,
@@ -109,14 +106,26 @@ impl ClusteredAgent {
         let rx_local_publish = self.take_local_publish_receiver().await;
 
         let local_publish_task = if let Some(rx) = rx_local_publish {
-            let client = admin_client.clone();
-            Some(tokio::spawn(Self::run_local_publish_loop(client, rx)))
+            let retained_store = {
+                let ctrl = self.controller.read().await;
+                Arc::clone(&ctrl.stores().retained)
+            };
+            let retained_writer = LocalRetainedWriter::new(
+                Arc::clone(&broker.router),
+                retained_store,
+                Arc::clone(&self.retained_echoes),
+            );
+            Some(tokio::spawn(Self::run_local_publish_loop(
+                admin_client.clone(),
+                retained_writer,
+                rx,
+            )))
         } else {
             None
         };
 
         #[cfg(feature = "http-api")]
-        let _http_task = self.spawn_http_task(service_username, service_password);
+        self.spawn_http_task(service_username, service_password);
         #[cfg(not(feature = "http-api"))]
         let _ = (service_username, service_password);
 
@@ -154,7 +163,7 @@ impl ClusteredAgent {
                     self.redial_disconnected_peers().await;
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
-                    Self::handle_retained_sync_cleanup(&synced_retained_topics).await;
+                    self.prune_retained_echoes();
                 }
                 _ = cascade_retry_interval.tick() => {
                     self.retry_pending_cascades().await;
@@ -174,7 +183,12 @@ impl ClusteredAgent {
         if let Some(task) = local_publish_task {
             task.abort();
         }
-        broker_handle.abort();
+        if let Some(manager) = broker.bridge_manager
+            && let Err(e) = manager.stop_all().await
+        {
+            warn!(error = %e, "failed to stop bridges");
+        }
+        broker.handle.abort();
         match self.fatal_error.get() {
             Some(reason) => Err(reason.clone().into()),
             None => Ok(()),
@@ -621,19 +635,15 @@ impl ClusteredAgent {
         }
     }
 
-    async fn handle_retained_sync_cleanup(
-        synced_retained_topics: &Arc<tokio::sync::RwLock<HashMap<String, std::time::Instant>>>,
-    ) {
-        let ttl = std::time::Duration::from_secs(RETAINED_SYNC_TTL_SECS);
-        let mut synced = synced_retained_topics.write().await;
-        let before_len = synced.len();
-        synced.retain(|_, insert_time| insert_time.elapsed() < ttl);
-        let removed = before_len - synced.len();
+    fn prune_retained_echoes(&self) {
+        let removed = self
+            .retained_echoes
+            .prune(Duration::from_secs(RETAINED_ECHO_MAX_AGE_SECS));
         if removed > 0 {
-            debug!(
+            warn!(
                 removed,
-                remaining = synced.len(),
-                "cleaned up stale retained sync entries"
+                remaining = self.retained_echoes.pending_count(),
+                "dropped retained echoes the broker never reported"
             );
         }
     }
@@ -649,24 +659,45 @@ impl ClusteredAgent {
 
     async fn run_local_publish_loop(
         admin_client: mqtt5::MqttClient,
-        rx: flume::Receiver<crate::cluster::LocalPublishRequest>,
+        retained_writer: LocalRetainedWriter,
+        rx: flume::Receiver<LocalPublishRequest>,
     ) {
         const MAX_CONCURRENT: usize = 256;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
         while let Ok(req) = rx.recv_async().await {
-            Self::spawn_local_publish(&admin_client, &semaphore, req).await;
+            Self::dispatch_local_publish(&admin_client, &retained_writer, &semaphore, req).await;
 
             while let Ok(req) = rx.try_recv() {
-                Self::spawn_local_publish(&admin_client, &semaphore, req).await;
+                Self::dispatch_local_publish(&admin_client, &retained_writer, &semaphore, req)
+                    .await;
             }
+        }
+    }
+
+    async fn dispatch_local_publish(
+        admin_client: &mqtt5::MqttClient,
+        retained_writer: &LocalRetainedWriter,
+        semaphore: &Arc<tokio::sync::Semaphore>,
+        req: LocalPublishRequest,
+    ) {
+        match req.kind {
+            LocalPublishKind::Plain => {
+                Self::spawn_local_publish(admin_client, semaphore, req).await
+            }
+            LocalPublishKind::Retained => {
+                retained_writer
+                    .write(&req.topic, &req.payload, req.qos)
+                    .await;
+            }
+            LocalPublishKind::RetainedRefresh => retained_writer.refresh(&req.topic).await,
         }
     }
 
     async fn spawn_local_publish(
         admin_client: &mqtt5::MqttClient,
         semaphore: &Arc<tokio::sync::Semaphore>,
-        req: crate::cluster::LocalPublishRequest,
+        req: LocalPublishRequest,
     ) {
         let Ok(permit) = Arc::clone(semaphore).acquire_owned().await else {
             return;
@@ -675,7 +706,6 @@ impl ClusteredAgent {
         tokio::spawn(async move {
             let mut options = mqtt5::PublishOptions {
                 qos: mqtt5::QoS::from(req.qos),
-                retain: req.retain,
                 ..Default::default()
             };
             options.properties.user_properties = req.user_properties;

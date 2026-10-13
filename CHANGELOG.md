@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-11 — mqdb-cluster 0.4.22, mqdb-cli 0.8.50
+
+### Fixed
+
+- **Cluster retained messages: a clear no longer loops between nodes, and quick successive changes are no longer lost.** Measured against the previous release on 3- and 5-node clusters:
+  - Clearing a handful of retained topics set off 2.3–4.3 million retained events in 30 seconds as the clear bounced between the topic's primary and replica. Live subscribers received up to 170,000 empty retained messages, the local publish queue filled up, and a node could keep running for minutes after being told to stop. Now a clear is applied once.
+  - A retained change arriving on a node within 5 seconds of the previous one for the same topic was skipped, so brokers kept the old value. Publishing a retained topic twice within a second left every node of the cluster with at least one wrong value; now every node returns the latest.
+  - Cause: each node built two event handlers, and the record of retained writes the node had made itself was kept by one while the broker's retained callback read the other. Clears were never recorded at all.
+- How it works now: a replicated retained write queues a refresh of the topic. The node's local publish loop applies refreshes one at a time, reads the retained store at that moment, skips the write if the broker already holds the value, and otherwise records exactly what it writes, so the broker's callback recognises its own write and does not replicate it again. A client change also queues a refresh, so the broker follows the store's order. The design is checked in `specs/ClusterRetainedSync.tla`.
+
+### Changed
+
+- Retained writes from other nodes, and remote retained messages fetched for a new subscriber, go straight into the broker's router instead of through the node's `mqdb-admin` client. They are no longer forwarded again to subscribers on other nodes, which already received the original.
+- The deprecated MQTT bridge transport (`mqtt-bridge` feature) does not support the refresh and logs a warning instead.
+
+### Known limitations
+
+- A node that holds neither the primary nor the replica of a topic keeps the copy it fetched for a local subscriber after the topic is cleared or changed elsewhere (#172).
+
 ## 2026-10-10 — mqdb-agent 0.8.35, mqdb-cli 0.8.49
 
 ### Added

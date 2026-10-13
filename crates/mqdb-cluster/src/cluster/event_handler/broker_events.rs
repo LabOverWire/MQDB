@@ -9,9 +9,8 @@ use super::super::session::session_partition;
 use super::super::transport::ClusterTransport;
 use super::{
     ClusterEventHandler, LwtPublisher, RETAINED_SET_PROCESSED, RETAINED_SET_SKIPPED,
-    RETAINED_SET_TOTAL, RETAINED_SYNC_TTL, SubAckReasonCodeExt, clear_client_subscriptions,
-    collect_pending_retained, current_time_ms, deliver_retained_messages,
-    handle_clean_session_cleanup, qos_to_u8,
+    RETAINED_SET_TOTAL, SubAckReasonCodeExt, clear_client_subscriptions, collect_pending_retained,
+    current_time_ms, deliver_retained_messages, handle_clean_session_cleanup, qos_to_u8,
 };
 use bebytes::BeBytes;
 use mqtt5::QoS;
@@ -22,7 +21,6 @@ use mqtt5::broker::events::{
 };
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use tracing::{debug, trace, warn};
 
@@ -216,7 +214,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         &'a self,
         event: ClientSubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        let synced_topics = Arc::clone(&self.synced_retained_topics);
         Box::pin(async move {
             if event.client_id.starts_with("mqdb-") {
                 trace!("skipping internal client subscription");
@@ -299,7 +296,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 drop(ctrl);
 
                 if !remote_only.is_empty() {
-                    deliver_retained_messages(&transport, &synced_topics, remote_only).await;
+                    deliver_retained_messages(&transport, remote_only).await;
                 }
             }
         })
@@ -444,7 +441,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         &'a self,
         event: RetainedSetEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        let synced_topics = Arc::clone(&self.synced_retained_topics);
         let node_id = self.node_id;
         Box::pin(async move {
             let total = RETAINED_SET_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
@@ -461,6 +457,15 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 );
             }
 
+            if self
+                .retained_echoes
+                .consume(event.topic.as_ref(), &event.payload)
+            {
+                RETAINED_SET_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
+                trace!(topic = %event.topic, "skipping echo of a local retained sync");
+                return;
+            }
+
             if event.topic.starts_with("$SYS/")
                 || event.topic.starts_with("_mqdb/")
                 || event
@@ -469,18 +474,6 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             {
                 trace!("skipping internal retained message");
                 return;
-            }
-
-            let topic_str = event.topic.as_ref().to_string();
-            {
-                let synced = synced_topics.read().await;
-                if let Some(&insert_time) = synced.get(&topic_str)
-                    && insert_time.elapsed() < RETAINED_SYNC_TTL
-                {
-                    RETAINED_SET_SKIPPED.fetch_add(1, AtomicOrdering::Relaxed);
-                    trace!(topic = %topic_str, "skipping synced retained message");
-                    return;
-                }
             }
 
             RETAINED_SET_PROCESSED.fetch_add(1, AtomicOrdering::Relaxed);
@@ -502,6 +495,9 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 .set_retained_replicated(topic, qos, &payload, timestamp);
 
             ctrl.write_or_forward(write).await;
+            ctrl.transport()
+                .queue_retained_refresh(topic.to_string())
+                .await;
         })
     }
 

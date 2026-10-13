@@ -33,6 +33,7 @@ mod rebalance_coordinator;
 mod rebalancer;
 mod replication;
 mod retained_store;
+mod retained_sync;
 mod session;
 mod snapshot;
 mod store_manager;
@@ -94,7 +95,7 @@ pub use qos2_store::{
     Qos2Direction, Qos2Phase, Qos2State, Qos2Store, Qos2StoreError, qos2_state_key,
 };
 pub use query_coordinator::{QueryCoordinator, QueryResult};
-pub use quic_transport::{LocalPublishRequest, QuicDirectTransport};
+pub use quic_transport::{LocalPublishKind, LocalPublishRequest, QuicDirectTransport};
 pub use quorum::{PendingWrites, QuorumResult, QuorumTracker};
 pub use raft_task::{RaftAdminCommand, RaftEvent, RaftStatus, RaftTask};
 pub use rebalance_coordinator::{
@@ -109,6 +110,7 @@ pub use replication::{ReplicaRole, ReplicaState, ReplicationError};
 pub use retained_store::{
     RetainedMessage, RetainedStore, RetainedStoreError, retained_message_key,
 };
+pub use retained_sync::{LocalRetainedWriter, RetainedEchoes};
 pub use session::{SessionData, SessionError, SessionStore, session_key, session_partition};
 pub use snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
