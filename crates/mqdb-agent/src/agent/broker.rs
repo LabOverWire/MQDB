@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::MqdbAgent;
-use crate::broker_defaults::{BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, SESSION_EXPIRY_SECS};
+use crate::broker_defaults::{
+    BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, BROKER_SYS_RETAINED_TOPICS, SESSION_EXPIRY_SECS,
+};
 use crate::presence::{
     PRESENCE_CHANNEL_CAPACITY, PRESENCE_TOPIC_PREFIX, PresenceEvent, PresenceEventHandler,
 };
@@ -22,7 +24,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 pub(super) struct AuthProviderConfig<'a> {
     pub needs_composite: bool,
@@ -111,6 +113,15 @@ impl MqdbAgent {
         Box<dyn std::error::Error + Send + Sync>,
     > {
         self.register_share_indexes().await;
+        if self.max_retained_messages > 0
+            && self.max_retained_messages <= BROKER_SYS_RETAINED_TOPICS
+        {
+            warn!(
+                limit = self.max_retained_messages,
+                sys_topics = BROKER_SYS_RETAINED_TOPICS,
+                "max retained messages is not above the broker's own retained $SYS topics, client retained publishes to new topics will be refused"
+            );
+        }
         let mqtt_storage_dir = self.db.path().join("mqtt_storage");
         let mut config = BrokerConfig {
             bind_addresses: vec![self.bind_address],
@@ -119,6 +130,8 @@ impl MqdbAgent {
             session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
+            max_retained_messages: self.max_retained_messages,
+            max_retained_message_size: self.max_retained_message_size,
             wildcard_subscription_available: true,
             subscription_identifier_available: true,
             shared_subscription_available: true,
@@ -189,7 +202,7 @@ impl MqdbAgent {
         };
         let certificates = self.sparkplug_aware.then(|| {
             info!("Sparkplug aware: storing birth certificates on {CERTIFICATES_PREFIX}");
-            Arc::new(CertificateStore::new())
+            Arc::new(CertificateStore::new().with_max_payload_size(self.max_retained_message_size))
         });
         if presence.is_some() || certificates.is_some() {
             config.event_handler = Some(Arc::new(AgentEventHandler {

@@ -33,6 +33,8 @@ pub(crate) struct AgentStartArgs {
     pub(crate) scoped_events: bool,
     pub(crate) presence: bool,
     pub(crate) sparkplug_aware: bool,
+    pub(crate) max_retained_messages: usize,
+    pub(crate) max_retained_message_size: usize,
     pub(crate) event_scope: Option<String>,
     pub(crate) passphrase_file: Option<PathBuf>,
     pub(crate) passphrase_data: Option<String>,
@@ -169,6 +171,10 @@ pub(crate) async fn cmd_agent_start(
     if args.sparkplug_aware {
         agent = agent.with_sparkplug_aware(true);
     }
+
+    agent = agent
+        .with_max_retained_messages(args.max_retained_messages)
+        .with_max_retained_message_size(args.max_retained_message_size);
 
     #[cfg(feature = "opentelemetry")]
     if let Some(ref endpoint) = args.otlp_endpoint {

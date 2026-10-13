@@ -131,6 +131,7 @@ pub struct ClusterConfig {
     pub ownership: mqdb_core::types::OwnershipConfig,
     pub scope_config: mqdb_core::types::ScopeConfig,
     pub presence: bool,
+    pub max_retained_message_size: usize,
     pub passphrase: Option<String>,
     pub license_expires_at: Option<u64>,
 }
@@ -176,6 +177,7 @@ pub struct ClusteredAgent {
     scope_config: Arc<mqdb_core::types::ScopeConfig>,
     presence: bool,
     retained_echoes: Arc<RetainedEchoes>,
+    max_retained_message_size: usize,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
     vault_key_store: Arc<VaultKeyStore>,
     license_expires_at: Option<u64>,

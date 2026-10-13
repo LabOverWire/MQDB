@@ -145,9 +145,10 @@ sees every client id, user id and connection timing.
 Agent (done): `presence.rs` holds the shared payload plus a `PresenceEventHandler`
 implementing `BrokerEventHandler` (the agent had none — `config.event_handler` was always
 `None`), wired via `config.event_handler` before `MqttBroker::with_config`. It pushes onto
-a bounded channel drained by `spawn_presence_task`, which publishes retained through the
-internal `mqdb-presence-publisher` client. `handle_message` skips the presence prefix so
-the agent's own `$DB/#` subscriber does not re-parse presence as a DB op.
+a bounded channel drained by `spawn_presence_task`, which writes each message retained
+straight into the broker's router, so `--max-retained-messages` never drops it.
+`handle_message` skips the presence prefix so the agent's own `$DB/#` subscriber does not
+re-parse presence as a DB op.
 
 Topic protection: `$DB/_presence/# ReadOnly` is **mandatory**, for two reasons. It blocks
 every client — admins included, since `ReadOnly` has no `is_admin` exemption — from
@@ -162,9 +163,9 @@ Cluster (done): **do not** copy the LWT template. Two verified constraints shape
   `mqdb-admin-<node>`, which the `mqdb-forward-` bypass does not match). So `_presence`
   was added to that allow-list. Retained local publishes, presence included, now skip
   the admin client and go straight into the broker's router, so they no longer re-enter
-  the handler. No internal publish reaches the allow-list entry any more; it now only
-  short-circuits publishes by the internal service account, the one identity topic
-  protection lets publish to `$DB/_presence/#`.
+  the handler and the retained limits never drop them. No internal publish reaches the
+  allow-list entry any more; it now only short-circuits publishes by the internal service
+  account, the one identity topic protection lets publish to `$DB/_presence/#`.
 - `TopicTrie::match_topic` returns nothing for any `$`-prefixed topic, so a
   `$DB/_presence/#` subscriber can never be resolved as a cross-node target. Cross-node
   delivery therefore **broadcasts** presence to every node, each publishing locally (the
