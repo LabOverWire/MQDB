@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-10-13 — mqdb-agent 0.8.36, mqdb-cluster 0.4.23, mqdb-cli 0.8.51
+## 2026-10-15 — mqdb-agent 0.8.36, mqdb-cluster 0.4.23, mqdb-cli 0.8.51
 
 ### Added
 
