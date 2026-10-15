@@ -130,10 +130,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
             }
 
             if is_internal {
-                return self
-                    .inner
-                    .authorize_publish(&client_id_owned, user_id, topic)
-                    .await;
+                return true;
             }
 
             if self.scoped_events && user_scope_segment(topic).is_some() {
@@ -187,10 +184,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
 
         Box::pin(async move {
             if is_internal {
-                return self
-                    .inner
-                    .authorize_subscribe(&client_id_owned, user_id, topic_filter)
-                    .await;
+                return true;
             }
 
             if self.scoped_events
@@ -382,6 +376,49 @@ mod tests {
             .authorize_subscribe("any-client-id", Some("mqdb-internal-abc123"), "$DB/_idx/#")
             .await;
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn internal_service_user_is_not_subject_to_the_acl() {
+        let provider = create_deny_provider()
+            .with_internal_service_username(Some("mqdb-internal-abc123".to_string()));
+
+        for topic in [
+            "$DB/notes/create",
+            "$DB/_presence/peer-1",
+            "$DB/notes/events/n1",
+        ] {
+            assert!(
+                provider
+                    .authorize_publish("mqdb-internal-handler", Some("mqdb-internal-abc123"), topic)
+                    .await,
+                "{topic}"
+            );
+            assert!(
+                provider
+                    .authorize_subscribe(
+                        "mqdb-internal-handler",
+                        Some("mqdb-internal-abc123"),
+                        topic
+                    )
+                    .await,
+                "{topic}"
+            );
+        }
+        assert!(
+            provider
+                .authorize_subscribe(
+                    "mqdb-internal-handler",
+                    Some("mqdb-internal-abc123"),
+                    "$DB/#"
+                )
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("mqdb-internal-handler", Some("app"), "$DB/#")
+                .await
+        );
     }
 
     #[tokio::test]

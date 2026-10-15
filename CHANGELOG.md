@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-15 — mqdb-agent 0.8.37, mqdb-cluster 0.4.24, mqdb-vault 0.1.8, mqdb-cli 0.8.52
+
+### Fixed
+
+- **An ACL that names only application users no longer stops the agent.** The internal service user (`mqdb-internal-<uuid>`) was authorized through the ACL like any other user. Its name is random, so an ACL could grant it only with a `user *` rule, which also grants every other user. Without one, mqtt5's ACL denied the internal clients, starting with the request handler's `$DB/#` subscribe, and since 0.8.31 `MqdbAgent::start` failed because the ready signal never came. The service user now bypasses the ACL (topic protection already let it through); every other user is still checked against it. This applies to agent and cluster nodes, and to `mqdb agent start --passwd ... --acl ...`. An ACL that keeps its `user * topic $DB/# ...` line behaves as before.
+
+### Changed
+
+- **mqtt5 updated to 0.48.1** (mqtt5-protocol 0.16.1). No source changes were needed. What it brings to MQDB:
+  - **Maximum packet size counts the whole packet** (MQTT 5 §3.1.2.26). The broker's 10 MiB limit counted only the remaining length on TCP, TLS and the QUIC control stream; a packet up to 5 bytes over it is now refused and closes the connection.
+  - **QUIC:** the limit is now also enforced on client data streams and datagrams, so a client can no longer make the broker buffer a packet larger than it. An unsupported client stream is refused on its own instead of closing the connection, and discarding a flow removes its subscriptions.
+  - **WebSocket client:** headers, subprotocols, user agent and TLS settings on a `WebSocketConfig` now reach the wire. MQDB's internal clients connect over TCP and are not affected; the WebSocket listener is unchanged.
+
 ## 2026-10-15 — mqdb-agent 0.8.36, mqdb-cluster 0.4.23, mqdb-cli 0.8.51
 
 ### Added
