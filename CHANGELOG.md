@@ -24,7 +24,7 @@ Each entry lists the date and the crate versions that were released.
 - Presence is not limited by `--max-retained-messages`: each client id keeps a retained presence topic, so with `--presence` the store can grow past the limit and leave no room for client retained topics.
 - Cluster mode has no count limit yet; this will be done with #172.
 
-## 2026-10-11 — mqdb-cluster 0.4.22, mqdb-cli 0.8.50
+## 2026-10-12 — mqdb-cluster 0.4.22, mqdb-cli 0.8.50
 
 ### Fixed
 
